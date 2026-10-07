@@ -40,11 +40,13 @@ import java.util.concurrent.locks.ReentrantLock;
  * <p><b>Algorithm overview:</b> Uses a 2D count array ({@code depth × width})
  * with per-slot fingerprint verification and probabilistic decay to estimate
  * the most frequent keys using bounded memory. Each key is hashed into one
- * bucket per row; if the stored fingerprint matches, the counter is
- * incremented; otherwise a probabilistic decay (sampled from a Binomial
- * distribution) determines whether the existing counter survives or is
- * replaced. This design excels at filtering out low-frequency items while
- * preserving high-frequency key rankings with low error rates.
+   * bucket per row; if the stored fingerprint matches, the counter is
+   * incremented; otherwise a probabilistic decay (sampled from a Binomial
+   * distribution) determines whether the existing counter survives or is
+   * replaced. A batch that strictly outweighs the occupant takes the slot
+   * outright (size-aware takeover) — the lottery only adjudicates ties and
+   * smaller claimants. This design excels at filtering out low-frequency items while
+   * preserving high-frequency key rankings with low error rates.
  *
  * <p><b>Sliding-window decay:</b> Instead of binary halving, each sketch slot
  * maintains a ring buffer of {@link #windowCount} time windows. {@link #fading()}
@@ -668,11 +670,12 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
    * Apply {@code increment} to the sketch for the key whose fingerprint is
    * {@code itemFingerprint} and return the maximum cross-row slot sum
    * observed. The top-level loop dispatches to {@link #updateEmptySlot},
-   * the matching-fingerprint fast path ({@link #applyIncrement}), or
-   * {@link #decayCollisionSlot} depending on the slot's populated state and
-   * fingerprint match. Per-row lock acquisition is delegated to those
-   * sub-routines via the {@code synchronized(lockStripes[...])} enclosing
-   * block. Callers must pass a positive increment — both {@code addDirect}
+   * the matching-fingerprint fast path ({@link #applyIncrement}), the
+   * size-aware takeover ({@link #takeoverSlot}, when the incoming batch
+   * outweighs the occupant), or {@link #decayCollisionSlot} depending on the
+   * slot's populated state and fingerprint match. Per-row lock acquisition is
+   * delegated to those sub-routines via the {@code synchronized(lockStripes[...])}
+   * enclosing block. Callers must pass a positive increment — both {@code addDirect}
    * overloads reject non-positive values before reaching here.
    */
   private long addToSketch(int itemFingerprint, long increment) {
@@ -696,6 +699,8 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
           maxCount = updateEmptySlot(index, active, itemFingerprint, increment, maxCount);
         } else if (fingerprints[index] == itemFingerprint) {
           maxCount = applyIncrement(index, active, increment, maxCount);
+        } else if (increment > cur) {
+          maxCount = takeoverSlot(index, active, itemFingerprint, increment, maxCount);
         } else {
           maxCount = decayCollisionSlot(index, active, itemFingerprint, increment, cur, maxCount);
         }
@@ -744,10 +749,35 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
   }
 
   /**
+   * Hand an occupied slot to the incoming fingerprint: swap the fingerprint, wipe
+   * all windows, and replay the {@code increment} into the active window.
+   *
+   * <p>Shared by the two handover paths — the size-aware takeover in
+   * {@link #addToSketch} (a strictly bigger batch displaces the occupant outright)
+   * and the full-displacement lottery win inside {@link #decayCollisionSlot}.
+   * Keeping one body guarantees both paths leave the slot in the identical state.
+   * Callers must hold the slot's stripe lock; {@code increment} is already
+   * saturated to the {@code int} range by the {@code addDirect} entry points.
+   */
+  private long takeoverSlot(int index, int active, int itemFingerprint, long increment, long maxCount) {
+    int base = index << windowShift;
+    fingerprints[index] = itemFingerprint;
+    Arrays.fill(windows, base, base + windowCount, 0);
+    windows[base + active] = (int) increment;
+    slotSums[index] = (int) increment;
+    return Math.max(maxCount, increment);
+  }
+
+  /**
    * Collision-with-different-fingerprint path: sample the number of
    * survivors from a Binomial({@code increment}, {@code decayProb}) and
    * either hand the slot over to the incoming fingerprint (full reset) or
    * proportionally decay every window. Returns the running {@code maxCount}.
+   *
+   * <p>This is reached only when the incoming batch does <em>not</em> outweigh
+   * the occupant ({@code increment <= cur}) — a strictly bigger newcomer takes
+   * the slot deterministically via {@link #takeoverSlot} before sampling, so
+   * the lottery here only ever adjudicates ties and smaller claimants.
    */
   @SuppressWarnings({ "null", "squid:S2245" })
   private long decayCollisionSlot(int index, int active, int itemFingerprint, long increment, long cur, long maxCount) {
@@ -780,12 +810,8 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
 
     int base = index << windowShift;
     if (decays >= cur) {
-      // Replace the slot: fingerprint swap, wipe all windows, replay increment.
-      fingerprints[index] = itemFingerprint;
-      Arrays.fill(windows, base, base + windowCount, 0);
-      windows[base + active] = (int) increment;
-      slotSums[index] = (int) increment;
-      return Math.max(maxCount, increment);
+      // Full-displacement lottery win: same handover as the size-aware path.
+      return takeoverSlot(index, active, itemFingerprint, increment, maxCount);
     }
     // Decrement each window proportionally, keep slotSums in sync. The
     // intermediate products (wv/cur * decays) need long arithmetic even with

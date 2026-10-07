@@ -21,8 +21,10 @@ import io.github.hyshmily.zeta.hotkeydetector.doublebuffer.WaveCounter;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.HeavyKeeper;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.Item;
 import java.lang.reflect.Method;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Random;
+import java.util.Set;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -41,6 +43,12 @@ import org.junit.jupiter.api.Test;
  * first despite 5000:1 cold camouflage. TopK membership itself is sticky by design
  * (recurring cold keys re-raise their sketch estimate every tide, so a 100-slot TopK
  * under churn is always full) — rank, not occupancy, is the false-positive signal.
+ *
+ * <p>Extended suite: burst magnitudes (2000/200/15 per tide), capacity overflow (150
+ * hot keys for 100 slots), flat-distribution stability (200 equal keys), and drift
+ * rotation on a production-aged sketch (90 tides, fading every 40) — the drift test
+ * pins a structural blind spot (minority lockout under saturation, documented on the
+ * test) rather than a universal SLO.
  */
 class HeavyKeeperBatchRecallTest {
 
@@ -100,6 +108,115 @@ class HeavyKeeperBatchRecallTest {
   }
 
   /**
+   * Capacity overflow: 150 hot keys at 500/tide contend for 100 TopK slots over cold
+   * churn. The hot mass must displace the noise — nearly every slot stays hot and no
+   * cold key reaches the top ranks.
+   */
+  @Test
+  void capacityOverflow_hotMassDisplacesCold() {
+    Chain chain = newChain();
+    Random random = new Random(42);
+    int hotKeys = 150;
+    for (int t = 0; t < TOTAL_TIDES; t++) {
+      feedCold(chain.counter(), random);
+      for (int i = 0; i < hotKeys; i++) {
+        chain.counter().count("hot-" + i, 500);
+      }
+      invokeTide(chain.counter());
+    }
+
+    List<String> members = chain.keeper().list().stream().map(Item::key).toList();
+    long hotMembers = members.stream().filter(k -> k.startsWith("hot-")).count();
+    System.out.println("capacityOverflow: hotMembers=" + hotMembers + "/100");
+    assertThat(hotMembers).as("150-key hot mass must occupy nearly all TopK slots").isGreaterThanOrEqualTo(95);
+    assertThat(members.stream().limit(10).toList()).as("top ranks are never cold").allMatch(k -> k.startsWith("hot-"));
+  }
+
+  /**
+   * Flat distribution: 200 keys at an identical 50/tide with no churn background. Every
+   * key earns equally, so the hot set must stay put instead of rotating a random sample
+   * every tide.
+   */
+  @Test
+  void flatDistribution_hotSetStaysStable() {
+    Chain chain = newChain();
+    int flatKeys = 200;
+    Set<String> early = new HashSet<>();
+    for (int t = 0; t < TOTAL_TIDES; t++) {
+      for (int i = 0; i < flatKeys; i++) {
+        chain.counter().count("flat-" + i, 50);
+      }
+      invokeTide(chain.counter());
+      if (t == TOTAL_TIDES / 2 - 1) {
+        early.addAll(memberKeys(chain.keeper()));
+      }
+    }
+
+    Set<String> late = memberKeys(chain.keeper());
+    long overlap = late.stream().filter(early::contains).count();
+    System.out.println("flatDistribution: overlap=" + overlap + "/100");
+    assertThat(overlap).as("flat hot set must stay stable, not rotate").isGreaterThanOrEqualTo(80);
+  }
+
+  /**
+   * Drift rotation on a production-aged sketch: 10 A-keys burn hot for 41 tides with
+   * production-cadence fading (every 40 tides), then go cold while 10 B-keys ignite.
+   *
+   * <p>Regression gate for the size-aware takeover (ADR-0092): before it, 2 of 10
+   * rotation keys never admitted (est=0 across the run, with or without fading) —
+   * every row they hashed to stayed occupied with a small sum, and their own
+   * per-tide collisions pinned those blockers at an equilibrium far below admission.
+   * A strictly bigger batch now takes the slot outright, so all 10 admit promptly
+   * and hold. The exact 10/10 pins the fix — any weakening trips the gate.
+   */
+  @Test
+  void driftRotation_newHeatDetectedDespiteIncumbents() {
+    Chain chain = newChain();
+    Random random = new Random(42);
+    int rotationTide = 41;
+    int totalTides = 90;
+    for (int t = 0; t < rotationTide; t++) {
+      feedCold(chain.counter(), random);
+      for (int i = 0; i < 10; i++) {
+        chain.counter().count("driftA-" + i, 1000);
+      }
+      invokeTide(chain.counter());
+      if ((t + 1) % 40 == 0) {
+        chain.keeper().fading();
+      }
+    }
+    assertThat(memberKeys(chain.keeper())).as("phase-1 heat established").contains("driftA-0", "driftA-9");
+
+    int promptCount = -1;
+    for (int t = rotationTide; t < totalTides; t++) {
+      feedCold(chain.counter(), random);
+      for (int i = 0; i < 10; i++) {
+        chain.counter().count("driftB-" + i, 1000);
+      }
+      invokeTide(chain.counter());
+      if ((t + 1) % 40 == 0) {
+        chain.keeper().fading();
+      }
+      if (t == rotationTide + 2) {
+        promptCount = countPresent(chain.keeper(), "driftB-", 10);
+      }
+    }
+    int finalCount = countPresent(chain.keeper(), "driftB-", 10);
+
+    System.out.println("driftRotation: prompt=" + promptCount + "/10 final=" + finalCount + "/10");
+    for (int i = 0; i < 10; i++) {
+      String k = "driftB-" + i;
+      System.out.println(
+        "driftB-" + i + ": present=" + chain.keeper().contains(k) + " est=" + chain.keeper().estimatedCount(k)
+      );
+    }
+    assertThat(promptCount)
+      .as("rotated-in heat must evict into the aged TopK within 3 tides")
+      .isEqualTo(10);
+    assertThat(finalCount).as("admitted rotation heat holds (never evicted by noise)").isEqualTo(10);
+  }
+
+  /**
    * Verifies cold churn alone promotes nothing burst-like: with no burst key fed, the TopK
    * top counts stay at noise level instead of pinning a fake hot key.
    */
@@ -127,10 +244,9 @@ class HeavyKeeperBatchRecallTest {
    * @return the keeper and the first tide containing the burst key ({@code -1} if never)
    */
   private static Drive driveBurst(int perTide) {
-    HeavyKeeper keeper = productionKeeper();
-    WaveCounter counter = new WaveCounter(batch -> {
-      keeper.addDirect(batch);
-    });
+    Chain chain = newChain();
+    HeavyKeeper keeper = chain.keeper();
+    WaveCounter counter = chain.counter();
     Random random = new Random(42);
 
     int promotedAt = -1;
@@ -148,9 +264,42 @@ class HeavyKeeperBatchRecallTest {
     return new Drive(keeper, promotedAt);
   }
 
+  // ── Chain ──
+
+  /** One production-wired detection chain under test. */
+  private record Chain(HeavyKeeper keeper, WaveCounter counter) {}
+
+  /** Wires {@code WaveCounter -> HeavyKeeper.addDirect} at the production operating point. */
+  private static Chain newChain() {
+    HeavyKeeper keeper = productionKeeper();
+    return new Chain(keeper, new WaveCounter(batch -> {
+      keeper.addDirect(batch);
+    }));
+  }
+
   /** Production operating point (see {@code ZetaProperties} defaults). */
   private static HeavyKeeper productionKeeper() {
     return new HeavyKeeper(100, 50_000, 5, 0.92, 10, 10_000, 3, true);
+  }
+
+  /** Snapshots current TopK membership as a key set. */
+  private static Set<String> memberKeys(HeavyKeeper keeper) {
+    Set<String> keys = new HashSet<>();
+    for (Item item : keeper.list()) {
+      keys.add(item.key());
+    }
+    return keys;
+  }
+
+  /** Counts how many keys of a {@code prefix + i} family the keeper holds. */
+  private static int countPresent(HeavyKeeper keeper, String prefix, int count) {
+    int present = 0;
+    for (int i = 0; i < count; i++) {
+      if (keeper.contains(prefix + i)) {
+        present++;
+      }
+    }
+    return present;
   }
 
   /** Feeds one tide of cold background traffic sampled from the shared pool. */
