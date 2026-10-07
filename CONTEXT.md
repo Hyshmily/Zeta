@@ -6,6 +6,7 @@
 - **Local-Hot** — A key whose frequency exceeds the HeavyKeeper TopK threshold on the local App instance. Triggers local L1 promotion but may differ from the cluster-wide view.
 - **Worker-Hot** — A key broadcast by the Worker as HOT (`KeyState.HOT`) via AMQP. Carries a `decisionVersion` for ordering. Grants the longest L1 TTLs (1h default).
 - **Worker-Cool** — A key broadcast by the Worker as COOL (`KeyState.COOL`). Signals the key is cooling down after a HOT period. Preserves original normal TTLs.
+- **Detection Capability** — Recall, false-positive rate, and burst-to-promotion latency of local TopK promotion — not sketch count error. Use this term when “精确” is meant; a sketch can count accurately yet promote late.
 
 ## Cache States
 
