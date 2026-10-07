@@ -237,6 +237,24 @@ public class WorkerProperties {
     @Min(1000)
     @Max(60_000)
     private long rebroadcastIntervalMs = 10_000;
+
+    /**
+     * Bounded COOL re-emission count (ADR-0087): how many times a COOL decision
+     * is re-sent after its initial broadcast, spaced one
+     * {@link #rebroadcastIntervalMs} apart with the <em>same</em> decision
+     * version (idempotent retry — receivers skip it when already applied or
+     * superseded, apply it when the first send was lost).
+     *
+     * <p>A lost COOL is the only decision loss without self-healing (HOT has
+     * the periodic rebroadcast, ADR-0024): the entry stays HOT until its hard
+     * TTL. Two repeats cut a single-loss window from ~1h to ~10-20s at the
+     * cost of two extra sends per cool episode — cooling is edge-triggered
+     * (once per hot episode), so this cannot storm. {@code 0} restores the
+     * legacy single-send behaviour. Range [0, 5].
+     */
+    @Min(0)
+    @Max(5)
+    private int coolRebroadcastTimes = 2;
   }
 
   /** Dynamic threshold adaptation based on global qps changes. Default constructor. */

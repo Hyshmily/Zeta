@@ -186,4 +186,64 @@ class WorkerBroadcasterTest {
 
     broadcaster.broadcastCool("key");
   }
+
+  /**
+   * ADR-0087: a successful COOL schedules {@code coolRepeatTimes} repeats with
+   * the SAME decision version (idempotent retry — receivers skip it when
+   * already applied or superseded, apply it when the first send was lost).
+   */
+  @Test
+  @SuppressWarnings({"unchecked", "rawtypes"})
+  void broadcastCool_withRepeats_shouldResendSameVersion() {
+    java.util.List<Runnable> scheduled = new java.util.ArrayList<>();
+    java.util.concurrent.ScheduledExecutorService scheduler = mock(java.util.concurrent.ScheduledExecutorService.class);
+    when(scheduler.schedule(any(Runnable.class), anyLong(), any(java.util.concurrent.TimeUnit.class))).thenAnswer(inv -> {
+      scheduled.add(inv.getArgument(0));
+      return mock(java.util.concurrent.ScheduledFuture.class);
+    });
+    WorkerBroadcaster repeating = new WorkerBroadcaster(
+      rabbitTemplate, BROADCAST, "testApp", "test-node", epochCounter, mock(SnowflakeIdGenerator.class), null,
+      2, 10_000L, scheduler
+    );
+
+    assertThat(repeating.broadcastCool("k")).isTrue();
+    assertThat(scheduled).hasSize(2);
+
+    scheduled.forEach(Runnable::run);
+
+    verify(rabbitTemplate, times(3)).send(eq(BROADCAST), eq(KEY_BROADCAST + "testApp"), messageCaptor.capture());
+    java.util.List<Message> sent = messageCaptor.getAllValues();
+    Object v0 = sent.get(0).getMessageProperties().getHeaders().get(HEADER_VERSION);
+    assertThat(sent.get(1).getMessageProperties().getHeaders().get(HEADER_VERSION)).isEqualTo(v0);
+    assertThat(sent.get(2).getMessageProperties().getHeaders().get(HEADER_VERSION)).isEqualTo(v0);
+    assertThat(sent.get(1).getMessageProperties().getHeaders().get(HEADER_TYPE)).isEqualTo(WorkerMessage.TYPE_COOL);
+  }
+
+  /**
+   * ADR-0087: the legacy constructor (and {@code coolRepeatTimes=0}) sends
+   * exactly once — no scheduler interaction, pre-0087 behaviour.
+   */
+  @Test
+  void broadcastCool_legacyConstructor_shouldSendOnce() {
+    assertThat(broadcaster.broadcastCool("k")).isTrue();
+    verify(rabbitTemplate, times(1)).send(any(), any(), any(Message.class));
+  }
+
+  /**
+   * ADR-0087: a saturated repeat scheduler drops repeats without failing the
+   * broadcast (fire-and-forget) — the initial send already went out.
+   */
+  @Test
+  void broadcastCool_repeatSchedulerRejected_shouldStillSucceed() {
+    java.util.concurrent.ScheduledExecutorService scheduler = mock(java.util.concurrent.ScheduledExecutorService.class);
+    when(scheduler.schedule(any(Runnable.class), anyLong(), any(java.util.concurrent.TimeUnit.class)))
+      .thenThrow(new java.util.concurrent.RejectedExecutionException("shutting down"));
+    WorkerBroadcaster repeating = new WorkerBroadcaster(
+      rabbitTemplate, BROADCAST, "testApp", "test-node", epochCounter, mock(SnowflakeIdGenerator.class), null,
+      2, 10_000L, scheduler
+    );
+
+    assertThat(repeating.broadcastCool("k")).isTrue();
+    verify(rabbitTemplate, times(1)).send(any(), any(), any(Message.class));
+  }
 }

@@ -145,9 +145,16 @@ public class WorkerBroadcastBuffer {
    * window, reporting the number of failures accumulated since the last log.
    */
   private void noteFailure() {
-    int failed = failedSinceLastLog.incrementAndGet();
+    failedSinceLastLog.incrementAndGet();
     if (!errorLogThrottle.tryAcquire()) {
       return;
+    }
+    // Atomically take-and-clear so concurrent increments in the read-clear
+    // window are not lost (the previous increment-then-set(0) dropped any
+    // increment landing between the log call and the reset).
+    int failed = failedSinceLastLog.getAndSet(0);
+    if (failed <= 0) {
+      failed = 1;
     }
     log.warn(
       "Failed to broadcast {} decision(s) since last report (send failures and saturation drops; " +
@@ -155,16 +162,25 @@ public class WorkerBroadcastBuffer {
       failed,
       LogThrottle.DEFAULT_WINDOW_MS / 1000
     );
-    failedSinceLastLog.set(0);
   }
 
   /**
    * Stops the buffer at context shutdown. Queued decisions are allowed to
-   * finish ({@code shutdown()} drains the queue); tasks submitted after
-   * shutdown are rejected and their rollbacks applied on the caller thread.
+   * finish (waits briefly for the drain); tasks submitted after shutdown are
+   * rejected and their rollbacks applied on the caller thread. Never throws.
    */
   @PreDestroy
+  @SuppressWarnings("all")
   public void shutdown() {
     sendExecutor.shutdown();
+    try {
+      // Bounded wait: the queue is bounded and each task is a single AMQP
+      // send, so an empty queue returns immediately and a full one drains in
+      // well under the timeout; on timeout the executor stays shut down and
+      // late tasks fall back to caller-thread rollback via submit().
+      sendExecutor.awaitTermination(5, TimeUnit.SECONDS);
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+    }
   }
 }

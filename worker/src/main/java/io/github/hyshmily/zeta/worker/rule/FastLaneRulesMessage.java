@@ -18,6 +18,7 @@ package io.github.hyshmily.zeta.worker.rule;
 import static io.github.hyshmily.zeta.constants.ZetaConstants.Amqp.*;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hyshmily.zeta.Internal;
 import io.github.hyshmily.zeta.worker.rule.FastLaneRuleManager.FastLaneRule;
@@ -55,8 +56,16 @@ public record FastLaneRulesMessage(long id, String nodeId, long rulesVersion, Li
   /** Message type discriminator for fast-lane rules gossip ({@value}). */
   public static final String TYPE = "FASTLANE_RULES";
 
-  /** Shared mapper for rule-set (de)serialization. Thread-safe after configuration. */
-  private static final ObjectMapper MAPPER = new ObjectMapper();
+  /**
+   * Shared mapper for rule-set (de)serialization. Ignores unknown properties:
+   * gossip senders may add rule fields that older Workers do not know yet —
+   * dropping the whole set on one unknown field would stall rule convergence
+   * until the full rollout (ADR-0091).
+   */
+  private static final ObjectMapper MAPPER = new ObjectMapper().configure(
+    DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES,
+    false
+  );
 
   private static final TypeReference<List<FastLaneRule>> RULE_LIST_TYPE = new TypeReference<>() {};
 

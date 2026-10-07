@@ -52,8 +52,7 @@ class FastLaneRulesMessageTest {
   }
 
   @Test
-  void from_shouldHandleEmptyRules() {
-    FastLaneRulesMessage original = new FastLaneRulesMessage(1L, "n", 1L, List.of());
+  void from_shouldHandleEmptyRules() {    FastLaneRulesMessage original = new FastLaneRulesMessage(1L, "n", 1L, List.of());
     Message amqp = original.toMessage();
     FastLaneRulesMessage restored = FastLaneRulesMessage.from(amqp);
     assertThat(restored).isNotNull();
@@ -66,5 +65,30 @@ class FastLaneRulesMessageTest {
     props.setHeader("type", "FASTLANE_RULES");
     Message msg = new Message("not-json".getBytes(), props);
     assertThat(FastLaneRulesMessage.from(msg)).isNull();
+  }
+
+  /**
+   * Forward compatibility (ADR-0091): a rule JSON carrying fields from a newer
+   * producer must decode with known fields intact — dropping the whole gossip
+   * set on one unknown field would stall rule convergence until full rollout.
+   */
+  @Test
+  void from_shouldIgnoreUnknownRuleFields() {
+    MessageProperties props = new MessageProperties();
+    props.setHeader("type", "FASTLANE_RULES");
+    props.setHeader("nodeId", "node9");
+    props.setHeader("messageId", 9L);
+    props.setHeader("fastlaneRulesVersion", 3000L);
+    Message msg = new Message(
+      "[{\"keyPattern\":\"product:*\",\"threshold\":500,\"futureField\":1}]".getBytes(),
+      props
+    );
+
+    FastLaneRulesMessage restored = FastLaneRulesMessage.from(msg);
+
+    assertThat(restored).isNotNull();
+    assertThat(restored.rules().size()).isEqualTo(1);
+    assertThat(restored.rules().get(0).keyPattern()).isEqualTo("product:*");
+    assertThat(restored.rules().get(0).threshold()).isEqualTo(500L);
   }
 }

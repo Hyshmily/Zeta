@@ -27,6 +27,7 @@ import io.github.hyshmily.zeta.worker.dispatch.VerifyConsumer;
 import io.github.hyshmily.zeta.worker.dispatch.WorkerBroadcastBuffer;
 import io.github.hyshmily.zeta.worker.dispatch.WorkerBroadcaster;
 import io.github.hyshmily.zeta.worker.dispatch.WorkerHeartbeatProducer;
+import io.github.hyshmily.zeta.worker.endpoint.FastLaneEndpoint;
 import io.github.hyshmily.zeta.worker.ingest.ReportConsumer;
 import io.github.hyshmily.zeta.worker.metrics.WorkerDetectionMetrics;
 import io.github.hyshmily.zeta.worker.rule.FastLaneRuleManager;
@@ -146,6 +147,63 @@ public class WorkerAutoConfiguration {
       "zeta.worker.state-machine.rebroadcast-interval-ms must be within [1000, 60000] " +
         "(self-healing upper bound for a lost HOT decision; default 10000), got: " +
         interval
+    );
+  }
+
+  /**
+   * Fail-fast guard for the slice-gated {@code addCount} fast path's
+   * no-lost-count precondition (ADR-0064).
+   *
+   * <p>{@link SlidingWindowDetector} refreshes a window's eviction timestamp at
+   * most once per slice, so a window the evictor can target must never be
+   * removable underneath an arriving count. That holds only while every
+   * staleness threshold applied to the detector is at least one slice. The
+   * detector is evicted on the short COLD tier
+   * ({@code cold-evict-interval-ms}, via {@link EvictStaleTask}), so the bound
+   * is checked against {@code min(evict-interval-ms, cold-evict-interval-ms)}.
+   * Defaults (5 min vs ~62 ms) pass by orders of magnitude; a violation means
+   * a misconfigured sub-second eviction that would silently early-evict hot
+   * windows and flip HOT keys to COOL.
+   */
+  @PostConstruct
+  void validateSliceGatePrecondition() {
+    long durationMs = properties.getSlidingWindow().getDurationMs();
+    int slices = properties.getSlidingWindow().getSlices();
+    final int aligned;
+    try {
+      aligned = SliceWindowMath.alignedSlices(durationMs, slices);
+    } catch (IllegalArgumentException e) {
+      // SliceWindowMath already describes the misconfiguration; the window
+      // bean construction will fail with the same cause. Skip here to avoid
+      // masking it with a second message.
+      return;
+    }
+    long sliceMs = durationMs / aligned;
+    if (sliceMs <= 0) {
+      return;
+    }
+
+    long minStaleMs = Math.min(
+      properties.getStateMachine().getEvictIntervalMs(),
+      properties.getStateMachine().getColdEvictIntervalMs()
+    );
+    Assert.state(
+      minStaleMs >= sliceMs,
+      "staleness thresholds must be >= one sliding-window slice " +
+        "(ADR-0064 slice-gated fast path precondition): min(evict-interval-ms=" +
+        properties.getStateMachine().getEvictIntervalMs() +
+        ", cold-evict-interval-ms=" +
+        properties.getStateMachine().getColdEvictIntervalMs() +
+        ") must be >= sliceMs=" +
+        sliceMs +
+        " (durationMs=" +
+        durationMs +
+        ", slices=" +
+        slices +
+        ", aligned=" +
+        aligned +
+        "), got minStaleMs=" +
+        minStaleMs
     );
   }
 
@@ -348,11 +406,16 @@ public class WorkerAutoConfiguration {
   /**
    * Broadcasts HOT / COOL decisions to all application instances.
    *
+   * <p>COOL repeats (ADR-0087) ride the shared {@code hotKeyScheduler}: the
+   * schedule call is non-blocking and a saturated scheduler drops repeats
+   * with a DEBUG log, so the broadcast path keeps its fire-and-forget shape.
+   *
    * @param rabbitTemplate         the RabbitMQ template used to publish messages
    * @param properties             worker configuration providing exchange and routing settings
    * @param nodeId                 the Worker's node identity, injected via {@code @Qualifier("workerNodeId")}
    * @param epochCounter           the Worker's epoch counter, injected via {@code @Qualifier("workerEpochCounter")}
    * @param metrics                provider for the optional detection-plane meters (ADR-0080)
+   * @param scheduler              shared scheduler for bounded COOL repeats (ADR-0087)
    * @return a new {@link WorkerBroadcaster} instance
    */
   @Bean
@@ -363,7 +426,8 @@ public class WorkerAutoConfiguration {
     @Qualifier("workerNodeId") String nodeId,
     @Qualifier("workerEpochCounter") AtomicLong epochCounter,
     SnowflakeIdGenerator snowflakeIdGenerator,
-    ObjectProvider<WorkerDetectionMetrics> metrics
+    ObjectProvider<WorkerDetectionMetrics> metrics,
+    @Qualifier("hotKeyScheduler") ScheduledExecutorService scheduler
   ) {
     return new WorkerBroadcaster(
       rabbitTemplate,
@@ -372,7 +436,10 @@ public class WorkerAutoConfiguration {
       nodeId,
       epochCounter,
       snowflakeIdGenerator,
-      metrics.getIfAvailable()
+      metrics.getIfAvailable(),
+      properties.getStateMachine().getCoolRebroadcastTimes(),
+      properties.getStateMachine().getRebroadcastIntervalMs(),
+      scheduler
     );
   }
 
@@ -534,6 +601,24 @@ public class WorkerAutoConfiguration {
       fastLaneRuleManager,
       snowflakeIdGenerator
     );
+  }
+
+  /**
+   * Management-plane endpoint for fast-lane rule CRUD (ADR-0025).
+   *
+   * <p>Declared explicitly (not component-scanned): {@code @Endpoint} is not
+   * a stereotype annotation, so without this bean the endpoint would silently
+   * vanish when its MVC stereotype was removed.
+   *
+   * @param ruleManager the runtime-managed fast-lane rules
+   * @param broadcaster the gossip broadcaster notified on mutation
+   * @return a new {@link FastLaneEndpoint} instance
+   */
+  @Bean
+  @ConditionalOnMissingBean
+  @ConditionalOnClass(name = "org.springframework.boot.actuate.endpoint.annotation.Endpoint")
+  public FastLaneEndpoint fastLaneEndpoint(FastLaneRuleManager ruleManager, FastLaneRulesBroadcaster broadcaster) {
+    return new FastLaneEndpoint(ruleManager, broadcaster);
   }
 
   /**
@@ -767,22 +852,19 @@ public class WorkerAutoConfiguration {
   }
 
   /**
-   * Fallback report message converter for reportToWorker messages. Active only when the
+   * Fallback report message converter for report messages. Active only when the
    * common module's {@code zetaReportMessageConverter} is absent (e.g. in tests).
    * <p>
    * Decodes both wire formats (Jackson JSON and the compact binary body,
    * ADR-0074) by first-byte sniffing; never encodes compact (a Worker does
-   * not emit report messages).
+   * not emit report messages). Unknown JSON fields are ignored (ADR-0091).
    *
-   * @return a dual-format {@code CompactAwareReportMessageConverter} over a Jackson delegate
+   * @return a dual-format {@code CompactAwareReportMessageConverter} over a forward-compatible Jackson delegate
    */
   @Bean("reportMessageConverter")
   @ConditionalOnMissingBean(name = "reportMessageConverter")
   public MessageConverter reportMessageConverter() {
-    return new CompactAwareReportMessageConverter(
-      new org.springframework.amqp.support.converter.Jackson2JsonMessageConverter(),
-      false
-    );
+    return CompactAwareReportMessageConverter.forwardCompatible(false);
   }
 
   /**

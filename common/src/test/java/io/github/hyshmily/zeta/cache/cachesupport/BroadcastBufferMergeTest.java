@@ -27,13 +27,15 @@ import org.junit.jupiter.api.Test;
 
 /**
  * Deterministic tests for {@link BroadcastBuffer#record}'s version-ordered merge
- * (ADR-0066): concurrent writers record out of INCR order (the version bump and the
- * record are separated by the L1 apply), so within a space the buffer must keep the
- * newest allocation instead of the last record. Before the fix, an out-of-order
- * {@code record(key, 5)} after {@code record(key, 6)} regressed the pending version
- * and the v6 REFRESH was never sent — peers pinned on stale data until the next
- * write or TTL. Across the degraded boundary the newest record wins (legacy
- * last-writer-wins; the receiver-side matrix decides what applies).
+ * (ADR-0066, normal-wins refinement): concurrent writers record out of INCR
+ * order (the version bump and the record are separated by the L1 apply), so
+ * within a space the buffer must keep the newest allocation instead of the
+ * last record. Before the fix, an out-of-order {@code record(key, 5)} after
+ * {@code record(key, 6)} regressed the pending version and the v6 REFRESH was
+ * never sent — peers pinned on stale data until the next write or TTL. Across
+ * the degraded boundary the normal record wins: a degraded record overwriting
+ * a pending normal one would send a REFRESH every normal-holding peer skips
+ * (case 2 of the sync matrix), silently dropping the normal update.
  *
  * <p>Kept out of {@code BroadcastBufferTest} so the deterministic merge coverage is
  * not excluded with that class's {@code flaky} timing tests.
@@ -88,9 +90,9 @@ class BroadcastBufferMergeTest {
   }
 
   /**
-   * Across the degraded boundary the newest RECORD wins (legacy last-writer-wins):
-   * a normal write recorded after a degraded one replaces it, and the receiver-side
-   * matrix handles whatever the peers hold.
+   * Across the degraded boundary the normal record wins: a normal write
+   * recorded after a degraded one replaces it — peers without entries converge
+   * on the version-ordered value, and normal-holding peers apply it normally.
    */
   @Test
   void record_degradedThenNormal_keepsNewestRecord() {
@@ -104,19 +106,19 @@ class BroadcastBufferMergeTest {
   }
 
   /**
-   * Across the degraded boundary the newest RECORD wins: a degraded write recorded
-   * after a normal one is kept pending — peers without an entry must still fetch
-   * the fresh value, while peers holding normal entries skip the degraded REFRESH
-   * on their own (the legacy behavior the existing integration test pins).
+   * Across the degraded boundary the normal record wins: a degraded write
+   * recorded after a normal one must not displace it — the degraded REFRESH
+   * would be skipped by every normal-holding peer (case 2 of the sync matrix)
+   * and the normal update would be lost until the next write or TTL.
    */
   @Test
-  void record_normalThenDegraded_keepsNewestRecord() {
+  void record_normalThenDegraded_keepsNormal() {
     BroadcastBuffer buf = buffer();
     buf.record("key", 5L, false);
     buf.record("key", Long.MIN_VALUE + 42L, true);
     buf.flush();
 
-    verify(publisher).broadcastRefresh("key", Long.MIN_VALUE + 42L, true);
+    verify(publisher).broadcastRefresh("key", 5L, false);
     verifyNoMoreInteractions(publisher);
   }
 

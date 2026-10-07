@@ -32,9 +32,11 @@ import lombok.extern.slf4j.Slf4j;
  * most recent entry per key via the {@link CacheSyncPublisher}. Concurrent
  * records for the same key are merged: within the same space (normal vs
  * degraded) the strictly newer allocation wins, across the degraded boundary
- * the newest record wins — an out-of-order record can never regress the
- * pending version within a space, so only intermediate versions may be lost,
- * which is acceptable because the next flush sends the latest known state.
+ * the normal record wins — an out-of-order record can never regress the
+ * pending version within a space, and a degraded record can never displace a
+ * pending normal one (which receivers would skip anyway), so only intermediate
+ * versions may be lost, which is acceptable because the next flush sends the
+ * latest known state.
  *
  * <p>Uses a lazy delayed flush strategy: the first {@link #record} after a
  * quiet period schedules a one-shot flush after a configurable delay
@@ -159,6 +161,20 @@ public class BroadcastBuffer {
     this.flushDelayMs = flushDelayMs;
     this.maxDeferMs = maxDeferMs;
     this.sendExecutor = sendExecutor;
+    if (publisher.isPresent() && sendExecutor == null) {
+      // One-time wiring warning, not throttled: without the dedicated send
+      // executor every deferred REFRESH runs synchronously on the calling
+      // thread (the shared hotKeyScheduler on flush, or the putThrough
+      // submitter on scheduler saturation) — a slow broker then stalls
+      // tide/park work. Production wiring (ZetaAutoConfiguration) always
+      // supplies zetaSendExecutor; this path only triggers for manual
+      // construction or a custom BroadcastBuffer bean (ADR-0037).
+      log.warn(
+        "BroadcastBuffer created without a send executor while a sync publisher is present: " +
+          "refresh sends run synchronously on the calling thread (legacy path, ADR-0037). " +
+          "Supply an executor to isolate AMQP sends from the shared scheduler."
+      );
+    }
   }
 
   /**
@@ -222,12 +238,16 @@ public class BroadcastBuffer {
    *       newest one — the defect this merge fixes (a regressed pending version let
    *       a flush send a REFRESH every receiver would skip, pinning peers on stale
    *       data until the next write or TTL).</li>
-   *   <li><b>Across the degraded boundary</b>: the newest RECORD wins
-   *       (last-writer-wins, the legacy semantics). The record order reflects real
-   *       write order here, and the receiver-side 4-case matrix decides what
-   *       applies — a newer degraded write must still reach peers without entries,
-   *       while peers holding normal entries skip it on their own
-   *       ({@code VersionGuard.shouldSkipForSync}).</li>
+   *   <li><b>Across the degraded boundary</b>: the normal record wins,
+   *       regardless of arrival order. The receiver-side 4-case matrix
+   *       ({@code VersionGuard.shouldSkipForSync}) always skips a degraded
+   *       REFRESH against a normal entry (case 2), so letting a degraded
+   *       record overwrite a pending normal one would silently drop the normal
+   *       update for every peer that already holds a normal entry — the
+   *       normal broadcast is lost until the next write or TTL. A pending
+   *       degraded record overwritten by a newer normal write is the symmetric
+   *       win: peers without entries converge on the version-ordered value
+   *       instead of a clock-ordered degraded one.</li>
    * </ul>
    *
    * @param old      the currently pending entry, or {@code null}
@@ -236,8 +256,14 @@ public class BroadcastBuffer {
    * @return the entry to keep pending
    */
   private static VersionInfo mergeVersion(VersionInfo old, long version, boolean degraded) {
-    if (old == null || old.degraded() != degraded) {
+    if (old == null) {
       return new VersionInfo(version, degraded);
+    }
+    if (old.degraded() != degraded) {
+      // Cross-boundary: normal wins (see the Javadoc above). A new normal
+      // record replaces a pending degraded one; a new degraded record never
+      // displaces a pending normal one.
+      return degraded ? old : new VersionInfo(version, degraded);
     }
     return version > old.version() ? new VersionInfo(version, degraded) : old;
   }

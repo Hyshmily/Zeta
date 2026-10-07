@@ -184,6 +184,40 @@ class WorkerAutoConfigurationTest {
   }
 
   /**
+   * ADR-0064 slice-gated fast path: the detector refreshes a window's eviction
+   * timestamp at most once per slice, so every staleness threshold applied to
+   * the detector must be at least one slice. A sub-slice eviction would silently
+   * early-evict hot windows — startup must fail fast instead.
+   */
+  @Test
+  @DisplayName("staleness threshold below one sliding-window slice fails startup")
+  void stalenessBelowOneSliceFailsStartup() {
+    new ApplicationContextRunner()
+      .withPropertyValues(
+        "zeta.worker.enabled=true",
+        "zeta.worker.sliding-window.duration-ms=1000",
+        "zeta.worker.sliding-window.slices=10",
+        "zeta.worker.state-machine.evict-interval-ms=10",
+        "zeta.worker.state-machine.cold-evict-interval-ms=10"
+      )
+      .withUserConfiguration(MinimalMockConfiguration.class)
+      .withConfiguration(AutoConfigurations.of(WorkerAutoConfiguration.class))
+      .run(ctx -> {
+        assertThat(ctx.getStartupFailure()).isNotNull();
+        assertThat(ctx.getStartupFailure()).hasStackTraceContaining("slice");
+      });
+  }
+
+  /**
+   * Verifies the slice-gate guard accepts the defaults (minutes vs ~62ms).
+   */
+  @Test
+  @DisplayName("default staleness thresholds pass the slice-gate guard")
+  void defaultThresholdsPassSliceGateGuard() {
+    runner.run(ctx -> assertThat(ctx).hasSingleBean(SlidingWindowDetector.class));
+  }
+
+  /**
    * Verifies no worker beans are created when {@code zeta.worker.enabled=false}.
    */
   @Test

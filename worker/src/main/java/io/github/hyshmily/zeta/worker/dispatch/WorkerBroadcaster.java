@@ -25,6 +25,8 @@ import io.github.hyshmily.zeta.util.id.SnowflakeIdGenerator;
 import io.github.hyshmily.zeta.util.version.VersionGuard;
 import io.github.hyshmily.zeta.worker.metrics.WorkerDetectionMetrics;
 import java.nio.charset.StandardCharsets;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import lombok.extern.slf4j.Slf4j;
@@ -83,6 +85,23 @@ public class WorkerBroadcaster {
   private final WorkerDetectionMetrics metrics;
 
   /**
+   * Bounded COOL re-emission count (ADR-0087): repeats scheduled per
+   * successful {@link #broadcastCool}, spaced one {@code coolRepeatIntervalMs}
+   * apart with the original decision version. {@code 0} disables repeats.
+   */
+  private final int coolRepeatTimes;
+
+  /** Spacing between COOL repeats (ms); reuses the HOT rebroadcast interval. */
+  private final long coolRepeatIntervalMs;
+
+  /**
+   * Scheduler for COOL repeats; {@code null} disables repeats (legacy path).
+   * Never blocked on: {@code schedule} is non-blocking, and a saturated
+   * scheduler drops the repeat batch with a DEBUG log.
+   */
+  private final ScheduledExecutorService repeatScheduler;
+
+  /**
    * Constructs a broadcaster.
    *
    * @param rabbitTemplate     the template used to publish messages
@@ -102,6 +121,35 @@ public class WorkerBroadcaster {
     SnowflakeIdGenerator snowflakeIdGenerator,
     WorkerDetectionMetrics metrics
   ) {
+    this(rabbitTemplate, broadcastExchange, appName, nodeId, epochCounter, snowflakeIdGenerator, metrics, 0, 0, null);
+  }
+
+  /**
+   * Constructs a broadcaster with bounded COOL re-emission (ADR-0087).
+   *
+   * @param rabbitTemplate     the template used to publish messages
+   * @param broadcastExchange  the fanout exchange name
+   * @param appName            the application name carried in the send header
+   * @param nodeId             this Worker's node identity
+   * @param epochCounter       this Worker's epoch counter
+   * @param snowflakeIdGenerator the trace-ID generator
+   * @param metrics            the emission counters, or {@code null} to leave them off
+   * @param coolRepeatTimes    COOL repeats per successful broadcast (0 disables)
+   * @param coolRepeatIntervalMs spacing between repeats in milliseconds
+   * @param repeatScheduler    scheduler for repeats, or {@code null} to disable
+   */
+  public WorkerBroadcaster(
+    RabbitTemplate rabbitTemplate,
+    String broadcastExchange,
+    String appName,
+    String nodeId,
+    AtomicLong epochCounter,
+    SnowflakeIdGenerator snowflakeIdGenerator,
+    WorkerDetectionMetrics metrics,
+    int coolRepeatTimes,
+    long coolRepeatIntervalMs,
+    ScheduledExecutorService repeatScheduler
+  ) {
     this.rabbitTemplate = rabbitTemplate;
     this.broadcastExchange = broadcastExchange;
     this.appName = appName;
@@ -109,6 +157,9 @@ public class WorkerBroadcaster {
     this.epochCounter = epochCounter;
     this.snowflakeIdGenerator = snowflakeIdGenerator;
     this.metrics = metrics;
+    this.coolRepeatTimes = Math.max(0, coolRepeatTimes);
+    this.coolRepeatIntervalMs = coolRepeatIntervalMs;
+    this.repeatScheduler = repeatScheduler;
   }
 
   /**
@@ -205,9 +256,13 @@ public class WorkerBroadcaster {
       broadcastDedupCache.put(dedupKey, Boolean.TRUE);
       log.debug("Broadcast HOT: key={}, dv={}", cacheKey, dv);
     } catch (Exception e) {
-      // Single failure log at the send site, with the full stack — callers
-      // (ReportConsumer) only aggregate the rollback side-effects.
-      log.error("Failed to broadcast HOT decision for key={}", cacheKey, e);
+      // ADR-0037 log discipline: the send site stays quiet (DEBUG, no stack) —
+      // WorkerBroadcastBuffer aggregates send failures into one rate-limited
+      // WARN per window with counts, which is the signal operators read. A
+      // per-decision ERROR with a full stack would flood the log exactly when
+      // a broker outage collides with a mass-heat wave (ADR-0061's own
+      // motivation), drowning the aggregated warning that matters.
+      log.debug("Failed to broadcast HOT decision for key={}: {}", cacheKey, e.toString());
       return false;
     }
     return true;
@@ -218,6 +273,9 @@ public class WorkerBroadcaster {
    *
    * <p>A successful send is counted into {@code zeta.worker.decisions.cool}
    * (ADR-0080), on the same emission-only rule as {@link #broadcastHot(String)}.
+   * On success, {@link #coolRepeatTimes} idempotent repeats are scheduled
+   * (ADR-0087) — a lost COOL has no other self-healing (HOT has the periodic
+   * rebroadcast, ADR-0024).
    *
    * @param cacheKey the key that has been confirmed as fully cooled
    */
@@ -234,15 +292,72 @@ public class WorkerBroadcaster {
         metrics.countCoolDecision();
       }
       broadcastDedupCache.put(dedupKey, Boolean.TRUE);
-      log.info("Broadcast COOL: key={}, dv={}", cacheKey, dv);
+      // ADR-0064: per-key state transitions are DEBUG — a mass-heat wave emits
+      // one line per key, which is exactly the flood the transition-log
+      // throttling was introduced to stop.
+      log.debug("Broadcast COOL: key={}, dv={}", cacheKey, dv);
+      scheduleCoolRepeats(cacheKey, dv);
     } catch (Exception e) {
-      // Single failure log at the send site, with the full stack — callers
-      // (ReportConsumer) only aggregate the rollback side-effects.
-      log.error("Failed to broadcast COOL decision for key={}", cacheKey, e);
+      // Same ADR-0037 discipline as broadcastHot: aggregate WARN lives in
+      // WorkerBroadcastBuffer, the send site stays at DEBUG without a stack.
+      log.debug("Failed to broadcast COOL decision for key={}: {}", cacheKey, e.toString());
       return false;
       // no throw — ADR-0007 fire-and-forget
     }
     return true;
+  }
+
+  /**
+   * Schedules the bounded COOL repeats for a just-sent decision (ADR-0087).
+   * Each repeat re-sends the <em>same</em> decision version — never a fresh
+   * one: a fresh version could overtake a subsequent HOT (cool → reheat inside
+   * the repeat window) and demote a legitimately hot entry, while the same
+   * version is skipped exactly where it should be (already applied → equal
+   * skip; superseded → newer wins) and applied exactly where it is needed
+   * (first send lost). Repeats bypass the 100ms dedup cache entirely (neither
+   * checked nor populated): the spacing (≥1s by config bound) already exceeds
+   * the debounce window, and a dedup-populated repeat could elide a genuine
+   * new decision.
+   *
+   * @param cacheKey the cooled key
+   * @param dv       the decision version of the initial broadcast to repeat
+   */
+  private void scheduleCoolRepeats(String cacheKey, long dv) {
+    if (repeatScheduler == null || coolRepeatTimes <= 0 || coolRepeatIntervalMs <= 0) {
+      return;
+    }
+
+    for (int i = 1; i <= coolRepeatTimes; i++) {
+      long delayMs = i * coolRepeatIntervalMs;
+      try {
+        repeatScheduler.schedule(() -> sendCoolRepeat(cacheKey, dv), delayMs, TimeUnit.MILLISECONDS);
+      } catch (RejectedExecutionException e) {
+        // Scheduler saturated or shutting down: the remaining repeats are
+        // dropped (fire-and-forget, ADR-0007) — the entry still converges via
+        // its hard TTL, exactly the pre-0087 behaviour.
+        log.debug("COOL repeat scheduling rejected (saturated/shutdown), key={}", cacheKey);
+        break;
+      }
+    }
+  }
+
+  /**
+   * Sends one idempotent COOL repeat with the original decision version.
+   *
+   * @param cacheKey the cooled key
+   * @param dv       the original decision version to re-send
+   */
+  private void sendCoolRepeat(String cacheKey, long dv) {
+    try {
+      sendBroadcast(cacheKey, WorkerMessage.TYPE_COOL, dv);
+      if (metrics != null) {
+        metrics.countCoolDecision();
+      }
+      log.debug("Rebroadcast COOL (repeat): key={}, dv={}", cacheKey, dv);
+    } catch (Exception e) {
+      // Fire-and-forget: a lost repeat just narrows the healing window.
+      log.debug("Failed to rebroadcast COOL repeat for key={}: {}", cacheKey, e.toString());
+    }
   }
 
   /**
