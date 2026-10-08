@@ -74,7 +74,7 @@ public class ZetaFacadeAutoConfiguration {
 
   /**
    * Shared scheduler for all periodic tasks (flush, monitor, heartbeat, persist, etc.).
-   * Pool size configurable via {@code zeta.scheduler-pool-size} (default 4).
+   * Pool size configurable via {@code zeta.scheduler-pool-size} (default 8).
    * Wrapped in a {@link SafeScheduledExecutorService} so a throwing periodic task never
    * kills the cadence of the shared scheduler.
    */

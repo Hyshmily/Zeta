@@ -16,8 +16,11 @@
 package io.github.hyshmily.zeta.autoconfigure;
 
 import io.github.hyshmily.zeta.Internal;
+import io.github.hyshmily.zeta.constants.ZetaConstants;
 import io.github.hyshmily.zeta.sync.distributedlock.LockProvider;
 import io.github.hyshmily.zeta.sync.distributedlock.impl.RedisLockProvider;
+import io.github.hyshmily.zeta.util.ZetaThreadFactory;
+import io.github.hyshmily.zeta.util.executor.SafeScheduledExecutorService;
 import java.util.concurrent.ScheduledExecutorService;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
@@ -50,11 +53,19 @@ import org.springframework.data.redis.core.StringRedisTemplate;
 public class ZetaLockAutoConfiguration {
 
   /**
+   * Fixed pool size for the lock-renewal scheduler. Deliberately not
+   * configurable: renewal cadence is derived from each lock's TTL, so thread
+   * count does not change throughput — a small pool only bounds how much
+   * renewal can be in flight against Redis at once.
+   */
+  private static final int LOCK_RENEW_SCHEDULER_POOL_SIZE = 2;
+
+  /**
    * Create the Redis-backed lock provider with retry counts from properties.
    *
    * @param redisTemplate the Redis template for SET / GET / EVAL operations
    * @param properties    the HotKey configuration properties for retry settings
-   * @param scheduler     the shared scheduler for watchdog renewal
+   * @param scheduler     the dedicated lock-renewal scheduler for watchdog tasks
    * @return a new {@link RedisLockProvider} instance
    */
   @Bean
@@ -63,7 +74,7 @@ public class ZetaLockAutoConfiguration {
   public LockProvider redisLockProvider(
     StringRedisTemplate redisTemplate,
     ZetaProperties properties,
-    @Qualifier("hotKeyScheduler") ScheduledExecutorService scheduler
+    @Qualifier("hotKeyLockRenewScheduler") ScheduledExecutorService scheduler
   ) {
     return new RedisLockProvider(
       redisTemplate,
@@ -71,6 +82,39 @@ public class ZetaLockAutoConfiguration {
       properties.getTryLockInquiryCount(),
       properties.getTryLockUnlockCount(),
       scheduler
+    );
+  }
+
+  /**
+   * Dedicated scheduler for lock watchdog renewal.
+   *
+   * <p>A watchdog tick is one synchronous Redis round-trip (a Lua {@code GET +
+   * PEXPIRE}), so it blocks its thread for a full RTT — or for the whole Redis
+   * command timeout during a failover. Renewal is scheduled per held lock, so
+   * {@code heldLocks} concurrent acquisitions occupy {@code heldLocks} threads.
+   *
+   * <p>Isolated from {@code hotKeyScheduler} for the same reason
+   * {@code hotKeySyncScheduler} and {@code hotKeyWorkerSchedScheduler} are:
+   * a blocking control-plane call must never starve the latency-sensitive
+   * periodic tasks sharing the general pool — the reporter's 50 ms flush tide,
+   * HeavyKeeper's decay window rotation, and the deferred broadcast flush.
+   * Eight blocked renewal threads on that pool would delay report delivery in
+   * whole tide intervals and slip the sketch window.
+   *
+   * <p>Pool size is fixed at 2 rather than configurable: renewal is a periodic
+   * task with a cadence derived from the lock TTL, not a throughput workload,
+   * so more threads buy nothing and a small pool is a natural back-pressure
+   * bound — a backlogged renewal simply runs late, and the lease TTL (not this
+   * pool) is the real constraint.
+   *
+   * @return a scheduled executor dedicated to lock renewal
+   */
+  @Bean(name = "hotKeyLockRenewScheduler", destroyMethod = "shutdownNow")
+  @ConditionalOnMissingBean(name = "hotKeyLockRenewScheduler")
+  public ScheduledExecutorService hotKeyLockRenewScheduler() {
+    return new SafeScheduledExecutorService(
+      LOCK_RENEW_SCHEDULER_POOL_SIZE,
+      new ZetaThreadFactory(ZetaConstants.Thread.PREFIX_SCHEDULER)
     );
   }
 }

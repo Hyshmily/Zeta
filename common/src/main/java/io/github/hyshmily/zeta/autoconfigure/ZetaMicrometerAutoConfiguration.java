@@ -26,6 +26,7 @@ import io.github.hyshmily.zeta.detection.ZetaBayesianSM;
 import io.github.hyshmily.zeta.endpoint.ZetaEndpoint;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.TopK;
 import io.github.hyshmily.zeta.reporting.KeyReporter;
+import io.github.hyshmily.zeta.rule.impl.RuleMatcherImpl;
 import io.github.hyshmily.zeta.sharding.HealthView;
 import io.github.hyshmily.zeta.sync.dispatcher.DispatcherStats;
 import io.github.hyshmily.zeta.sync.local.CacheSyncListener;
@@ -139,6 +140,7 @@ public class ZetaMicrometerAutoConfiguration {
    *   <tr><td>{@code zeta.worker.alive}</td><td>Whether any worker shard is alive</td><td>&mdash;</td></tr>
    *   <tr><td>{@code zeta.worker.tracked.keys}</td><td>Keys tracked by state machine</td><td>&mdash;</td></tr>
    *   <tr><td>{@code zeta.cpu.load}</td><td>System CPU load EMA</td><td>&mdash;</td></tr>
+   *   <tr><td>{@code zeta.rules.persist.failed}</td><td>Rule mutations that never reached Redis/broadcast (cluster divergence)</td><td>&mdash;</td></tr>
    * </table>
    *
    * @param hotKeyDetectorProvider      provider for the app-side TopK (may be absent)
@@ -236,6 +238,25 @@ public class ZetaMicrometerAutoConfiguration {
         }
       });
     };
+  }
+
+  /**
+   * Rule persist-failure divergence gauge (T1 fix): {@code zeta.rules.persist.failed}
+   * counts rule mutations that reached memory but never Redis/broadcast.
+   *
+   * <p>Separate {@link MeterBinder} so the main {@code hotKeyCustomMetrics} signature
+   * stays stable for existing callers/tests.
+   *
+   * @param ruleMatcherProvider provider for the rule matcher (may be absent)
+   * @return a {@link MeterBinder} registering the rules divergence gauge
+   */
+  @Bean
+  @ConditionalOnMissingBean
+  public MeterBinder hotKeyRulesMetrics(ObjectProvider<RuleMatcherImpl> ruleMatcherProvider) {
+    return registry ->
+      ruleMatcherProvider.ifAvailable(matcher ->
+        Gauge.builder("zeta.rules.persist.failed", matcher, m -> (double) m.getRulesPersistFailures()).register(registry)
+      );
   }
 
   /**
