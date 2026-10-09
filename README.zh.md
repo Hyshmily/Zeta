@@ -15,7 +15,7 @@
 
 [**English**](README.md)
 
-Zeta 是一款可配置、高性能、低成本的轻量级分布式缓存与预热框架, 致力于以极低的成本解决集群维度对任意突发性的、无法预先感知的热点数据分布式一致性缓存问题,通过 Redis 和 RabbitMQ 将业务代码与整个分布式协调基础设施完全解耦。
+Zeta 是一个自动化、高性能、低成本的轻量级分布式缓存与预热框架——无需预注册 key，热点发现、决策、预热、降级全链路自动闭环；以最小成本为集群突发热点提供最终一致性缓存，并通过 Redis 与 RabbitMQ 将业务代码与分布式协调基础设施完全解耦。
 
 ### 定位
 
@@ -55,7 +55,7 @@ zeta.tag("product:123");
 zeta.peek("product:123");
 ```
 
-- **本地层（常开）：** 每个实例运行 HeavyKeeper TopK 草图。key 进入 TopK 集合即自动延长其 L1 Caffeine TTL——无需 Worker 反馈。L1 未命中由 SingleFlight 合并并发请求防击穿；软过期条目回陈旧值同时后台刷新，数据源故障时条目以衰减续租（`max(剩余/2, 120s)`）继续存活，而不是每次读都请求数据源（[ADR-0036](docs/adr/0036-lease-on-failure.md)）。
+- **本地层（常开）：** 每个实例运行 HeavyKeeper TopK 草图。key 进入 TopK 集合即自动延长其 L1 Caffeine TTL——无需 Worker 反馈。L1 未命中由 SingleFlight 合并并发请求防击穿；软过期条目回陈旧值同时后台刷新，数据源故障时条目以永不缩短的续租（`max(剩余, floor, 剩余/2)`，floor 跟随条目自身量级）继续存活，而不是每次读都请求数据源（[ADR-0036](docs/adr/0036-lease-on-failure.md)，见 [ADR-0093](docs/adr/0093-explicit-outcomes-never-shorten-lease.md) 修订）。
 - **集群层（可选）：** 实例计数经 CPU-BBR 背压上报至 RabbitMQ；Worker 集群运行双路径评估管线——**快车道**（glob 规则，达标即提升 `CONFIRMED_HOT`，全链路 ~60ms P99）与**贝叶斯路径**（Normal-Normal 共轭后验 + 逐 key 证据累积：强热点 ~50–150ms 确认，边界 key 跨评估窗口累积证据）。
 
 <details>

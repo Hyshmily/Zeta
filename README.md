@@ -15,7 +15,7 @@
 
 [**中文**](README.zh.md)
 
-Zeta is a configurable, high-performance, low-cost lightweight distributed cache and preheating framework, designed to solve cluster-wide distributed consistent caching problems for arbitrary sudden hotspot data at minimal cost, fully decoupling business code from distributed coordination infrastructure via Redis and RabbitMQ.
+Zeta is an automated, high-performance, low-cost lightweight distributed cache and preheating framework — no key pre-registration; hotspot detection, decision, warming, and degradation form a fully automated closed loop. It gives burst hot keys eventually-consistent caching across the cluster at minimal cost, fully decoupling business code from distributed coordination infrastructure via Redis and RabbitMQ.
 
 ### Positioning
 
@@ -55,7 +55,7 @@ zeta.tag("product:123");
 zeta.peek("product:123");
 ```
 
-- **Local tier (always on):** every instance runs a HeavyKeeper TopK sketch. A key entering the TopK set gets its L1 Caffeine TTL extended automatically — no Worker feedback needed. L1 misses are merged by SingleFlight to prevent cache breakdown; soft-expired entries serve stale while a background refresh runs, and if the data source is down the entry stays alive on a decaying lease (`max(remaining/2, 120s)`) instead of hitting the data source on every read ([ADR-0036](docs/adr/0036-lease-on-failure.md)).
+- **Local tier (always on):** every instance runs a HeavyKeeper TopK sketch. A key entering the TopK set gets its L1 Caffeine TTL extended automatically — no Worker feedback needed. L1 misses are merged by SingleFlight to prevent cache breakdown; soft-expired entries serve stale while a background refresh runs, and if the data source is down the entry is kept alive by a never-shortening lease (`max(remaining, floor, remaining/2)`, floor follows the entry's own scale) instead of hitting the data source on every read ([ADR-0036](docs/adr/0036-lease-on-failure.md), amended by [ADR-0093](docs/adr/0093-explicit-outcomes-never-shorten-lease.md)).
 - **Cluster tier (optional):** instances report counts through a CPU-BBR back-pressured reporter to RabbitMQ; the Worker cluster runs a two-path evaluation pipeline — **FastLane** (glob rules, threshold → immediate `CONFIRMED_HOT`, ~60ms P99 end-to-end) and the **Bayesian path** (Normal-Normal conjugate posterior with per-key evidence accumulation: strongly hot keys confirm in ~50–150ms, borderline keys accumulate evidence across evaluation windows).
 
 <details>
