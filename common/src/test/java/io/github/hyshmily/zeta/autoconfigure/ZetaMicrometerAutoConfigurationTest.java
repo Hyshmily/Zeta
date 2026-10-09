@@ -237,7 +237,13 @@ class ZetaMicrometerAutoConfigurationTest {
     binder.bindTo(registry);
 
     assertThat(registry.find("zeta.expire.refresh.available").gauge()).isNull();
-    assertThat(registry.getMeters()).isEmpty();
+    // Lease counters live on the refresher seam itself (not the limiter), so
+    // they register even when the limiter is absent.
+    assertThat(registry.find("zeta.expire.refresh.failure.leased.total").gauge()).isNotNull();
+    assertThat(registry.find("zeta.expire.refresh.lease.stale.capped.total").gauge()).isNotNull();
+    assertThat(registry.find("zeta.expire.refresh.lease.suppressed.total").gauge()).isNotNull();
+    assertThat(registry.find("zeta.expire.refresh.lease.debt.keys").gauge()).isNotNull();
+    assertThat(registry.getMeters()).hasSize(4);
   }
 
   /**

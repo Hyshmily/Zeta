@@ -258,6 +258,17 @@ private static void putDispatchStats(Map<String, Object> section, DispatcherStat
       }
     }
 
+    // Lease-on-failure observability (ADR-0036): without these counters the
+    // "staleness is self-healing and bounded" claim is a belief, not a
+    // verifiable statement. Deliberately NOT folded into ZetaCacheStats
+    // (a pure L1 snapshot per ADR-0076) — the refresher seam owns them.
+    if (backgroundRefresher != null) {
+      local.put("refreshFailureLeased", backgroundRefresher.getRefreshFailureLeased());
+      local.put("leaseStaleCapped", backgroundRefresher.getLeaseStaleCapped());
+      local.put("leaseSuppressedByClassifier", backgroundRefresher.getLeaseSuppressedByClassifier());
+      local.put("staleDebt", backgroundRefresher.leasedStaleness(Math.max(1, Math.min(limit, 100))));
+    }
+
     if (versionController != null) {
       local.put("versionRedisEnabled", versionController.isRedisConfigured());
       local.put("versionDegradedCount", versionController.getDegradedVersionCount());

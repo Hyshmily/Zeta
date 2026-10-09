@@ -27,6 +27,7 @@ import io.github.hyshmily.zeta.sync.dispatcher.PerKeyOrderedDispatcher;
 import io.github.hyshmily.zeta.sync.worker.WorkerListener;
 import io.github.hyshmily.zeta.util.AmqpMessageReader;
 import io.github.hyshmily.zeta.util.InstanceIdGenerator;
+import io.github.hyshmily.zeta.util.LogThrottle;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import java.io.IOException;
@@ -93,6 +94,15 @@ public class CacheSyncListener {
    * application's traffic back to the shared backend — hence the drop.
    */
   private final AppIsolationFilter isolation;
+
+  /**
+   * Rate-limits the unknown-sync-type WARN to one line per
+   * {@link LogThrottle#DEFAULT_WINDOW_MS} window (ADR-0037 one-per-window
+   * convention). An unknown type is an expected rolling-upgrade condition and
+   * every instance sees every message, so an unthrottled WARN fired once per
+   * inbound message.
+   */
+  private final LogThrottle.Counting unknownTypeLog = new LogThrottle.Counting();
 
   /**
    * Bit-shift divisor converting a message body length into ~1KB cost units
@@ -342,7 +352,44 @@ public class CacheSyncListener {
       case TYPE_INVALIDATE_ALL -> decisionHandler.handleLocalInvalidateAll(msg);
       case TYPE_REFRESH -> decisionHandler.handleRefresh(msg, endOfBatch);
       case TYPE_RULES_SYNC -> decisionHandler.handleRulesSync(msg);
-      default -> log.warn("Unknown sync type: {}, cacheKey: {}", msg.type(), msg.cacheKey());
+      default -> logUnknownType(msg);
+    }
+  }
+
+  /**
+   * Report a sync message whose type this instance does not recognise.
+   *
+   * <p>Expected during a rolling upgrade: a peer on a newer version emits a type
+   * this instance predates, and every instance sees every message. An
+   * unthrottled WARN therefore fired once per inbound message — and a
+   * misconfiguration where a publisher emits an unknown type floods at full
+   * message rate indefinitely. Rate-limited to one line per
+   * {@link LogThrottle#DEFAULT_WINDOW_MS} window per the ADR-0037 convention,
+   * with the occurrence count on the admitted line so a suppressed burst is
+   * still visible.
+   *
+   * @param msg the message with the unrecognised type
+   */
+  private void logUnknownType(SyncMessage msg) {
+    LogThrottle.Counting.Attempt attempt = unknownTypeLog.record();
+    if (!attempt.admitted()) {
+      log.debug(
+        "Unknown sync type: {}, cacheKey: {} ({} in current window)",
+        msg.type(),
+        msg.cacheKey(),
+        attempt.count()
+      );
+      return;
+    }
+    if (attempt.count() > 0) {
+      log.warn(
+        "Unknown sync type: {}, cacheKey: {} ({} suppressed in the last window)",
+        msg.type(),
+        msg.cacheKey(),
+        attempt.count()
+      );
+    } else {
+      log.warn("Unknown sync type: {}, cacheKey: {}", msg.type(), msg.cacheKey());
     }
   }
 }

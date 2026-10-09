@@ -26,6 +26,7 @@ import io.github.hyshmily.zeta.sync.dispatcher.DispatcherStats;
 import io.github.hyshmily.zeta.sync.dispatcher.PerKeyOrderedDispatcher;
 import io.github.hyshmily.zeta.sync.local.CacheSyncListener;
 import io.github.hyshmily.zeta.util.AmqpMessageReader;
+import io.github.hyshmily.zeta.util.LogThrottle;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import java.io.IOException;
@@ -81,6 +82,15 @@ public class WorkerListener {
    * Workers) are always processed.
    */
   private final AppIsolationFilter isolation;
+
+  /**
+   * Rate-limits the unknown-message-type WARN to one line per
+   * {@link LogThrottle#DEFAULT_WINDOW_MS} window (ADR-0037 one-per-window
+   * convention). ADR-0024 has every Worker re-emit HOT per hot key on a
+   * rebroadcast interval, so an unthrottled WARN fired once per decision
+   * message — per interval, per instance.
+   */
+  private final LogThrottle.Counting unknownTypeLog = new LogThrottle.Counting();
 
   /** Per-key FIFO dispatcher for ordered cache mutation execution. */
   // volatile: written once from start() (container lifecycle thread), read from
@@ -302,7 +312,43 @@ public class WorkerListener {
     switch (msg.type()) {
       case TYPE_HOT -> decisionHandler.handleHot(msg);
       case TYPE_COOL -> decisionHandler.handleCool(msg);
-      default -> log.warn("Unknown worker message type: {}, cacheKey: {}", msg.type(), msg.cacheKey());
+      default -> logUnknownType(msg);
+    }
+  }
+
+  /**
+   * Report a Worker decision whose type this instance does not recognise.
+   *
+   * <p>Expected during a rolling upgrade against a newer Worker. The rate is
+   * worse than on the sync plane: ADR-0024 has every Worker re-emits HOT for
+   * every hot key on a rebroadcast interval (10s default), so an unrecognised
+   * type produced {@code hotKeys × workers} WARNs per interval, per instance,
+   * indefinitely. Rate-limited to one line per
+   * {@link LogThrottle#DEFAULT_WINDOW_MS} window per the ADR-0037 convention,
+   * with the occurrence count on the admitted line.
+   *
+   * @param msg the message with the unrecognised type
+   */
+  private void logUnknownType(WorkerMessage msg) {
+    LogThrottle.Counting.Attempt attempt = unknownTypeLog.record();
+    if (!attempt.admitted()) {
+      log.debug(
+        "Unknown worker message type: {}, cacheKey: {} ({} in current window)",
+        msg.type(),
+        msg.cacheKey(),
+        attempt.count()
+      );
+      return;
+    }
+    if (attempt.count() > 0) {
+      log.warn(
+        "Unknown worker message type: {}, cacheKey: {} ({} suppressed in the last window)",
+        msg.type(),
+        msg.cacheKey(),
+        attempt.count()
+      );
+    } else {
+      log.warn("Unknown worker message type: {}, cacheKey: {}", msg.type(), msg.cacheKey());
     }
   }
 }

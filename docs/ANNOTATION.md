@@ -126,6 +126,7 @@ For a given read operation:
 - **Default (no annotation or `@NullCaching(true)`)**: a `null` result is stored as Zeta's internal `NullValue` sentinel with `zeta.local.null-value-ttl-seconds` (short TTL). Every write path uses the same sentinel and TTL — the loader path and the annotation store path (`@CachePut` returning null, non-sync `@Cacheable` stores, explicit Spring `NullValue` writes) — so Spring's own `NullValue` marker is never persisted. Hits on a valid sentinel return `null` **without re-invoking the method**; the access is still counted for hot-key detection.
 - **`@NullCaching(false)`**: a `null` result leaves no entry; the next call re-invokes the method.
 - Identical semantics apply on all three read paths (`get`, `getWithSoftExpire`, `computeIfAbsent[WithSoftExpire]`) and in the fluent API (`read(key).nullCaching(false)`).
+- **Sync-read failure semantics (`sync = true`)**: the delegated policy is forced to fail-fast, so a throwing method surfaces as Spring's `ValueRetrievalException` (never swallowed into a `null` miss) and a suppressed load (timeout / executor saturation with a closed breaker) surfaces as `ValueRetrievalException` wrapping `ZetaSuppressedException`. A breaker-open load with no serveable stale entry still resolves to `null` (graceful degradation wins over fail-fast there).
 
 ---
 

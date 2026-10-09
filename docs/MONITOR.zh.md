@@ -8,7 +8,7 @@ Zeta 提供两种互补的监控机制。
 
 **前置条件：** classpath 中包含 `spring-boot-starter-actuator`。
 
-Zeta 端点是普通的 Spring `@RestController`，**不是** Actuator `@Endpoint`——不受 `management.endpoints.web.exposure.include` 控制，无需在 include 列表中登记。只要 classpath 中存在 `spring-boot-starter-actuator`（注册条件）且 Spring MVC 可用，即自动注册：
+Zeta 端点是 Actuator `@Endpoint` Bean（不是普通的 `@RestController`）——受 `management.endpoints.web.exposure.include` 控制，需在 include 列表中登记（例如 `management.endpoints.web.exposure.include=health,info,hotkey,hotkeyring`）。只要 classpath 中存在 `spring-boot-starter-actuator`（注册条件），即自动注册：
 
 | 端点                                      | 路径                            |
 | ----------------------------------------- | ------------------------------- |
@@ -68,6 +68,10 @@ Zeta 端点是普通的 Spring `@RestController`，**不是** Actuator `@Endpoin
     "hotSoftTtlMs": 300000,         // 有效软 TTL——热 key（毫秒）
     "nullValueTtlSec": 10,          // null 缓存条目 TTL（秒）
     "refreshPoolAvailable": 100,    // 刷新信号量可用许可数
+    "refreshFailureLeased": 3,      // 累计获准续租的后台刷新失败数（ADR-0036）
+    "leaseStaleCapped": 1,          // 因 30 分钟陈旧上限被拒的续租累计数
+    "leaseSuppressedByClassifier": 0, // 被失败分类器拒绝的续租累计数
+    "staleDebt": {"k1": 95000},     // 当前被续租的 key（前 100）到陈旧毫秒数——"有界陈旧"的审计面
 
     // ── 版本追踪 ──
     "versionRedisEnabled": true,    // Redis 版本追踪是否启用
@@ -136,7 +140,17 @@ Zeta 端点是普通的 Spring `@RestController`，**不是** Actuator `@Endpoin
 | `zeta.stall.redis_degraded.stopped` | Gauge | —                    | 熔断器打开时为 1（加载快速失败）  |
 | `zeta.stall.redis_degraded.timeouts.total` | Gauge | —             | 因读取超时而解析为空的去重加载数  |
 | `zeta.stall.worker_partition.stopped` | Gauge | —                  | 无存活 Worker 分片时为 1（报告路由无目标） |
+| `zeta.l1.refault.admit.total` | Gauge | — | 累计放行判定数（ADR-0079；仅 `refault-admission` != off 时注册） |
+| `zeta.l1.refault.reject.total` | Gauge | — | 累计拒绝判定数；shadow 模式为 would-reject 率 |
+| `zeta.l1.refault.distance` | Gauge | — | 最近一次有证据判定的距离，-1 = 无证据 |
+| `zeta.l1.refault.capacity` | Gauge | — | 距离比较用的静态容量估计 |
+| `zeta.l1.refault.clock.rate` | Gauge | — | 容量驱逐速率（次/秒，扫描压力告警） |
+| `zeta.rules.persist.failed` | Gauge | — | 已入内存但未到达 Redis/广播的规则变更数 |
 | `zeta.expire.refresh.available`     | Gauge | —                    | 刷新信号量可用许可数             |
+| `zeta.expire.refresh.failure.leased.total` | Gauge | —           | 获准续租的刷新失败累计数（ADR-0036） |
+| `zeta.expire.refresh.lease.stale.capped.total` | Gauge | —       | 因陈旧上限被拒的续租累计数 |
+| `zeta.expire.refresh.lease.suppressed.total` | Gauge | —        | 被失败分类器拒绝的续租累计数 |
+| `zeta.expire.refresh.lease.debt.keys` | Gauge | —                | 当前被续租的 key 数（staleDebt 大小） |
 | `zeta.version.degraded.total`       | Gauge | —                    | 累计版本回退次数                 |
 | `zeta.sync.dedup.size`              | Gauge | —                    | 广播去重缓存大小                 |
 | `zeta.worker.alive`                 | Gauge | —                    | 任意 Worker 分片是否存活（0/1）  |

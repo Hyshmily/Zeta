@@ -22,6 +22,7 @@ import io.github.hyshmily.zeta.constants.ZetaConstants;
 import io.github.hyshmily.zeta.sync.distributedlock.AutoReleaseLock;
 import io.github.hyshmily.zeta.sync.distributedlock.LockProvider;
 import io.github.hyshmily.zeta.util.LogThrottle;
+import io.github.hyshmily.zeta.util.TimeSource;
 import java.time.Duration;
 import java.util.List;
 import java.util.Objects;
@@ -328,10 +329,21 @@ public class RedisLockProvider implements LockProvider {
    * handle lives — every {@code max(expireMs / 3, 1s)} milliseconds, clamped
    * down to {@code expireMs / 2} for sub-second TTLs — and is cancelled when
    * {@link #close()} is called. Renewal is conditional on this handle's UUID,
-   * so a stolen or already-released lock is never renewed (the watchdog then
-   * silently stops extending). <b>Consequence:</b> a leaked handle (never
-   * closed) keeps the lock alive indefinitely — always release in a
-   * {@code finally} block or via try-with-resources.
+   * so a stolen or already-released lock is never renewed: the script returns
+   * {@code 0}, which the watchdog records as lease loss (see {@link #isHeld()}).
+   *
+   * <p><b>Lease loss is observable.</b> The renewal result used to be
+   * discarded, which made a lapsed lease indistinguishable from a held one —
+   * the holder kept mutating unguarded while {@link #close()} reported an
+   * idempotent success. {@link #isHeld()} now answers the question, and loss
+   * is logged at ERROR because mutual exclusion is already broken when it
+   * happens. There is no fencing token: detection is the only remedy
+   * available without changing the lock protocol, so critical sections that
+   * must not run unguarded should re-check {@link #isHeld()} between steps.
+   *
+   * <p><b>Consequence of never closing:</b> a leaked handle keeps the lock
+   * alive indefinitely — always release in a {@code finally} block or via
+   * try-with-resources.
    *
    * <p>Release uses Lua {@code GET + DEL} with UUID comparison for safe,
    * idempotent unlocking — no client-clock-based guard is needed.
@@ -352,6 +364,33 @@ public class RedisLockProvider implements LockProvider {
      * unlock attempt plus the summary — see {@link #acquireFailureLog}.
      */
     private final LogThrottle.Counting unlockFailureLog = new LogThrottle.Counting();
+
+    /**
+     * Rate-limits the watchdog-path WARN. The watchdog fires every
+     * {@code expireMs / 3} per held lock, so a Redis outage reaches this branch
+     * at {@code heldLocks × renewalRate} lines per second — the same
+     * log-flood shape {@link #unlockFailureLog} already guards.
+     */
+    private final LogThrottle.Counting renewFailureLog = new LogThrottle.Counting();
+
+    /**
+     * Set when the watchdog observes that this handle no longer owns the lock:
+     * the renewal script returned {@code 0}, meaning the UUID in Redis no
+     * longer matches ours (the lease lapsed and a peer took it, or the key was
+     * evicted). Volatile because the watchdog thread writes it and the holder
+     * thread reads it via {@link #isHeld()}.
+     */
+    @SuppressWarnings("java:S3077")
+    private volatile boolean lost;
+
+    /**
+     * {@link TimeSource#monotonicMillis()} at which {@link #lost} was first
+     * set, or {@code -1} while the lease is intact. Kept for the close-path
+     * report so the operator can tell a momentary hiccup from a lease that
+     * lapsed long before the critical section ended.
+     */
+    @SuppressWarnings("java:S3077")
+    private volatile long lostAtMonoMs = -1L;
 
     @SuppressWarnings("java:S3077")
     private volatile ScheduledFuture<?> watchdogTask;
@@ -388,7 +427,7 @@ public class RedisLockProvider implements LockProvider {
      * {@code expireMs / 3} (minimum 1 second).  The watchdog uses Lua
      * {@code GET + PEXPIRE} so it only extends the key when the UUID
      * matches — if the lock has been stolen (lost due to partition, etc.)
-     * the renewal silently stops.
+     * the renewal returns {@code 0} and the handle is marked lost.
      *
      * <p>The watchdog is cancelled when {@link #close()} is called.
      */
@@ -405,10 +444,7 @@ public class RedisLockProvider implements LockProvider {
       // and the {@value #MIN_WATCHDOG_INTERVAL_MS}ms floor bounds the Redis
       // renewal rate (a 2ms floor used to renew a 4ms lock 500×/s). A TTL
       // below the floor cannot be renewed reliably and is warned about.
-      long interval = Math.max(
-        MIN_WATCHDOG_INTERVAL_MS,
-        Math.min(Math.max(expireMs / 3, 1000L), expireMs / 2)
-      );
+      long interval = Math.max(MIN_WATCHDOG_INTERVAL_MS, Math.min(Math.max(expireMs / 3, 1000L), expireMs / 2));
       if (interval >= expireMs) {
         log.warn(
           "Lock TTL {}ms is below the {}ms watchdog renewal floor for key {}; the lock may expire before renewal",
@@ -420,15 +456,80 @@ public class RedisLockProvider implements LockProvider {
       watchdogTask = scheduler.scheduleWithFixedDelay(
         () -> {
           try {
-            redisTemplate.execute(RENEW_SCRIPT, List.of(lockKey), uuid, String.valueOf(expireMs));
+            Long renewed = redisTemplate.execute(RENEW_SCRIPT, List.of(lockKey), uuid, String.valueOf(expireMs));
+            if (renewed != null && renewed == 0L) {
+              // RENEW_SCRIPT returns 0 only when GET != uuid: the key either
+              // lapsed (a pause longer than the TTL) or was taken by a peer.
+              // Either way this handle no longer excludes anyone.
+              markLost();
+            }
           } catch (Exception e) {
-            log.warn("Lock renew failed for {}: {}", lockKey, e.toString());
+            // A failed renewal is NOT proof of loss: the exception may be a
+            // transport error against a lease that is still ticking in Redis.
+            // It is reported (rate-limited) but does not flip `lost`, because a
+            // false "lost" would make callers abandon a lock they still own.
+            LogThrottle.Counting.Attempt attempt = renewFailureLog.record();
+            if (!attempt.admitted()) {
+              log.debug("Lock renew failed for {} ({} in current window): {}", lockKey, attempt.count(), e.toString());
+            } else if (attempt.count() > 0) {
+              log.warn(
+                "Lock renew failed for {} ({} suppressed since the last WARN): {}",
+                lockKey,
+                attempt.count(),
+                e.toString()
+              );
+            } else {
+              log.warn("Lock renew failed for {}: {}", lockKey, e.toString());
+            }
           }
         },
         interval,
         interval,
         TimeUnit.MILLISECONDS
       );
+    }
+
+    /**
+     * Record that this handle no longer owns the lock, and stop the watchdog.
+     *
+     * <p>Idempotent: only the first transition stamps {@link #lostAtMonoMs} and
+     * logs, so a lease that stays lost across several renewal ticks (each firing
+     * before cancellation takes effect) yields exactly one ERROR per handle.
+     */
+    private void markLost() {
+      if (lost) {
+        return;
+      }
+      lostAtMonoMs = TimeSource.monotonicMillis();
+      lost = true;
+      ScheduledFuture<?> task = watchdogTask;
+      if (task != null) {
+        task.cancel(false);
+      }
+      // ERROR, not WARN: mutual exclusion is already broken for this handle.
+      // There is no fencing token, so the holder cannot be stopped — the only
+      // remedy is the operator learning the critical section ran unguarded.
+      log.error(
+        "Lock lease LOST for key {} — renewal observed a foreign owner, so this handle no longer excludes peers. " +
+          "Any critical section still running under it is unguarded; treat this as a correctness incident.",
+        lockKey
+      );
+    }
+
+    @Override
+    public boolean isHeld() {
+      return !lost;
+    }
+
+    /**
+     * The monotonic timestamp at which lease loss was first observed, or
+     * {@code -1} when the lease stayed intact for the handle's lifetime.
+     *
+     * @return the {@link TimeSource#monotonicMillis()} reading at first loss,
+     *         or {@code -1} if the lease never lapsed
+     */
+    public long lostAtMonoMs() {
+      return lostAtMonoMs;
     }
 
     /**
@@ -460,10 +561,17 @@ public class RedisLockProvider implements LockProvider {
           if (result != null) {
             // 1 = our lock was deleted; 0 = the lock was already gone or
             // stolen (UUID mismatch). Either way there is nothing left to
-            // release, so this is idempotent success — retrying a 0 would
+            // release, so it is idempotent success — retrying a 0 would
             // keep returning 0 and end in a misleading "Failed to release"
             // WARN. Only a null result (no information) falls through to
             // the retry loop.
+            if (result == 0L && !lost) {
+              // The watchdog never observed the loss (it is off when no
+              // scheduler is wired, or the renewal interval was not reached
+              // before close). Surface it here rather than returning a clean
+              // release, so a lapsed lease is never mistaken for a held one.
+              markLost();
+            }
             return;
           }
         } catch (DataAccessException e) {

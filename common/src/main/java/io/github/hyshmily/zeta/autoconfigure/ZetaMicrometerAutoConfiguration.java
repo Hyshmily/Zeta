@@ -201,6 +201,21 @@ public class ZetaMicrometerAutoConfiguration {
             (double) e.getRefreshLimiter().availablePermits()
           ).register(registry);
         }
+        // Lease-on-failure observability (ADR-0036 follow-up): cumulative
+        // counters read off the refresher seam (not ZetaCacheStats, which is
+        // a pure L1 snapshot per ADR-0076).
+        Gauge.builder("zeta.expire.refresh.failure.leased.total", em, e ->
+          (double) e.getRefreshFailureLeased()
+        ).register(registry);
+        Gauge.builder("zeta.expire.refresh.lease.stale.capped.total", em, e ->
+          (double) e.getLeaseStaleCapped()
+        ).register(registry);
+        Gauge.builder("zeta.expire.refresh.lease.suppressed.total", em, e ->
+          (double) e.getLeaseSuppressedByClassifier()
+        ).register(registry);
+        Gauge.builder("zeta.expire.refresh.lease.debt.keys", em, e ->
+          (double) e.leasedStaleness(Integer.MAX_VALUE).size()
+        ).register(registry);
       });
       versionControllerProvider.ifAvailable(vc ->
         Gauge.builder("zeta.version.degraded.total", vc, v -> (double) v.getDegradedVersionCount()).register(registry)

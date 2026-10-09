@@ -40,4 +40,43 @@ public interface AutoReleaseLock extends AutoCloseable {
    */
   @Override
   void close();
+
+  /**
+   * Whether the lock is still believed to be held by this handle.
+   *
+   * <p>A lease-based lock can be lost without the holder noticing: the TTL
+   * lapses (a GC pause or scheduler starvation longer than the lease, a Redis
+   * failover that drops the key, a network partition) and a peer acquires the
+   * same key while this handle's critical section is still running. The
+   * mutual-exclusion invariant is broken at that point, and no exception is
+   * raised by {@link #close()} — releasing a lock this handle no longer owns
+   * is an idempotent no-op that looks exactly like success.
+   *
+   * <p>Long critical sections should therefore re-check this before each
+   * externally-visible step:
+   *
+   * <pre>{@code
+   * try (AutoReleaseLock lock = hotKey.tryLock("my:key", 30, TimeUnit.SECONDS)) {
+   *   if (lock == null) {
+   *     return;                       // provider unavailable or contended
+   *   }
+   *   stepOne();
+   *   if (!lock.isHeld()) {
+   *     throw new IllegalStateException("lock lease lapsed mid-critical-section");
+   *   }
+   *   stepTwo();
+   * }
+   * }</pre>
+   *
+   * <p><b>Default:</b> {@code true} — an implementation that cannot observe
+   * lease loss reports the handle as held. Callers must treat {@code false} as
+   * the only authoritative answer; {@code true} means "no loss detected",
+   * never "loss is impossible".
+   *
+   * @return {@code false} once the lease is known to have lapsed (or been
+   *         stolen); {@code true} otherwise
+   */
+  default boolean isHeld() {
+    return true;
+  }
 }

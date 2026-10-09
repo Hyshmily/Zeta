@@ -8,7 +8,7 @@ Zeta provides two complementary monitoring mechanisms.
 
 **Prerequisite:** `spring-boot-starter-actuator` on classpath.
 
-The Zeta endpoints are plain Spring `@RestController`s, **not** Actuator `@Endpoint`s — they do not participate in `management.endpoints.web.exposure.include` and need no include-list entry. They are auto-registered when `spring-boot-starter-actuator` is on the classpath (registration condition) and Spring MVC is available:
+The Zeta endpoints are Actuator `@Endpoint` beans (not plain `@RestController`s) — they participate in `management.endpoints.web.exposure.include` and must be listed there (e.g. `management.endpoints.web.exposure.include=health,info,hotkey,hotkeyring`). They are auto-registered when `spring-boot-starter-actuator` is on the classpath (registration condition):
 
 | Endpoint                                  | Path                            |
 | ----------------------------------------- | ------------------------------- |
@@ -68,6 +68,10 @@ Supports an optional `?limit=N` query parameter to cap the number of app-side To
     "hotSoftTtlMs": 300000,         // Effective soft TTL — hot keys (ms)
     "nullValueTtlSec": 10,          // TTL (seconds) for null/cache-miss entries
     "refreshPoolAvailable": 100,    // Available refresh limiter permits
+    "refreshFailureLeased": 3,      // Cumulative background-refresh failures granted a lease (ADR-0036)
+    "leaseStaleCapped": 1,          // Cumulative lease refusals by the 30-minute staleness cap
+    "leaseSuppressedByClassifier": 0, // Cumulative lease refusals by the failure classifier
+    "staleDebt": {"k1": 95000},     // Currently-leased keys (top 100) to staleness ms — the audit surface for "bounded staleness"
 
     // ── Version tracking ──
     "versionRedisEnabled": true,    // Redis-based version tracking active
@@ -160,7 +164,17 @@ Standard Caffeine cache metrics via `CaffeineCacheMetrics.monitor()`:
 | `zeta.stall.redis_degraded.stopped` | Gauge | —                    | 1 while the circuit breaker is open (loads fast-fail) |
 | `zeta.stall.redis_degraded.timeouts.total` | Gauge | —             | Cumulative dedup loads resolved empty by a reader timeout |
 | `zeta.stall.worker_partition.stopped` | Gauge | —                  | 1 while no Worker shard is alive (report routing has no target) |
+| `zeta.l1.refault.admit.total` | Gauge | — | Cumulative admit verdicts (ADR-0079; registered only when `refault-admission` != off) |
+| `zeta.l1.refault.reject.total` | Gauge | — | Cumulative reject verdicts; shadow-mode rejects are the would-reject rate |
+| `zeta.l1.refault.distance` | Gauge | — | Distance of the latest evidence-backed decision, -1 = no evidence |
+| `zeta.l1.refault.capacity` | Gauge | — | Static capacity estimate the distances compare against |
+| `zeta.l1.refault.clock.rate` | Gauge | — | Capacity-eviction rate (evictions/sec, scan-pressure alarm) |
+| `zeta.rules.persist.failed` | Gauge | — | Rule mutations that reached memory but never Redis/broadcast |
 | `zeta.expire.refresh.available`     | Gauge | —                    | Available refresh limiter permits       |
+| `zeta.expire.refresh.failure.leased.total` | Gauge | —           | Cumulative refresh failures granted a lease (ADR-0036) |
+| `zeta.expire.refresh.lease.stale.capped.total` | Gauge | —       | Cumulative lease refusals by the staleness cap |
+| `zeta.expire.refresh.lease.suppressed.total` | Gauge | —        | Cumulative lease refusals by the failure classifier |
+| `zeta.expire.refresh.lease.debt.keys` | Gauge | —                | Currently-leased keys (staleDebt size) |
 | `zeta.version.degraded.total`       | Gauge | —                    | Cumulative version fallback count       |
 | `zeta.sync.dedup.size`              | Gauge | —                    | Broadcast dedup cache size              |
 | `zeta.worker.alive`                 | Gauge | —                    | Whether any worker shard is alive (0/1) |

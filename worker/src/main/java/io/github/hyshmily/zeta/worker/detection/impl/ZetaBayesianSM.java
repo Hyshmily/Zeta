@@ -815,13 +815,15 @@ public class ZetaBayesianSM implements io.github.hyshmily.zeta.detection.ZetaBay
 
   /**
    * Raised re-promotion threshold for the demotion-hysteresis gate (§6.1):
-   * {@code threshold × GAIN_NUM / GAIN_DEN} (= 1.25×) in pure integer math.
+   * {@code threshold × GAIN_NUM / GAIN_DEN} (= 1.25×) in pure integer math,
+   * with a floor step of 1 — tiny thresholds ({@code < 4}) shift to zero and
+   * would otherwise raise nothing, leaving the hysteresis gate open.
    *
    * @param threshold the current hot threshold ({@code ctx.threshold()})
    * @return the raised bar a fully-demoted key must exceed to count as hot
    */
   private static long raisedThreshold(long threshold) {
-    return threshold > 0 ? threshold + (threshold >> 2) : threshold;
+    return threshold > 0 ? threshold + Math.max(1L, threshold >> 2) : threshold;
   }
 
   /**

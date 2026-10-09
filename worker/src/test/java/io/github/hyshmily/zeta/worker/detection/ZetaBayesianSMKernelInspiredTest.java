@@ -129,6 +129,42 @@ class ZetaBayesianSMKernelInspiredTest {
   }
 
   @Test
+  void demotion_tinyThreshold_floorStepHoldsGate() {
+    // threshold=2: (2>>2)==0, so without the floor step the "raised" bar
+    // would equal the plain threshold and the gate would be open. The floor
+    // step raises it to 3: a sum-2 window (plain-hot) stays COLD.
+    EvaluationContext tinyHot = new EvaluationContext(100L, 100L, 2L, Double.NaN, 0.0);
+    EvaluationContext tinySub = new EvaluationContext(2L, 2L, 2L, Double.NaN, 0.0);
+    EvaluationContext tinyCold = new EvaluationContext(0L, 0L, 2L, Double.NaN, 0.0);
+    // Hour-long counter window: this test pins the hysteresis bar, not the
+    // idle-epoch crediting — real-time gaps must not fast-forward cooling.
+    ZetaBayesianSM tinyMachine = new ZetaBayesianSM(
+      3, 10, 4, EVAL, BayesianConfidenceEstimator.PRIOR_MEAN, 10_000L, 3_600_000L);
+    ZetaDecision last = null;
+    for (int i = 0; i < 3; i++) {
+      last = tinyMachine.evaluate("tiny", true, false, tinyHot);
+    }
+    assertThat(last.type()).isEqualTo(DecisionType.HOT);
+    for (int i = 0; i < 9; i++) {
+      last = tinyMachine.evaluate("tiny", false, false, tinyCold);
+      assertThat(last.type()).isEqualTo(DecisionType.NONE);
+    }
+    last = tinyMachine.evaluate("tiny", false, false, tinyCold);
+    assertThat(last.type()).isEqualTo(DecisionType.COOL);
+    assertThat(tinyMachine.getStateSnapshot("tiny").demoteHysteresisActive()).isTrue();
+
+    // The raised bar (not the streak gate) refuses every sub-band window:
+    // hotStreak never leaves 0, so even three consecutive plain-hot windows
+    // cannot accumulate toward re-promotion. Without the floor step the bar
+    // would equal the plain threshold and the streak would grow 1→2→3.
+    for (int i = 0; i < 3; i++) {
+      assertThat(tinyMachine.evaluate("tiny", true, false, tinySub).type()).isEqualTo(DecisionType.NONE);
+      assertThat(tinyMachine.getStateSnapshot("tiny").hotStreak()).isZero();
+    }
+    assertThat(tinyMachine.getStateSnapshot("tiny").currentState()).isEqualTo("COLD");
+  }
+
+  @Test
   void demotion_raisedBandRePromotes_andDisarmsGate() {
     promote("k");
     demote("k");

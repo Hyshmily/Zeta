@@ -295,10 +295,17 @@ class PerKeyOrderedDispatcherTest {
   /**
    * Verifies that a burst of same-key tasks is consumed in batches: a single underlying-executor
    * submission drives up to {@code maxTasksPerCycle} tasks, instead of one submission per task.
+   *
+   * <p>The executor is gated so the whole burst is enqueued before any cycle runs. Without the
+   * gate the first {@code submit} starts the worker on a real pool thread, so the number of cycles
+   * — and therefore the submission count — depended on how the submitting thread raced the worker
+   * (observed 4 or 5 submissions across runs, making an exact bound unassertable). Gated, all 32
+   * tasks are present before the first cycle, and since 32 &lt; {@code maxTasksPerCycle} (64) a
+   * single cycle drains the burst: exactly one submission, and no continuation.
    */
   @Test
   void submit_sameKeyBurst_shouldBatch() throws InterruptedException {
-    CountingExecutor countingExecutor = new CountingExecutor(4);
+    GatedCountingExecutor countingExecutor = new GatedCountingExecutor(4);
     PerKeyOrderedDispatcher batchingDispatcher = new PerKeyOrderedDispatcher(countingExecutor, "test", PerKeyOrderedDispatcher.DEFAULT_MAX_QUEUE_PER_KEY, PerKeyOrderedDispatcher.DEFAULT_MAX_TASKS_PER_CYCLE, PerKeyOrderedDispatcher.DEFAULT_MAX_GLOBAL_PENDING_UNITS, 0);
 
     int taskCount = 32;
@@ -307,11 +314,15 @@ class PerKeyOrderedDispatcherTest {
       for (int i = 0; i < taskCount; i++) {
         batchingDispatcher.submit("key", done::countDown);
       }
+      // Every task is now queued; let the single armed cycle drain them.
+      countingExecutor.release();
+
       assertThat(done.await(5, TimeUnit.SECONDS)).isTrue();
       // One submission starts the worker, one continuation drains the rest — far fewer than
-      // one submission per task (the pre-batching behaviour would need 32+ submissions).
-      assertThat(countingExecutor.getSubmissionCount()).isLessThanOrEqualTo(4);
+      // one submission per task (the pre-batching behaviour would need 32 submissions).
+      assertThat(countingExecutor.getSubmissionCount()).isLessThanOrEqualTo(2);
     } finally {
+      countingExecutor.release();
       batchingDispatcher.close();
       countingExecutor.shutdownNow();
     }
@@ -1090,6 +1101,47 @@ class PerKeyOrderedDispatcherTest {
     public void execute(Runnable command) {
       submissions.incrementAndGet();
       super.execute(command);
+    }
+
+    int getSubmissionCount() {
+      return submissions.get();
+    }
+  }
+
+  /**
+   * A {@link ScheduledThreadPoolExecutor} that counts submissions and holds each
+   * submitted command at a gate until {@link #release()} is called.
+   *
+   * <p>Lets a test enqueue a whole burst before any cycle runs, so a batch-size
+   * assertion does not depend on how the submitting thread races the worker.
+   */
+  private static class GatedCountingExecutor extends ScheduledThreadPoolExecutor {
+
+    private final AtomicInteger submissions = new AtomicInteger(0);
+    private final CountDownLatch gate = new CountDownLatch(1);
+
+    GatedCountingExecutor(int corePoolSize) {
+      super(corePoolSize);
+    }
+
+    @Override
+    @SuppressWarnings("java:S2142")
+    public void execute(Runnable command) {
+      submissions.incrementAndGet();
+      super.execute(() -> {
+        try {
+          gate.await();
+        } catch (InterruptedException e) {
+          Thread.currentThread().interrupt();
+          return;
+        }
+        command.run();
+      });
+    }
+
+    /** Let every gated command run. Idempotent. */
+    void release() {
+      gate.countDown();
     }
 
     int getSubmissionCount() {

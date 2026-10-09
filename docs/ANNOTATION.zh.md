@@ -124,6 +124,7 @@ Zeta / HotKeyCache
 - **默认（无注解或 `@NullCaching(true)`）**：`null` 结果以 Zeta 的内部 `NullValue` 哨兵存储，TTL 为 `zeta.local.null-value-ttl-seconds`（短 TTL）。所有写路径使用同一哨兵与 TTL——loader 路径与注解存储路径（`@CachePut` 返回 null、非 sync `@Cacheable` 入库、显式写入 Spring `NullValue`）——因此 Spring 自带的 `NullValue` 标记永远不会被持久化。命中有效哨兵返回 `null` 且**不再调用方法体**；该访问仍计入热 key 检测。
 - **`@NullCaching(false)`**：`null` 结果不留条目；下次调用重新执行方法。
 - 三条读路径（`get`、`getWithSoftExpire`、`computeIfAbsent[WithSoftExpire]`）与 fluent API（`read(key).nullCaching(false)`）语义一致。
+- **sync 读失败语义（`sync = true`）**：下发的策略被强制为快速失败——抛异常的方法体表现为 Spring 的 `ValueRetrievalException`（永不吞成 `null` miss），被抑制的加载（熔断关闭时的超时/执行器饱和）表现为包裹 `ZetaSuppressedException` 的 `ValueRetrievalException`。熔断打开且无可服务的 stale 条目时仍返回 `null`（优雅降级优先于快速失败）。
 
 ---
 

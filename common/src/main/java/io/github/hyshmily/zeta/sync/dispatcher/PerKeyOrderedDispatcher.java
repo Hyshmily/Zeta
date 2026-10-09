@@ -362,18 +362,17 @@ public class PerKeyOrderedDispatcher implements AutoCloseable {
     // is no window in which the worker can be orphaned (a queue whose owner never re-runs it) —
     // the running-flag re-verification and retry loop of earlier designs is not needed.
     //
-    // The remapping function is invoked exactly once per compute call — per the JDK contract
-    // for ConcurrentHashMap.compute, the entire method invocation is performed atomically.
-    // enqueue() deliberately mutates the worker's queue and submit-outcome field inside the
-    // lambda in reliance on that single-invocation guarantee — a re-invocation would add the
-    // task twice — so this is a documented reliance on the JDK spec, not on observed behavior.
-    // The outcome is carried on the returned worker itself (a field written by this thread's
-    // lambda and read by this thread after compute returns — no cross-thread publication
-    // involved), so a submission allocates no per-call holder array.
+    // The submit outcome is carried in a per-call holder read after compute returns. A previous
+    // revision carried it on the shared worker field (written inside the lambda, read after
+    // compute) — but that field is shared across submitters, so a second submitter's compute
+    // could overwrite the first submitter's outcome between its compute-return and its field
+    // read, silently skipping the global-budget charge for an enqueued task (budget drifts low).
+    // The holder costs one small array per submit on the sync/worker plane — never the read path.
+    final int[] outcome = new int[1];
     KeyWorker worker = queues.compute(key, (k, existing) -> {
       if (existing == null) {
         KeyWorker created = new KeyWorker(key, new PendingTask(task, effectiveWeight));
-        created.lastSubmitOutcome = OUTCOME_CREATED;
+        outcome[0] = OUTCOME_CREATED;
         // Park jitter is drawn once per worker incarnation, inside the same atomic
         // insertion that fixes the key's ordering — a ThreadLocalRandom draw is
         // cheap enough for the bin lock.
@@ -386,10 +385,11 @@ public class PerKeyOrderedDispatcher implements AutoCloseable {
       existing.lastSubmitOutcome = existing.enqueue(task, effectiveWeight, maxQueuePerKey)
         ? OUTCOME_ENQUEUED
         : OUTCOME_REJECTED;
+      outcome[0] = existing.lastSubmitOutcome;
       return existing;
     });
 
-    if (worker.lastSubmitOutcome != OUTCOME_REJECTED) {
+    if (outcome[0] != OUTCOME_REJECTED) {
       globalPendingUnits.add(effectiveWeight);
     } else {
       // Rate-limited: one WARN per window (ADR-0037 one-per-window convention) —
@@ -629,11 +629,10 @@ public class PerKeyOrderedDispatcher implements AutoCloseable {
      */
     final AtomicBoolean scheduled = new AtomicBoolean(false);
     /**
-     * Submit outcome of the most recent {@code queues.compute} on the submitting thread:
-     * {@code OUTCOME_CREATED} for a fresh worker, or {@code OUTCOME_ENQUEUED}/
-     * {@code OUTCOME_REJECTED} written by {@link #enqueue}. Written inside the compute lambda
-     * on the submitting thread and read by that same thread right after compute returns —
-     * no cross-thread publication is involved, so no {@code volatile} is needed.
+     * Last submit outcome observed for this worker (best-effort debug aid only).
+     * The authoritative per-submit outcome is carried in the submitter's local holder —
+     * this shared field may be overwritten by a concurrent submitter and must never
+     * gate budget accounting.
      */
     int lastSubmitOutcome = OUTCOME_CREATED;
     /**

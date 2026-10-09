@@ -336,4 +336,160 @@ class RedisLockProviderTest {
     // The watchdog was armed exactly once (at construction) and never re-armed.
     verify(scheduler, times(1)).scheduleWithFixedDelay(any(Runnable.class), anyLong(), anyLong(), any(TimeUnit.class));
   }
+
+  // ── Lease loss detection ──────────────────────────────────────
+
+  /**
+   * The renewal script returns {@code 0} when the UUID in Redis no longer
+   * matches ours — the lease lapsed (a pause longer than the TTL) or a peer
+   * took the key. The watchdog must record that as loss so the holder stops
+   * assuming mutual exclusion. This is the signal the implementation used to
+   * discard outright, which made a lapsed lease indistinguishable from a held
+   * one.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  void watchdog_renewalReturningZero_shouldMarkLeaseLost() {
+    ScheduledFuture<Void> future = mock(ScheduledFuture.class);
+    doReturn(future)
+      .when(scheduler)
+      .scheduleWithFixedDelay(any(Runnable.class), anyLong(), anyLong(), any(TimeUnit.class));
+    when(redisTemplate.execute(any(DefaultRedisScript.class), anyList(), any(), any())).thenReturn(0L);
+    var handle = new RedisLockProvider.RedisLockHandle(
+      redisTemplate,
+      "zeta:lock:" + KEY,
+      "uuid-1",
+      3,
+      scheduler,
+      10_000L
+    );
+    assertThat(handle.isHeld()).isTrue();
+    assertThat(handle.lostAtMonoMs()).isEqualTo(-1L);
+
+    runCapturedRenewalTask();
+
+    assertThat(handle.isHeld()).isFalse();
+    assertThat(handle.lostAtMonoMs()).isGreaterThanOrEqualTo(0L);
+    // Nothing left to extend: the watchdog stops renewing a lock we do not own.
+    verify(future).cancel(false);
+  }
+
+  /**
+   * A renewal that succeeds must leave the handle intact — otherwise a
+   * well-behaved lock would be reported lost and callers would abandon a
+   * critical section they still own.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  void watchdog_renewalReturningOne_shouldKeepLeaseHeld() {
+    when(redisTemplate.execute(any(DefaultRedisScript.class), anyList(), any(), any())).thenReturn(1L);
+    var handle = new RedisLockProvider.RedisLockHandle(
+      redisTemplate,
+      "zeta:lock:" + KEY,
+      "uuid-1",
+      3,
+      scheduler,
+      10_000L
+    );
+
+    runCapturedRenewalTask();
+
+    assertThat(handle.isHeld()).isTrue();
+    assertThat(handle.lostAtMonoMs()).isEqualTo(-1L);
+  }
+
+  /**
+   * A renewal that throws is a transport failure, not proof of loss: the lease
+   * may still be ticking in Redis. Reporting loss here would make callers
+   * abandon a lock they hold, so a failure must not flip the flag — only the
+   * script's {@code 0} verdict may.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  void watchdog_renewalThrowing_shouldNotClaimLoss() {
+    when(redisTemplate.execute(any(DefaultRedisScript.class), anyList(), any(), any()))
+      .thenThrow(new RedisConnectionFailureException("redis down"));
+    var handle = new RedisLockProvider.RedisLockHandle(
+      redisTemplate,
+      "zeta:lock:" + KEY,
+      "uuid-1",
+      3,
+      scheduler,
+      10_000L
+    );
+
+    runCapturedRenewalTask();
+
+    assertThat(handle.isHeld()).isTrue();
+    assertThat(handle.lostAtMonoMs()).isEqualTo(-1L);
+  }
+
+  /**
+   * Repeated lost renewals must report one transition, not one per tick: a lease
+   * that stays lost can fire the task again before cancellation takes effect.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  void watchdog_repeatedLostRenewals_shouldReportSingleLossTimestamp() {
+    when(redisTemplate.execute(any(DefaultRedisScript.class), anyList(), any(), any())).thenReturn(0L);
+    var handle = new RedisLockProvider.RedisLockHandle(
+      redisTemplate,
+      "zeta:lock:" + KEY,
+      "uuid-1",
+      3,
+      scheduler,
+      10_000L
+    );
+
+    runCapturedRenewalTask();
+    long firstLoss = handle.lostAtMonoMs();
+    runCapturedRenewalTask();
+
+    assertThat(handle.isHeld()).isFalse();
+    assertThat(handle.lostAtMonoMs()).isEqualTo(firstLoss);
+  }
+
+  /**
+   * With no watchdog wired (no scheduler), the renewal never runs — so the
+   * release path is the only place loss can be observed. {@code close()} must
+   * therefore treat a {@code 0} from the unlock script as loss rather than
+   * returning the clean idempotent success it would otherwise report.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  void close_unlockReturningZero_shouldMarkLeaseLost() {
+    when(redisTemplate.execute(any(DefaultRedisScript.class), anyList(), any())).thenReturn(0L);
+    var handle = new RedisLockProvider.RedisLockHandle(
+      redisTemplate,
+      "zeta:lock:" + KEY,
+      "uuid-1",
+      3,
+      null,
+      10_000L
+    );
+    assertThat(handle.isHeld()).isTrue();
+
+    handle.close();
+
+    assertThat(handle.isHeld()).isFalse();
+  }
+
+  /**
+   * The default {@link AutoReleaseLock#isHeld()} must stay {@code true}: it is
+   * the answer for providers that cannot observe lease loss, and flipping it to
+   * {@code false} would make every such lock look broken.
+   */
+  @Test
+  void autoReleaseLock_defaultIsHeld_shouldReportTrue() {
+    AutoReleaseLock lock = () -> {};
+    assertThat(lock.isHeld()).isTrue();
+  }
+
+  /** Run the single watchdog task the handle armed at construction. */
+  private void runCapturedRenewalTask() {
+    ArgumentCaptor<Runnable> renewalTask = ArgumentCaptor.forClass(Runnable.class);
+    verify(scheduler, atLeastOnce())
+      .scheduleWithFixedDelay(renewalTask.capture(), anyLong(), anyLong(), eq(TimeUnit.MILLISECONDS));
+    renewalTask.getValue().run();
+  }
 }

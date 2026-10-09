@@ -150,6 +150,17 @@ public final class TimeSource {
   }
 
   /**
+   * Seconds since JVM boot on the monotonic axis ({@code System.nanoTime()}
+   * based, never moves backwards). Fits an {@code int} for ~68 years; used
+   * for compact entry-age stamps where second precision suffices.
+   *
+   * @return monotonic seconds since boot
+   */
+  public static int monotonicSecondsSinceBoot() {
+    return (int) ((System.nanoTime() - BOOT_NANO) / 1_000_000_000L);
+  }
+
+  /**
    * Test-only hook to simulate wall-clock jumps (e.g. NTP steps) for
    * {@code TimeJumpTest}-style regression tests. A positive {@code wallOffsetMs}
    * simulates a forward jump, a negative one a backward jump; the monotonic
