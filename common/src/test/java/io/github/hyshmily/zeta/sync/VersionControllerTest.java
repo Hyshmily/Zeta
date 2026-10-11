@@ -18,6 +18,8 @@ package io.github.hyshmily.zeta.sync;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import ch.qos.logback.classic.Level;
@@ -41,6 +43,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.slf4j.LoggerFactory;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.data.redis.core.ValueOperations;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.data.redis.core.script.RedisScript;
 
@@ -244,6 +247,11 @@ class VersionControllerTest {
    * than previous calls). The floor is never lowered by the regression — it
    * keeps the pre-wraparound maximum, so subsequent increments below it take
    * the (rate-limited) alarm path until the counter climbs back.
+   *
+   * <p>The gap here is 99, inside the repair margin, so this is treated as a
+   * benign interleaving and the observed value is returned unchanged — see
+   * {@code nextVersion_whenCounterRestarts_beyondMargin_shouldRepairAndReseed} for
+   * the repair path.
    */
   @Test
   void nextVersion_whenWraparound_shouldDetectAndRecover() throws Exception {
@@ -256,6 +264,93 @@ class VersionControllerTest {
     // Subsequent increments are still returned normally.
     assertThat(controller.nextVersion("wrap-key").dataVersion()).isEqualTo(2L);
     assertThat(floorCache(controller).getIfPresent("wrap-key")).isEqualTo(100L);
+  }
+
+  /**
+   * A version that regresses far below the observed floor means the Redis
+   * counter genuinely restarted (key expired, evicted, FLUSHALLed, or lost in a
+   * failover), not that a concurrent allocation won a race. Handing the regressed
+   * version out means every receiver skips it — including this node's own L1
+   * write — so the value stays pinned until the counter re-climbs past the floor.
+   * The counter must therefore be re-seeded and an authoritative version returned.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  void nextVersion_whenCounterRestarts_beyondMargin_shouldRepairAndReseed() {
+    ValueOperations<String, String> valueOps = mock(ValueOperations.class);
+    when(redisTemplate.opsForValue()).thenReturn(valueOps);
+    when(redisTemplate.execute(any(DefaultRedisScript.class), anyList(), anyString()))
+      .thenReturn(5000L, 1L);
+
+    assertThat(controller.nextVersion("lost-key").dataVersion()).isEqualTo(5000L);
+    // Counter restarted from 1 — 4999 below the floor, far beyond any concurrent skew.
+    assertThat(controller.nextVersion("lost-key").dataVersion()).isEqualTo(5001L);
+    // The repair writes the restored counter back so the next INCR continues from there.
+    verify(valueOps).set(eq("zeta:ver:lost-key"), eq("5001"), any(java.time.Duration.class));
+  }
+
+  /**
+   * The repair must not be reported as degraded: it allocated from Redis and is
+   * fully ordered against peers. Marking it degraded would make every receiver
+   * skip it — the exact outcome the repair exists to prevent.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  void nextVersion_whenRepaired_shouldNotBeMarkedDegraded() {
+    ValueOperations<String, String> valueOps = mock(ValueOperations.class);
+    when(redisTemplate.opsForValue()).thenReturn(valueOps);
+    when(redisTemplate.execute(any(DefaultRedisScript.class), anyList(), anyString()))
+      .thenReturn(5000L, 1L);
+
+    controller.nextVersion("lost-key");
+    VersionResult repaired = controller.nextVersion("lost-key");
+
+    assertThat(repaired.dataVersion()).isEqualTo(5001L);
+    assertThat(repaired.degraded()).isFalse();
+  }
+
+  /**
+   * A concurrent interleaving — two INCRs on one key returning consecutive
+   * values, the later one committing its floor update first — must NOT be
+   * repaired. Rewriting the counter here would hand one writer a version above a
+   * write that legitimately happened after it, and push that later write's own
+   * broadcast into the skip path. The observed value is returned unchanged.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  void nextVersion_whenRegressionWithinMargin_shouldNotRepairCounter() {
+    ValueOperations<String, String> valueOps = mock(ValueOperations.class);
+    when(redisTemplate.opsForValue()).thenReturn(valueOps);
+    when(redisTemplate.execute(any(DefaultRedisScript.class), anyList(), anyString()))
+      .thenReturn(5000L, 4999L);
+
+    controller.nextVersion("race-key");
+    assertThat(controller.nextVersion("race-key").dataVersion()).isEqualTo(4999L);
+    verify(valueOps, never()).set(anyString(), anyString(), any(java.time.Duration.class));
+  }
+
+  /**
+   * A failed re-seed must not turn a version allocation into a write-path
+   * exception. The observed version is returned instead and the alarm carries the
+   * diagnosis — degrading to the local fallback would be worse, since a negative
+   * version is skipped by every peer holding a normal entry.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  void nextVersion_whenRepairFails_shouldReturnObservedVersionWithoutThrowing() {
+    ValueOperations<String, String> valueOps = mock(ValueOperations.class);
+    when(redisTemplate.opsForValue()).thenReturn(valueOps);
+    when(redisTemplate.execute(any(DefaultRedisScript.class), anyList(), anyString()))
+      .thenReturn(5000L, 1L);
+    org.mockito.Mockito.doThrow(new org.springframework.data.redis.RedisConnectionFailureException("redis down"))
+      .when(valueOps)
+      .set(anyString(), anyString(), any(java.time.Duration.class));
+
+    controller.nextVersion("lost-key");
+    VersionResult result = controller.nextVersion("lost-key");
+
+    assertThat(result.dataVersion()).isEqualTo(1L);
+    assertThat(result.degraded()).isFalse();
   }
 
   /**

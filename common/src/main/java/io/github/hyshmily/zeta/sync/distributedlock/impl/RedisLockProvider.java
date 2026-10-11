@@ -135,6 +135,34 @@ public class RedisLockProvider implements LockProvider {
   private final LogThrottle.Counting acquireFailureLog = new LogThrottle.Counting();
 
   /**
+   * Acquire-outcome counters: {@code tryLock} returns {@code null} both when
+   * Redis is down and when a peer holds the lock, which are indistinguishable
+   * to the caller — these counters separate them for monitoring
+   * ({@code zeta.lock.*} gauges). Monotonic; safe to read from any thread.
+   */
+  private final java.util.concurrent.atomic.LongAdder lockAcquired = new java.util.concurrent.atomic.LongAdder();
+  private final java.util.concurrent.atomic.LongAdder lockContended = new java.util.concurrent.atomic.LongAdder();
+  private final java.util.concurrent.atomic.LongAdder lockErrored = new java.util.concurrent.atomic.LongAdder();
+
+  /** Cumulative successful acquisitions since startup. */
+  @Override
+  public long lockAcquiredCount() {
+    return lockAcquired.sum();
+  }
+
+  /** Cumulative {@code null} returns where a peer held the lock (normal contention). */
+  @Override
+  public long lockContendedCount() {
+    return lockContended.sum();
+  }
+
+  /** Cumulative {@code null} returns caused by Redis failures, interrupts, or invalid keys. */
+  @Override
+  public long lockErrorCount() {
+    return lockErrored.sum();
+  }
+
+  /**
    * Constructs a {@code RedisLockProvider} with the given template and default retry counts.
    *
    * @param redisTemplate         the Redis template for executing lock commands; must not be null
@@ -242,12 +270,14 @@ public class RedisLockProvider implements LockProvider {
     int unlockCount
   ) {
     if (invalidCacheKey(key)) {
+      lockErrored.increment();
       return null;
     }
 
     String lockKey = ZetaConstants.Redis.LOCK_KEY_PREFIX + key;
     String uuid = lockId();
     long expireMs = unit.toMillis(expire);
+    boolean redisErrorSeen = false;
 
     for (int i = 0; i < lockCount; i++) {
       if (i > 0) {
@@ -255,6 +285,7 @@ public class RedisLockProvider implements LockProvider {
           Thread.sleep(Math.min(10L * (1L << i), 100L));
         } catch (InterruptedException e) {
           Thread.currentThread().interrupt();
+          lockErrored.increment();
           return null;
         }
       }
@@ -266,6 +297,7 @@ public class RedisLockProvider implements LockProvider {
           if (i > 0) {
             log.debug("Lock '{}' acquired after {} retries", key, i);
           }
+          lockAcquired.increment();
           return new RedisLockHandle(redisTemplate, lockKey, uuid, unlockCount, scheduler, expireMs);
         }
 
@@ -276,6 +308,7 @@ public class RedisLockProvider implements LockProvider {
                 Thread.sleep(Math.min(2L * (1L << j), 10L));
               } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
+                lockErrored.increment();
                 return null;
               }
             }
@@ -285,6 +318,7 @@ public class RedisLockProvider implements LockProvider {
               if (i > 0) {
                 log.debug("Lock '{}' acquired after {} retries (inquiry path)", key, i);
               }
+              lockAcquired.increment();
               return new RedisLockHandle(redisTemplate, lockKey, uuid, unlockCount, scheduler, expireMs);
             }
             if (value != null) {
@@ -293,6 +327,9 @@ public class RedisLockProvider implements LockProvider {
           }
         }
       } catch (DataAccessException e) {
+        // Any attempt that actually touched Redis and failed is an error, not
+        // contention — the final null return is attributed accordingly below.
+        redisErrorSeen = true;
         // DataAccessException, not the narrower RedisSystemException: connection
         // failures and command timeouts (RedisConnectionFailureException,
         // QueryTimeoutException) are SIBLINGS of RedisSystemException under
@@ -317,7 +354,15 @@ public class RedisLockProvider implements LockProvider {
     // tryLock is a try-style API: returning null because another caller holds
     // the lock is its NORMAL outcome under contention, not an operational risk —
     // log at DEBUG so a contended workload does not flood the log at try-rate.
+    // A Redis failure and contention share the null return, so the outcome is
+    // attributed to the error counter when any attempt hit Redis, else to the
+    // contention counter (zeta.lock.* gauges separate the two).
     log.debug("Failed to acquire lock '{}' after {} attempts", key, lockCount);
+    if (redisErrorSeen) {
+      lockErrored.increment();
+    } else {
+      lockContended.increment();
+    }
     return null;
   }
 

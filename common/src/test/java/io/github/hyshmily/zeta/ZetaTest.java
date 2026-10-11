@@ -22,22 +22,22 @@ import static org.mockito.Mockito.*;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import io.github.hyshmily.zeta.cache.HotKeyCache;
-import io.github.hyshmily.zeta.scheduler.TimedRefreshCoordinator;
 import io.github.hyshmily.zeta.cache.loader.ZetaLoaderRegistry;
 import io.github.hyshmily.zeta.cache.loader.ZetaLoadingSpec;
 import io.github.hyshmily.zeta.exception.ZetaBlockedException;
 import io.github.hyshmily.zeta.exception.ZetaModeException;
 import io.github.hyshmily.zeta.hotkeydetector.HotKeyDetector;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.Item;
+import io.github.hyshmily.zeta.model.HotKey;
 import io.github.hyshmily.zeta.model.InvalidatePolicy;
 import io.github.hyshmily.zeta.model.ReadPolicy;
-import io.github.hyshmily.zeta.model.WritePolicy;
-import io.github.hyshmily.zeta.model.HotKey;
 import io.github.hyshmily.zeta.model.StalePolicy;
+import io.github.hyshmily.zeta.model.WritePolicy;
 import io.github.hyshmily.zeta.model.ZetaCacheStats;
 import io.github.hyshmily.zeta.rule.Rule;
-import io.github.hyshmily.zeta.rule.RuleService;
 import io.github.hyshmily.zeta.rule.Rule.RuleAction;
+import io.github.hyshmily.zeta.rule.RuleService;
+import io.github.hyshmily.zeta.scheduler.TimedRefreshCoordinator;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.LinkedHashMap;
@@ -101,15 +101,20 @@ class ZetaTest {
   @Test
   void get_withTtl_shouldDelegateToCache() {
     when(hotKeyCache.get(anyString(), any(ReadPolicy.class))).thenReturn(Optional.of("v"));
-    assertThat(zeta.get("key1", ReadPolicy.of(() -> "loaded").withHardTtl(1000L).withSoftTtl(100L))).contains("v");
+    assertThat(
+      zeta.get(
+        "key1",
+        ReadPolicy.of(() -> "loaded")
+          .withHardTtl(1000L)
+          .withSoftTtl(100L)
+      )
+    ).contains("v");
     verify(hotKeyCache).get(anyString(), any(ReadPolicy.class));
   }
 
   @Test
   void getWithSoftExpire_shouldDelegateToCache() {
-    when(hotKeyCache.getWithSoftExpire(anyString(), any(ReadPolicy.class))).thenReturn(
-      Optional.of("v")
-    );
+    when(hotKeyCache.getWithSoftExpire(anyString(), any(ReadPolicy.class))).thenReturn(Optional.of("v"));
     assertThat(zeta.getWithSoftExpire("key1", () -> "v")).contains("v");
     verify(hotKeyCache).getWithSoftExpire(anyString(), any(ReadPolicy.class));
   }
@@ -120,21 +125,27 @@ class ZetaTest {
   @SuppressWarnings("all")
   void getNoReader_shouldLoadThroughRegisteredSpec() {
     ZetaLoaderRegistry registry = new ZetaLoaderRegistry();
-    registry.register("user:", ZetaLoadingSpec.<String>builder()
-      .loader(key -> "loaded:" + key)
-      .hardTtl(5_000)
-      .softTtl(500)
-      .build());
+    registry.register(
+      "user:",
+      ZetaLoadingSpec.<String>builder()
+        .loader(key -> "loaded:" + key)
+        .hardTtl(5_000)
+        .softTtl(500)
+        .build()
+    );
     Zeta withRegistry = new DefaultZeta(hotKeyCache, appDetector, null, registry, ruleService);
     when(hotKeyCache.get(anyString(), any(ReadPolicy.class))).thenReturn(Optional.of("loaded:user:42"));
 
     assertThat(withRegistry.get("user:42")).contains("loaded:user:42");
-    verify(hotKeyCache)
-      .get(eq("user:42"), argThat(p ->
-        p.hardTtlMs().getAsLong() == 5_000
-          && p.softTtlMs().getAsLong() == 500
-          && "loaded:user:42".equals(p.reader().get())
-      ));
+    verify(hotKeyCache).get(
+      eq("user:42"),
+      argThat(
+        p ->
+          p.hardTtlMs().getAsLong() == 5_000 &&
+          p.softTtlMs().getAsLong() == 500 &&
+          "loaded:user:42".equals(p.reader().get())
+      )
+    );
   }
 
   @Test
@@ -142,7 +153,12 @@ class ZetaTest {
   void getWithSoftExpireNoReader_shouldForceSoftRefresh() {
     ZetaLoaderRegistry registry = new ZetaLoaderRegistry();
     registry.register(
-        "user:", ZetaLoadingSpec.<String>builder().loader(key -> "v").stalePolicy(StalePolicy.RETURN).build());
+      "user:",
+      ZetaLoadingSpec.<String>builder()
+        .loader(key -> "v")
+        .stalePolicy(StalePolicy.RETURN)
+        .build()
+    );
     Zeta withRegistry = new DefaultZeta(hotKeyCache, appDetector, null, registry, ruleService);
     when(hotKeyCache.getWithSoftExpire(anyString(), any(ReadPolicy.class))).thenReturn(Optional.of("v"));
 
@@ -169,21 +185,35 @@ class ZetaTest {
     ZetaLoaderRegistry registry = new ZetaLoaderRegistry();
     registry.register(
       "user:",
-      ZetaLoadingSpec.<String>builder().loader(key -> "loaded:" + key).hardTtl(5_000).softTtl(500).build()
+      ZetaLoadingSpec.<String>builder()
+        .loader(key -> "loaded:" + key)
+        .hardTtl(5_000)
+        .softTtl(500)
+        .build()
     );
     registry.register("order:", ZetaLoadingSpec.of(key -> "O:" + key));
     Zeta withRegistry = new DefaultZeta(hotKeyCache, appDetector, null, registry, ruleService);
 
-    when(hotKeyCache.get(any(Iterable.class), any(Function.class), anyLong(), anyLong(), anyBoolean(), anyBoolean()))
-      .thenAnswer(inv -> {
-        Iterable<String> keys = (Iterable<String>) inv.getArgument(0);
-        Function<String, String> reader = (Function<String, String>) inv.getArgument(1);
-        Map<String, Optional<String>> out = new LinkedHashMap<>();
-        for (String k : keys) {
-          out.put(k, Optional.ofNullable(reader.apply(k)));
-        }
-        return out;
-      });
+    when(
+      hotKeyCache.get(
+        any(Iterable.class),
+        any(Function.class),
+        anyLong(),
+        anyLong(),
+        anyBoolean(),
+        anyBoolean(),
+        anyBoolean(),
+        any(StalePolicy.class)
+      )
+    ).thenAnswer(inv -> {
+      Iterable<String> keys = (Iterable<String>) inv.getArgument(0);
+      Function<String, String> reader = (Function<String, String>) inv.getArgument(1);
+      Map<String, Optional<String>> out = new LinkedHashMap<>();
+      for (String k : keys) {
+        out.put(k, Optional.ofNullable(reader.apply(k)));
+      }
+      return out;
+    });
 
     Map<String, String> result = withRegistry.getAll(List.of("user:42", "order:7", "user:43"));
 
@@ -197,18 +227,66 @@ class ZetaTest {
     ArgumentCaptor<Iterable> keysCaptor = ArgumentCaptor.forClass(Iterable.class);
     ArgumentCaptor<Long> hardCaptor = ArgumentCaptor.forClass(Long.class);
     ArgumentCaptor<Long> softCaptor = ArgumentCaptor.forClass(Long.class);
-    verify(hotKeyCache, times(2))
-      .get(
-        keysCaptor.capture(),
-        any(Function.class),
-        hardCaptor.capture(),
-        softCaptor.capture(),
-        anyBoolean(),
-        anyBoolean());
+    verify(hotKeyCache, times(2)).get(
+      keysCaptor.capture(),
+      any(Function.class),
+      hardCaptor.capture(),
+      softCaptor.capture(),
+      anyBoolean(),
+      anyBoolean(),
+      anyBoolean(),
+      any(StalePolicy.class)
+    );
     assertThat(hardCaptor.getAllValues()).containsExactly(5_000L, 0L);
     assertThat(softCaptor.getAllValues()).containsExactly(500L, 0L);
     assertThat((List<String>) keysCaptor.getAllValues().get(0)).containsExactly("user:42", "user:43");
     assertThat((List<String>) keysCaptor.getAllValues().get(1)).containsExactly("order:7");
+  }
+
+  /**
+   * The batch path must carry the spec's {@code nullCaching} and
+   * {@code stalePolicy} instead of hard-coding {@code true}/{@code SOFT_REFRESH}:
+   * a caller who registered {@code nullCaching(false)} to avoid pinning
+   * negative entries still got them on every {@code getAll}.
+   */
+  @Test
+  @SuppressWarnings("all")
+  void getNoReaderBatch_carriesNullCachingAndStalePolicy() {
+    ZetaLoaderRegistry registry = new ZetaLoaderRegistry();
+    registry.register(
+      "user:",
+      ZetaLoadingSpec.<String>builder()
+        .loader(key -> "U:" + key)
+        .nullCaching(false)
+        .stalePolicy(StalePolicy.REVALIDATE)
+        .build()
+    );
+    Zeta withRegistry = new DefaultZeta(hotKeyCache, appDetector, null, registry, ruleService);
+    when(
+      hotKeyCache.get(
+        any(Iterable.class),
+        any(Function.class),
+        anyLong(),
+        anyLong(),
+        anyBoolean(),
+        anyBoolean(),
+        anyBoolean(),
+        any(StalePolicy.class)
+      )
+    ).thenReturn(new LinkedHashMap<>());
+
+    withRegistry.getAll(List.of("user:42"));
+
+    verify(hotKeyCache).get(
+      any(Iterable.class),
+      any(Function.class),
+      anyLong(),
+      anyLong(),
+      anyBoolean(),
+      anyBoolean(),
+      eq(false),
+      eq(StalePolicy.REVALIDATE)
+    );
   }
 
   @Test
@@ -221,20 +299,38 @@ class ZetaTest {
     assertThatThrownBy(() -> withRegistry.getAll(List.of("user:42", "vendor:9")))
       .isInstanceOf(IllegalStateException.class)
       .hasMessageContaining("No CacheLoader registered for key 'vendor:9'");
-    verify(hotKeyCache, never())
-      .get(any(Iterable.class), any(Function.class), anyLong(), anyLong(), anyBoolean(), anyBoolean());
+    verify(hotKeyCache, never()).get(
+      any(Iterable.class),
+      any(Function.class),
+      anyLong(),
+      anyLong(),
+      anyBoolean(),
+      anyBoolean(),
+      anyBoolean(),
+      any(StalePolicy.class)
+    );
   }
 
   @Test
   @SuppressWarnings("all")
   void getBatch_nullAndMissOmittedFromMap() {
-    when(hotKeyCache.get(any(Iterable.class), any(Function.class), anyLong(), anyLong(), anyBoolean(), anyBoolean()))
-      .thenAnswer(inv -> {
-        Map<String, Optional<String>> out = new LinkedHashMap<>();
-        out.put("a", Optional.of("va"));
-        out.put("b", Optional.empty());
-        return out;
-      });
+    when(
+      hotKeyCache.get(
+        any(Iterable.class),
+        any(Function.class),
+        anyLong(),
+        anyLong(),
+        anyBoolean(),
+        anyBoolean(),
+        anyBoolean(),
+        any(StalePolicy.class)
+      )
+    ).thenAnswer(inv -> {
+      Map<String, Optional<String>> out = new LinkedHashMap<>();
+      out.put("a", Optional.of("va"));
+      out.put("b", Optional.empty());
+      return out;
+    });
 
     Map<String, String> result = zeta.getAll(List.of("a", "b"), k -> "v");
 
@@ -247,30 +343,50 @@ class ZetaTest {
   @SuppressWarnings("all")
   void getWithSoftExpireNoReaderBatch_shouldRoutePerSpec() {
     ZetaLoaderRegistry registry = new ZetaLoaderRegistry();
-    registry.register("user:", ZetaLoadingSpec.<String>builder().loader(key -> "U:" + key).hardTtl(5_000).build());
+    registry.register(
+      "user:",
+      ZetaLoadingSpec.<String>builder()
+        .loader(key -> "U:" + key)
+        .hardTtl(5_000)
+        .build()
+    );
     Zeta withRegistry = new DefaultZeta(hotKeyCache, appDetector, null, registry, ruleService);
 
-    when(hotKeyCache
-        .getWithSoftExpire(any(Iterable.class), any(Function.class), anyLong(), anyLong(), anyBoolean(), anyBoolean()))
-      .thenAnswer(inv -> {
-        Iterable<String> keys = (Iterable<String>) inv.getArgument(0);
-        Function<String, String> reader = (Function<String, String>) inv.getArgument(1);
-        Map<String, Optional<String>> out = new LinkedHashMap<>();
-        for (String k : keys) {
-          out.put(k, Optional.ofNullable(reader.apply(k)));
-        }
-        return out;
-      });
+    when(
+      hotKeyCache.getWithSoftExpire(
+        any(Iterable.class),
+        any(Function.class),
+        anyLong(),
+        anyLong(),
+        anyBoolean(),
+        anyBoolean(),
+        anyBoolean(),
+        any(StalePolicy.class)
+      )
+    ).thenAnswer(inv -> {
+      Iterable<String> keys = (Iterable<String>) inv.getArgument(0);
+      Function<String, String> reader = (Function<String, String>) inv.getArgument(1);
+      Map<String, Optional<String>> out = new LinkedHashMap<>();
+      for (String k : keys) {
+        out.put(k, Optional.ofNullable(reader.apply(k)));
+      }
+      return out;
+    });
 
     Map<String, String> result = withRegistry.getAllWithSoftExpire(List.of("user:1", "user:2"));
 
-    assertThat(result)
-      .containsEntry("user:1", "U:user:1")
-      .containsEntry("user:2", "U:user:2");
+    assertThat(result).containsEntry("user:1", "U:user:1").containsEntry("user:2", "U:user:2");
     ArgumentCaptor<Long> hardCaptor = ArgumentCaptor.forClass(Long.class);
-    verify(hotKeyCache)
-      .getWithSoftExpire(
-          any(Iterable.class), any(Function.class), hardCaptor.capture(), anyLong(), anyBoolean(), anyBoolean());
+    verify(hotKeyCache).getWithSoftExpire(
+      any(Iterable.class),
+      any(Function.class),
+      hardCaptor.capture(),
+      anyLong(),
+      anyBoolean(),
+      anyBoolean(),
+      anyBoolean(),
+      any(StalePolicy.class)
+    );
     assertThat(hardCaptor.getValue()).isEqualTo(5_000L);
   }
 
@@ -280,7 +396,11 @@ class ZetaTest {
     ZetaLoaderRegistry registry = new ZetaLoaderRegistry();
     registry.register(
       "user:",
-      ZetaLoadingSpec.<String>builder().loader(key -> "loaded:" + key).hardTtl(5_000).softTtl(500).build()
+      ZetaLoadingSpec.<String>builder()
+        .loader(key -> "loaded:" + key)
+        .hardTtl(5_000)
+        .softTtl(500)
+        .build()
     );
     Zeta withRegistry = new DefaultZeta(hotKeyCache, appDetector, null, registry, ruleService);
 
@@ -303,7 +423,13 @@ class ZetaTest {
   @SuppressWarnings("all")
   void computeIfAbsentWithSoftExpireNoReader_shouldForceSoftRefresh() {
     ZetaLoaderRegistry registry = new ZetaLoaderRegistry();
-    registry.register("user:", ZetaLoadingSpec.<String>builder().loader(key -> "U:" + key).softTtl(500).build());
+    registry.register(
+      "user:",
+      ZetaLoadingSpec.<String>builder()
+        .loader(key -> "U:" + key)
+        .softTtl(500)
+        .build()
+    );
     Zeta withRegistry = new DefaultZeta(hotKeyCache, appDetector, null, registry, ruleService);
 
     when(hotKeyCache.computeIfAbsentWithSoftExpire(anyString(), any(ReadPolicy.class))).thenAnswer(inv -> {
@@ -404,9 +530,7 @@ class ZetaTest {
 
   @Test
   void getWithSoftExpire_withSoftTtl_shouldDelegateToCache() {
-    when(hotKeyCache.getWithSoftExpire(anyString(), any(ReadPolicy.class))).thenReturn(
-      Optional.of("v")
-    );
+    when(hotKeyCache.getWithSoftExpire(anyString(), any(ReadPolicy.class))).thenReturn(Optional.of("v"));
     assertThat(zeta.getWithSoftExpire("key1", ReadPolicy.of(() -> "v").withSoftTtl(200L))).contains("v");
     verify(hotKeyCache).getWithSoftExpire(anyString(), any(ReadPolicy.class));
   }
@@ -597,104 +721,125 @@ class ZetaTest {
 
   @Test
   void computeIfAbsent_shouldReturnValue() {
-    when(hotKeyCache.computeIfAbsent(anyString(), any(ReadPolicy.class))).thenReturn(
-      Optional.of("v")
-    );
+    when(hotKeyCache.computeIfAbsent(anyString(), any(ReadPolicy.class))).thenReturn(Optional.of("v"));
     assertThat(zeta.computeIfAbsent("k", () -> "loaded")).isEqualTo("v");
     verify(hotKeyCache).computeIfAbsent(eq("k"), any(ReadPolicy.class));
   }
 
   @Test
   void computeIfAbsent_shouldReturnNullWhenLoaderNull() {
-    when(hotKeyCache.computeIfAbsent(anyString(), any(ReadPolicy.class))).thenReturn(
-      Optional.empty()
-    );
+    when(hotKeyCache.computeIfAbsent(anyString(), any(ReadPolicy.class))).thenReturn(Optional.empty());
     assertThat((Object) zeta.computeIfAbsent("k", () -> null)).isNull();
   }
 
   @Test
   void computeIfAbsent_withHardTtl_shouldDelegate() {
-    when(hotKeyCache.computeIfAbsent(anyString(), any(ReadPolicy.class))).thenReturn(
-      Optional.of("v")
-    );
+    when(hotKeyCache.computeIfAbsent(anyString(), any(ReadPolicy.class))).thenReturn(Optional.of("v"));
     assertThat(zeta.computeIfAbsentOptional("k", ReadPolicy.of(() -> "db").withHardTtl(5000L))).contains("v");
     verify(hotKeyCache).computeIfAbsent(eq("k"), any(ReadPolicy.class));
   }
 
   @Test
   void computeIfAbsent_withHardSoftTtl_shouldDelegate() {
-    when(hotKeyCache.computeIfAbsent(anyString(), any(ReadPolicy.class))).thenReturn(
-      Optional.of("v")
-    );
+    when(hotKeyCache.computeIfAbsent(anyString(), any(ReadPolicy.class))).thenReturn(Optional.of("v"));
     assertThat(
-        zeta.computeIfAbsentOptional("k", ReadPolicy.of(() -> "db", 5000L, 500L, true, true, StalePolicy.SOFT_REFRESH)))
-      .contains("v");
+      zeta.computeIfAbsentOptional("k", ReadPolicy.of(() -> "db", 5000L, 500L, true, true, StalePolicy.SOFT_REFRESH))
+    ).contains("v");
     verify(hotKeyCache).computeIfAbsent(eq("k"), any(ReadPolicy.class));
   }
 
   @Test
   void computeIfAbsent_withNonDefaultReport_shouldDelegate() {
-    when(hotKeyCache.computeIfAbsent(anyString(), any(ReadPolicy.class))).thenReturn(
-      Optional.of("v")
-    );
+    when(hotKeyCache.computeIfAbsent(anyString(), any(ReadPolicy.class))).thenReturn(Optional.of("v"));
     assertThat(
-        zeta.computeIfAbsentOptional("k", ReadPolicy.of(() -> "db", 0L, 0L, true, false, StalePolicy.SOFT_REFRESH)))
-      .contains("v");
+      zeta.computeIfAbsentOptional("k", ReadPolicy.of(() -> "db", 0L, 0L, true, false, StalePolicy.SOFT_REFRESH))
+    ).contains("v");
     verify(hotKeyCache).computeIfAbsent(eq("k"), any(ReadPolicy.class));
   }
 
   @Test
   void computeIfAbsentWithSoftExpire_SoftTtl_shouldDelegate() {
-    when(hotKeyCache.computeIfAbsentWithSoftExpire(anyString(), any(ReadPolicy.class))).thenReturn(
-      Optional.of("v")
+    when(hotKeyCache.computeIfAbsentWithSoftExpire(anyString(), any(ReadPolicy.class))).thenReturn(Optional.of("v"));
+    assertThat(zeta.computeIfAbsentWithSoftExpireOptional("k", ReadPolicy.of(() -> "db").withSoftTtl(500L))).contains(
+      "v"
     );
-    assertThat(zeta.computeIfAbsentWithSoftExpireOptional("k", ReadPolicy.of(() -> "db").withSoftTtl(500L))).contains("v");
     verify(hotKeyCache).computeIfAbsentWithSoftExpire(eq("k"), any(ReadPolicy.class));
   }
 
   @Test
   void computeIfAbsentWithSoftExpire_collectionSoftTtl_shouldDelegate() {
-    when(hotKeyCache.computeIfAbsentWithSoftExpire(anyString(), any(ReadPolicy.class))).thenReturn(
-      Optional.of("v")
+    when(hotKeyCache.computeIfAbsentWithSoftExpire(anyString(), any(ReadPolicy.class))).thenReturn(Optional.of("v"));
+    assertThat(zeta.computeIfAbsentWithSoftExpireOptional("k", ReadPolicy.of(() -> "db").withSoftTtl(500L))).contains(
+      "v"
     );
-    assertThat(zeta.computeIfAbsentWithSoftExpireOptional("k", ReadPolicy.of(() -> "db").withSoftTtl(500L))).contains("v");
     verify(hotKeyCache).computeIfAbsentWithSoftExpire(eq("k"), any(ReadPolicy.class));
   }
 
   @Test
   void computeIfAbsentWithSoftExpire_BothTtls_shouldDelegate() {
-    when(hotKeyCache.computeIfAbsentWithSoftExpire(anyString(), any(ReadPolicy.class))).thenReturn(
-      Optional.of("v")
-    );
+    when(hotKeyCache.computeIfAbsentWithSoftExpire(anyString(), any(ReadPolicy.class))).thenReturn(Optional.of("v"));
     assertThat(
-        zeta.computeIfAbsentWithSoftExpireOptional("k", ReadPolicy.of(() -> "db").withHardTtl(5000L).withSoftTtl(500L)))
-      .contains("v");
+      zeta.computeIfAbsentWithSoftExpireOptional(
+        "k",
+        ReadPolicy.of(() -> "db")
+          .withHardTtl(5000L)
+          .withSoftTtl(500L)
+      )
+    ).contains("v");
     verify(hotKeyCache).computeIfAbsentWithSoftExpire(eq("k"), any(ReadPolicy.class));
   }
 
   @Test
   void computeIfAbsentWithSoftExpire_BothTtlsAndReport_shouldDelegate() {
-    when(hotKeyCache.computeIfAbsentWithSoftExpire(anyString(), any(ReadPolicy.class))).thenReturn(
-      Optional.of("v")
-    );
-    assertThat(zeta.computeIfAbsentWithSoftExpireOptional(
-        "k", ReadPolicy.of(() -> "db", 5000L, 500L, true, true, StalePolicy.SOFT_REFRESH)))
-      .contains("v");
+    when(hotKeyCache.computeIfAbsentWithSoftExpire(anyString(), any(ReadPolicy.class))).thenReturn(Optional.of("v"));
+    assertThat(
+      zeta.computeIfAbsentWithSoftExpireOptional(
+        "k",
+        ReadPolicy.of(() -> "db", 5000L, 500L, true, true, StalePolicy.SOFT_REFRESH)
+      )
+    ).contains("v");
     verify(hotKeyCache).computeIfAbsentWithSoftExpire(eq("k"), any(ReadPolicy.class));
   }
 
-  // ── invalidateAllLocal no-arg ──
+  // ── flushLocalEmergency (invalidateAllLocal is a deprecated alias) ──
 
   @Test
-  void invalidateAllLocal_shouldDelegateToCache() {
+  void flushLocalEmergency_shouldDelegateToCache() {
+    zeta.flushLocalEmergency();
+    verify(hotKeyCache).flushLocalEmergency();
+  }
+
+  @Test
+  @SuppressWarnings("deprecation")
+  void invalidateAllLocal_shouldDelegateToFlush() {
     zeta.invalidateAllLocal();
-    verify(hotKeyCache).invalidateAllLocal();
+    verify(hotKeyCache).flushLocalEmergency();
+  }
+
+  @Test
+  void flushLocalEmergency_shouldThrowInWorkerMode() {
+    Zeta workerOnly = new DefaultZeta(null, null, null, null, null);
+    assertThatThrownBy(workerOnly::flushLocalEmergency).isInstanceOf(ZetaModeException.class);
   }
 
   @Test
   void invalidateAllLocal_shouldThrowInWorkerMode() {
     Zeta workerOnly = new DefaultZeta(null, null, null, null, null);
     assertThatThrownBy(workerOnly::invalidateAllLocal).isInstanceOf(ZetaModeException.class);
+  }
+
+  @Test
+  void invalidateAndGetVersion_shouldDelegateToCache() {
+    when(hotKeyCache.invalidate("k", true)).thenReturn(42L);
+    assertThat(zeta.invalidateAndGetVersion("k", InvalidatePolicy.defaults())).isEqualTo(42L);
+    verify(hotKeyCache).invalidate("k", true);
+  }
+
+  @Test
+  void invalidateAndGetVersions_shouldDelegateToCache() {
+    Map<String, Long> versions = Map.of("k1", 7L);
+    when(hotKeyCache.invalidate(List.of("k1"), true)).thenReturn(versions);
+    assertThat(zeta.invalidateAndGetVersions(List.of("k1"), InvalidatePolicy.defaults())).isEqualTo(versions);
   }
 
   // ── invalidate Collection ──
@@ -745,9 +890,9 @@ class ZetaTest {
   }
 
   @Test
-  void stats_shouldReturnNullInWorkerMode() {
+  void stats_shouldThrowInWorkerMode() {
     Zeta workerOnly = new DefaultZeta(null, null, null, null, null);
-    assertThat(workerOnly.stats().snapshot()).isNull();
+    assertThatThrownBy(() -> workerOnly.stats().snapshot()).isInstanceOf(ZetaModeException.class);
   }
 
   // ── notifyLocalDetectorDirect ──
@@ -852,8 +997,9 @@ class ZetaTest {
   @Test
   void invalidateLocal_shouldThrowInWorkerMode() {
     Zeta workerOnly = new DefaultZeta(null, null, null, null, null);
-    assertThatThrownBy(() -> workerOnly.invalidate("k", InvalidatePolicy.of(true)))
-      .isInstanceOf(ZetaModeException.class);
+    assertThatThrownBy(() -> workerOnly.invalidate("k", InvalidatePolicy.of(true))).isInstanceOf(
+      ZetaModeException.class
+    );
   }
 
   // ── areLocalHotKeys ──
@@ -862,7 +1008,9 @@ class ZetaTest {
   void areLocalHotKeys_shouldDelegateToCache() {
     when(hotKeyCache.isHot("k1")).thenReturn(true);
     when(hotKeyCache.isHot("k2")).thenReturn(false);
-    assertThat(zeta.detector().areLocalHotKeys(List.of("k1", "k2"))).containsEntry("k1", true).containsEntry("k2", false);
+    assertThat(zeta.detector().areLocalHotKeys(List.of("k1", "k2")))
+      .containsEntry("k1", true)
+      .containsEntry("k2", false);
   }
 
   @Test
@@ -874,17 +1022,16 @@ class ZetaTest {
   // ── refresh ──
 
   @Test
-  void refresh_shouldEvictAndPutThrough() {
+  void refresh_shouldDelegateToGuardedRefresh() {
     zeta.refresh("k1", () -> "v");
-    verify(hotKeyCache).invalidate("k1", false);
-    verify(hotKeyCache).putThrough(eq("k1"), eq("v"), any(), anyLong(), anyLong(), anyBoolean());
+    verify(hotKeyCache).refresh(eq("k1"), any(), eq(0L), eq(0L), eq(true));
+    verify(hotKeyCache, never()).invalidate(anyString(), anyBoolean());
   }
 
   @Test
-  void refresh_withTtl_shouldEvictAndPutThroughWithTtl() {
+  void refresh_withTtl_shouldDelegateWithTtl() {
     zeta.refresh("k1", () -> "v", WritePolicy.of(5000L, 500L));
-    verify(hotKeyCache).invalidate("k1", false);
-    verify(hotKeyCache).putThrough(eq("k1"), eq("v"), any(), eq(5000L), eq(500L), anyBoolean());
+    verify(hotKeyCache).refresh(eq("k1"), any(), eq(5000L), eq(500L), eq(true));
   }
 
   @Test
@@ -898,8 +1045,7 @@ class ZetaTest {
   @Test
   void refreshAll_shouldRefreshEachKey() {
     zeta.refreshAll(Map.of("k1", (Supplier<?>) () -> "v1", "k2", (Supplier<?>) () -> "v2"));
-    verify(hotKeyCache, times(2)).invalidate(anyString(), eq(false));
-    verify(hotKeyCache, times(2)).putThrough(anyString(), any(), any(), anyLong(), anyLong(), anyBoolean());
+    verify(hotKeyCache, times(2)).refresh(anyString(), any(), anyLong(), anyLong(), anyBoolean());
   }
 
   // ── invalidateAfterPut ──
@@ -1026,12 +1172,10 @@ class ZetaTest {
   @Test
   void unregisterRefresh_shouldNotThrow() throws InterruptedException {
     CountDownLatch firstCallLatch = new CountDownLatch(1);
-    when(hotKeyCache.getWithSoftExpire(eq("cancel-key"), any(ReadPolicy.class))).thenAnswer(
-      invocation -> {
-        firstCallLatch.countDown();
-        return Optional.of("v");
-      }
-    );
+    when(hotKeyCache.getWithSoftExpire(eq("cancel-key"), any(ReadPolicy.class))).thenAnswer(invocation -> {
+      firstCallLatch.countDown();
+      return Optional.of("v");
+    });
 
     zeta.refresh().registerRefresh("cancel-key", () -> "v", ReadPolicy.of(300_000L, 10L));
     assertThat(firstCallLatch.await(5, TimeUnit.SECONDS)).as("first scheduled refresh occurred").isTrue();
@@ -1044,12 +1188,10 @@ class ZetaTest {
   @Test
   void registerRefresh_replacesExistingRegistration() throws InterruptedException {
     AtomicInteger callCount = new AtomicInteger(0);
-    when(hotKeyCache.getWithSoftExpire(anyString(), any(ReadPolicy.class))).thenAnswer(
-      invocation -> {
-        callCount.incrementAndGet();
-        return Optional.of("v");
-      }
-    );
+    when(hotKeyCache.getWithSoftExpire(anyString(), any(ReadPolicy.class))).thenAnswer(invocation -> {
+      callCount.incrementAndGet();
+      return Optional.of("v");
+    });
 
     zeta.refresh().registerRefresh("dup-key", () -> "v1", ReadPolicy.of(300_000L, 5L));
     Thread.sleep(20);
@@ -1090,13 +1232,15 @@ class ZetaTest {
     CountDownLatch start = new CountDownLatch(1);
     List<Future<?>> jobs = new ArrayList<>();
     for (int t = 0; t < threads; t++) {
-      jobs.add(pool.submit(() -> {
-        start.await();
-        for (int i = 0; i < iterations; i++) {
-          zeta.refresh().registerRefresh("race-key", () -> "v", ReadPolicy.of(300_000L, 5_000L));
-        }
-        return null;
-      }));
+      jobs.add(
+        pool.submit(() -> {
+          start.await();
+          for (int i = 0; i < iterations; i++) {
+            zeta.refresh().registerRefresh("race-key", () -> "v", ReadPolicy.of(300_000L, 5_000L));
+          }
+          return null;
+        })
+      );
     }
     start.countDown();
     for (Future<?> job : jobs) {
@@ -1114,14 +1258,11 @@ class ZetaTest {
     field.setAccessible(true);
     @SuppressWarnings("unchecked")
     java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.ScheduledFuture<?>> futures =
-      (java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.ScheduledFuture<?>>)
-        field.get(coordinator);
+      (java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.ScheduledFuture<?>>) field.get(coordinator);
 
     Object surviving = futures.get("race-key");
     assertThat(surviving).as("a registration must survive the race").isNotNull();
-    assertThat(futures.get("race-key").isCancelled())
-      .as("the surviving future must not be cancelled")
-      .isFalse();
+    assertThat(futures.get("race-key").isCancelled()).as("the surviving future must not be cancelled").isFalse();
 
     zeta.refresh().unregisterRefresh("race-key");
   }
@@ -1166,8 +1307,9 @@ class ZetaTest {
   }
 
   @Test
-  void putThrough_shouldRejectNullValue() {
-    assertThatThrownBy(() -> zeta.putThrough("k", null, () -> {})).isInstanceOf(NullPointerException.class);
+  void putThrough_shouldAllowNullValueAsSentinel() {
+    zeta.putThrough("k", null, () -> {}, WritePolicy.defaults());
+    verify(hotKeyCache).putThrough(eq("k"), isNull(), any(), eq(0L), eq(0L), eq(true));
   }
 
   @Test
@@ -1249,8 +1391,9 @@ class ZetaTest {
 
   @Test
   void registerRefresh_shouldRejectNullSupplier() {
-    assertThatThrownBy(() -> zeta.refresh().registerRefresh("k", null, ReadPolicy.of(1000L, 100L)))
-      .isInstanceOf(NullPointerException.class);
+    assertThatThrownBy(() -> zeta.refresh().registerRefresh("k", null, ReadPolicy.of(1000L, 100L))).isInstanceOf(
+      NullPointerException.class
+    );
   }
 
   @Test
@@ -1262,8 +1405,9 @@ class ZetaTest {
     assertThat(TimedRefreshCoordinator.intervalFor(5_000L)).isEqualTo(5_500L);
     // Rounding: 7ms × 1.1 = 7.7 → ceil to 8 so the interval never undershoots.
     assertThat(TimedRefreshCoordinator.intervalFor(7L)).isEqualTo(8L);
-    // Clamped to at least 1ms for degenerate TTLs.
-    assertThat(TimedRefreshCoordinator.intervalFor(0L)).isEqualTo(1L);
+    // Non-positive TTLs fail fast instead of degrading to a 1ms hot loop.
+    assertThatThrownBy(() -> TimedRefreshCoordinator.intervalFor(0L))
+      .isInstanceOf(IllegalArgumentException.class);
     assertThat(TimedRefreshCoordinator.intervalFor(1L)).isEqualTo(2L);
   }
 
@@ -1320,8 +1464,9 @@ class ZetaTest {
 
   @Test
   void putLocal_shouldRejectNegativeHardTtl() {
-    assertThatThrownBy(() -> zeta.putLocal("k", "v", WritePolicy.of(-1L, 0L)))
-      .isInstanceOf(IllegalArgumentException.class);
+    assertThatThrownBy(() -> zeta.putLocal("k", "v", WritePolicy.of(-1L, 0L))).isInstanceOf(
+      IllegalArgumentException.class
+    );
   }
 
   @Test

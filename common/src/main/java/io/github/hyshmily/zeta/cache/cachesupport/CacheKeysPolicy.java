@@ -54,7 +54,9 @@ public final class CacheKeysPolicy {
    */
   @Nullable
   public static String normalizeKey(@Nullable String rawKey) {
-    if (rawKey == null) return null;
+    if (rawKey == null) {
+      return null;
+    }
     int idx = rawKey.indexOf('?');
     return idx >= 0 ? rawKey.substring(0, idx) : rawKey;
   }
@@ -67,10 +69,7 @@ public final class CacheKeysPolicy {
    * @return {@code true} if the entry state is HOT or COOL
    */
   public static boolean isWorkerManaged(@Nullable CacheEntry existing) {
-    return (
-      existing != null &&
-      (existing.getKeyState() == KeyState.HOT || existing.getKeyState() == KeyState.COOL)
-    );
+    return (existing != null && (existing.getKeyState() == KeyState.HOT || existing.getKeyState() == KeyState.COOL));
   }
 
   /**

@@ -24,8 +24,8 @@ import io.github.hyshmily.zeta.Zeta;
 import io.github.hyshmily.zeta.annotation.annotationsupporter.NullValue;
 import io.github.hyshmily.zeta.exception.ZetaBlockedException;
 import io.github.hyshmily.zeta.model.ReadPolicy;
-import io.github.hyshmily.zeta.model.WritePolicy;
 import io.github.hyshmily.zeta.model.StalePolicy;
+import io.github.hyshmily.zeta.model.WritePolicy;
 import java.util.Optional;
 import java.util.function.Supplier;
 import org.junit.jupiter.api.BeforeEach;
@@ -43,10 +43,11 @@ class ZetaReadQueryTest {
   }
 
   private static ReadPolicy eqPolicy(long hardTtlMs, long softTtlMs, boolean nullCaching) {
-    return argThat(p ->
-      p.hardTtlMs().getAsLong() == hardTtlMs
-        && p.softTtlMs().getAsLong() == softTtlMs
-        && p.nullCaching() == nullCaching
+    return argThat(
+      p ->
+        p.hardTtlMs().getAsLong() == hardTtlMs &&
+        p.softTtlMs().getAsLong() == softTtlMs &&
+        p.nullCaching() == nullCaching
     );
   }
 
@@ -57,12 +58,13 @@ class ZetaReadQueryTest {
    * read already counted the access), and no stale-policy machinery.
    */
   private static ReadPolicy eqNullSentinelPolicy() {
-    return argThat(p ->
-      p.hardTtlMs().getAsLong() == 0L
-        && p.softTtlMs().getAsLong() == 0L
-        && p.nullCaching()
-        && p.stalePolicy() == StalePolicy.RETURN
-        && !p.reportEnabled()
+    return argThat(
+      p ->
+        p.hardTtlMs().getAsLong() == 0L &&
+        p.softTtlMs().getAsLong() == 0L &&
+        p.nullCaching() &&
+        p.stalePolicy() == StalePolicy.RETURN &&
+        !p.reportEnabled()
     );
   }
 
@@ -74,8 +76,7 @@ class ZetaReadQueryTest {
    */
   @Test
   void execute_shouldPropagateBlockedExceptionFromCacheLayer() {
-    when(zeta.get(anyString(), any(ReadPolicy.class)))
-      .thenThrow(new ZetaBlockedException("HotKeyCache", "test-key"));
+    when(zeta.get(anyString(), any(ReadPolicy.class))).thenThrow(new ZetaBlockedException("HotKeyCache", "test-key"));
     ZetaReadQuery<String> q = query.withPrimary(() -> "v");
     assertThatThrownBy(q::execute).isInstanceOf(ZetaBlockedException.class);
   }
@@ -95,7 +96,10 @@ class ZetaReadQueryTest {
   @Test
   void execute_shouldCarryStalePolicyOverrideIntoPolicy() {
     when(zeta.get(anyString(), any(ReadPolicy.class))).thenReturn(Optional.of("cached"));
-    Optional<String> result = query.withPrimary(() -> "db").withStalePolicy(StalePolicy.RETURN).execute();
+    Optional<String> result = query
+      .withPrimary(() -> "db")
+      .withStalePolicy(StalePolicy.RETURN)
+      .execute();
     assertThat(result).contains("cached");
     verify(zeta).get(eq("test-key"), argThat((ReadPolicy p) -> p.stalePolicy() == StalePolicy.RETURN));
   }
@@ -109,9 +113,7 @@ class ZetaReadQueryTest {
 
   @Test
   void execute_shouldReturnCachedValueInSoftExpireMode() {
-    when(zeta.getWithSoftExpire(anyString(), any(ReadPolicy.class))).thenReturn(
-      Optional.of("cached")
-    );
+    when(zeta.getWithSoftExpire(anyString(), any(ReadPolicy.class))).thenReturn(Optional.of("cached"));
     Optional<String> result = query.withPrimary(() -> "db", CacheMode.GET_WITH_SOFT_EXPIRE).execute();
     assertThat(result).contains("cached");
     verify(zeta).getWithSoftExpire(eq("test-key"), eqPolicy(0L, 0L, true));
@@ -157,7 +159,9 @@ class ZetaReadQueryTest {
       .thenExecute(() -> "fallback")
       .execute();
     assertThat(result).contains("fallback");
-    verify(zeta).putLocal("test-key", "fallback", WritePolicy.of(0L, 0L));
+    // Broadcast-by-default: fallback values converge via putThrough unless
+    // notAllowBroadcast() opts out.
+    verify(zeta).putThrough(eq("test-key"), eq("fallback"), any(Runnable.class), eq(WritePolicy.of(0L, 0L)));
   }
 
   // ── Cache miss, fallback with send ──
@@ -189,7 +193,63 @@ class ZetaReadQueryTest {
       .execute();
     assertThat(result).contains("fb2");
     verify(fb1).get();
-    verify(zeta).putLocal("test-key", "fb2", WritePolicy.of(0L, 0L));
+    verify(zeta).putThrough(eq("test-key"), eq("fb2"), any(Runnable.class), eq(WritePolicy.of(0L, 0L)));
+  }
+
+  // ── Fallback chain resilience ──
+
+  /**
+   * A fallback exists to be used when the level above it is down, so a
+   * throwing link must not break the chain. The old behaviour let the
+   * exception escape {@code execute()} and skip every remaining fallback —
+   * the degradation chain degraded to nothing exactly when it was needed.
+   */
+  @Test
+  void execute_shouldContinueToNextFallbackWhenOneThrows() {
+    when(zeta.get(anyString(), any(ReadPolicy.class))).thenReturn(Optional.empty());
+    Optional<String> result = query
+      .withPrimary(() -> null)
+      .thenExecute(() -> {
+        throw new IllegalStateException("cacheRepo timeout");
+      })
+      .thenExecute(() -> "remoteApi")
+      .execute();
+    assertThat(result).contains("remoteApi");
+    verify(zeta).putThrough(eq("test-key"), eq("remoteApi"), any(Runnable.class), eq(WritePolicy.of(0L, 0L)));
+  }
+
+  /** Every link exhausted (all throwing) resolves empty rather than propagating. */
+  @Test
+  void execute_shouldReturnEmptyWhenEveryFallbackThrows() {
+    when(zeta.get(anyString(), any(ReadPolicy.class))).thenReturn(Optional.empty());
+    ZetaReadQuery<String> q = query
+      .withPrimary(() -> null)
+      .thenExecute(() -> {
+        throw new IllegalStateException("down-1");
+      })
+      .thenExecute(() -> {
+        throw new IllegalStateException("down-2");
+      });
+
+    assertThat(q.execute()).isEmpty();
+    verify(zeta, never()).putLocal(anyString(), any(), any(WritePolicy.class));
+    verify(zeta, never()).putThrough(anyString(), any(), any(Runnable.class), any(WritePolicy.class));
+  }
+
+  /**
+   * A policy rejection (BLOCK) is not a source failure — swallowing it would
+   * hide the fact that this key is not allowed to be read at all.
+   */
+  @Test
+  void execute_shouldPropagateBlockedExceptionFromFallback() {
+    when(zeta.get(anyString(), any(ReadPolicy.class))).thenReturn(Optional.empty());
+    ZetaReadQuery<String> q = query
+      .withPrimary(() -> null)
+      .thenExecute(() -> {
+        throw new ZetaBlockedException("ZetaReadQuery", "test-key");
+      });
+
+    assertThatThrownBy(q::execute).isInstanceOf(ZetaBlockedException.class);
   }
 
   // ── Fallback null, null caching enabled → short-TTL null sentinel via the cache layer ──
@@ -251,18 +311,19 @@ class ZetaReadQueryTest {
     verify(zeta, never()).putThrough(anyString(), any(), any(), any(WritePolicy.class));
   }
 
-  // ── Single-use enforcement ──
+  // ── Reusable queries ──
 
   /**
-   * Queries are single-use: a second terminal call must fail loudly rather
-   * than re-issuing the read (which would double-count detection/reporting
-   * and re-run fallback side effects).
+   * Queries are reusable: every terminal call re-runs the resolution (no
+   * single-use guard — the read path is idempotent and re-reads stay cheap).
    */
   @Test
-  void execute_shouldRejectSecondExecution() {
+  void execute_shouldAllowReExecution() {
     when(zeta.get(anyString(), any(ReadPolicy.class))).thenReturn(Optional.of("v"));
-    query.withPrimary(() -> "db").execute();
-    assertThatThrownBy(query::execute).isInstanceOf(IllegalStateException.class);
+    query.withPrimary(() -> "db");
+    assertThat(query.execute()).contains("v");
+    assertThat(query.execute()).contains("v");
+    verify(zeta, times(2)).get(eq("test-key"), any(ReadPolicy.class));
   }
 
   // ── orNull / orElse terminals ──
@@ -359,6 +420,18 @@ class ZetaReadQueryTest {
   }
 
   // ── Builder chaining ──
+
+  @Test
+  void execute_shouldUsePutLocalWhenBroadcastDisabled() {
+    when(zeta.get(anyString(), any(ReadPolicy.class))).thenReturn(Optional.empty());
+    Optional<String> result = query
+      .withPrimary(() -> null)
+      .notAllowBroadcast()
+      .thenExecute(() -> "local-only")
+      .execute();
+    assertThat(result).contains("local-only");
+    verify(zeta).putLocal("test-key", "local-only", WritePolicy.of(0L, 0L));
+  }
 
   @Test
   void builder_shouldReturnSameInstance() {

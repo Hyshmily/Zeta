@@ -104,6 +104,7 @@ final class LocalPromotion {
     if (
       raw == null ||
       raw.getValue() == NullValue.INSTANCE ||
+      raw.isSoloFlight() ||
       !isPromotableState(raw) ||
       !hotKeyDetector.contains(cacheKey)
     ) {
@@ -131,7 +132,12 @@ final class LocalPromotion {
    * @return the promoted entry, or {@code current} when not promotable
    */
   CacheEntry promoteInLock(CacheEntry current, String cacheKey, LongSupplier hardTtlMs, LongSupplier softTtlMs) {
-    if (!isPromotableState(current) || current.getValue() == NullValue.INSTANCE || !hotKeyDetector.contains(cacheKey)) {
+    if (
+      !isPromotableState(current) ||
+      current.getValue() == NullValue.INSTANCE ||
+      current.isSoloFlight() ||
+      !hotKeyDetector.contains(cacheKey)
+    ) {
       return current;
     }
     long hotHardTtl = entryLifecycle.ttlPolicy().resolveEffectiveHotHard(hardTtlMs.getAsLong());
@@ -155,7 +161,7 @@ final class LocalPromotion {
       .asMap()
       .compute(cacheKey, (k, existing) -> {
         if (existing != null) {
-          if (!isPromotableState(existing) || !hotKeyDetector.contains(k)) {
+          if (!isPromotableState(existing) || existing.isSoloFlight() || !hotKeyDetector.contains(k)) {
             return existing;
           }
           promoted.set(true);

@@ -91,6 +91,8 @@ public class CircuitBreakerImpl implements CircuitBreaker, InitializingBean {
   private final LongAdder[] successCounts;
   private final long[] failureCounts;
   private final ScheduledExecutorService scheduler;
+  /** {@code false} when the scheduler is shared (registry-owned): {@link #close()} must not shut it down. */
+  private final boolean ownsScheduler;
   private final long slideMs;
   private volatile int currentIndex;
 
@@ -114,7 +116,7 @@ public class CircuitBreakerImpl implements CircuitBreaker, InitializingBean {
    * result per key, while a completed-future replay admitted in CLOSED cannot
    * release a slot from a later HALF_OPEN episode.
    */
-  private final ThreadLocal<ArrayDeque<Long>> probeReservations = ThreadLocal.withInitial(ArrayDeque::new);
+  private final ThreadLocal<ArrayDeque<Long>> probeReservations = new ThreadLocal<>();
 
   /**
    * Asymmetric probe-quota credit for HALF_OPEN recovery, adapted from
@@ -158,6 +160,21 @@ public class CircuitBreakerImpl implements CircuitBreaker, InitializingBean {
    *               read live on every decision so runtime toggles keep working (ADR-0082).
    */
   public CircuitBreakerImpl(CircuitBreakerSettings config) {
+    this(config, null);
+  }
+
+  /**
+   * Registry-shared variant: the slide task runs on the caller-supplied
+   * scheduler (one thread serves every breaker of the registry) instead of a
+   * private thread per breaker. The shared scheduler stays the caller's
+   * property — {@link #close()} cancels this breaker's slide task but never
+   * shuts the scheduler down.
+   *
+   * @param config          Circuit breaker configuration view (never {@code null})
+   * @param sharedScheduler scheduler hosting the slide task, or {@code null}
+   *                        for a private instance-level scheduler (legacy)
+   */
+  public CircuitBreakerImpl(CircuitBreakerSettings config, ScheduledExecutorService sharedScheduler) {
     this.config = config;
     this.bucketSize = config.getWindowBuckets();
     this.successCounts = new LongAdder[bucketSize];
@@ -173,11 +190,15 @@ public class CircuitBreakerImpl implements CircuitBreaker, InitializingBean {
     // Instance-level single-thread scheduler: the slide task is trivial, one daemon thread per
     // breaker is enough. Owned by this instance and shut down in close(), so hot-restart
     // (new classloader) scenarios do not leak threads or this instance via the task chain.
-    this.scheduler = new SafeScheduledExecutorService(1, r -> {
-      Thread t = new Thread(r, "zeta-cb");
-      t.setDaemon(true);
-      return t;
-    });
+    this.ownsScheduler = sharedScheduler == null;
+    this.scheduler =
+      sharedScheduler != null
+        ? sharedScheduler
+        : new SafeScheduledExecutorService(1, r -> {
+            Thread t = new Thread(r, "zeta-cb");
+            t.setDaemon(true);
+            return t;
+          });
   }
 
   /**
@@ -280,12 +301,20 @@ public class CircuitBreakerImpl implements CircuitBreaker, InitializingBean {
   }
 
   private void reserveProbeForCurrentThread(long generation) {
-    probeReservations.get().addLast(generation);
+    ArrayDeque<Long> reservations = probeReservations.get();
+    if (reservations == null) {
+      reservations = new ArrayDeque<>();
+      probeReservations.set(reservations);
+    }
+    reservations.addLast(generation);
   }
 
   /** Returns the reserved episode, or {@code Long.MIN_VALUE} when this call did not reserve a probe. */
   private long consumeProbeReservation() {
     ArrayDeque<Long> reservations = probeReservations.get();
+    if (reservations == null) {
+      return Long.MIN_VALUE;
+    }
     Long generation = reservations.pollFirst();
     if (reservations.isEmpty()) {
       probeReservations.remove();
@@ -637,7 +666,9 @@ public class CircuitBreakerImpl implements CircuitBreaker, InitializingBean {
   }
 
   /**
-   * Cancels the scheduled sliding task and shuts down the instance-level scheduler.
+   * Cancels the scheduled sliding task and — only for an instance-owned
+   * scheduler — shuts it down. A registry-shared scheduler outlives any one
+   * breaker (eviction must not stop its siblings' clocks).
    * Called by the Spring container (AutoCloseable destroy-method inference) on
    * context shutdown — releasing this instance and its config for GC.
    */
@@ -647,6 +678,8 @@ public class CircuitBreakerImpl implements CircuitBreaker, InitializingBean {
     if (future != null) {
       future.cancel(false);
     }
-    scheduler.shutdownNow();
+    if (ownsScheduler) {
+      scheduler.shutdownNow();
+    }
   }
 }

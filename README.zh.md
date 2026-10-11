@@ -138,11 +138,10 @@ zeta:
 
 ```yaml
 zeta:
+  app-name: myapp # 【必须】App 侧与 Worker 侧共用同一个键
   worker:
     enabled: true
-    routing:
-      app-name: myapp # 【必须】与 App 侧 zeta.local.app-name 一致
-      # 一致性哈希默认开启；Worker 通过心跳自动注册
+    # 一致性哈希默认开启；Worker 通过心跳自动注册
 
 # 多 Worker 示例：3 台机器，相同 app-name
 # 一致性哈希通过心跳自动将 key 路由到正确的 Worker
@@ -298,14 +297,13 @@ Optional<String> r = zeta.get("user:123", () -> redisTemplate.opsForValue().get(
 // D. getWithSoftExpire — 软失效（stale-while-revalidate）
 Optional<String> r = zeta.getWithSoftExpire("user:123", () -> redisTemplate.opsForValue().get("user:123"));
 
-// E. 流式读 API + fallback 链
+// E. 流式读 API + fallback 链（fallback 值默认广播到 peers —— .notAllowBroadcast() 保持仅本地；查询可复用）
 User user = zeta
   .read("user:42")
   .withPrimary(userRepo::findById)
   .thenExecute(backupRepo::findById)
   .withHardTtl(30_000)
   .withSoftTtl(10_000)
-  .allowBroadcast()
   .orNull();
 ```
 
@@ -357,7 +355,7 @@ Optional<User> user = zeta.computeIfAbsentWithSoftExpireOptional(
 **写操作**
 
 ```java
-// R. putThrough — 写穿透 + 广播
+// R. putThrough — 写穿透 + 广播（null 存短 TTL 空哨兵；Long.MAX_VALUE 硬 TTL + 广播会被拒绝——条目会活过版本 key）
 zeta.putThrough("user:123", newValue, () -> redisTemplate.opsForValue().set("user:123", newValue));
 
 // S. putThrough 带显式广播控制
@@ -371,10 +369,16 @@ zeta.putThrough("user:123", newValue, () -> redisTemplate.opsForValue().set("use
 // U. invalidateAfterPut — 变异后失效（集合类型）
 zeta.invalidateAfterPut(key, () -> redisTemplate.opsForSet().add(key, members));
 
+// U2. invalidateAndGetVersion — 失效并观测分配到的数据版本
+long version = zeta.invalidateAndGetVersion(key, InvalidatePolicy.defaults());
+
 // V. putLocal — 仅本地写，不广播、不 bump 版本
 zeta.putLocal("user:123", cachedValue, WritePolicy.of(hardTtlMs, softTtlMs)); // 指定 TTL
 
-// W. refresh — 本地驱逐后加载并缓存
+// V2. flushLocalEmergency — 紧急仅本地刷清（invalidateAllLocal 为已废弃别名）
+zeta.flushLocalEmergency();
+
+// W. refresh — 版本守卫的重载：先分配版本再加载，并发的新写获胜，陈旧加载不会回退
 zeta.refresh("user:123", () -> loadUser(123), WritePolicy.of(hardTtlMs, softTtlMs)); // 带 TTL 覆盖
 
 // X. 流式写 API
@@ -485,7 +489,7 @@ Worker 模块（`zeta-worker`）已将广播 exchange（默认 `zeta.send.exchan
 
 **共享 broker 的 appName 隔离（[ADR-0068](docs/adr/0068-broadcast-app-name-isolation.md)）**
 
-每条 HOT/COOL 决策广播都携带 `appName` 头（取自 Worker 的 `zeta.worker.routing.app-name`），App 侧监听器会丢弃与自身 `zeta.local.app-name` 不同的决策——fanout 交换机忽略 routing key，多应用共用一个 RabbitMQ 时，否则 A 应用的决策会触发 B 应用的无效预热。两条兼容规则：**不带** `appName` 头的消息（旧版 Worker，滚动升级窗口）一律照常处理；未配置 `app-name` 的应用保持原有全收行为。两端 `app-name` 不一致时决策会被静默丢弃（DEBUG 日志可见），务必保持一致。详见 [ADR-0068](docs/adr/0068-broadcast-app-name-isolation.md)。
+每条 HOT/COOL 决策广播都携带 `appName` 头（取自共享的 `zeta.app-name`），App 侧监听器会丢弃与自身不同的决策——fanout 交换机忽略 routing key，多应用共用一个 RabbitMQ 时，否则 A 应用的决策会触发 B 应用的无效预热。两条兼容规则：**不带** `appName` 头的消息（旧版 Worker，滚动升级窗口）一律照常处理；未配置 `app-name` 的应用保持原有全收行为。两端 `app-name` 不一致时决策会被静默丢弃（DEBUG 日志可见），务必保持一致。详见 [ADR-0068](docs/adr/0068-broadcast-app-name-isolation.md)。
 
 **PING/PONG 验证是辅助手段**
 

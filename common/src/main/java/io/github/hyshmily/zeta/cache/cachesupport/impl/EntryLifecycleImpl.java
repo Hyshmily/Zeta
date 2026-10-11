@@ -26,6 +26,7 @@ import io.github.hyshmily.zeta.model.DecisionStamp;
 import io.github.hyshmily.zeta.model.EntryDraft;
 import io.github.hyshmily.zeta.model.KeyState;
 import io.github.hyshmily.zeta.sharding.HealthView;
+import io.github.hyshmily.zeta.util.TimeSource;
 import lombok.extern.slf4j.Slf4j;
 import org.jspecify.annotations.Nullable;
 
@@ -241,11 +242,13 @@ public class EntryLifecycleImpl implements EntryLifecycle {
   /**
    * Entry factory for creating new entries — the single creation path. See
    * {@link EntryLifecycle#newEntry()} for the draft contract (value discipline,
-   * TTL resolution semantics).
+   * TTL resolution semantics). Blank drafts are born now: the value-birth
+   * stamp is preset to the current monotonic second (fresh value), while
+   * {@link #editEntry(CacheEntry)} preserves the source entry's stamp.
    */
   @Override
   public EntryDraft newEntry() {
-    return EntryDraft.blank(ttlPolicy);
+    return EntryDraft.blank(ttlPolicy).birthStampSec(TimeSource.monotonicSecondsSinceBoot());
   }
 
   /**

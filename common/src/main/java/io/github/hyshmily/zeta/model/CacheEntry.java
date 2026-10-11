@@ -99,6 +99,14 @@ public class CacheEntry {
    */
   private static final long SOLO_FLIGHT_FLAG = 1L << 58;
 
+  /**
+   * Maximum staleness of a lease-kept entry in seconds (30 min). A background
+   * refresh failure never extends an entry older than this — the lease is a
+   * provisional keep-alive, not indefinite life support. Second precision
+   * suffices because the bound is minute-scale.
+   */
+  public static final int MAX_LEASE_STALE_SEC = 30 * 60;
+
   /** TTL encoding units (2-bit selector in the packed {@code int}). */
   private static final int TTL_UNIT_MS = 0;
   private static final int TTL_UNIT_SECOND = 1;
@@ -224,6 +232,17 @@ public class CacheEntry {
   private final int normalSoftTtlMs;
 
   /**
+   * Monotonic seconds-since-boot when this entry's value was born (fresh load
+   * or successful refresh). The lease-on-failure path refuses entries older
+   * than {@link #MAX_LEASE_STALE_SEC}; {@code 0} means unknown (pre-upgrade
+   * entries, arithmetic-free drafts) and always admits. 4 bytes — second
+   * precision suffices for a minute-scale bound, and a {@code long} timestamp
+   * would double the cost on every entry.
+   */
+  @ToString.Include(name = "birthStampSec")
+  private final int birthStampSec;
+
+  /**
    * Creates a new entry, packing {@code decisionEpoch} + {@code keyState}
    * into {@link #packedState} and the four TTLs into compact encodings.
    *
@@ -276,7 +295,8 @@ public class CacheEntry {
     @Nullable KeyState keyState,
     long normalHardTtlMs,
     long normalSoftTtlMs,
-    boolean soloFlight
+    boolean soloFlight,
+    int birthStampSec
   ) {
     Assert.isTrue(
       isVersionDegraded == (dataVersion < 0),
@@ -297,6 +317,20 @@ public class CacheEntry {
     this.softExpireAtMs = softExpireAtMs;
     this.normalHardTtlMs = encodeTtl(normalHardTtlMs, "normalHardTtlMs");
     this.normalSoftTtlMs = encodeTtl(normalSoftTtlMs, "normalSoftTtlMs");
+    this.birthStampSec = birthStampSec;
+  }
+
+  /**
+   * Whether this entry is too old for another lease-on-failure extension:
+   * entries born more than {@link #MAX_LEASE_STALE_SEC} ago (on the monotonic
+   * axis) must hard-expire instead of being renewed. Unknown birth
+   * ({@code 0}) always admits.
+   *
+   * @param nowSec the current monotonic seconds-since-boot
+   * @return {@code true} when the entry exceeded the staleness cap
+   */
+  public boolean isLeaseStaleCapped(int nowSec) {
+    return birthStampSec != 0 && nowSec - birthStampSec > MAX_LEASE_STALE_SEC;
   }
 
   private static int stateCode(@Nullable KeyState keyState) {

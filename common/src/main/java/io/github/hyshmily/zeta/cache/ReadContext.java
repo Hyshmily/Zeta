@@ -48,6 +48,7 @@ final class ReadContext {
   private final boolean nullCaching;
   private final StalePolicy stalePolicy;
   private final boolean skipReport;
+  private final boolean failOnError;
   private final LongSupplier rawHardTtlMs;
   private final LongSupplier rawSoftTtlMs;
   private boolean hardResolved;
@@ -60,6 +61,7 @@ final class ReadContext {
     boolean nullCaching,
     StalePolicy stalePolicy,
     boolean skipReport,
+    boolean failOnError,
     LongSupplier rawHardTtlMs,
     LongSupplier rawSoftTtlMs
   ) {
@@ -67,6 +69,7 @@ final class ReadContext {
     this.nullCaching = nullCaching;
     this.stalePolicy = stalePolicy;
     this.skipReport = skipReport;
+    this.failOnError = failOnError;
     this.rawHardTtlMs = rawHardTtlMs;
     this.rawSoftTtlMs = rawSoftTtlMs;
   }
@@ -96,6 +99,7 @@ final class ReadContext {
       policy.nullCaching(),
       policy.stalePolicy(),
       skipReport,
+      policy.failOnError(),
       policy.hardTtlMs(),
       policy.softTtlMs()
     );
@@ -103,14 +107,23 @@ final class ReadContext {
 
   /**
    * Batch read helpers: the TTL overrides are already-resolved constants
-   * carried by the caller, so no laziness is involved.
+   * carried by the caller, so no laziness is involved. Batch fail-fast is
+   * applied by the batch loop itself, so the context carries {@code false}.
    */
-  static ReadContext of(Supplier<?> reader, long hardTtlMs, long softTtlMs, boolean skipReport) {
+  static ReadContext of(
+    Supplier<?> reader,
+    long hardTtlMs,
+    long softTtlMs,
+    boolean skipReport,
+    boolean nullCaching,
+    StalePolicy stalePolicy
+  ) {
     return new ReadContext(
       reader,
-      true,
-      StalePolicy.SOFT_REFRESH,
+      nullCaching,
+      stalePolicy,
       skipReport,
+      false,
       constant(hardTtlMs),
       constant(softTtlMs)
     );
@@ -130,6 +143,10 @@ final class ReadContext {
 
   boolean skipReport() {
     return skipReport;
+  }
+
+  boolean failOnError() {
+    return failOnError;
   }
 
   /**

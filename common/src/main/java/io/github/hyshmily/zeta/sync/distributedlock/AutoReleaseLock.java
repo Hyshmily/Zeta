@@ -71,7 +71,10 @@ public interface AutoReleaseLock extends AutoCloseable {
    * <p><b>Default:</b> {@code true} — an implementation that cannot observe
    * lease loss reports the handle as held. Callers must treat {@code false} as
    * the only authoritative answer; {@code true} means "no loss detected",
-   * never "loss is impossible".
+   * never "loss is impossible". Implementations that CAN observe loss
+   * (e.g. the Redis watchdog) must override and report honestly —
+   * {@link io.github.hyshmily.zeta.Zeta#tryLockAndRun} re-checks this after
+   * the action and reports {@code false} when the lease lapsed mid-action.
    *
    * @return {@code false} once the lease is known to have lapsed (or been
    *         stolen); {@code true} otherwise

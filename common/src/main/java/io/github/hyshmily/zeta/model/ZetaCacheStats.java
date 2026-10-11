@@ -25,27 +25,29 @@ import io.github.hyshmily.zeta.Zeta;
  *
  * <p><b>Availability:</b>
  * <ul>
- *   <li>{@code hitCount}, {@code missCount}, {@code hitRate}, and
- *       {@code evictionCount} are populated by the default L1 cache, which
+ *   <li>{@code hitCount}, {@code missCount}, and {@code hitRate} are
+ *       request-level counters maintained by the cache itself — one increment
+ *       per served key on the load-capable read paths. They are always
+ *       available, independent of Caffeine's {@code recordStats()}.</li>
+ *   <li>{@code evictionCount} is populated by the default L1 cache, which
  *       always enables Caffeine's {@code recordStats()}. If a custom
- *       {@code Cache} bean is supplied without {@code recordStats()}, all
- *       four fields report {@code 0}.</li>
+ *       {@code Cache} bean is supplied without {@code recordStats()}, it
+ *       reports {@code 0}.</li>
  *   <li>{@code estimatedSize} is always available — it reflects the
  *       underlying Caffeine estimate and does not require stats recording.</li>
  * </ul>
  *
- * <p>The counters are cumulative since the last Caffeine stats reset
- * (typically process lifetime). Use {@code hitRate} as a measure of
- * cache effectiveness: a low hit rate may indicate that the cache is
- * too small, TTLs are too short, or keys are not being reused.
+ * <p>The counters are cumulative for the process lifetime. Use {@code hitRate}
+ * as a measure of cache effectiveness: a low hit rate may indicate that the
+ * cache is too small, TTLs are too short, or keys are not being reused.
  *
- * @param hitCount       total number of successful cache hits since stats
- *                       recording was enabled (0 if not recorded)
- * @param missCount      total number of cache misses since stats recording
- *                       was enabled (0 if not recorded)
+ * @param hitCount       total number of request-level cache hits (served from
+ *                       L1 without invoking the reader, sentinel hits included)
+ * @param missCount      total number of request-level cache misses (reached
+ *                       the loader, including blocking REVALIDATE reloads)
  * @param hitRate        hit rate in {@code [0.0, 1.0]} — {@code hitCount /
- *                       (hitCount + missCount)}; {@code 0.0} if not recorded
- *                       or if no requests have been made
+ *                       (hitCount + missCount)}; {@code 0.0} if no requests
+ *                       have been made yet
  * @param evictionCount  total number of entries evicted by Caffeine
  *                       (due to size, weight, or TTL expiry); 0 if not
  *                       recorded

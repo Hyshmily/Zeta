@@ -19,11 +19,15 @@ import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import io.github.hyshmily.zeta.Internal;
 import io.github.hyshmily.zeta.cache.cachesupport.CircuitBreaker;
+import io.github.hyshmily.zeta.cache.cachesupport.CircuitBreakerRegistry;
+import io.github.hyshmily.zeta.cache.cachesupport.LoadStatus;
+import io.github.hyshmily.zeta.cache.cachesupport.LoaderOutcome;
 import io.github.hyshmily.zeta.cache.cachesupport.SingleFlight;
 import io.github.hyshmily.zeta.util.InterruptingAsync;
 import io.github.hyshmily.zeta.util.LogThrottle;
 import java.util.*;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Function;
 import java.util.function.Supplier;
@@ -54,8 +58,12 @@ public class SingleFlightImpl implements SingleFlight {
   private final int timeoutSeconds;
   /** Maximum number of in-flight keys tracked simultaneously. */
   private final int inflightMaxSize;
-  /** Circuit breaker for protecting remote calls from cascading failures. */
-  private final CircuitBreaker circuitBreaker;
+  /**
+   * Per-prefix circuit-breaker shards protecting remote calls from cascading
+   * failures — one sick datasource trips only its own prefix bucket, never
+   * the whole key space.
+   */
+  private final CircuitBreakerRegistry breakerRegistry;
 
   /**
    * Rate-limiter for the join-failure WARN: one per window — a data-source
@@ -84,6 +92,15 @@ public class SingleFlightImpl implements SingleFlight {
   private final AtomicLong timeoutCounter = new AtomicLong();
 
   /**
+   * Live count of reader suppliers currently executing on the dedup executor —
+   * gauges real in-flight loads without the per-call {@code estimatedSize()}
+   * segment scan on the admission path. Entries retained for the dedup TTL
+   * after completion are excluded: this answers "how many remote calls are
+   * running right now", which is what the high-inflight WARN is about.
+   */
+  private final AtomicInteger runningLoads = new AtomicInteger();
+
+  /**
    * Creates a SingleFlightImpl deduplicator that prevents concurrent in-flight loads
    * for the same key.
    *
@@ -100,22 +117,56 @@ public class SingleFlightImpl implements SingleFlight {
     Executor executor,
     CircuitBreaker circuitBreaker
   ) {
+    this(maxSize, ttlSec, timeoutSeconds, executor, CircuitBreakerRegistry.fixed(circuitBreaker));
+  }
+
+  /**
+   * Creates a SingleFlightImpl deduplicator fronted by a per-prefix breaker
+   * registry: each key's admission, success, and failure accounting routes to
+   * its own prefix shard.
+   *
+   * @param maxSize         maximum number of concurrent in-flight keys tracked
+   * @param ttlSec          time-to-live for dedup entries after write
+   * @param timeoutSeconds  per-supplier timeout before the future is completed exceptionally
+   * @param executor        async executor for supplier execution
+   * @param breakerRegistry per-prefix breaker shards (never {@code null})
+   */
+  public SingleFlightImpl(
+    int maxSize,
+    int ttlSec,
+    int timeoutSeconds,
+    Executor executor,
+    CircuitBreakerRegistry breakerRegistry
+  ) {
     this.inflightLoads = Caffeine.newBuilder().maximumSize(maxSize).expireAfterWrite(ttlSec, TimeUnit.SECONDS).build();
     this.executor = executor;
     this.timeoutSeconds = timeoutSeconds;
     this.inflightMaxSize = maxSize;
-    this.circuitBreaker = circuitBreaker;
+    this.breakerRegistry = breakerRegistry;
   }
 
   /**
-   * Whether the circuit breaker is currently open.
-   * Used by {@code HotKeyCache} to decide whether to return stale cache on miss.
+   * Whether any breaker shard is currently open.
+   * The no-key aggregate behind the stall gauges — per-key callers should
+   * prefer {@link #isBreakerOpen(String)}.
    *
-   * @return {@code true} if the breaker is open
+   * @return {@code true} if at least one shard is open
    */
   @Override
   public boolean isBreakerOpen() {
-    return circuitBreaker.isOpen();
+    return breakerRegistry.isAnyOpen();
+  }
+
+  /**
+   * Whether the given key's breaker shard is currently open.
+   * Used by {@code HotKeyCache} to decide whether to return stale cache on miss.
+   *
+   * @param cacheKey the key whose shard to check
+   * @return {@code true} if the key's shard breaker is open
+   */
+  @Override
+  public boolean isBreakerOpen(String cacheKey) {
+    return breakerRegistry.isOpen(cacheKey);
   }
 
   /**
@@ -136,20 +187,24 @@ public class SingleFlightImpl implements SingleFlight {
   }
 
   /**
-   * Load a value via the supplier, deduplicating concurrent requests for the same key.
-   * Thread-safe: concurrent calls for the same key share a single future.
+   * Explicit-outcome single-key load — the primary. Never throws for reader
+   * failures; they surface as {@code FAILED} (or a {@code SUPPRESSED_*} state
+   * for transient degradation) so the caller owns the {@code failOnError}
+   * decision. The legacy {@link SingleFlight#load(String, Supplier)} bridge
+   * rethrows {@code FAILED} to preserve the historical fail-fast behavior.
    *
    * @param cacheKey the key to load
    * @param reader   the value supplier (should not return {@code null})
    * @param <T>      the value type
-   * @return the loaded value, or empty if the load failed or timed out
+   * @return the explicit outcome (never {@code null})
    */
   @SuppressWarnings("all")
   @Override
-  public <T> Optional<T> load(String cacheKey, Supplier<T> reader) {
-    if (tryAdmitUnderBreaker()) {
+  public <T> LoaderOutcome<T> loadOutcome(String cacheKey, Supplier<T> reader) {
+    CircuitBreaker breaker = breakerRegistry.breakerFor(cacheKey);
+    if (tryAdmitUnderBreaker(breaker)) {
       log.debug("CB open, skip load for key={}", cacheKey);
-      return Optional.empty();
+      return LoaderOutcome.suppressed(LoadStatus.SUPPRESSED_BREAKER);
     }
 
     CompletableFuture<Object> future;
@@ -157,36 +212,39 @@ public class SingleFlightImpl implements SingleFlight {
       future = inflightLoads.asMap().computeIfAbsent(cacheKey, k -> submitReader(reader::get));
     } catch (RejectedExecutionException e) {
       // The executor rejected the task before any data-source call: no reader
-      // outcome exists, so resolve empty (parity with the timeout path) and
+      // outcome exists, so report suppression (parity with the timeout path) and
       // release the half-open probe reservation taken by tryAdmitUnderBreaker() — without
       // this callback the reserved slot leaks and the breaker sticks in
       // HALF_OPEN once the quota is drained by repeated rejections.
-      log.debug("SingleFlight executor rejected load, resolving empty: key={}", cacheKey);
-      circuitBreaker.onAbandoned();
-      return Optional.empty();
+      log.debug("SingleFlight executor rejected load, key={}", cacheKey);
+      breaker.onAbandoned();
+      return LoaderOutcome.suppressed(LoadStatus.SUPPRESSED_EXECUTOR);
     }
 
     try {
       T result = (T) future.join();
-      circuitBreaker.onSuccess();
+      breaker.onSuccess();
       // ADR-0002 catch-only semantics: keep the completed future cached until
       // expireAfterWrite(ttlSec) naturally evicts it, so late-arriving callers
       // reuse the result instead of re-running the supplier.
-      return Optional.ofNullable(result);
+      return result == null ? LoaderOutcome.sourceEmpty() : LoaderOutcome.loaded(result);
     } catch (CompletionException e) {
-      // Record EVERY failure against the breaker — the exception filter inside
+      // Record EVERY failure against the key's own shard — the exception filter inside
       // CircuitBreakerImpl decides whether the cause is ignorable. Previously
       // only TimeoutException was recorded, so a fast-failing data source
       // (connection refused, serialization error) never opened the breaker and
       // the stale-entry fallback in HotKeyCache never engaged.
-      circuitBreaker.onFailure(e.getCause());
-      handleFailure(cacheKey, e);
-      return Optional.empty();
+      breaker.onFailure(e.getCause());
+      return failedOutcome(cacheKey, e);
     }
   }
 
   /**
-   * {@inheritDoc}
+   * Legacy batch bridge over {@link #loadOutcome(Iterable, Function)}: outcomes
+   * mapped to {@code Optional}, {@code FAILED} swallowed (the historical
+   * {@code failOnError=false} behavior). The fail-fast variant lives as the
+   * interface default {@link SingleFlight#load(Iterable, Function, boolean)}.
+   *
    * <p>
    * Implementation note: submits all reader suppliers to the executor in a single
    * pass via {@code computeIfAbsent}, then collects results.  This avoids nested
@@ -196,19 +254,26 @@ public class SingleFlightImpl implements SingleFlight {
   @SuppressWarnings("all")
   @Override
   public <T> Map<String, Optional<T>> load(Iterable<String> cacheKeys, Function<? super String, ? extends T> reader) {
-    return load(cacheKeys, reader, false);
+    Map<String, LoaderOutcome<T>> outcomes = loadOutcome(cacheKeys, reader);
+    Map<String, Optional<T>> results = new LinkedHashMap<>();
+    for (Map.Entry<String, LoaderOutcome<T>> e : outcomes.entrySet()) {
+      results.put(e.getKey(), e.getValue().toOptional());
+    }
+    return results;
   }
 
   /**
-   * Batch variant with an explicit failure policy — see
-   * {@link SingleFlight#load(Iterable, Function, boolean)} for the contract.
+   * Batch explicit-outcome primary with the two-phase submit/collect shape:
+   * Phase 1 submits every reader in one pass, capturing the dedup future per
+   * key; Phase 2 joins the captured references. Never throws for reader
+   * failures — they surface per key as {@code FAILED} and the caller applies
+   * its own fail-fast policy.
    */
   @SuppressWarnings("all")
   @Override
-  public <T> Map<String, Optional<T>> load(
+  public <T> Map<String, LoaderOutcome<T>> loadOutcome(
     Iterable<String> cacheKeys,
-    Function<? super String, ? extends T> reader,
-    boolean failOnError
+    Function<? super String, ? extends T> reader
   ) {
     List<String> keys = new ArrayList<>();
     cacheKeys.forEach(keys::add);
@@ -216,78 +281,68 @@ public class SingleFlightImpl implements SingleFlight {
       return Collections.emptyMap();
     }
 
-    if (tryAdmitUnderBreaker()) {
-      Map<String, Optional<T>> empty = new LinkedHashMap<>();
-      for (String key : keys) empty.put(key, Optional.empty());
-      return empty;
+    // Phase 0: admit every key under its own prefix shard. A tripped shard
+    // suppresses only its own keys — siblings behind healthy shards still load.
+    Map<String, CircuitBreaker> admitted = new LinkedHashMap<>();
+    Map<String, LoaderOutcome<T>> suppressed = new LinkedHashMap<>();
+    for (String key : keys) {
+      CircuitBreaker breaker = breakerRegistry.breakerFor(key);
+      if (tryAdmitUnderBreaker(breaker)) {
+        suppressed.put(key, LoaderOutcome.suppressed(LoadStatus.SUPPRESSED_BREAKER));
+      } else {
+        admitted.put(key, breaker);
+      }
     }
 
-    // Phase 1: submit every reader in one pass, capturing the dedup future per
+    // Phase 1: submit every admitted reader in one pass, capturing the dedup future per
     // key. The captured reference (not a second map lookup) is joined in phase
     // 2 — one hash round trip fewer, and the captured future always completes
     // even if a concurrent failure removes it from the dedup cache, so the
     // null-future branch of the former get()-based collect is gone.
-    List<CompletableFuture<Object>> futures = new ArrayList<>(keys.size());
+    List<String> admittedKeys = new ArrayList<>(admitted.keySet());
+    List<CompletableFuture<Object>> futures = new ArrayList<>(admittedKeys.size());
     try {
-      for (String key : keys) {
+      for (String key : admittedKeys) {
         futures.add(inflightLoads.asMap().computeIfAbsent(key, ignored -> submitReader(() -> reader.apply(key))));
       }
     } catch (RejectedExecutionException e) {
-      // Executor saturation is not a reader failure: resolve empty for every
-      // key in both failure modes (mirrors the breaker-interception path,
-      // which resolves empty even under failOnError). Release the half-open
-      // probe reservation taken by tryAdmitUnderBreaker(); readers already submitted
-      // keep running and their results stay in the dedup cache for late
-      // callers (ADR-0002).
-      log.debug("SingleFlight executor rejected batch load, resolving empty: {} keys", keys.size());
-      circuitBreaker.onAbandoned();
-      Map<String, Optional<T>> empty = new LinkedHashMap<>();
-      for (String key : keys) {
-        empty.put(key, Optional.empty());
+      // Executor saturation is not a reader failure: report suppression for
+      // every admitted key. Release each key's half-open probe reservation taken
+      // by tryAdmitUnderBreaker(); readers already submitted keep running and
+      // their results stay in the dedup cache for late callers (ADR-0002).
+      log.debug("SingleFlight executor rejected batch load: {} keys", admittedKeys.size());
+      for (String key : admittedKeys) {
+        admitted.get(key).onAbandoned();
+        suppressed.put(key, LoaderOutcome.suppressed(LoadStatus.SUPPRESSED_EXECUTOR));
       }
-      return empty;
+      return suppressed;
     }
 
-    Map<String, Optional<T>> results = new LinkedHashMap<>();
-    for (int i = 0; i < keys.size(); i++) {
-      String key = keys.get(i);
+    Map<String, LoaderOutcome<T>> outcomes = new LinkedHashMap<>(suppressed);
+    for (int i = 0; i < admittedKeys.size(); i++) {
+      String key = admittedKeys.get(i);
+      CircuitBreaker breaker = admitted.get(key);
       CompletableFuture<Object> future = futures.get(i);
       try {
         T result = (T) future.join();
-        circuitBreaker.onSuccess();
+        breaker.onSuccess();
         // ADR-0002 catch-only semantics: keep the completed future cached until
         // expireAfterWrite(ttlSec) naturally evicts it (late callers reuse).
-        results.put(key, Optional.ofNullable(result));
+        outcomes.put(key, result == null ? LoaderOutcome.sourceEmpty() : LoaderOutcome.loaded(result));
       } catch (CompletionException e) {
-        // Every failure is recorded against the breaker (the filter inside
+        // Every failure is recorded against the key's own shard (the filter inside
         // CircuitBreakerImpl decides ignorability) — see the single-key path.
         // Joining the captured reference means a waiter observes the same
         // failure as the caller that caused it, instead of silently
         // resolving empty when the dedup entry was invalidated mid-flight.
-        circuitBreaker.onFailure(e.getCause());
-        Throwable cause = e.getCause();
-        // The contract resolves timeouts to empty in both failure modes; the
-        // InterruptedException branch is defensive (CompletableFuture.join is
-        // uninterruptible, so a join cause is only ever a reader failure).
-        boolean resolveEmpty = cause instanceof TimeoutException || cause instanceof InterruptedException;
-        if (cause instanceof TimeoutException) {
-          timeoutCounter.incrementAndGet();
-        }
-        if (failOnError && !resolveEmpty) {
-          // Fail-fast batch: handleFailure invalidates the dedup future so a
-          // retry re-runs the reader, then rethrows the cause — the first real
-          // reader failure aborts the collection and propagates to the caller.
-          handleFailure(key, e);
-        }
-        logFailure(key, e);
-
-        inflightLoads.invalidate(key);
-        results.put(key, Optional.empty());
-
-        if (cause instanceof InterruptedException) {
-          Thread.currentThread().interrupt();
-        }
+        breaker.onFailure(e.getCause());
+        outcomes.put(key, failedOutcome(key, e));
       }
+    }
+    // Re-assemble in caller input order (suppressed keys were collected first).
+    Map<String, LoaderOutcome<T>> results = new LinkedHashMap<>(outcomes.size());
+    for (String key : keys) {
+      results.put(key, outcomes.get(key));
     }
     return results;
   }
@@ -337,16 +392,18 @@ public class SingleFlightImpl implements SingleFlight {
   }
 
   /**
-   * Check the circuit breaker and log a warning if the inflight queue is high.
+   * Check the key's breaker shard and log a warning if the inflight queue is high.
    *
-   * @return {@code true} if the request was <b>intercepted</b> (the breaker is open
+   * @param breaker the responsible shard (resolved by the caller, so admission
+   *                and settlement always pair on the same instance)
+   * @return {@code true} if the request was <b>intercepted</b> (the shard breaker is open
    *         and the caller must resolve to empty), {@code false} if it may proceed
    */
-  private boolean tryAdmitUnderBreaker() {
-    if (!circuitBreaker.allowRequest()) {
+  private boolean tryAdmitUnderBreaker(CircuitBreaker breaker) {
+    if (!breaker.allowRequest()) {
       return true;
     }
-    long inflight = estimatedInflightSize();
+    long inflight = runningLoads.get();
     if (inflight > inflightMaxSize * 0.8 && inflightLogThrottle.tryAcquire()) {
       log.warn("SingleFlight inflight queue is high: {}/{}", inflight, inflightMaxSize);
     }
@@ -381,52 +438,41 @@ public class SingleFlightImpl implements SingleFlight {
     // Timeout machinery shared with the background-refresh path: the shared
     // logic (thread capture, race-once latch, interrupt-flag cleanup) lives in
     // {@link InterruptingAsync}.
-    return InterruptingAsync.supplyAsync(reader, executor, timeoutSeconds, TimeUnit.SECONDS);
+    return InterruptingAsync.supplyAsync(() -> {
+        runningLoads.incrementAndGet();
+        try {
+          return reader.get();
+        } finally {
+          runningLoads.decrementAndGet();
+        }
+      }, executor, timeoutSeconds, TimeUnit.SECONDS);
   }
 
   /**
-   * Handle a {@link CompletionException} from a future join by logging,
-   * invalidating the cache entry, and rethrowing an appropriate exception.
+   * Classify a {@link CompletionException} from a future join into an explicit
+   * outcome: log once (rate-limited), evict the dedup entry so a retry
+   * re-runs the reader, count timeouts for the stall gauge, and restore the
+   * interrupt bit when the cause is an {@code InterruptedException} (which —
+   * six-state design — maps to {@code FAILED}, never to a suppression state).
    *
    * @param cacheKey the key whose load failed
    * @param e        the caught {@link CompletionException}
-   * @throws RuntimeException wrapping the actual cause
-   * @throws Error          if the cause is an {@link Error}
+   * @return the classified outcome (never {@code null})
    */
-  private void handleFailure(String cacheKey, CompletionException e) {
+  private <T> LoaderOutcome<T> failedOutcome(String cacheKey, CompletionException e) {
     logFailure(cacheKey, e);
     inflightLoads.invalidate(cacheKey);
 
-    Throwable cause = e.getCause();
+    Throwable cause = e.getCause() != null ? e.getCause() : e;
     if (cause instanceof InterruptedException) {
       Thread.currentThread().interrupt();
-      return;
+      return LoaderOutcome.failed(cause);
     }
     if (cause instanceof TimeoutException) {
       timeoutCounter.incrementAndGet();
-      return;
+      return LoaderOutcome.suppressed(LoadStatus.SUPPRESSED_TIMEOUT);
     }
-    propagateCause(e);
-  }
-
-  /**
-   * Rethrow a {@link CompletionException}'s cause in its natural form: a
-   * {@code RuntimeException} as-is, an {@code Error} as-is, anything else wrapped
-   * back in a {@code CompletionException}. Used by the single-key failure path and
-   * the fail-fast batch path (where the interface contract requires every
-   * non-timeout reader failure to propagate).
-   *
-   * @param e the caught {@link CompletionException}
-   */
-  private static void propagateCause(CompletionException e) {
-    Throwable cause = e.getCause();
-    if (cause instanceof RuntimeException re) {
-      throw re;
-    }
-    if (cause instanceof Error err) {
-      throw err;
-    }
-    throw new CompletionException(cause);
+    return LoaderOutcome.failed(cause);
   }
 
   /**

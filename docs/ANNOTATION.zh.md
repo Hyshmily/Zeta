@@ -44,7 +44,7 @@ Zeta / HotKeyCache
 | --- | --- | --- | --- |
 | `@CacheTTL` | 方法/类 | `@Cacheable` | 覆盖硬/软 TTL。支持静态值与 SpEL（`hardTtlSpEl`、`softTtlSpEl`）。SpEL 每次调用最多求值一次，仅在 miss/提升/刷新时。类级注解作为所有方法的回退 |
 | `@Intercept` | 方法 | `@Cacheable` | 按触发模式（`IS_LOCAL_HOT` / `FORCE` / `QPS` / `CONCURRENT_THREADS`）跳过方法体。模式专属配置通过嵌套注解：`@Intercept.QpsConfig`（`threshold`、`blockDurationMs`）和 `@Intercept.ConcurrentConfig`（`threshold`）。兜底优先级：`@Intercept.fallback()` → `@Fallback` → `peek()`。拦截时递增本地探测器（不上报 Worker） |
-| `@Fallback` | 方法 | `@Cacheable` | 被封锁/拦截/异常时的兜底值（SpEL）或命名约定方法（`{方法名}Fallback`） |
+| `@Fallback` | 方法 | `@Cacheable` | 拦截/异常时的兜底值（SpEL）或命名约定方法（`{方法名}Fallback`）；黑名单 BLOCK 永不进兜底，直接抛给调用方 |
 | `@NullCaching` | 方法 | `@Cacheable` | **opt-out**：null 结果默认缓存（短 TTL 哨兵，防穿透）；`@NullCaching(false)` 禁止该方法的 null 缓存 |
 | `@SkipBroadcast` | 方法 | 全部三种 | 禁止跨实例 AMQP 同步消息（仅本地写/失效，`@CacheCondition` 清除也仅本地） |
 | `@Preload` | 方法 | `@Cacheable` | 预膨胀已知热 key 的 HeavyKeeper 计数（静态 `keys[]` 或动态 `keyExpr` SpEL） |
@@ -114,7 +114,7 @@ Zeta / HotKeyCache
 
 1. **NORMAL 条目创建**——正的 `@CacheTTL`（静态或 SpEL）覆盖优先生效；为 0 时用配置默认值（`zeta.local.*`）。
 2. **提升 HOT / HOT 续期**——有效热 TTL = `max(覆盖值, 热默认值)`：覆盖只能抬高下限，提升永不缩短条目寿命。普通命中时覆盖 supplier 不求值，提升使用配置的热默认值。
-3. **软过期（stale-while-revalidate）**——仅由全局配置决定。注解读路径始终经软过期入口进入，功能全局关闭时自动降级。TTL 覆盖不再对其构成门槛。
+3. **软过期（stale-while-revalidate）**——仅由全局配置决定。注解 `sync=true` 读路径经软过期入口进入，功能全局关闭时自动降级；默认非 sync 路径经带检测的 peek（`peekAndTag`，含过期检查）服务，无后台刷新。TTL 覆盖不再对其构成门槛。
 4. **TTL 抖动**——默认 ±5%（`zeta.local.ttl-jitter-ratio`），作用于所有过期时间戳。
 
 ---

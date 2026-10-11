@@ -22,6 +22,7 @@ import io.github.hyshmily.zeta.cache.CentralDispatcher;
 import io.github.hyshmily.zeta.cache.HotKeyCache;
 import io.github.hyshmily.zeta.cache.cachesupport.BroadcastBuffer;
 import io.github.hyshmily.zeta.cache.cachesupport.EntryLifecycle;
+import io.github.hyshmily.zeta.cache.cachesupport.LoaderOutcome;
 import io.github.hyshmily.zeta.cache.cachesupport.SingleFlight;
 import io.github.hyshmily.zeta.cache.cachesupport.impl.EntryLifecycleImpl;
 import io.github.hyshmily.zeta.cache.codec.CacheCompressor;
@@ -117,6 +118,11 @@ public class HotHitBenchmark {
     @Override
     public <T> Optional<T> load(String cacheKey, Supplier<T> reader) {
       throw new AssertionError("SingleFlight.load invoked on an L1 hit");
+    }
+
+    @Override
+    public <T> LoaderOutcome<T> loadOutcome(String cacheKey, Supplier<T> reader) {
+      throw new AssertionError("SingleFlight.loadOutcome invoked on an L1 hit");
     }
 
     @Override

@@ -17,8 +17,6 @@ package io.github.hyshmily.zeta.cache.fluentAPI;
 
 import io.github.hyshmily.zeta.Zeta;
 import io.github.hyshmily.zeta.model.WritePolicy;
-import java.util.concurrent.atomic.AtomicBoolean;
-import org.springframework.util.Assert;
 
 /**
  * Fluent write command for the HotKey cache.
@@ -39,7 +37,7 @@ import org.springframework.util.Assert;
  *       .invalidate();
  * </pre>
  *
- * <p>Instances are single-use.
+ * <p>Instances are reusable; every terminal call re-runs its operation.
  */
 public class ZetaWriteCommand<T> {
 
@@ -47,7 +45,6 @@ public class ZetaWriteCommand<T> {
   private final String cacheKey;
   private long hardTtlMs = 0;
   private long softTtlMs = 0;
-  private final AtomicBoolean executed = new AtomicBoolean(false);
 
   /**
    * Creates a new write command bound to the given cache key.
@@ -89,7 +86,6 @@ public class ZetaWriteCommand<T> {
    * @param writer the data-source mutation to execute before caching
    */
   public void putThrough(T value, Runnable writer) {
-    beginExecution();
     zeta.putThrough(cacheKey, value, writer, WritePolicy.of(hardTtlMs, softTtlMs));
   }
 
@@ -106,7 +102,6 @@ public class ZetaWriteCommand<T> {
    */
   public void invalidateAfterMutation(Runnable mutation) {
     assertNoUnusedTtl("invalidateAfterMutation");
-    beginExecution();
     zeta.invalidateAfterPut(cacheKey, mutation);
   }
 
@@ -120,7 +115,6 @@ public class ZetaWriteCommand<T> {
    */
   public void invalidate() {
     assertNoUnusedTtl("invalidate");
-    beginExecution();
     zeta.invalidate(cacheKey);
   }
 
@@ -136,21 +130,10 @@ public class ZetaWriteCommand<T> {
   private void assertNoUnusedTtl(String terminal) {
     if (hardTtlMs != 0 || softTtlMs != 0) {
       throw new IllegalStateException(
-        "withHardTtl/withSoftTtl apply only to putThrough(); this " + terminal
-          + "() call would silently drop the requested TTL override"
+        "withHardTtl/withSoftTtl apply only to putThrough(); this " +
+          terminal +
+          "() call would silently drop the requested TTL override"
       );
     }
-  }
-
-  /**
-   * Marks this command as executed — single-use enforcement for the terminal methods.
-   *
-   * @throws IllegalStateException if this command has already been executed
-   */
-  private void beginExecution() {
-    Assert.state(
-      executed.compareAndSet(false, true),
-      "This ZetaWriteCommand has already been executed and cannot be reused."
-    );
   }
 }

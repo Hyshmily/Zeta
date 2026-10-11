@@ -241,7 +241,7 @@ public class CacheSyncListener {
         // (rate-limited) plus a counter/endpoint signal (ADR-0068).
         if (isolation.tryLog()) {
           log.warn(
-            "Dropped sync message from another application: senderApp={}, localApp={} ({} total drops, further warnings suppressed for 10s; check zeta.local.app-name)",
+            "Dropped sync message from another application: senderApp={}, localApp={} ({} total drops, further warnings suppressed for 10s; check zeta.app-name)",
             senderApp,
             isolation.appName(),
             total

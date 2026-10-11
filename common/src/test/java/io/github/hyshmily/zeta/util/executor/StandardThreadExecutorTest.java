@@ -202,10 +202,35 @@ class StandardThreadExecutorTest {
       }
       assertThat(done.await(5, TimeUnit.SECONDS)).isTrue();
       assertThat(tasks.get()).isEqualTo(20);
-      assertThat(executor.getSubmittedTasksCount()).isZero();
+      // The latch is released from inside the task body, but the counter is
+      // decremented by ThreadPoolExecutor.afterExecute, which runs after the
+      // body returns. Asserting immediately after the latch therefore raced the
+      // worker's bookkeeping and failed intermittently. Poll for the drain
+      // instead: the counter is only ever conservative (it over-counts while a
+      // task is between "body finished" and "afterExecute"), so waiting for zero
+      // is both safe and deterministic.
+      assertThat(awaitSubmittedCountZero(executor)).as("submittedTasksCount returns to zero after completion").isTrue();
     } finally {
       executor.shutdownNow();
     }
+  }
+
+  /**
+   * Wait for {@code getSubmittedTasksCount()} to reach zero, bounded so a genuine
+   * leak fails the test rather than hanging it.
+   *
+   * @param executor the pool under test
+   * @return true if the counter reached zero within the timeout
+   */
+  private static boolean awaitSubmittedCountZero(StandardThreadExecutor executor) throws InterruptedException {
+    long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+    while (System.nanoTime() < deadline) {
+      if (executor.getSubmittedTasksCount() == 0) {
+        return true;
+      }
+      Thread.sleep(1L);
+    }
+    return executor.getSubmittedTasksCount() == 0;
   }
 
   @Test

@@ -409,25 +409,59 @@ class BroadcastBufferTest {
   }
 
   /**
-   * Verifies that when the scheduler rejects the forced cap-flush scheduling, record degrades to a
-   * synchronous flush instead of stranding the pending entries.
+   * Verifies that crossing the pending cap does not submit one scheduler task per
+   * record.
+   *
+   * <p>The over-the-cap branch used to call {@code scheduler.execute(flushAndReset)}
+   * unconditionally, so a burst across the cap enqueued an unbounded number of
+   * tasks into the shared scheduler's queue — delaying the reporter flush tick
+   * and the sketch decay that share the pool, and each of which had to run
+   * before the queue could be serviced. The cap path now arms (or re-arms) a
+   * single task instead.
+   *
+   * <p>Pinned by asserting {@code execute} is never used for the forced flush
+   * and that scheduling stays bounded as the burst continues.
    */
   @Test
-  void record_whenCapFlushScheduleRejected_shouldFlushSynchronously() {
-    ScheduledExecutorService rejecting = mock(ScheduledExecutorService.class);
-    when(rejecting.schedule(any(Runnable.class), anyLong(), any(TimeUnit.class)))
-      .thenReturn(mock(ScheduledFuture.class));
-    doThrow(new RejectedExecutionException("saturated")).when(rejecting).execute(any(Runnable.class));
+  void record_whenCapExceeded_shouldNotSubmitOneTaskPerRecord() {
+    ScheduledExecutorService scheduler = mock(ScheduledExecutorService.class);
+    @SuppressWarnings("unchecked")
+    ScheduledFuture<Object> armed = mock(ScheduledFuture.class);
+    doReturn(armed).when(scheduler).schedule(any(Runnable.class), anyLong(), any(TimeUnit.class));
+    // An armed task that is already due: no re-arm needed, and no new task added.
+    when(armed.isDone()).thenReturn(false);
+    when(armed.getDelay(any(TimeUnit.class))).thenReturn(0L);
 
-    BroadcastBuffer buf = new BroadcastBuffer(rejecting, Optional.of(publisher), 5000L, Math.max(5000L, 2_000), null);
+    BroadcastBuffer buf = new BroadcastBuffer(scheduler, Optional.of(publisher), 5000L, Math.max(5000L, 2_000), null);
 
-    for (int i = 0; i < BroadcastBuffer.MAX_PENDING_ENTRIES; i++) {
+    for (int i = 0; i < BroadcastBuffer.MAX_PENDING_ENTRIES + 50; i++) {
       buf.record("key-" + i, i, false);
     }
-    buf.record("key-cap", 1L, false);
 
-    verify(publisher, times(BroadcastBuffer.MAX_PENDING_ENTRIES + 1)).broadcastRefresh(anyString(), anyLong(), anyBoolean());
-    verify(publisher).broadcastRefresh("key-cap", 1L, false);
+    // The forced flush never uses execute() — that was the unbounded path.
+    verify(scheduler, never()).execute(any(Runnable.class));
+    // A burst across the cap must not schedule a task per record: one arm for the
+    // deferral window plus at most one re-arm when the cap is first crossed.
+    verify(scheduler, atMost(3)).schedule(any(Runnable.class), anyLong(), any(TimeUnit.class));
+  }
+
+  /**
+   * Control for the test above: the deferral path does arm exactly one task, so
+   * the bounded-schedule assertion above is measuring the cap branch and not a
+   * buffer that never schedules anything.
+   */
+  @Test
+  void record_firstRecord_shouldArmExactlyOneFlushTask() {
+    ScheduledExecutorService scheduler = mock(ScheduledExecutorService.class);
+    @SuppressWarnings("unchecked")
+    ScheduledFuture<Object> armed = mock(ScheduledFuture.class);
+    doReturn(armed).when(scheduler).schedule(any(Runnable.class), anyLong(), any(TimeUnit.class));
+    when(armed.isDone()).thenReturn(false);
+
+    BroadcastBuffer buf = new BroadcastBuffer(scheduler, Optional.of(publisher), 5000L, Math.max(5000L, 2_000), null);
+    buf.record("key1", 1L, false);
+
+    verify(scheduler, times(1)).schedule(any(Runnable.class), anyLong(), any(TimeUnit.class));
   }
 
   /**

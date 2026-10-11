@@ -23,12 +23,15 @@ import java.lang.annotation.Target;
 /**
  * Declares a fallback value or method for a {@link org.springframework.cache.annotation.Cacheable @Cacheable} READ operation.
  * <p>
- * The fallback is invoked in three scenarios:
+ * The fallback is invoked in two scenarios:
  * <ol>
- *   <li>A blacklist rule blocks the cache key</li>
  *   <li>The key is a local hot key and {@link Intercept @Intercept} is present</li>
  *   <li>The cache loader throws a {@link RuntimeException}</li>
  * </ol>
+ * <p>
+ * A blacklist block ({@link io.github.hyshmily.zeta.exception.ZetaBlockedException})
+ * NEVER routes to the fallback — policy rejection is not a method failure and
+ * always propagates to the caller.
  * <p>
  * When {@link #value()} is non-empty, it is evaluated as a SpEL expression
  * (method parameters are available as {@code #paramName} variables).

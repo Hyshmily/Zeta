@@ -27,6 +27,7 @@ import io.github.hyshmily.zeta.annotation.annotationsupporter.NullValue;
 import io.github.hyshmily.zeta.autoconfigure.ZetaProperties;
 import io.github.hyshmily.zeta.cache.cachesupport.BroadcastBuffer;
 import io.github.hyshmily.zeta.cache.cachesupport.EntryLifecycle;
+import io.github.hyshmily.zeta.cache.cachesupport.LoaderOutcome;
 import io.github.hyshmily.zeta.cache.cachesupport.SingleFlight;
 import io.github.hyshmily.zeta.cache.cachesupport.impl.EntryLifecycleImpl;
 import io.github.hyshmily.zeta.scheduler.BackgroundRefresher;
@@ -105,18 +106,20 @@ class VersionStampedLoadTest {
     cache = Caffeine.newBuilder().maximumSize(10_000).build();
     singleFlight = mock(SingleFlight.class);
     // Run the composite (value read + version probe) supplier inline.
-    when(singleFlight.load(anyString(), any())).thenAnswer(inv -> {
+    when(singleFlight.loadOutcome(anyString(), any())).thenAnswer(inv -> {
       @SuppressWarnings("all")
       Supplier<Object> supplier = inv.getArgument(1);
-      return Optional.ofNullable(supplier.get());
+      Object v = supplier.get();
+      return v == null ? LoaderOutcome.sourceEmpty() : LoaderOutcome.loaded(v);
     });
-    when(singleFlight.load(anyIterable(), any(), anyBoolean())).thenAnswer(inv -> {
+    when(singleFlight.loadOutcome(anyIterable(), any())).thenAnswer(inv -> {
       Iterable<String> keys = inv.getArgument(0);
       @SuppressWarnings("all")
       Function<String, Object> fn = inv.getArgument(1);
-      Map<String, Optional<Object>> out = new LinkedHashMap<>();
+      Map<String, LoaderOutcome<Object>> out = new LinkedHashMap<>();
       for (String key : keys) {
-        out.put(key, Optional.ofNullable(fn.apply(key)));
+        Object v = fn.apply(key);
+        out.put(key, v == null ? LoaderOutcome.sourceEmpty() : LoaderOutcome.loaded(v));
       }
       return out;
     });
@@ -424,7 +427,9 @@ class VersionStampedLoadTest {
       0L,
       0L,
       true,
-      false
+      false,
+      true,
+      StalePolicy.SOFT_REFRESH
     );
 
     assertThat(result.get("a")).contains("val-a");

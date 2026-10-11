@@ -153,6 +153,10 @@ Zeta 端点是 Actuator `@Endpoint` Bean（不是普通的 `@RestController`）�
 | `zeta.expire.refresh.lease.debt.keys` | Gauge | —                | 当前被续租的 key 数（staleDebt 大小） |
 | `zeta.version.degraded.total`       | Gauge | —                    | 累计版本回退次数                 |
 | `zeta.sync.dedup.size`              | Gauge | —                    | 广播去重缓存大小                 |
+| `zeta.sync.send.failed.total`       | Gauge | —                    | 同步面发布失败累计数（broker 错误）；INVALIDATE 从未离开本节点的唯一信号 |
+| `zeta.lock.acquired.total`          | Gauge | —                    | 分布式锁累计获取成功数           |
+| `zeta.lock.contended.total`         | Gauge | —                    | `tryLock` 返回 null 中对端持锁的累计数（正常竞争） |
+| `zeta.lock.error.total`             | Gauge | —                    | `tryLock` 返回 null 中由 provider 故障导致的累计数（Redis 宕机、中断、非法 key） |
 | `zeta.worker.alive`                 | Gauge | —                    | 任意 Worker 分片是否存活（0/1）  |
 | `zeta.worker.tracked.keys`          | Gauge | —                    | 状态机追踪的 key 数（仅统计曾经热过的 key） |
 | `zeta.worker.detector.keys`         | Gauge | —                    | Worker 检测器中持有活跃滑动窗口条目的 key 数（key 级内存的主要占用者） |
@@ -168,6 +172,8 @@ Zeta 端点是 Actuator `@Endpoint` Bean（不是普通的 `@RestController`）�
 | `zeta.dispatch.rejected.total`      | Gauge | `plane`              | 被单 key 队列上限拒绝数          |
 
 `zeta.dispatch.*` 指标带 `plane=sync`（同步面）或 `plane=worker`（决策面）标签；当前部署模式下不存在的面不会注册任何指标。把 `pending.units` 与 `remaining.units` 一起看，才能区分"没有流量"与"闸门已饱和"——在这组指标出现之前，这两种情况在观测上无法区分，且只在提交已被丢弃之后才通过一条限流 WARN 体现。
+
+`zeta.lock.*` 之所以存在，是因为 `tryLock` 把两种截然不同的结果压成同一个 `null` 返回："对端正持有锁"（正常竞争，高负载下预期可见）与"provider 故障"（Redis 宕机、线程中断、非法 key——真正的故障）。只有拆开才能分辨：应对 `zeta.lock.error.total` 告警，而 `zeta.lock.contended.total` 上升应视为容量信号而非故障。三者都是累计计数、以 gauge 暴露，因此速率要看抓取之间的差值而非原始值。
 
 ### Worker 检测面指标（`zeta.worker.detector.keys`、`zeta.worker.decisions.*`、`zeta.worker.report.eval`）
 

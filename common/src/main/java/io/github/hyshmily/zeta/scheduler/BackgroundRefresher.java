@@ -50,4 +50,48 @@ public interface BackgroundRefresher {
 
   /** Expose the refresh limiter semaphore for monitoring purposes. */
   Semaphore getRefreshLimiter();
+
+  /**
+   * Cumulative background-refresh failures that were granted a lease
+   * (stale entry kept servable, ADR-0036). {@code 0} for implementations
+   * without lease accounting.
+   *
+   * @return monotonic lease count
+   */
+  default long getRefreshFailureLeased() {
+    return 0L;
+  }
+
+  /**
+   * Cumulative lease refusals because the entry exceeded the staleness cap
+   * (birth-based age bound).
+   *
+   * @return monotonic cap count
+   */
+  default long getLeaseStaleCapped() {
+    return 0L;
+  }
+
+  /**
+   * Cumulative lease refusals by the failure classifier (definitive/fatal
+   * errors that must not keep stale data alive).
+   *
+   * @return monotonic suppression count
+   */
+  default long getLeaseSuppressedByClassifier() {
+    return 0L;
+  }
+
+  /**
+   * Oldest currently-leased keys for the {@code staleDebt} diagnostic view:
+   * entries whose last refresh failed and whose lease is still holding them
+   * servable, ordered oldest-first.
+   *
+   * @param limit maximum entries to return
+   * @return map of key to staleness milliseconds (time since the first lease
+   *         of the current episode), never {@code null}
+   */
+  default java.util.Map<String, Long> leasedStaleness(int limit) {
+    return java.util.Map.of();
+  }
 }

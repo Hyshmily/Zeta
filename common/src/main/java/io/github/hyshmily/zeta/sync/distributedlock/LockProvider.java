@@ -112,4 +112,36 @@ public interface LockProvider {
   ) {
     return tryLock(key, expire, unit);
   }
+
+  /**
+   * Cumulative successful acquisitions since startup. The default returns
+   * {@code 0} for custom providers that do not track outcomes.
+   *
+   * @return cumulative acquisition count (monotonic, never negative)
+   */
+  default long lockAcquiredCount() {
+    return 0L;
+  }
+
+  /**
+   * Cumulative {@code null} returns where a peer held the lock (normal
+   * contention, not a failure). The default returns {@code 0} for custom
+   * providers that do not track outcomes.
+   *
+   * @return cumulative contention count (monotonic, never negative)
+   */
+  default long lockContendedCount() {
+    return 0L;
+  }
+
+  /**
+   * Cumulative {@code null} returns caused by provider failures (Redis down,
+   * interrupts). The default returns {@code 0} for custom providers that do
+   * not track outcomes.
+   *
+   * @return cumulative error count (monotonic, never negative)
+   */
+  default long lockErrorCount() {
+    return 0L;
+  }
 }

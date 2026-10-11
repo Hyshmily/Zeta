@@ -96,7 +96,7 @@ public class CacheSyncPublisher {
   private final SnowflakeIdGenerator snowflakeIdGenerator;
 
   /**
-   * This application's {@code zeta.local.app-name}, stamped onto every sync
+   * This application's {@code zeta.app-name}, stamped onto every sync
    * message so a receiver sharing the broker can drop messages that belong to a
    * <em>different</em> application (ADR-0068 pattern; the sync plane previously
    * carried no application identity at all, while the decision plane already did).
@@ -106,6 +106,23 @@ public class CacheSyncPublisher {
    * is what legacy/rolling-upgrade wiring needs.
    */
   private final String appName;
+
+  /**
+   * Cumulative sync-plane publish failures (broker errors) since startup.
+   * Monotonic; safe to read from any thread. The BroadcastBuffer-side
+   * counterpart is {@code BroadcastBuffer.sendFailures()} (ADR-0037
+   * convention: every send path exposes its failure count).
+   */
+  private final java.util.concurrent.atomic.LongAdder sendFailureCounter = new java.util.concurrent.atomic.LongAdder();
+
+  /**
+   * Cumulative count of sync messages that failed to publish since startup.
+   *
+   * @return the total send-failure count
+   */
+  public long sendFailures() {
+    return sendFailureCounter.sum();
+  }
 
   /**
    * Stamp this instance's application name on an outgoing sync message.
@@ -377,6 +394,7 @@ public class CacheSyncPublisher {
       rabbitTemplate.send(properties.getExchangeName(), "", new Message(body, props));
       return true;
     } catch (RuntimeException e) {
+      sendFailureCounter.increment();
       log.error(failureLogMessage, e);
       return false;
     }

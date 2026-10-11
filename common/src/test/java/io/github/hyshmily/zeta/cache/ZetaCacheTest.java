@@ -31,6 +31,8 @@ import io.github.hyshmily.zeta.cache.cachesupport.BroadcastBuffer;
 import io.github.hyshmily.zeta.cache.cachesupport.CircuitBreaker;
 import io.github.hyshmily.zeta.cache.cachesupport.EntryLifecycle;
 import io.github.hyshmily.zeta.cache.cachesupport.TtlPolicy;
+import io.github.hyshmily.zeta.cache.cachesupport.LoadStatus;
+import io.github.hyshmily.zeta.cache.cachesupport.LoaderOutcome;
 import io.github.hyshmily.zeta.cache.cachesupport.SingleFlight;
 import io.github.hyshmily.zeta.cache.cachesupport.impl.EntryLifecycleImpl;
 import io.github.hyshmily.zeta.scheduler.BackgroundRefresher;
@@ -135,15 +137,27 @@ class ZetaCacheTest {
   }
 
   /**
-   * SingleFlight stub carrier for the ADR-0033 composite-load contract: the
-   * supplier handed to {@code singleFlight.load} returns a {@link VersionedValue}.
-   * Unstamped (probe withheld) so tests keep exercising the legacy version
-   * handling. Typed as {@code Optional<Object>} so the {@code any()} matcher's
-   * {@code T=Object} inference accepts it.
+   * Legacy SingleFlight stub carrier for the ADR-0033 composite-load contract
+   * (kept for the bridge-path tests): the supplier handed to
+   * {@code singleFlight.load} returns a {@link VersionedValue}. Unstamped
+   * (probe withheld) so tests keep exercising the legacy version handling.
+   * Typed as {@code Optional<Object>} so the {@code any()} matcher's
+   * {@code T=Object} inference accepts it. New tests prefer {@link #oc}.
    */
   @SuppressWarnings("all")
   private static Optional<Object> vv(String value) {
     return (Optional) Optional.of(new VersionedValue(value, 0L, false));
+  }
+
+  /**
+   * Explicit-outcome stub carrier for the ADR-0033 composite-load contract:
+   * the supplier handed to {@code singleFlight.loadOutcome} returns a
+   * {@link VersionedValue}. Unstamped (probe withheld) so tests keep
+   * exercising the legacy version handling.
+   */
+  @SuppressWarnings("all")
+  private static LoaderOutcome<Object> oc(String value) {
+    return LoaderOutcome.loaded(new VersionedValue(value, 0L, false));
   }
 
   /**
@@ -245,6 +259,28 @@ class ZetaCacheTest {
       .keyState(KeyState.NORMAL)
       .normalHardTtlMs(300_000)
       .normalSoftTtlMs(0L)
+      .build();
+  }
+
+  /**
+   * A NORMAL entry whose soft window has lapsed while its hard TTL is still
+   * valid — the "stale but servable" shape every breaker-open fallback and
+   * stale-while-revalidate test needs.
+   */
+  private static CacheEntry staleHitEntry(Object value) {
+    long now = System.currentTimeMillis();
+    return CacheEntry.builder()
+      .value(value)
+      .dataVersion(0)
+      .isVersionDegraded(false)
+      .decisionVersion(0)
+      .hardTtlMs(300_000)
+      .hardExpireAtMs(now + 300_000)
+      .softTtlMs(30_000)
+      .softExpireAtMs(now - 1_000)
+      .keyState(KeyState.NORMAL)
+      .normalHardTtlMs(300_000)
+      .normalSoftTtlMs(30_000)
       .build();
   }
 
@@ -393,7 +429,7 @@ class ZetaCacheTest {
    */
   @Test
   void get_shouldLoadAndCacheOnMiss() {
-    when(singleFlight.load(anyString(), any())).thenReturn(vv("loadedValue"));
+    when(singleFlight.loadOutcome(anyString(), any())).thenReturn(oc("loadedValue"));
 
     Optional<String> result = hotKeyCache.get(
       "key1",
@@ -458,7 +494,7 @@ class ZetaCacheTest {
    */
   @Test
   void get_shouldEvaluateTtlSuppliersAtMostOnceOnMiss() {
-    when(singleFlight.load(anyString(), any())).thenReturn(vv("loadedValue"));
+    when(singleFlight.loadOutcome(anyString(), any())).thenReturn(oc("loadedValue"));
     AtomicInteger hardEvals = new AtomicInteger();
     AtomicInteger softEvals = new AtomicInteger();
 
@@ -605,7 +641,7 @@ class ZetaCacheTest {
 
   @Test
   void execute_shouldRouteSwallowedExceptionToConfiguredHandler() {
-    when(singleFlight.load(anyString(), any())).thenThrow(new IllegalStateException("boom"));
+    when(singleFlight.loadOutcome(anyString(), any())).thenReturn(LoaderOutcome.failed(new IllegalStateException("boom")));
     AtomicInteger calls = new AtomicInteger();
     ZetaExceptionHandler.setDefaultExceptionHandler(t -> calls.incrementAndGet());
     try {
@@ -622,7 +658,7 @@ class ZetaCacheTest {
 
   @Test
   void get_withFailOnError_shouldPropagateReaderFailure() {
-    when(singleFlight.load(anyString(), any())).thenThrow(new IllegalStateException("boom"));
+    when(singleFlight.loadOutcome(anyString(), any())).thenReturn(LoaderOutcome.failed(new IllegalStateException("boom")));
 
     assertThatThrownBy(() -> hotKeyCache.get("key1", ReadPolicy.of(() -> "loaded").withFailOnError()))
       .isInstanceOf(IllegalStateException.class)
@@ -632,15 +668,85 @@ class ZetaCacheTest {
 
   @Test
   void get_default_shouldSwallowReaderFailureAsMiss() {
-    when(singleFlight.load(anyString(), any())).thenThrow(new IllegalStateException("boom"));
+    when(singleFlight.loadOutcome(anyString(), any())).thenReturn(LoaderOutcome.failed(new IllegalStateException("boom")));
 
     assertThat(hotKeyCache.get("key1", ReadPolicy.of(() -> "loaded"))).isEmpty();
     assertThat(caffeineCache.getIfPresent("key1")).isNull();
   }
 
+  // ── Suppression is not a null answer: no sentinel may be pinned ──
+
+  /**
+   * A suppressed load (breaker / timeout / executor saturation) means the
+   * source was never asked, so there is no authority to record "this key is
+   * absent". Writing the negative sentinel here pins a fabricated miss for the
+   * whole {@code null-value-ttl}: the caller sees {@code empty} on every read
+   * in that window without a single source call. The correct outcome is a bare
+   * miss — the next read retries.
+   */
+  @Test
+  void get_suppressedLoad_shouldNotWriteNullSentinel() {
+    when(singleFlight.loadOutcome(anyString(), any()))
+      .thenReturn(LoaderOutcome.suppressed(LoadStatus.SUPPRESSED_TIMEOUT));
+    when(singleFlight.isBreakerOpen(anyString())).thenReturn(false);
+
+    assertThat(hotKeyCache.get("key1", ReadPolicy.of(() -> "loaded"))).isEmpty();
+    assertThat(caffeineCache.getIfPresent("key1"))
+      .as("a suppressed load must not pin a negative sentinel")
+      .isNull();
+  }
+
+  /** Every suppression reason takes the same no-sentinel path. */
+  @Test
+  void get_allSuppressionReasons_shouldNotWriteNullSentinel() {
+    for (LoadStatus status : List.of(
+      LoadStatus.SUPPRESSED_BREAKER,
+      LoadStatus.SUPPRESSED_TIMEOUT,
+      LoadStatus.SUPPRESSED_EXECUTOR
+    )) {
+      caffeineCache.invalidateAll();
+      when(singleFlight.loadOutcome(anyString(), any())).thenReturn(LoaderOutcome.suppressed(status));
+      when(singleFlight.isBreakerOpen(anyString())).thenReturn(false);
+
+      assertThat(hotKeyCache.get("key1", ReadPolicy.of(() -> "loaded"))).isEmpty();
+      assertThat(caffeineCache.getIfPresent("key1")).as("status %s must not write a sentinel", status).isNull();
+    }
+  }
+
+  /**
+   * Control for the above: a suppressed load under an OPEN breaker with a
+   * hard-valid entry still serves that stale value — the graceful-degradation
+   * path is intact, it is only the sentinel write that is gone.
+   */
+  @Test
+  void get_suppressedLoad_withBreakerOpenAndStaleEntry_shouldServeStaleNotSentinel() {
+    caffeineCache.put("key1", staleHitEntry("stale"));
+    when(singleFlight.loadOutcome(anyString(), any()))
+      .thenReturn(LoaderOutcome.suppressed(LoadStatus.SUPPRESSED_BREAKER));
+    when(singleFlight.isBreakerOpen(anyString())).thenReturn(true);
+
+    assertThat(hotKeyCache.get("key1", ReadPolicy.of(() -> "loaded", 0L, 0L, true, true, StalePolicy.RETURN)))
+      .contains("stale");
+    assertThat(((CacheEntry) caffeineCache.getIfPresent("key1")).getValue())
+      .as("the surviving entry must remain the stale value, not a NullValue sentinel")
+      .isEqualTo("stale");
+  }
+
+  /**
+   * The contrast case: the source really answered "absent", so the sentinel
+   * IS correct — penetration protection depends on it.
+   */
+  @Test
+  void get_sourceEmpty_shouldStillWriteNullSentinel() {
+    when(singleFlight.loadOutcome(anyString(), any())).thenReturn(LoaderOutcome.sourceEmpty());
+
+    assertThat(hotKeyCache.get("key1", ReadPolicy.of(() -> null))).isEmpty();
+    assertThat(((CacheEntry) caffeineCache.getIfPresent("key1")).getValue()).isEqualTo(NullValue.INSTANCE);
+  }
+
   @Test
   void get_withFailOnError_nullResult_shouldStillCacheNullValue() {
-    when(singleFlight.load(anyString(), any())).thenReturn(Optional.empty());
+    when(singleFlight.loadOutcome(anyString(), any())).thenReturn(LoaderOutcome.sourceEmpty());
 
     assertThat(hotKeyCache.get("key1", ReadPolicy.of(() -> null).withFailOnError())).isEmpty();
     Object raw = caffeineCache.getIfPresent("key1");
@@ -667,7 +773,7 @@ class ZetaCacheTest {
         .normalSoftTtlMs(30_000)
         .build()
     );
-    when(singleFlight.load(anyString(), any())).thenThrow(new IllegalStateException("boom"));
+    when(singleFlight.loadOutcome(anyString(), any())).thenReturn(LoaderOutcome.failed(new IllegalStateException("boom")));
 
     assertThatThrownBy(() ->
       hotKeyCache.computeIfAbsent(
@@ -691,7 +797,7 @@ class ZetaCacheTest {
 
   @Test
   void computeIfAbsent_miss_shouldLoadViaSingleFlightAndCacheNormalEntry() {
-    when(singleFlight.load(eq("key1"), any())).thenReturn(vv("fresh"));
+    when(singleFlight.loadOutcome(eq("key1"), any())).thenReturn(oc("fresh"));
 
     assertThat(hotKeyCache.computeIfAbsent("key1", ReadPolicy.of(() -> "fresh"))).contains("fresh");
 
@@ -703,7 +809,7 @@ class ZetaCacheTest {
 
   @Test
   void computeIfAbsent_nullReader_shouldCacheNullSentinelAndReturnEmpty() {
-    when(singleFlight.load(anyString(), any())).thenReturn(Optional.empty());
+    when(singleFlight.loadOutcome(anyString(), any())).thenReturn(LoaderOutcome.sourceEmpty());
 
     assertThat(hotKeyCache.computeIfAbsent("key1", ReadPolicy.of(() -> null))).isEmpty();
 
@@ -714,7 +820,7 @@ class ZetaCacheTest {
 
   @Test
   void computeIfAbsent_nullReader_noNullCaching_shouldLeaveNoEntry() {
-    when(singleFlight.load(anyString(), any())).thenReturn(Optional.empty());
+    when(singleFlight.loadOutcome(anyString(), any())).thenReturn(LoaderOutcome.sourceEmpty());
 
     assertThat(
       hotKeyCache.computeIfAbsent("key1", ReadPolicy.of(() -> null, 0L, 0L, false, true, StalePolicy.SOFT_REFRESH))
@@ -740,7 +846,7 @@ class ZetaCacheTest {
         .normalSoftTtlMs(30_000)
         .build()
     );
-    when(singleFlight.load(anyString(), any())).thenThrow(new IllegalStateException("boom"));
+    when(singleFlight.loadOutcome(anyString(), any())).thenReturn(LoaderOutcome.failed(new IllegalStateException("boom")));
 
     assertThat(
       hotKeyCache.computeIfAbsent("key1", ReadPolicy.of(() -> "fresh", 0L, 0L, true, true, StalePolicy.REVALIDATE))
@@ -771,8 +877,8 @@ class ZetaCacheTest {
         .normalSoftTtlMs(30_000)
         .build()
     );
-    when(singleFlight.isBreakerOpen()).thenReturn(true);
-    when(singleFlight.load(anyString(), any())).thenReturn(Optional.empty());
+    when(singleFlight.isBreakerOpen(anyString())).thenReturn(true);
+    when(singleFlight.loadOutcome(anyString(), any())).thenReturn(LoaderOutcome.sourceEmpty());
 
     assertThat(
       hotKeyCache.computeIfAbsent("key1", ReadPolicy.of(() -> "fresh", 0L, 0L, true, true, StalePolicy.REVALIDATE))
@@ -804,10 +910,10 @@ class ZetaCacheTest {
         .build()
     );
     CountDownLatch releaseLoad = new CountDownLatch(1);
-    when(singleFlight.isBreakerOpen()).thenReturn(true);
-    when(singleFlight.load(anyString(), any())).thenAnswer(inv -> {
+    when(singleFlight.isBreakerOpen(anyString())).thenReturn(true);
+    when(singleFlight.loadOutcome(anyString(), any())).thenAnswer(inv -> {
       releaseLoad.await();
-      return Optional.empty();
+      return LoaderOutcome.sourceEmpty();
     });
 
     CompletableFuture<Optional<String>> future = CompletableFuture.supplyAsync(() ->
@@ -849,10 +955,10 @@ class ZetaCacheTest {
         .build()
     );
     CountDownLatch releaseLoad = new CountDownLatch(1);
-    when(singleFlight.isBreakerOpen()).thenReturn(true);
-    when(singleFlight.load(anyString(), any())).thenAnswer(inv -> {
+    when(singleFlight.isBreakerOpen(anyString())).thenReturn(true);
+    when(singleFlight.loadOutcome(anyString(), any())).thenAnswer(inv -> {
       releaseLoad.await();
-      throw new IllegalStateException("boom");
+      return LoaderOutcome.failed(new IllegalStateException("boom"));
     });
 
     CompletableFuture<Optional<String>> future = CompletableFuture.supplyAsync(() ->
@@ -887,7 +993,7 @@ class ZetaCacheTest {
         .normalSoftTtlMs(30_000)
         .build()
     );
-    when(singleFlight.load(anyString(), any())).thenThrow(new IllegalStateException("boom"));
+    when(singleFlight.loadOutcome(anyString(), any())).thenReturn(LoaderOutcome.failed(new IllegalStateException("boom")));
 
     // Aligned with the get() path: hard-expired entries are removed on a
     // failed reload — they are never served as stale.
@@ -916,7 +1022,7 @@ class ZetaCacheTest {
       false
     );
 
-    when(singleFlight.load(anyString(), any())).thenReturn(vv("fresh"));
+    when(singleFlight.loadOutcome(anyString(), any())).thenReturn(oc("fresh"));
 
     // Miss: TTL suppliers are evaluated exactly once (entry creation).
     assertThat(hotKeyCache.computeIfAbsent("key1", policy)).contains("fresh");
@@ -1067,7 +1173,7 @@ class ZetaCacheTest {
     );
 
     assertThat(hotKeyCache.computeIfAbsent("key1", ReadPolicy.of(() -> "should-not-load"))).isEmpty();
-    verify(singleFlight, never()).load(anyString(), any());
+    verify(singleFlight, never()).loadOutcome(anyString(), any());
   }
 
   /**
@@ -1128,20 +1234,22 @@ class ZetaCacheTest {
 
   @Test
   void getAll_withFailOnError_shouldPropagateReaderFailure() {
-    when(singleFlight.load(any(Iterable.class), any(), anyBoolean())).thenThrow(new IllegalStateException("boom"));
+    when(singleFlight.loadOutcome(any(Iterable.class), any())).thenReturn(
+      Map.of("a", LoaderOutcome.failed(new IllegalStateException("boom")), "b", LoaderOutcome.loaded((Object) "v"))
+    );
 
-    assertThatThrownBy(() -> hotKeyCache.get(List.of("a", "b"), k -> "v", 0L, 0L, true, true))
+    assertThatThrownBy(() -> hotKeyCache.get(List.of("a", "b"), k -> "v", 0L, 0L, true, true, true, StalePolicy.SOFT_REFRESH))
       .isInstanceOf(IllegalStateException.class)
       .hasMessage("boom");
   }
 
   @Test
   void getAll_default_shouldSwallowPerKeyFailure() {
-    when(singleFlight.load(any(Iterable.class), any(), anyBoolean())).thenReturn(
-      Map.of("a", Optional.of("v"), "b", Optional.<String>empty())
+    when(singleFlight.loadOutcome(any(Iterable.class), any())).thenReturn(
+      Map.of("a", LoaderOutcome.loaded((Object) "v"), "b", LoaderOutcome.sourceEmpty())
     );
 
-    Map<String, Optional<String>> result = hotKeyCache.get(List.of("a", "b"), k -> "v", 0L, 0L, true, false);
+    Map<String, Optional<String>> result = hotKeyCache.get(List.of("a", "b"), k -> "v", 0L, 0L, true, false, true, StalePolicy.SOFT_REFRESH);
 
     assertThat(result).containsEntry("a", Optional.of("v")).containsEntry("b", Optional.empty());
   }
@@ -1157,7 +1265,7 @@ class ZetaCacheTest {
     EntryLifecycleImpl noSoft = new EntryLifecycleImpl(caffeineCache, props, CacheCompressor.NONE, null);
     BackgroundRefresher noSoftRefresh = new DefaultBackgroundRefresher(caffeineCache, executor, noSoft.ttlPolicy(), CacheCompressor.NONE, 10);
 
-    when(singleFlight.load(anyString(), any())).thenReturn(vv("loaded"));
+    when(singleFlight.loadOutcome(anyString(), any())).thenReturn(oc("loaded"));
 
     HotKeyCache cache = new HotKeyCache(
       hotKeyDetector,
@@ -1441,18 +1549,18 @@ class ZetaCacheTest {
 
   /**
    * Verifies that invalidateAfterPut with a failed mutation does NOT invalidate
-   * the cache entry (fault mode: writer exception).
+   * the cache entry and propagates the failure (fault mode: writer exception).
    */
   @Test
   void invalidateAfterPutAll() {
     caffeineCache.put("key1", plainEntry("original"));
-    hotKeyCache.invalidateAfterPut(
+    assertThatThrownBy(() -> hotKeyCache.invalidateAfterPut(
       "key1",
       () -> {
         throw new RuntimeException("db-fail");
       },
       true
-    );
+    )).isInstanceOf(RuntimeException.class);
 
     assertThat(hotKeyCache.peek("key1")).contains("original");
   }
@@ -1688,7 +1796,7 @@ class ZetaCacheTest {
         .normalSoftTtlMs(30_000)
         .build()
     );
-    when(singleFlight.load(anyString(), any())).thenReturn(vv("fresh"));
+    when(singleFlight.loadOutcome(anyString(), any())).thenReturn(oc("fresh"));
 
     assertThat(
       hotKeyCache.get("expired", ReadPolicy.of(() -> "fresh", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH))
@@ -1722,11 +1830,11 @@ class ZetaCacheTest {
         .normalSoftTtlMs(30_000)
         .build()
     );
-    when(singleFlight.load(eq("key1"), any())).thenReturn(vv("fresh"));
+    when(singleFlight.loadOutcome(eq("key1"), any())).thenReturn(oc("fresh"));
 
     assertThat(hotKeyCache.get("key1", ReadPolicy.of(() -> "fresh", 0L, 0L, true, true, StalePolicy.REVALIDATE)))
       .contains("fresh");
-    verify(singleFlight, times(1)).load(eq("key1"), any());
+    verify(singleFlight, times(1)).loadOutcome(eq("key1"), any());
     assertThat(((CacheEntry) caffeineCache.getIfPresent("key1")).getValue()).isEqualTo("fresh");
   }
 
@@ -1752,7 +1860,7 @@ class ZetaCacheTest {
 
     assertThat(hotKeyCache.get("key1", ReadPolicy.of(() -> "fresh", 0L, 0L, true, true, StalePolicy.RETURN)))
       .contains("stale");
-    verify(singleFlight, never()).load(anyString(), any());
+    verify(singleFlight, never()).loadOutcome(anyString(), any());
     assertThat(((CacheEntry) caffeineCache.getIfPresent("key1")).getValue()).isEqualTo("stale");
   }
 
@@ -1779,11 +1887,11 @@ class ZetaCacheTest {
         .normalSoftTtlMs(0L)
         .build()
     );
-    when(singleFlight.load(anyString(), any())).thenReturn(vv("loaded"));
+    when(singleFlight.loadOutcome(anyString(), any())).thenReturn(oc("loaded"));
 
     assertThat(hotKeyCache.get("key1", ReadPolicy.of(() -> "loaded", 0L, 0L, true, true, StalePolicy.REVALIDATE)))
       .isEmpty();
-    verify(singleFlight, never()).load(anyString(), any());
+    verify(singleFlight, never()).loadOutcome(anyString(), any());
     assertThat(((CacheEntry) caffeineCache.getIfPresent("key1")).getValue()).isEqualTo(NullValue.INSTANCE);
   }
 
@@ -1819,7 +1927,7 @@ class ZetaCacheTest {
         .normalSoftTtlMs(30_000)
         .build()
     );
-    when(singleFlight.load(anyString(), any())).thenReturn(vv("fresh"));
+    when(singleFlight.loadOutcome(anyString(), any())).thenReturn(oc("fresh"));
 
     assertThat(
       hotKeyCache.getWithSoftExpire(
@@ -1833,7 +1941,7 @@ class ZetaCacheTest {
 
   @Test
   void getWithSoftExpire_withCacheMiss_shouldLoad() {
-    when(singleFlight.load(anyString(), any())).thenReturn(vv("loaded"));
+    when(singleFlight.loadOutcome(anyString(), any())).thenReturn(oc("loaded"));
 
     assertThat(
       hotKeyCache.getWithSoftExpire(
@@ -1923,7 +2031,7 @@ class ZetaCacheTest {
   @Test
   void getWithSoftExpire_revalidate_workerManagedCoolEntry_shouldKeepAndRenewWithoutReloadRate() {
     caffeineCache.put("key1", workerCoolSoftExpiredEntry());
-    when(singleFlight.load(eq("key1"), any())).thenReturn(vv("fresh"));
+    when(singleFlight.loadOutcome(eq("key1"), any())).thenReturn(oc("fresh"));
 
     // First read: the kept entry's reload re-invokes the loader once; the
     // fresh value serves this caller while the Worker-managed entry survives.
@@ -1944,7 +2052,7 @@ class ZetaCacheTest {
     assertThat(
       hotKeyCache.getWithSoftExpire("key1", ReadPolicy.of(() -> "fresh2", 0L, 0L, true, true, StalePolicy.REVALIDATE))
     ).contains("stored");
-    verify(singleFlight, times(1)).load(anyString(), any());
+    verify(singleFlight, times(1)).loadOutcome(anyString(), any());
   }
 
   /**
@@ -1955,7 +2063,7 @@ class ZetaCacheTest {
   @Test
   void get_revalidate_workerManagedEntry_nullLoad_shouldPreserveDecisionStampOnSentinel() {
     caffeineCache.put("key1", workerCoolSoftExpiredEntry());
-    when(singleFlight.load(eq("key1"), any())).thenReturn(Optional.empty());
+    when(singleFlight.loadOutcome(eq("key1"), any())).thenReturn(LoaderOutcome.sourceEmpty());
 
     assertThat(hotKeyCache.get("key1", ReadPolicy.of(() -> null, 0L, 0L, true, true, StalePolicy.REVALIDATE)))
       .isEmpty();
@@ -2288,7 +2396,7 @@ class ZetaCacheTest {
     @DisplayName("loadAndCache should promote key to HOT when detected as hot")
     void loadAndCache_shouldPromoteHotKey() {
       when(hotKeyDetector.contains("key1")).thenReturn(true);
-      when(singleFlight.load(eq("key1"), any())).thenReturn(vv("value"));
+      when(singleFlight.loadOutcome(eq("key1"), any())).thenReturn(oc("value"));
 
       Optional<String> result = hotKeyCache.get(
         "key1",
@@ -2366,7 +2474,7 @@ class ZetaCacheTest {
     @DisplayName("loadAndCache should preserve Worker-managed HOT entry")
     void loadAndCache_shouldPreserveWorkerManagedEntry() {
       when(hotKeyDetector.contains("key1")).thenReturn(false);
-      when(singleFlight.load(eq("key1"), any())).thenAnswer(invocation -> {
+      when(singleFlight.loadOutcome(eq("key1"), any())).thenAnswer(invocation -> {
         Supplier<?> reader = invocation.getArgument(1);
         caffeineCache.put(
           "key1",
@@ -2384,7 +2492,8 @@ class ZetaCacheTest {
             .normalSoftTtlMs(30_000)
             .build()
         );
-        return Optional.ofNullable(reader.get());
+        Object v = reader.get();
+        return v == null ? LoaderOutcome.sourceEmpty() : LoaderOutcome.loaded(v);
       });
 
       Optional<String> result = hotKeyCache.get(
@@ -2718,7 +2827,7 @@ class ZetaCacheTest {
     @Test
     @DisplayName("get with TTL overrides should use them in loadAndCache")
     void get_shouldUseTtlOverrides() {
-      when(singleFlight.load(anyString(), any())).thenReturn(vv("value"));
+      when(singleFlight.loadOutcome(anyString(), any())).thenReturn(oc("value"));
       when(hotKeyDetector.contains("key1")).thenReturn(false);
 
       hotKeyCache.get("key1", ReadPolicy.of(() -> "value", 50000L, 5000L, true, true, StalePolicy.SOFT_REFRESH));
@@ -2780,7 +2889,7 @@ class ZetaCacheTest {
           .normalSoftTtlMs(0)
           .build()
       );
-      when(singleFlight.load(anyString(), any())).thenReturn(vv("fresh"));
+      when(singleFlight.loadOutcome(anyString(), any())).thenReturn(oc("fresh"));
 
       hotKeyCache.getWithSoftExpire("key", ReadPolicy.of(() -> "fresh", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH));
 
@@ -2792,7 +2901,7 @@ class ZetaCacheTest {
     @Test
     @DisplayName("get with TTL overrides and hot detection uses TTL overrides in hot path")
     void get_withTtlOverridesAndHotDetection_usesTtlOverrides() {
-      when(singleFlight.load(anyString(), any())).thenReturn(vv("hot-value"));
+      when(singleFlight.loadOutcome(anyString(), any())).thenReturn(oc("hot-value"));
       when(hotKeyDetector.contains("key1")).thenReturn(true);
 
       hotKeyCache.get("key1", ReadPolicy.of(() -> "hot-value", 80000L, 8000L, true, true, StalePolicy.SOFT_REFRESH));
@@ -2809,7 +2918,7 @@ class ZetaCacheTest {
     @DisplayName("get with ALLOW_NO_REPORT and hot detection skips reportToWorker")
     void get_withAllowNoReportAndHotDetection_skipsReport() {
       ruleService.addWhitelist("noreport-hot");
-      when(singleFlight.load(eq("noreport-hot"), any())).thenReturn(vv("value"));
+      when(singleFlight.loadOutcome(eq("noreport-hot"), any())).thenReturn(oc("value"));
       when(hotKeyDetector.contains("noreport-hot")).thenReturn(true);
 
       hotKeyCache.get("noreport-hot", ReadPolicy.of(() -> "value", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH));
@@ -2823,7 +2932,7 @@ class ZetaCacheTest {
     @DisplayName("get with ALLOW_NO_REPORT and no hot detection skips reportToWorker")
     void get_withAllowNoReportAndNoHotDetection_skipsReport() {
       ruleService.addWhitelist("noreport-normal");
-      when(singleFlight.load(eq("noreport-normal"), any())).thenReturn(vv("value"));
+      when(singleFlight.loadOutcome(eq("noreport-normal"), any())).thenReturn(oc("value"));
       when(hotKeyDetector.contains("noreport-normal")).thenReturn(false);
 
       hotKeyCache.get("noreport-normal", ReadPolicy.of(() -> "value", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH));
@@ -2920,7 +3029,7 @@ class ZetaCacheTest {
     @DisplayName("loadAndCache preserves Worker-managed entry in hot path")
     void loadAndCache_withWorkerManagedEntryInHotPath_preservesIt() {
       when(hotKeyDetector.contains("key1")).thenReturn(true);
-      when(singleFlight.load(eq("key1"), any())).thenAnswer(invocation -> {
+      when(singleFlight.loadOutcome(eq("key1"), any())).thenAnswer(invocation -> {
         Supplier<?> reader = invocation.getArgument(1);
         caffeineCache.put(
           "key1",
@@ -2938,7 +3047,8 @@ class ZetaCacheTest {
             .normalSoftTtlMs(30_000)
             .build()
         );
-        return Optional.ofNullable(reader.get());
+        Object v = reader.get();
+        return v == null ? LoaderOutcome.sourceEmpty() : LoaderOutcome.loaded(v);
       });
 
       Optional<String> result = hotKeyCache.get(
@@ -3098,7 +3208,9 @@ class ZetaCacheTest {
       0L,
       0L,
       false,
-      false
+      false,
+      true,
+      StalePolicy.SOFT_REFRESH
     );
 
     assertThat(results.get("sentinel")).isEmpty();
@@ -3126,7 +3238,9 @@ class ZetaCacheTest {
       0L,
       0L,
       false,
-      false
+      false,
+      true,
+      StalePolicy.SOFT_REFRESH
     );
 
     assertThat(results.get("sentinel")).isEmpty();
@@ -3164,7 +3278,7 @@ class ZetaCacheTest {
    */
   @Test
   void computeIfAbsent_blockedKeyOnLoad_shouldPropagateZetaBlockedException() {
-    when(singleFlight.load(anyString(), any())).thenThrow(new ZetaBlockedException("test", "key1"));
+    when(singleFlight.loadOutcome(anyString(), any())).thenReturn(LoaderOutcome.failed(new ZetaBlockedException("test", "key1")));
 
     assertThatThrownBy(() ->
       hotKeyCache.computeIfAbsent("key1", ReadPolicy.of(() -> "loaded", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH))
@@ -3206,7 +3320,7 @@ class ZetaCacheTest {
     when(healthView.epochOf("w1")).thenReturn(5L);
     CacheEntry hotEntry = softExpiredWorkerHotEntry("w1", 5L);
     caffeineCache.put("key1", hotEntry);
-    when(singleFlight.load(anyString(), any())).thenReturn(vv("loadedValue"));
+    when(singleFlight.loadOutcome(anyString(), any())).thenReturn(oc("loadedValue"));
 
     Optional<String> result = hotKeyCache.getWithSoftExpire(
       "key1",

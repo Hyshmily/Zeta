@@ -136,11 +136,10 @@ zeta:
 
 ```yaml
 zeta:
+  app-name: myapp # 【Required】Shared by the App side and the Worker side (single key)
   worker:
     enabled: true
-    routing:
-      app-name: myapp # 【Required】Must match App-side zeta.local.app-name
-      # Consistent hashing is enabled by default; Workers register via heartbeat
+    # Consistent hashing is enabled by default; Workers register via heartbeat
 
 # Multi-Worker example: 3 machines, same app-name
 # Consistent hashing routes keys to the correct Worker via heartbeat automatically
@@ -297,14 +296,14 @@ Optional<String> r = zeta.get("user:123", () -> redisTemplate.opsForValue().get(
 // D. getWithSoftExpire — soft expiration (stale-while-revalidate)
 Optional<String> r = zeta.getWithSoftExpire("user:123", () -> redisTemplate.opsForValue().get("user:123"));
 
-// E. Fluent read API + fallback chain
+// E. Fluent read API + fallback chain (fallback values broadcast to peers by
+// default — .notAllowBroadcast() keeps them local; queries are reusable)
 User user = zeta
   .read("user:42")
   .withPrimary(userRepo::findById)
   .thenExecute(backupRepo::findById)
   .withHardTtl(30_000)
   .withSoftTtl(10_000)
-  .allowBroadcast()
   .orNull();
 ```
 
@@ -354,7 +353,8 @@ Optional<User> user = zeta.computeIfAbsentWithSoftExpireOptional(
     .withNullCaching(false)
 );
 ```java
-// R. putThrough — write-through + broadcast
+// R. putThrough — write-through + broadcast (null stores a short-TTL null sentinel;
+// Long.MAX_VALUE hard TTL + broadcast is rejected — the entry would outlive the version key)
 zeta.putThrough("user:123", newValue, () -> redisTemplate.opsForValue().set("user:123", newValue));
 
 // S. putThrough with explicit broadcast control
@@ -368,10 +368,17 @@ zeta.putThrough("user:123", newValue, () -> redisTemplate.opsForValue().set("use
 // U. invalidateAfterPut — mutate then invalidate (collection types)
 zeta.invalidateAfterPut(key, () -> redisTemplate.opsForSet().add(key, members));
 
+// U2. invalidateAndGetVersion — invalidate and observe the allocated data version
+long version = zeta.invalidateAndGetVersion(key, InvalidatePolicy.defaults());
+
 // V. putLocal — local write only, no broadcast, no version bump
 zeta.putLocal("user:123", cachedValue, WritePolicy.of(hardTtlMs, softTtlMs)); // custom TTL
 
-// W. refresh — local evict then load and cache
+// V2. flushLocalEmergency — emergency local-only flush (invalidateAllLocal is a deprecated alias)
+zeta.flushLocalEmergency();
+
+// W. refresh — version-guarded reload: the version is allocated before the load,
+// so a concurrent newer write wins instead of being regressed by a stale load
 zeta.refresh("user:123", () -> loadUser(123), WritePolicy.of(hardTtlMs, softTtlMs)); // with TTL override
 
 // X. Fluent write API
@@ -482,7 +489,7 @@ For the remaining entities (`zeta.send.exchange`, `zeta.reportToWorker.exchange`
 
 **Shared-broker appName isolation ([ADR-0068](docs/adr/0068-broadcast-app-name-isolation.md))**
 
-Every HOT/COOL decision broadcast carries an `appName` header (from the Worker's `zeta.worker.routing.app-name`), and the App-side listener drops decisions whose `appName` differs from its own `zeta.local.app-name` — the fanout exchange ignores the routing key, so on a shared RabbitMQ broker app A's decisions would otherwise trigger useless prewarming on app B. Two compatibility rules: messages **without** the `appName` header (older Workers, rolling-upgrade window) are always processed, and apps with no `app-name` configured keep the old receive-everything behavior. A mismatch between the two `app-name` values silently discards decisions (visible at DEBUG) — keep them identical. See [ADR-0068](docs/adr/0068-broadcast-app-name-isolation.md).
+Every HOT/COOL decision broadcast carries an `appName` header (from the shared `zeta.app-name`), and the App-side listener drops decisions whose `appName` differs from its own — the fanout exchange ignores the routing key, so on a shared RabbitMQ broker app A's decisions would otherwise trigger useless prewarming on app B. Two compatibility rules: messages **without** the `appName` header (older Workers, rolling-upgrade window) are always processed, and apps with no `app-name` configured keep the old receive-everything behavior. A mismatch between the two `app-name` values silently discards decisions (visible at DEBUG) — keep them identical. See [ADR-0068](docs/adr/0068-broadcast-app-name-isolation.md).
 
 **PING/PONG Verification Is Auxiliary**
 

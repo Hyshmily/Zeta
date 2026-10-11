@@ -15,6 +15,8 @@
  */
 package io.github.hyshmily.zeta.scheduler;
 
+import static io.github.hyshmily.zeta.constants.ZetaConstants.Version.VERSION_DEFAULT;
+
 import com.github.benmanes.caffeine.cache.Cache;
 import io.github.hyshmily.zeta.Internal;
 import io.github.hyshmily.zeta.cache.cachesupport.TtlPolicy;
@@ -22,14 +24,14 @@ import io.github.hyshmily.zeta.cache.codec.CacheCompressor;
 import io.github.hyshmily.zeta.model.*;
 import io.github.hyshmily.zeta.util.InterruptingAsync;
 import io.github.hyshmily.zeta.util.TimeSource;
+import java.util.*;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Predicate;
+import java.util.function.Supplier;
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 import org.jspecify.annotations.Nullable;
-
-import java.util.concurrent.*;
-import java.util.function.Supplier;
-
-import static io.github.hyshmily.zeta.constants.ZetaConstants.Version.VERSION_DEFAULT;
 
 /**
  * Default {@link BackgroundRefresher}: soft-expire refresh scheduling with
@@ -68,6 +70,60 @@ public class DefaultBackgroundRefresher implements BackgroundRefresher {
   /** Lease-on-failure (ADR-0036): minimum lease duration in milliseconds — the decay floor. */
   @SuppressWarnings("all")
   private static final long LEASE_MIN_TTL_MS = 120_000;
+
+  /**
+   * Decides whether a failed background refresh may keep its stale entry
+   * servable. The default leases every failure except JVM-level {@code Error}s
+   * (fatal, never a reason to serve older data longer); applications with
+   * definitive "not found" error types supply their own predicate to also
+   * refuse those. Evaluated against the peeled cause (one
+   * {@code CompletionException} layer removed).
+   */
+  @FunctionalInterface
+  public interface LeaseClassifier extends Predicate<Throwable> {
+    /**
+     * Default: lease everything but {@code Error}.
+     *
+     * @return a classifier that refuses only {@code Error} causes
+     */
+    static LeaseClassifier defaults() {
+      return cause -> !(cause instanceof Error);
+    }
+  }
+
+  /** Failure classifier gating the lease (never {@code null}). */
+  private final LeaseClassifier leaseClassifier;
+
+  /** Cumulative leases granted (the D-observability counter). */
+  private final AtomicLong refreshFailureLeased = new java.util.concurrent.atomic.AtomicLong();
+
+  /** Cumulative lease refusals by the staleness cap. */
+  private final AtomicLong leaseStaleCapped = new java.util.concurrent.atomic.AtomicLong();
+
+  /** Cumulative lease refusals by the failure classifier. */
+  private final AtomicLong leaseSuppressedByClassifier = new AtomicLong();
+
+  /**
+   * Currently-leased keys for the {@code staleDebt} diagnostic view:
+   * key to the running episode (first-lease wall time + lease count).
+   * Bounded to 1024 entries — a refresh storm must not grow observability
+   * state without bound; the eldest episode is evicted first.
+   */
+  private final Map<String, LeaseEpisode> leasedEpisodes = java.util.Collections.synchronizedMap(
+    new LinkedHashMap<>(64, 0.75f, true) {
+      @Override
+      protected boolean removeEldestEntry(Map.Entry<String, LeaseEpisode> eldest) {
+        return size() > 1024;
+      }
+    }
+  );
+
+  /** One running lease episode for {@link #leasedEpisodes}. */
+  private record LeaseEpisode(long firstLeaseAtMs, long leases) {
+    LeaseEpisode leasedAgain() {
+      return new LeaseEpisode(firstLeaseAtMs, leases + 1);
+    }
+  }
 
   /**
    * Immutable snapshot of an entry's decision-relevant metadata, taken at
@@ -116,11 +172,81 @@ public class DefaultBackgroundRefresher implements BackgroundRefresher {
     CacheCompressor compressor,
     int refreshMaxPools
   ) {
+    this(caffeineCache, executor, ttlPolicy, compressor, refreshMaxPools, LeaseClassifier.defaults());
+  }
+
+  /**
+   * Creates a refresher with an explicit lease classifier (see
+   * {@link LeaseClassifier}): applications with definitive "not found" error
+   * types refuse the lease for those and let the entry hard-expire instead of
+   * serving known-stale data.
+   *
+   * @param caffeineCache   the underlying L1 Caffeine cache
+   * @param executor        async executor for background refresh
+   * @param ttlPolicy       the pure TTL policy shared with the entry lifecycle
+   * @param compressor      compressor for L1 cache values
+   * @param refreshMaxPools maximum concurrent background refreshes (capped at 100)
+   * @param leaseClassifier the failure classifier gating the lease (never {@code null})
+   */
+  public DefaultBackgroundRefresher(
+    Cache<String, CacheEntry> caffeineCache,
+    Executor executor,
+    TtlPolicy ttlPolicy,
+    CacheCompressor compressor,
+    int refreshMaxPools,
+    LeaseClassifier leaseClassifier
+  ) {
     this.caffeineCache = caffeineCache;
     this.executor = executor;
     this.ttlPolicy = ttlPolicy;
     this.compressor = compressor;
     this.refreshLimiter = new Semaphore(refreshMaxPools > 0 ? refreshMaxPools : 100);
+    this.leaseClassifier = leaseClassifier != null ? leaseClassifier : LeaseClassifier.defaults();
+  }
+
+  /** Cumulative leases granted (see {@link BackgroundRefresher#getRefreshFailureLeased()}). */
+  @Override
+  public long getRefreshFailureLeased() {
+    return refreshFailureLeased.get();
+  }
+
+  /** Cumulative lease refusals by the staleness cap. */
+  @Override
+  public long getLeaseStaleCapped() {
+    return leaseStaleCapped.get();
+  }
+
+  /** Cumulative lease refusals by the failure classifier. */
+  @Override
+  public long getLeaseSuppressedByClassifier() {
+    return leaseSuppressedByClassifier.get();
+  }
+
+  /**
+   * Oldest currently-leased keys, oldest-first, capped at {@code limit} — the
+   * {@code staleDebt} diagnostic view. A key leaves the view when its next
+   * refresh succeeds (healed) or its entry leaves L1.
+   */
+  @Override
+  public Map<String, Long> leasedStaleness(int limit) {
+    long now = TimeSource.currentTimeMillis();
+    List<Map.Entry<String, LeaseEpisode>> episodes;
+    synchronized (leasedEpisodes) {
+      episodes = new ArrayList<>(leasedEpisodes.entrySet());
+    }
+    episodes.sort(Comparator.comparingLong(e -> e.getValue().firstLeaseAtMs()));
+    Map<String, Long> view = new LinkedHashMap<>();
+    for (Map.Entry<String, LeaseEpisode> e : episodes) {
+      if (view.size() >= Math.max(0, limit)) {
+        break;
+      }
+      if (caffeineCache.getIfPresent(e.getKey()) == null) {
+        leasedEpisodes.remove(e.getKey());
+        continue;
+      }
+      view.put(e.getKey(), Math.max(0L, now - e.getValue().firstLeaseAtMs()));
+    }
+    return Collections.unmodifiableMap(view);
   }
 
   /**
@@ -264,18 +390,24 @@ public class DefaultBackgroundRefresher implements BackgroundRefresher {
     task.whenComplete((value, error) -> {
       try {
         if (error != null) {
-          if (error instanceof TimeoutException) {
+          // Peel one CompletionException layer: supplier failures arrive
+          // wrapped (supplyAsync encodeThrowable semantics) while orTimeout
+          // timeouts arrive bare — the classifier must see the real cause.
+          Throwable peeled = firstCause(error);
+          if (peeled instanceof TimeoutException) {
             log.warn("Background soft refresh timed out after {}s: {}", REFRESH_TIMEOUT_SECONDS, cacheKey);
           } else {
             log.warn("Background soft refresh failed: {}", cacheKey, error);
           }
           // ADR-0036: keep the stale entry servable instead of letting it run
           // into the hard TTL and stampede the failing source on every read.
-          leaseOnFailure(cacheKey, snap);
+          leaseOnFailure(cacheKey, snap, peeled);
           return;
         }
         if (value instanceof VersionedValue vv && vv.value() != null) {
           applyRefreshTask(cacheKey, vv, softTtlMs, snap);
+          // Healed: the fresh value ends the lease episode.
+          leasedEpisodes.remove(cacheKey);
         }
       } finally {
         // Always release the limiter permit and remove the in-flight
@@ -292,6 +424,23 @@ public class DefaultBackgroundRefresher implements BackgroundRefresher {
   }
 
   /**
+   * Unwrap one {@code CompletionException}/{@code ExecutionException} layer so
+   * the classifier and the timeout log see the real cause: supplier failures
+   * arrive wrapped (supplyAsync encodeThrowable semantics) while orTimeout
+   * timeouts arrive bare. Mirrors {@code SingleFlightImpl}'s join-side
+   * {@code getCause()} handling.
+   *
+   * @param error the raw {@code whenComplete} error (never {@code null} here)
+   * @return the peeled cause, or the error itself when it carries no cause
+   */
+  private static Throwable firstCause(Throwable error) {
+    if ((error instanceof CompletionException || error instanceof ExecutionException) && error.getCause() != null) {
+      return error.getCause();
+    }
+    return error;
+  }
+
+  /**
    * Lease-on-Failure (ADR-0036): keep a stale entry servable after its
    * background refresh failed, by extending its expire timestamps.
    *
@@ -299,15 +448,26 @@ public class DefaultBackgroundRefresher implements BackgroundRefresher {
    * authoritative state transition — the value, all metadata (dataVersion,
    * decision stamps, keyState) and the {@code hardTtlMs}/{@code softTtlMs}
    * duration fields are preserved verbatim; only the expire timestamps move.
-   * The hard timestamp extends to {@code now + max(remaining/2, 120s)} — the
-   * halved remaining budget gives soft exponential decay to the 120s floor,
-   * so repeated failure is graceful degradation rather than an entry clearing.
-   * The soft timestamp extends to the lease midpoint ({@code now + lease/2}):
-   * the entry is soft-expired during the second half of every lease while
-   * still hard-valid, which is the read-triggered retry window — the next
-   * read re-arms the refresh. {@code soft == hard} would close the window:
-   * the read path checks hard expiry before soft expiry, so the entry would
-   * die at lease end without ever retrying.
+   * The hard timestamp extends to {@code now + max(remaining, floor,
+   * remaining/2)} — never shorter than the remaining budget (a failure must
+   * not punish a healthy long TTL), decaying to the floor on repeated
+   * failure, so repeated failure is graceful degradation rather than an
+   * entry clearing. The floor follows the entry's own scale
+   * ({@code min(120s, hardTtlMs)}): a single lease never exceeds one declared
+   * lifetime. The soft timestamp extends to the lease midpoint
+   * ({@code now + lease/2}): the entry is soft-expired during the second half
+   * of every lease while still hard-valid, which is the read-triggered retry
+   * window — the next read re-arms the refresh. {@code soft == hard} would
+   * close the window: the read path checks hard expiry before soft expiry, so
+   * the entry would die at lease end without ever retrying.
+   *
+   * <p><b>Refusals:</b> the classifier may refuse definitive/fatal failures
+   * (counted as suppressed); entries older than the staleness cap
+   * ({@code birthStampSec}, default 30 min) are refused (counted as capped)
+   * and let hard-expire; entries whose declared hard TTL is below twice the
+   * refresh timeout cannot fit a retry window below it, so they are refused
+   * as well. Every grant is counted and tracked for the {@code staleDebt}
+   * view, so "bounded staleness" is verifiable, not a belief.
    *
    * <p><b>Identity guard:</b> mirrors {@link #applyRefreshTask}'s version
    * guard — the lease applies only to the same logical entry that failed the
@@ -321,8 +481,24 @@ public class DefaultBackgroundRefresher implements BackgroundRefresher {
    *
    * @param cacheKey the key whose entry to lease
    * @param snap     the entry metadata snapshot taken at refresh-creation time
+   * @param error    the peeled refresh failure (one wrapper layer removed)
    */
-  private void leaseOnFailure(String cacheKey, SnapshotEntry snap) {
+  private void leaseOnFailure(String cacheKey, SnapshotEntry snap, Throwable error) {
+    if (!leaseClassifier.test(error)) {
+      leaseSuppressedByClassifier.incrementAndGet();
+      log.debug("Lease-on-failure: classifier refused lease for key={} (cause {})", cacheKey, error.toString());
+      return;
+    }
+    // Staleness cap first (no L1 touch): an over-age value must hard-expire
+    // even when the source keeps failing.
+    CacheEntry current = caffeineCache.getIfPresent(cacheKey);
+    if (current != null && current.isLeaseStaleCapped(TimeSource.monotonicSecondsSinceBoot())) {
+      leaseStaleCapped.incrementAndGet();
+      leasedEpisodes.remove(cacheKey);
+      log.debug("Lease-on-failure: staleness cap refused lease for key={}", cacheKey);
+      return;
+    }
+
     caffeineCache
       .asMap()
       .compute(cacheKey, (key, existing) -> {
@@ -334,10 +510,29 @@ public class DefaultBackgroundRefresher implements BackgroundRefresher {
         ) {
           return existing;
         }
+        // Re-check the cap under the bin lock: the pre-check above raced the
+        // entry it inspected.
+        if (existing.isLeaseStaleCapped(TimeSource.monotonicSecondsSinceBoot())) {
+          leaseStaleCapped.incrementAndGet();
+          leasedEpisodes.remove(cacheKey);
+          return existing;
+        }
+        // No retry window fits below twice the refresh timeout: abandon the
+        // lease and let the entry hard-expire instead of granting a lease
+        // whose soft half ends before a retry could finish.
+        long ownScaleMs = Math.max(1L, existing.getHardTtlMs());
+        if (ownScaleMs < 2 * TimeUnit.SECONDS.toMillis(REFRESH_TIMEOUT_SECONDS)) {
+          log.debug("Lease-on-failure: retry window cannot fit, abandoning lease for key={}", cacheKey);
+          return existing;
+        }
 
         long now = TimeSource.currentTimeMillis();
-        long remainingMs = existing.getHardExpireAtMs() - now;
-        long leaseTtlMs = Math.max(LEASE_MIN_TTL_MS, Math.max(1, remainingMs) >> LEASE_DIVISOR);
+        long remainingMs = Math.max(0L, existing.getHardExpireAtMs() - now);
+        long floorMs = Math.min(LEASE_MIN_TTL_MS, ownScaleMs);
+        // Never shorter than the remaining budget: max(remaining, floor,
+        // remaining/2). The halving only bites once the remaining budget
+        // decayed toward the floor.
+        long leaseTtlMs = Math.max(remainingMs, Math.max(floorMs, remainingMs >> LEASE_DIVISOR));
         long leaseExpireAtMs = now + leaseTtlMs;
         // The soft timestamp sits at the midpoint of the lease: the entry spends
         // the second half of every lease soft-expired while still hard-valid, so
@@ -351,8 +546,10 @@ public class DefaultBackgroundRefresher implements BackgroundRefresher {
           "Lease-on-failure: extending stale entry for key={} by {}ms (floor {}ms)",
           cacheKey,
           leaseTtlMs,
-          LEASE_MIN_TTL_MS
+          floorMs
         );
+        refreshFailureLeased.incrementAndGet();
+        leasedEpisodes.compute(cacheKey, (k, prev) -> prev == null ? new LeaseEpisode(now, 1) : prev.leasedAgain());
         // Provisional keep-alive: durations, value, and all metadata preserved
         // verbatim; only the two expire timestamps move (explicit lease
         // arithmetic — the draft's computed expiry must not run here).
@@ -370,20 +567,20 @@ public class DefaultBackgroundRefresher implements BackgroundRefresher {
    *       refresh-creation time.</li>
    *   <li>Call Caffeine {@code compute} on the map:
    *       <ul>
-    *       <li><b>Stamped refresh (ADR-0033):</b> the result carries the
-    *             {@code dataVersion} probed from Redis after the value read.
-    *             Acceptance is decided against the creation-time
-    *             <i>snapshot</i>, not the probe: the refresh applies unless
-    *             a newer write landed in flight (entry version strictly above
-    *             the snapshot, or the degraded boundary was crossed). A probe
-    *             comparison is wrong in both directions — equal-skip discards
-    *             every ordinary refresh (entry == probe with no concurrent
-    *             write, so SWR would never extend TTLs), while equal-apply
-    *             re-applies a stale value over a concurrent writer's fresh
-    *             entry when the probe was taken after the write. Same-version
-    *             apply also heals: a snapshot-degraded entry with no in-flight
-    *             write is overwritten by the normal probe (case 4 of the sync
-    *             matrix), so a recovered Redis heals degraded entries.</li>
+   *       <li><b>Stamped refresh (ADR-0033):</b> the result carries the
+   *             {@code dataVersion} probed from Redis after the value read.
+   *             Acceptance is decided against the creation-time
+   *             <i>snapshot</i>, not the probe: the refresh applies unless
+   *             a newer write landed in flight (entry version strictly above
+   *             the snapshot, or the degraded boundary was crossed). A probe
+   *             comparison is wrong in both directions — equal-skip discards
+   *             every ordinary refresh (entry == probe with no concurrent
+   *             write, so SWR would never extend TTLs), while equal-apply
+   *             re-applies a stale value over a concurrent writer's fresh
+   *             entry when the probe was taken after the write. Same-version
+   *             apply also heals: a snapshot-degraded entry with no in-flight
+   *             write is overwritten by the normal probe (case 4 of the sync
+   *             matrix), so a recovered Redis heals degraded entries.</li>
    *         <li><b>Unstamped refresh (fail-open):</b> the probe was withheld.
    *             Legacy L1-internal guards apply: discard if the entry is
    *             degraded, or if its current {@code dataVersion} exceeds the
@@ -503,7 +700,13 @@ public class DefaultBackgroundRefresher implements BackgroundRefresher {
    * @return the merged entry
    */
   private CacheEntry refreshedEntry(CacheEntry entry, Object wrappedValue, long dataVersion, long softTtlMs) {
-    EntryDraft refreshed = EntryDraft.of(entry, ttlPolicy).value(wrappedValue).version(dataVersion).softTtl(softTtlMs);
+    // Fresh value ⇒ reborn: the birth stamp resets so the lease staleness cap
+    // measures the current value's age, not the superseded entry's.
+    EntryDraft refreshed = EntryDraft.of(entry, ttlPolicy)
+      .value(wrappedValue)
+      .version(dataVersion)
+      .softTtl(softTtlMs)
+      .birthStampSec(TimeSource.monotonicSecondsSinceBoot());
     if (entry.getKeyState() == KeyState.COOL) {
       refreshed.keyState(KeyState.NORMAL);
     }
@@ -532,7 +735,8 @@ public class DefaultBackgroundRefresher implements BackgroundRefresher {
       .value(wrappedValue)
       .version(stampedVersion)
       .ttl(effectiveHardTtl, softTtlMs, ttlPolicy.getEffectiveHardTtlMs(), ttlPolicy.getEffectiveSoftTtlMs())
-      .keyState(snap.keyState() == KeyState.COOL ? KeyState.NORMAL : snap.keyState());
+      .keyState(snap.keyState() == KeyState.COOL ? KeyState.NORMAL : snap.keyState())
+      .birthStampSec(TimeSource.monotonicSecondsSinceBoot());
     if (snap.decision() != null) {
       rebuilt.decision(snap.decision());
     }

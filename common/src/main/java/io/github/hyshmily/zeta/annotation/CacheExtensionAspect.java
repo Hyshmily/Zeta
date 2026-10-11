@@ -747,7 +747,14 @@ public class CacheExtensionAspect {
       Object[] args = pjp.getArgs();
       return SIMPLE_KEY_GENERATOR.generate(pjp.getTarget(), method, args).toString();
     }
-    return getExpression(expression).getValue(buildEvaluationContext(pjp, method), String.class);
+    String keyPart = getExpression(expression).getValue(buildEvaluationContext(pjp, method), String.class);
+    if (keyPart == null) {
+      throw new IllegalArgumentException(
+        "SpEL key expression '" + expression + "' evaluated to null for method " + method.getName() +
+          " — null keys would collapse every call onto one hot key; fix the expression or guard the null argument"
+      );
+    }
+    return keyPart;
   }
 
   /**

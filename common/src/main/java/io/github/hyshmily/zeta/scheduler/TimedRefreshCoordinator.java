@@ -111,6 +111,11 @@ public class TimedRefreshCoordinator {
    * @return the refresh interval in milliseconds
    */
   public static long intervalFor(long resolvedSoftTtlMs) {
+    if (resolvedSoftTtlMs <= 0) {
+      throw new IllegalArgumentException(
+        "resolvedSoftTtlMs must be positive (soft-expire disabled has no refresh cadence): " + resolvedSoftTtlMs
+      );
+    }
     return Math.max(1, resolvedSoftTtlMs + (resolvedSoftTtlMs + 9) / 10);
   }
 

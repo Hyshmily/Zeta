@@ -291,4 +291,17 @@ public record ReadPolicy(
       hardTtlMs, softTtlMs, nullCaching, stalePolicy, reader, reportEnabled, failOnError
     );
   }
+
+  /**
+   * Returns a copy of this policy with the stale policy replaced.
+   * Used by the {@code *WithSoftExpire} facade overloads to honor their
+   * naming contract (force {@link StalePolicy#SOFT_REFRESH} regardless of
+   * what the caller built).
+   *
+   * @param stalePolicy the stale policy for the copy
+   * @return a new policy instance
+   */
+  public ReadPolicy withStalePolicy(StalePolicy stalePolicy) {
+    return new ReadPolicy(hardTtlMs, softTtlMs, nullCaching, stalePolicy, reader, reportEnabled, failOnError);
+  }
 }

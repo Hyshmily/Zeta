@@ -206,9 +206,8 @@ public class ZetaSpringCache extends AbstractValueAdaptingCache {
         return;
       }
       // Null-caching write: align with the load path — Zeta's sentinel + short
-      // null TTL (Long.MAX_VALUE when null-value TTL is disabled, matching
-      // TtlPolicy.computeNullExpireAt's disabled semantics). The @CacheTTL
-      // override does not apply: the sentinel TTL is its own knob.
+      // null TTL. The @CacheTTL override does not apply: the sentinel TTL is
+      // its own knob (null-value-ttl-seconds, always positive).
       long nullTtlMs = settings.effectiveNullTtlMs();
       if (skipBroadcast) {
         zeta.putLocal(prefixed, NullValue.INSTANCE, WritePolicy.of(nullTtlMs, nullTtlMs));

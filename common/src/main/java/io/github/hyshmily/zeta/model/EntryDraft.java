@@ -111,6 +111,12 @@ public final class EntryDraft {
   /** Refault-gate solo-flight flag (ADR-0079) — carried over from the source entry on a seeded draft. */
   private boolean soloFlight;
   /**
+   * Value-birth stamp (monotonic seconds-since-boot) — carried over from the
+   * source entry on a seeded draft; blank drafts start at {@code 0}
+   * (unknown ⇒ lease admits) unless shaped explicitly.
+   */
+  private int birthStampSec;
+  /**
    * Provisional computed expiry on an arithmetic-free draft: {@code ttl}/
    * {@code hardTtl}/{@code softTtl}/{@code rearmExpiry} set the flag for the
    * side they could not compute (positive duration, no arithmetic), and an
@@ -174,6 +180,7 @@ public final class EntryDraft {
     draft.normalHardTtlMs = source.getNormalHardTtlMs();
     draft.normalSoftTtlMs = source.getNormalSoftTtlMs();
     draft.soloFlight = source.isSoloFlight();
+    draft.birthStampSec = source.getBirthStampSec();
     return draft;
   }
 
@@ -334,6 +341,21 @@ public final class EntryDraft {
   }
 
   /**
+   * Set the value-birth stamp (monotonic seconds-since-boot, see
+   * {@link io.github.hyshmily.zeta.util.TimeSource#monotonicSecondsSinceBoot}).
+   * Seeded drafts carry the source entry's stamp over (lease preservation);
+   * fresh-value construction sites (loads, successful refreshes) stamp
+   * {@code now}.
+   *
+   * @param birthStampSec the birth stamp
+   * @return this draft
+   */
+  public EntryDraft birthStampSec(int birthStampSec) {
+    this.birthStampSec = birthStampSec;
+    return this;
+  }
+
+  /**
    * Override the hard expire timestamp explicitly (custom jitter ratio, lease,
    * or bound-capped scenarios). Call after {@link #ttl} to replace its computed
    * value; the hard TTL duration is unaffected. On an arithmetic-free draft
@@ -421,7 +443,8 @@ public final class EntryDraft {
       keyState,
       normalHardTtlMs,
       normalSoftTtlMs,
-      soloFlight
+      soloFlight,
+      birthStampSec
     );
   }
 

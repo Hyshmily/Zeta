@@ -55,3 +55,17 @@ The HALF_OPEN state is entered from OPEN after `singleTestIntervalMs` — at whi
 3. **`consecutiveSuccessThreshold` defaults to 3.** This was chosen as a balance between stability (preventing flapping) and recovery speed (three probes at `singleTestIntervalMs` = 15s worst case to recover). Users with fast-recovery suppliers may lower this to 1 (the original behavior, no flapping protection).
 
 4. **Backward compatibility.** The no-arg `onFailure()` retains the original semantics (always counts as failure). Existing tests pass without modification. The `CircuitBreakerState` enum is a new type — code that only checks `isOpen()` is unaffected.
+
+5. **The breaker is sharded per key prefix, not global (added later).** This ADR
+   describes one breaker; a single instance is now the degenerate case of a
+   `CircuitBreakerRegistry` that hands out one shard per key prefix — the
+   segment before the first `:`, so `user:` and `product:` trip independently,
+   with prefix-less keys sharing one bucket. Motivation: the motivation above
+   ("silently degrade all subsequent requests for unrelated keys") was only
+   half-solved by exception filtering — a genuinely sick datasource still
+   degraded every key in the JVM, because the breaker could not tell which
+   datasource a key belongs to. Shard count is bounded by
+   `zeta.local.circuit-breaker.max-prefixes` (default 64) so an unbounded
+   key space cannot grow the map without limit. The shards share one slide
+   scheduler; the state machine, filtering, and anti-flapping semantics in this
+   ADR are per-shard and unchanged.

@@ -54,11 +54,11 @@ import org.springframework.transaction.support.TransactionSynchronizationManager
  * {@code runNowOrAfterCommit} are NOT executed if the surrounding
  * transaction rolls back. This is standard Spring
  * {@code TransactionSynchronization.afterCommit()} behavior.
- * Callers using {@code invalidate()} inside a transaction that may
- * roll back should be aware that the invalidation will be silently
- * dropped on rollback. For critical invalidations, use
- * {@code invalidateLocal()} (immediate, no tx deferral) or register
- * an {@code afterCompletion} callback manually.
+  * Callers using {@code invalidate()} inside a transaction that may
+  * roll back should be aware that the invalidation will be silently
+  * dropped on rollback (every invalidation defers to after-commit, with or
+  * without broadcast). For critical invalidations, register an
+  * {@code afterCompletion} callback manually.
  */
 @Slf4j
 @Internal
@@ -103,10 +103,18 @@ public final class TransactionSupport {
             // must not turn an already-committed transaction into an error for
             // the caller. This is also what makes the "errors are logged, not
             // propagated" contract in the method Javadoc true on BOTH paths.
+            // NOTE: failures are rethrown so commit callers observe them —
+            // a silently skipped cache update after a committed DB write is
+            // worse than a loud commit-path error (P0-4). Spring wraps this
+            // as a transaction-system error; the data is already committed.
             try {
               task.run();
+            } catch (RuntimeException e) {
+              log.error("Deferred post-commit async task failed; transaction already committed", e);
+              throw e;
             } catch (Exception e) {
               log.error("Deferred post-commit async task failed; transaction already committed", e);
+              throw new IllegalStateException("Deferred post-commit task failed after commit", e);
             }
           }
         }
@@ -145,13 +153,18 @@ public final class TransactionSupport {
           public void afterCommit() {
             // afterCommit() runs on the commit path: an exception escaping here
             // surfaces to the caller of commit() as a transaction-system error
-            // even though the data was already committed. The deferred work is
-            // the cache update (the data-source write carries its own guard), so
-            // it is logged rather than allowed to fail the commit.
+            // even though the data was already committed. That loud failure is
+            // deliberate (P0-4): a silently skipped cache update after a
+            // committed DB write leaves cache and DB inconsistent with the
+            // caller believing they agree.
             try {
               task.run();
+            } catch (RuntimeException e) {
+              log.error("Deferred post-commit cache task failed; transaction already committed", e);
+              throw e;
             } catch (Exception e) {
               log.error("Deferred post-commit cache task failed; transaction already committed", e);
+              throw new IllegalStateException("Deferred post-commit cache task failed after commit", e);
             }
           }
         }

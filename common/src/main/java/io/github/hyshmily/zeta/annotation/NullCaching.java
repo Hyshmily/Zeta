@@ -23,21 +23,23 @@ import java.lang.annotation.RetentionPolicy;
 import java.lang.annotation.Target;
 
 /**
- * Marks a {@link org.springframework.cache.annotation.Cacheable @Cacheable} method to allow
- * caching of {@code null} return values.
+ * Opt-out for {@code null} caching on a
+ * {@link org.springframework.cache.annotation.Cacheable @Cacheable} method.
  *
- * <p>By default, when a {@code @Cacheable} method returns {@code null}, the result is
- * <em>not</em> cached — a subsequent call with the same key will invoke the method again.
- * With {@code @NullCaching(true)}, the {@code null} value is stored via an internal sentinel
- * ({@link NullValue}), and subsequent calls skip the method
- * and return {@code null} directly.
+ * <p>By default every {@code null} return value IS cached as an internal
+ * sentinel ({@link NullValue}) with a short TTL
+ * ({@code zeta.local.null-value-ttl-seconds}) for cache-penetration
+ * protection — a subsequent call with the same key skips the method and
+ * returns {@code null} directly until the sentinel expires.
+ * With {@code @NullCaching(false)}, the {@code null} result is <em>not</em>
+ * cached and the next call re-invokes the method.
  *
  * <p>This annotation is only effective on {@code @Cacheable} methods. It has no effect on
- * {@code @CachePut} or {@code @CacheEvict}.
+ * {@code @CacheEvict}.
  *
  * <pre>{@code
  * @Cacheable("users")
- * @NullCaching(true)
+ * @NullCaching(false)
  * User findUser(String id) { ... }
  * }</pre>
  */

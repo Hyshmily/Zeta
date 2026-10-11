@@ -74,7 +74,10 @@ class ZetaWriteCommandTest {
 
   @Test
   void putThrough_withBothTtls_shouldDelegateWithTtl() {
-    command.withHardTtl(30000L).withSoftTtl(3000L).putThrough("v", () -> {});
+    command
+      .withHardTtl(30000L)
+      .withSoftTtl(3000L)
+      .putThrough("v", () -> {});
     assertThat(capturedWritePolicy().hardTtlMs().getAsLong()).isEqualTo(30000L);
     assertThat(capturedWritePolicy().softTtlMs().getAsLong()).isEqualTo(3000L);
   }
@@ -93,20 +96,31 @@ class ZetaWriteCommandTest {
   }
 
   @Test
-  void putThrough_shouldThrowWhenExecutedTwice() {
+  void putThrough_shouldAllowReExecution() {
     command.putThrough("v", () -> {});
-    assertThatThrownBy(() -> command.putThrough("v", () -> {})).isInstanceOf(IllegalStateException.class);
+    command.putThrough("v", () -> {});
+    verify(zeta, org.mockito.Mockito.times(2)).putThrough(
+      org.mockito.ArgumentMatchers.eq("test-key"),
+      org.mockito.ArgumentMatchers.eq("v"),
+      any(Runnable.class),
+      any(WritePolicy.class)
+    );
   }
 
   @Test
-  void invalidate_shouldThrowWhenAfterPutThrough() {
+  void invalidate_shouldAllowAfterPutThrough() {
     command.putThrough("v", () -> {});
-    assertThatThrownBy(command::invalidate).isInstanceOf(IllegalStateException.class);
+    command.invalidate();
+    verify(zeta).invalidate("test-key");
   }
 
   @Test
-  void invalidateAfterMutation_shouldThrowWhenExecutedTwice() {
+  void invalidateAfterMutation_shouldAllowReExecution() {
     command.invalidateAfterMutation(() -> {});
-    assertThatThrownBy(() -> command.invalidateAfterMutation(() -> {})).isInstanceOf(IllegalStateException.class);
+    command.invalidateAfterMutation(() -> {});
+    verify(zeta, org.mockito.Mockito.times(2)).invalidateAfterPut(
+      org.mockito.ArgumentMatchers.eq("test-key"),
+      any(Runnable.class)
+    );
   }
 }

@@ -24,7 +24,6 @@ import io.github.hyshmily.zeta.model.WritePolicy;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Supplier;
 import org.springframework.util.Assert;
 
@@ -47,9 +46,9 @@ import org.springframework.util.Assert;
  *       .orNull();
  * </pre>
  *
- * <p>Created via {@link Zeta#read(String)}. Instances are single-use;
- * call {@link #execute()}, {@link #orNull()} or {@link #orElse(Object)}
- * exactly once.
+ * <p>Created via {@link Zeta#read(String)}. Instances are reusable;
+ * every terminal call ({@link #execute()}, {@link #orNull()} or
+ * {@link #orElse(Object)}) re-runs the resolution.
  */
 public class ZetaReadQuery<T> {
 
@@ -64,9 +63,13 @@ public class ZetaReadQuery<T> {
   private long softTtlMs = 0;
   private StalePolicy stalePolicy = StalePolicy.SOFT_REFRESH;
   private boolean nullCaching = true;
-  private boolean isAllowBroadcast = false;
+  // Broadcast-by-default (I3): a fallback-resolved value is cluster state and
+  // must converge — local-only is the explicit opt-out via notAllowBroadcast().
+  private boolean isAllowBroadcast = true;
+  // Worker-report-by-default: the primary read reports like every other read
+  // path; background/probe reads opt out via report(false).
+  private boolean reportEnabled = true;
   private List<Supplier<T>> fallbacks;
-  private final AtomicBoolean executed = new AtomicBoolean(false);
 
   /**
    * Creates a new read query bound to the given cache key.
@@ -82,9 +85,10 @@ public class ZetaReadQuery<T> {
   /**
    * Enable cross-instance send for fallback values.
    *
-   * <p>When enabled, any value resolved from a fallback reader will be
-   * send to peer instances via AMQP.  When disabled (default), the
-   * value is written only to the local L1 cache via {@link Zeta#putLocal}.
+   * <p>When enabled (the default), any value resolved from a fallback reader
+   * will be send to peer instances via AMQP. When disabled via
+   * {@link #notAllowBroadcast()}, the value is written only to the local L1
+   * cache via {@link Zeta#putLocal}.
    *
    * @return this query instance
    */
@@ -94,7 +98,7 @@ public class ZetaReadQuery<T> {
   }
 
   /**
-   * Disable cross-instance send for fallback values (default).
+   * Disable cross-instance send for fallback values.
    *
    * @return this query instance
    */
@@ -204,12 +208,27 @@ public class ZetaReadQuery<T> {
   }
 
   /**
+   * Set whether this query's primary read reports to the Worker (default
+   * {@code true}, matching every other read path). Background/probe reads
+   * that must not pollute hot-key detection pass {@code false}.
+   *
+   * @param reportEnabled whether to allow Worker reporting for the primary read
+   * @return this query instance
+   */
+  public ZetaReadQuery<T> report(boolean reportEnabled) {
+    this.reportEnabled = reportEnabled;
+    return this;
+  }
+
+  /**
    * Add a fallback reader to the chain.
    *
    * <p>Fallbacks are executed sequentially in registration order when the
    * primary reader does not return a value (either cache miss or reader
-   * returns {@code null}).  Each non-null result is cached before being
-   * returned.
+   * returns {@code null}). A fallback that <i>throws</i> is skipped and the
+   * next fallback runs ({@link ZetaBlockedException} and {@link Error} still
+   * propagate — policy rejection and fatal faults are never swallowable).
+   * Each non-null result is cached before being returned.
    *
    * @param reader a supplier that loads the value from a fallback data source
    * @return this query instance
@@ -227,9 +246,10 @@ public class ZetaReadQuery<T> {
    * Execute the read query and return the resolved value, or {@code null} if no
    * value is available.
    *
+   * <p>Queries are reusable — every terminal call re-runs the resolution.
+   *
    * @return the resolved value, or {@code null} if empty
    * @throws ZetaBlockedException if the key matches a block rule
-   * @throws IllegalStateException if this query has already been executed
    */
   public T orNull() {
     return execute().orElse(null);
@@ -242,10 +262,11 @@ public class ZetaReadQuery<T> {
    * <p>The default value is <b>not</b> cached. It is returned only for this
    * single invocation.
    *
+   * <p>Queries are reusable — every terminal call re-runs the resolution.
+   *
    * @param defaultValue the value to return if all readers return {@code null}
    * @return the resolved value, or {@code defaultValue} if empty
    * @throws ZetaBlockedException if the key matches a block rule
-   * @throws IllegalStateException if this query has already been executed
    */
   public T orElse(T defaultValue) {
     return execute().orElse(defaultValue);
@@ -255,21 +276,27 @@ public class ZetaReadQuery<T> {
    * Execute the read query and return the resolved value as an {@link Optional}.
    *
    * <p>Resolution order: L1 hit, then the primary reader on a miss, then the
-   * fallback readers in registration order. The first non-null result is cached
-   * (broadcast to peers only when {@link #allowBroadcast()} is set) and returned.
+   * fallback readers in registration order (a throwing fallback is skipped,
+   * except {@link ZetaBlockedException}/{@link Error} which propagate). The
+   * first non-null result is cached
+   * (broadcast to peers by default; {@link #notAllowBroadcast()} opts out) and returned.
    * When every reader yields {@code null} and null caching is allowed, one
    * short-TTL {@code NullValue} sentinel is cached so subsequent reads return
    * {@link Optional#empty()} without invoking any reader again — until the
    * sentinel expires.
    *
+   * <p>Queries are reusable — every terminal call re-runs the resolution.
+   *
    * @return the resolved value, or an empty {@code Optional} if no reader produced a value
    * @throws ZetaBlockedException if the key matches a block rule (propagated from the cache layer)
-   * @throws IllegalStateException if this query has already been executed
+   * @throws IllegalStateException if no reader was configured at all
    */
   @SuppressWarnings("unchecked")
   public Optional<T> execute() {
-    if (!executed.compareAndSet(false, true)) {
-      throw new IllegalStateException("ZetaReadQuery can only be executed once");
+    if (primaryReader == null && (fallbacks == null || fallbacks.isEmpty())) {
+      throw new IllegalStateException(
+        "ZetaReadQuery has no reader: call withPrimary(...) and/or thenExecute(...) before execute()"
+      );
     }
 
     // BLOCK-rule enforcement is centralized in the cache layer (HotKeyCache.preGuard),
@@ -279,9 +306,7 @@ public class ZetaReadQuery<T> {
     // inside the cache layer, which stores a short-TTL NullValue sentinel
     // (when null caching is allowed) or leaves no entry at all (when
     // disallowed via nullCaching(false)).
-    ReadPolicy policy = ReadPolicy.of(
-      primaryReader, hardTtlMs, softTtlMs, nullCaching, true, stalePolicy
-    );
+    ReadPolicy policy = ReadPolicy.of(primaryReader, hardTtlMs, softTtlMs, nullCaching, reportEnabled, stalePolicy);
 
     Optional<Object> result = switch (cacheMode) {
       case GET -> zeta.get(cacheKey, policy);
@@ -294,7 +319,18 @@ public class ZetaReadQuery<T> {
 
     if (fallbacks != null) {
       for (Supplier<T> fallback : fallbacks) {
-        T val = fallback.get();
+        final T val;
+        try {
+          val = fallback.get();
+        } catch (ZetaBlockedException | Error e) {
+          // Policy rejection and fatal faults are never swallowable — same
+          // contract as the cache read paths.
+          throw e;
+        } catch (RuntimeException e) {
+          // A failing fallback must not break the chain: its whole purpose
+          // is "try the next source when the previous one is down".
+          continue;
+        }
 
         if (val != null) {
           if (isAllowBroadcast) {

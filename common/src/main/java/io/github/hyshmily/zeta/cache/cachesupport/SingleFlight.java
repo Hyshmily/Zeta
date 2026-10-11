@@ -37,10 +37,26 @@ public interface SingleFlight {
   /**
    * Whether the circuit breaker is currently open.
    * Used by {@code HotKeyCache} to decide whether to return stale cache on miss.
+   * <p>
+   * The default answers for the whole key space; per-prefix registries narrow
+   * it per key via {@link #isBreakerOpen(String)}.
    *
    * @return {@code true} if the breaker is open
    */
   boolean isBreakerOpen();
+
+  /**
+   * Whether the given key's breaker shard is currently open.
+   * <p>
+   * The default implementation ignores the key for backward compatibility
+   * with custom {@link SingleFlight} beans that front a single breaker.
+   *
+   * @param cacheKey the key whose shard to check
+   * @return {@code true} if the key's breaker is open
+   */
+  default boolean isBreakerOpen(String cacheKey) {
+    return isBreakerOpen();
+  }
 
   /**
    * Total number of dedup loads that resolved to empty because the reader
@@ -69,13 +85,52 @@ public interface SingleFlight {
    * Load a value via the supplier, deduplicating concurrent requests for the same key.
    * Thread-safe: concurrent calls for the same key share a single future.
    *
+   * <p><b>Explicit-outcome primary.</b> New code should prefer
+   * {@link #loadOutcome(String, Supplier)}: it distinguishes a null source
+   * ({@code SOURCE_EMPTY}) from protection-machinery suppression
+   * ({@code SUPPRESSED_*}) and carries reader failures as {@code FAILED}
+   * instead of throwing, so the caller (and only the caller) decides the
+   * {@code failOnError} policy in one place.
+   *
    * @param cacheKey the key to load
    * @param reader   the value supplier (should not return {@code null})
    * @param <T>      the value type
-   * @return the loaded value, or empty if the load failed, timed out, was
-   *         blocked by the circuit breaker, or the executor rejected the task
+   * @return the explicit outcome (never {@code null}; never throws for reader
+   *         failures — they surface as {@code FAILED})
    */
-  <T> Optional<T> load(String cacheKey, Supplier<T> reader);
+  <T> LoaderOutcome<T> loadOutcome(String cacheKey, Supplier<T> reader);
+
+  /**
+   * Load a value via the supplier, deduplicating concurrent requests for the same key.
+   * Thread-safe: concurrent calls for the same key share a single future.
+   *
+   * <p>Legacy bridge over {@link #loadOutcome(String, Supplier)}: suppressed
+   * and null-source outcomes resolve to empty; {@code FAILED} rethrows the
+   * cause in its natural form (the historical single-key fail-fast behavior).
+   * Prefer the explicit outcome for new code.
+   *
+   * @param cacheKey the key to load
+   * @param reader   the value supplier (should not return {@code null})
+   * @param <T>      the value type
+   * @return the loaded value, or empty if the source was null or the load was
+   *         suppressed
+   * @throws RuntimeException the reader failure cause when the outcome is {@code FAILED}
+   * @throws Error          the reader failure cause when it is an {@code Error}
+   */
+  default <T> Optional<T> load(String cacheKey, Supplier<T> reader) {
+    LoaderOutcome<T> outcome = loadOutcome(cacheKey, reader);
+    if (outcome.status() == LoadStatus.FAILED) {
+      Throwable cause = outcome.cause();
+      if (cause instanceof RuntimeException re) {
+        throw re;
+      }
+      if (cause instanceof Error err) {
+        throw err;
+      }
+      throw new java.util.concurrent.CompletionException(cause);
+    }
+    return outcome.toOptional();
+  }
   /**
    * Load multiple keys in parallel, deduplicating across all callers.
    * <p>
@@ -96,18 +151,38 @@ public interface SingleFlight {
   <T> Map<String, Optional<T>> load(Iterable<String> cacheKeys, Function<? super String, ? extends T> reader);
 
   /**
+   * Batch explicit-outcome primary: per-key outcomes, never throws for reader
+   * failures (they surface per key as {@code FAILED}). The caller applies its
+   * own fail-fast policy over the returned map.
+   *
+   * @param cacheKeys the keys to load
+   * @param reader    function that returns a value for each key (called on executor threads)
+   * @param <T>       the value type
+   * @return map of key to explicit outcome, preserving iteration order of
+   *         {@code cacheKeys}
+   */
+  default <T> Map<String, LoaderOutcome<T>> loadOutcome(
+    Iterable<String> cacheKeys,
+    Function<? super String, ? extends T> reader
+  ) {
+    Map<String, LoaderOutcome<T>> outcomes = new java.util.LinkedHashMap<>();
+    for (String key : cacheKeys) {
+      outcomes.put(key, loadOutcome(key, () -> reader.apply(key)));
+    }
+    return outcomes;
+  }
+
+  /**
    * Batch variant of {@link #load(Iterable, Function)} with an explicit
    * failure policy.
    * <p>
-   * When {@code failOnError} is {@code false} (the default), the behavior is
-   * identical to {@link #load(Iterable, Function)}: per-key failures are
-   * swallowed (the key is absent from the result) so one failing key does not
-   * sink the whole batch. When {@code true}, the first reader failure aborts
-   * the collection and propagates to the caller — already-completed results
-   * are discarded, and the failed key's dedup future is evicted so a retry
-   * re-runs the reader. Timeouts, circuit-breaker interception, and executor
-   * rejection (the executor refused the task before any data-source call —
-   * not a reader failure) resolve to an empty result in both modes.
+   * Legacy bridge over {@link #loadOutcome(Iterable, Function)}: per-key
+   * outcomes are mapped to {@code Optional} ({@code FAILED} excluded), and
+   * when {@code failOnError} is {@code true} the first {@code FAILED} cause
+   * aborts the collection and propagates (already-completed results are
+   * discarded). Suppressed outcomes (timeouts, breaker interception, executor
+   * rejection) resolve to an empty result in both modes — they are transient
+   * degradation, not failures.
    *
    * @param cacheKeys   the keys to load
    * @param reader      function that returns a value for each key (called on executor threads)
@@ -121,7 +196,23 @@ public interface SingleFlight {
     Function<? super String, ? extends T> reader,
     boolean failOnError
   ) {
-    return load(cacheKeys, reader);
+    Map<String, LoaderOutcome<T>> outcomes = loadOutcome(cacheKeys, reader);
+    Map<String, Optional<T>> results = new java.util.LinkedHashMap<>();
+    for (Map.Entry<String, LoaderOutcome<T>> e : outcomes.entrySet()) {
+      LoaderOutcome<T> o = e.getValue();
+      if (o.status() == LoadStatus.FAILED && failOnError) {
+        Throwable cause = o.cause();
+        if (cause instanceof RuntimeException re) {
+          throw re;
+        }
+        if (cause instanceof Error err) {
+          throw err;
+        }
+        throw new java.util.concurrent.CompletionException(cause);
+      }
+      results.put(e.getKey(), o.toOptional());
+    }
+    return results;
   }
 
   /**

@@ -93,7 +93,7 @@ Supports an optional `?limit=N` query parameter to cap the number of app-side To
     "dispatchRejected": 0,                // Cumulative submissions rejected by the per-key queue bound
 
     // ── Shared-broker appName isolation (ADR-0068) ──
-    "foreignAppDrops": 0,               // Cumulative HOT/COOL decisions dropped for appName mismatch (misconfigured zeta.local.app-name discards 100% here)
+    "foreignAppDrops": 0,               // Cumulative HOT/COOL decisions dropped for appName mismatch (a foreign appName here means another application shares the broker with a different zeta.app-name)
     "lastForeignApp": "appB"            // Most recent foreign sender appName (present only after a drop)
   },
   "sync": {
@@ -177,6 +177,10 @@ Standard Caffeine cache metrics via `CaffeineCacheMetrics.monitor()`:
 | `zeta.expire.refresh.lease.debt.keys` | Gauge | —                | Currently-leased keys (staleDebt size) |
 | `zeta.version.degraded.total`       | Gauge | —                    | Cumulative version fallback count       |
 | `zeta.sync.dedup.size`              | Gauge | —                    | Broadcast dedup cache size              |
+| `zeta.sync.send.failed.total`       | Gauge | —                    | Cumulative sync-plane publish failures (broker errors); the only signal for an INVALIDATE that never left the node |
+| `zeta.lock.acquired.total`          | Gauge | —                    | Cumulative distributed-lock acquisitions |
+| `zeta.lock.contended.total`         | Gauge | —                    | Cumulative `tryLock` nulls where a peer held the lock (normal contention) |
+| `zeta.lock.error.total`             | Gauge | —                    | Cumulative `tryLock` nulls caused by provider failures (Redis down, interrupts, invalid keys) |
 | `zeta.worker.alive`                 | Gauge | —                    | Whether any worker shard is alive (0/1) |
 | `zeta.worker.tracked.keys`          | Gauge | —                    | Keys tracked by state machine (only keys that have ever been hot) |
 | `zeta.worker.detector.keys`         | Gauge | —                    | Keys holding a live sliding-window entry in the Worker detector (the per-key memory driver) |
@@ -192,6 +196,8 @@ Standard Caffeine cache metrics via `CaffeineCacheMetrics.monitor()`:
 | `zeta.dispatch.rejected.total`      | Gauge | `plane`              | Cumulative rejections by key bound      |
 
 The `zeta.dispatch.*` gauges carry `plane=sync` for the sync plane and `plane=worker` for the decision plane; a plane absent from the current deployment mode registers no gauges. Reading `pending.units` together with `remaining.units` is what distinguishes "no traffic" from "gate saturated" — before these gauges existed, both looked identical and only surfaced as a rate-limited WARN after submissions had already been dropped.
+
+The `zeta.lock.*` gauges exist because `tryLock` collapses two very different outcomes into the same `null` return: "a peer holds the lock" (normal contention, expected under load) and "the provider failed" (Redis down, an interrupt, an invalid key — a real incident). Only the split tells them apart, so alert on `zeta.lock.error.total` and treat a rising `zeta.lock.contended.total` as a capacity signal, not a fault. All three are cumulative counters exposed as gauges, so a scrape-level delta (not the raw value) is the rate.
 
 ### Worker Detection-Plane Metrics (`zeta.worker.detector.keys`, `zeta.worker.decisions.*`, `zeta.worker.report.eval`)
 

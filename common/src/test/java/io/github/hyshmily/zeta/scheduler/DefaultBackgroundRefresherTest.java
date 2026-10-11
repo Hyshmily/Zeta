@@ -606,8 +606,10 @@ class DefaultBackgroundRefresherTest {
 
   /**
    * Verifies that a failed background refresh leases the existing entry:
-   * value and metadata preserved, duration fields untouched (Option B), both
-   * expire timestamps extended to approximately half of the remaining budget.
+   * value and metadata preserved, duration fields untouched (Option B). The
+   * lease never shortens a healthy budget — with ~300s remaining the hard
+   * timestamp is preserved (not halved), and soft lands at the lease midpoint
+   * (the retry window).
    */
   @Test
   void triggerBackgroundRefresh_withSupplierError_shouldLeaseExistingEntry() throws InterruptedException {
@@ -635,44 +637,164 @@ class DefaultBackgroundRefresherTest {
       // Duration fields stay authoritative — only timestamps move (ADR-0036).
       assertThat(entry.getHardTtlMs()).isEqualTo(300_000);
       assertThat(entry.getSoftTtlMs()).isEqualTo(30_000);
-      // Lease = remaining/2 (well above the 120s floor); hard extended to
-      // now + lease, soft to the lease midpoint — the retry window.
-      assertThat(entry.getHardExpireAtMs()).isGreaterThan(now + 120_000);
-      assertThat(entry.getHardExpireAtMs()).isLessThanOrEqualTo(now + 160_000);
-      assertThat(entry.getSoftExpireAtMs()).isBetween(now + 60_000, now + 80_000);
+      // Never-shorten: remaining (~300s) exceeds the floor, so hard is
+      // preserved (within elapsed tolerance), soft at the lease midpoint.
+      assertThat(entry.getHardExpireAtMs()).isBetween(now + 290_000, originalExpire + 1_000);
+      assertThat(entry.getSoftExpireAtMs()).isBetween(now + 140_000, now + 160_000);
       assertThat(entry.getSoftExpireAtMs()).isLessThan(entry.getHardExpireAtMs());
+      // Observability: one granted lease, nothing refused.
+      assertThat(asyncExpire.getRefreshFailureLeased()).isEqualTo(1);
+      assertThat(asyncExpire.getLeaseStaleCapped()).isZero();
+      assertThat(asyncExpire.getLeaseSuppressedByClassifier()).isZero();
+      assertThat(asyncExpire.leasedStaleness(10)).containsKey("key");
     } finally {
       asyncExec.shutdownNow();
     }
   }
 
   /**
-   * Verifies that repeated failures halve the remaining budget each time,
-   * decaying to the 120s floor (soft exponential decay, ADR-0036).
+   * Verifies that repeated failures on a long-lived entry preserve the
+   * remaining budget instead of halving it: a failure must not punish a
+   * healthy TTL. Decay toward the floor happens through wall-time passage,
+   * not through halving.
    */
   @Test
-  void triggerBackgroundRefresh_repeatedFailures_shouldDecayLeaseToFloor() {
-    caffeineCache.put("key", hotEntry("original", 1, System.currentTimeMillis() + 600_000));
+  void triggerBackgroundRefresh_repeatedFailures_shouldPreserveRemainingBudget() {
+    long originalExpire = System.currentTimeMillis() + 600_000;
+    caffeineCache.put("key", hotEntry("original", 1, originalExpire));
     BackgroundRefresher syncExpire = new DefaultBackgroundRefresher(caffeineCache, Runnable::run, ttlPolicy, CacheCompressor.NONE, 10);
 
     syncExpire.triggerBackgroundRefresh("key", failingReader(), 30_000);
     long now = System.currentTimeMillis();
     CacheEntry first = (CacheEntry) caffeineCache.getIfPresent("key");
-    assertThat(first.getHardExpireAtMs()).isBetween(now + 260_000, now + 320_000);
+    assertThat(first.getHardExpireAtMs()).isBetween(now + 590_000, originalExpire + 1_000);
 
     syncExpire.triggerBackgroundRefresh("key", failingReader(), 30_000);
     now = System.currentTimeMillis();
     CacheEntry second = (CacheEntry) caffeineCache.getIfPresent("key");
-    assertThat(second.getHardExpireAtMs()).isBetween(now + 130_000, now + 170_000);
+    assertThat(second.getHardExpireAtMs()).isBetween(now + 580_000, originalExpire + 1_000);
 
     syncExpire.triggerBackgroundRefresh("key", failingReader(), 30_000);
     now = System.currentTimeMillis();
     CacheEntry third = (CacheEntry) caffeineCache.getIfPresent("key");
-    assertThat(third.getHardExpireAtMs()).isBetween(now + 110_000, now + 130_000);
-    // Floor lease: soft at the midpoint (60s) — the entry stays retry-eligible.
-    assertThat(third.getSoftExpireAtMs()).isBetween(now + 50_000, now + 70_000);
+    assertThat(third.getHardExpireAtMs()).isBetween(now + 570_000, originalExpire + 1_000);
+    // Soft at the lease midpoint — the entry stays retry-eligible.
+    assertThat(third.getSoftExpireAtMs()).isBetween(now + 280_000, now + 320_000);
     assertThat(third.getSoftExpireAtMs()).isLessThan(third.getHardExpireAtMs());
     assertThat((Object) third.getValue()).isEqualTo("original");
+    assertThat(syncExpire.getRefreshFailureLeased()).isEqualTo(3);
+  }
+
+  /**
+   * Verifies the floor follows the entry's own scale and extends short
+   * budgets: with ~100s remaining (below the 120s floor, hard TTL 300s) the
+   * hard timestamp extends to now + 120s instead of tracking the remainder.
+   */
+  @Test
+  void triggerBackgroundRefresh_shortRemaining_shouldExtendToFloor() {
+    caffeineCache.put("key", hotEntry("original", 1, System.currentTimeMillis() + 100_000));
+    BackgroundRefresher syncExpire = new DefaultBackgroundRefresher(caffeineCache, Runnable::run, ttlPolicy, CacheCompressor.NONE, 10);
+
+    syncExpire.triggerBackgroundRefresh("key", failingReader(), 30_000);
+    long now = System.currentTimeMillis();
+    CacheEntry entry = (CacheEntry) caffeineCache.getIfPresent("key");
+    assertThat(entry).isNotNull();
+    assertThat(entry.getHardExpireAtMs()).isBetween(now + 110_000, now + 130_000);
+    assertThat(entry.getSoftExpireAtMs()).isBetween(now + 50_000, now + 70_000);
+    assertThat((Object) entry.getValue()).isEqualTo("original");
+  }
+
+  /**
+   * Verifies that an entry whose declared hard TTL cannot fit a retry window
+   * below the refresh timeout (hard TTL &lt; 2 × 30s) is refused a lease and
+   * left to hard-expire.
+   */
+  @Test
+  void triggerBackgroundRefresh_tinyHardTtl_shouldAbandonLease() {
+    caffeineCache.put(
+      "key",
+      CacheEntry.builder()
+        .value("original")
+        .dataVersion(1)
+        .isVersionDegraded(false)
+        .decisionVersion(0)
+        .hardTtlMs(30_000)
+        .hardExpireAtMs(System.currentTimeMillis() + 30_000)
+        .softTtlMs(10_000)
+        .softExpireAtMs(System.currentTimeMillis() - 1_000)
+        .keyState(KeyState.NORMAL)
+        .normalHardTtlMs(30_000)
+        .normalSoftTtlMs(10_000)
+        .build()
+    );
+    long before = System.currentTimeMillis();
+    BackgroundRefresher syncExpire = new DefaultBackgroundRefresher(caffeineCache, Runnable::run, ttlPolicy, CacheCompressor.NONE, 10);
+
+    syncExpire.triggerBackgroundRefresh("key", failingReader(), 10_000);
+
+    CacheEntry entry = (CacheEntry) caffeineCache.getIfPresent("key");
+    assertThat(entry).isNotNull();
+    // Untouched: no extension granted.
+    assertThat(entry.getHardExpireAtMs()).isLessThanOrEqualTo(before + 30_000);
+    assertThat(syncExpire.getRefreshFailureLeased()).isZero();
+  }
+
+  /**
+   * Verifies the failure classifier: a JVM-level {@code Error} never leases
+   * (fatal, not a reason to serve older data longer) and is counted as
+   * suppressed.
+   */
+  @Test
+  void triggerBackgroundRefresh_withError_shouldRefuseLeaseByClassifier() {
+    caffeineCache.put("key", hotEntry("original", 1, System.currentTimeMillis() + 300_000));
+    BackgroundRefresher syncExpire = new DefaultBackgroundRefresher(caffeineCache, Runnable::run, ttlPolicy, CacheCompressor.NONE, 10);
+
+    syncExpire.triggerBackgroundRefresh(
+      "key",
+      () -> {
+        throw new AssertionError("fatal");
+      },
+      30_000
+    );
+
+    CacheEntry entry = (CacheEntry) caffeineCache.getIfPresent("key");
+    assertThat(entry).isNotNull();
+    assertThat((Object) entry.getValue()).isEqualTo("original");
+    assertThat(syncExpire.getRefreshFailureLeased()).isZero();
+    assertThat(syncExpire.getLeaseSuppressedByClassifier()).isEqualTo(1);
+  }
+
+  /**
+   * Verifies the staleness cap: an entry born over 30 minutes ago is refused
+   * a lease (counted as capped) and left to hard-expire.
+   */
+  @Test
+  void triggerBackgroundRefresh_overAgeEntry_shouldRefuseLeaseByStalenessCap() {
+    int oldBirth = io.github.hyshmily.zeta.util.TimeSource.monotonicSecondsSinceBoot() - 3700;
+    caffeineCache.put(
+      "key",
+      CacheEntry.builder()
+        .value("original")
+        .dataVersion(1)
+        .isVersionDegraded(false)
+        .decisionVersion(0)
+        .hardTtlMs(300_000)
+        .hardExpireAtMs(System.currentTimeMillis() + 300_000)
+        .softTtlMs(30_000)
+        .softExpireAtMs(System.currentTimeMillis() - 1_000)
+        .keyState(KeyState.HOT)
+        .normalHardTtlMs(300_000)
+        .normalSoftTtlMs(30_000)
+        .birthStampSec(oldBirth)
+        .build()
+    );
+    BackgroundRefresher syncExpire = new DefaultBackgroundRefresher(caffeineCache, Runnable::run, ttlPolicy, CacheCompressor.NONE, 10);
+
+    syncExpire.triggerBackgroundRefresh("key", failingReader(), 30_000);
+
+    assertThat(syncExpire.getRefreshFailureLeased()).isZero();
+    assertThat(syncExpire.getLeaseStaleCapped()).isEqualTo(1);
+    assertThat(syncExpire.leasedStaleness(10)).doesNotContainKey("key");
   }
 
   /**

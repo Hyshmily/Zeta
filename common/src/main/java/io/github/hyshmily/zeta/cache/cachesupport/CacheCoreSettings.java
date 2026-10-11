@@ -64,4 +64,11 @@ public interface CacheCoreSettings {
 
   /** Whether query parameters ({@code ?key=val}) are stripped from cache keys before operations. */
   boolean isStripQuery();
+
+  /**
+   * Single value size limit in bytes (0 = unlimited). Values whose estimated
+   * size exceeds this bound are served to the caller but never stored in L1 —
+   * the memory protection {@code zeta.local.cache.max-value-size} promises.
+   */
+  long getMaxValueSize();
 }

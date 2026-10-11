@@ -21,11 +21,11 @@ import io.github.hyshmily.zeta.cache.loader.ZetaLoaderRegistry;
 import io.github.hyshmily.zeta.exception.ZetaBlockedException;
 import io.github.hyshmily.zeta.exception.ZetaModeException;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.Item;
+import io.github.hyshmily.zeta.model.HotKey;
 import io.github.hyshmily.zeta.model.InvalidatePolicy;
 import io.github.hyshmily.zeta.model.ReadPolicy;
-import io.github.hyshmily.zeta.model.WritePolicy;
-import io.github.hyshmily.zeta.model.HotKey;
 import io.github.hyshmily.zeta.model.StalePolicy;
+import io.github.hyshmily.zeta.model.WritePolicy;
 import io.github.hyshmily.zeta.model.ZetaCacheStats;
 import io.github.hyshmily.zeta.rule.Rule;
 import io.github.hyshmily.zeta.rule.RuleMatcher;
@@ -45,20 +45,20 @@ import org.springframework.util.Assert;
  * two planes:
  *
  * <ul>
-  *   <li><b>Data plane</b> (this interface): cache reads, writes,
-  *       invalidations, detection tagging, and distributed locks. All methods
-  *       follow the <b>two-arity convention</b> — a common-case convenience
-  *       form (implemented here as a {@code default} method) and a
-  *       full-control form whose last parameter is the family's closed
-  *       policy record ({@link ReadPolicy}, {@link WritePolicy},
-  *       {@link InvalidatePolicy}).
-  *       Intermediate positional overloads intentionally do not exist.</li>
-   *   <li><b>Administrative plane</b> ({@link #rules()}, {@link #refresh()},
-   *       {@link #stats()}, {@link #detector()}): low-frequency operations —
-   *       rule CRUD, timed refresh registration, observability, and local-TopK
-   *       detection queries/feeds — behind small interfaces that can be
-   *       replaced independently (Caffeine's {@code Cache.policy()}
-   *       pattern).</li>
+ *   <li><b>Data plane</b> (this interface): cache reads, writes,
+ *       invalidations, detection tagging, and distributed locks. All methods
+ *       follow the <b>two-arity convention</b> — a common-case convenience
+ *       form (implemented here as a {@code default} method) and a
+ *       full-control form whose last parameter is the family's closed
+ *       policy record ({@link ReadPolicy}, {@link WritePolicy},
+ *       {@link InvalidatePolicy}).
+ *       Intermediate positional overloads intentionally do not exist.</li>
+ *   <li><b>Administrative plane</b> ({@link #rules()}, {@link #refresh()},
+ *       {@link #stats()}, {@link #detector()}): low-frequency operations —
+ *       rule CRUD, timed refresh registration, observability, and local-TopK
+ *       detection queries/feeds — behind small interfaces that can be
+ *       replaced independently (Caffeine's {@code Cache.policy()}
+ *       pattern).</li>
  * </ul>
  *
  * <p>
@@ -124,7 +124,9 @@ public interface Zeta {
    * <p>
    * Updates the local HeavyKeeper sketch and enqueues the key for batch
    * reporting to the Worker, exactly as {@link #get} would, but without
-   * touching the L1 cache or invoking any reader/loader.
+   * touching the L1 cache or invoking any reader/loader. Fire-and-forget:
+   * a blacklisted key drops the hint instead of throwing, so audit-style
+   * tagging never breaks the business method.
    *
    * @param cacheKey the key to tag
    */
@@ -201,12 +203,20 @@ public interface Zeta {
    * TTLs.
    *
    * <p>
+   * <b>Default stale policy:</b> the convenience reader overload builds
+   * {@link ReadPolicy} with {@link StalePolicy#SOFT_REFRESH}, so a soft-expired
+   * hit arms a background refresh — behaviorally identical to
+   * {@link #getWithSoftExpire(String, Supplier)}. To disable the background
+   * refresh, pass an explicit policy with {@link StalePolicy#RETURN} to
+   * {@link #get(String, ReadPolicy)}.
+   *
+   * <p>
    * <b>Registry precedence:</b> this overload never consults the
    * {@link ZetaLoaderRegistry} — a spec registered for the key's prefix (its
    * TTL overrides, null-caching, {@code failOnError}, reporting) is <i>not</i>
    * applied; global defaults govern instead. To inherit a spec's policy while
    * swapping only the data source, derive it explicitly —
-   * {@code spec.withLoader(custom).toPolicy(key)} handed to
+   * {@code spec.withLoader(custom).toReadPolicy(key)} handed to
    * {@link #get(String, ReadPolicy)}.
    *
    * @param cacheKey the key to retrieve
@@ -251,7 +261,7 @@ public interface Zeta {
    * <i>not</i> applied; global defaults govern and the stale policy is forced
    * to {@link StalePolicy#SOFT_REFRESH}. To inherit a spec's policy while
    * swapping only the data source, derive it explicitly —
-   * {@code spec.withLoader(custom).toPolicy(key, StalePolicy.SOFT_REFRESH)}
+   * {@code spec.withLoader(custom).toReadPolicy(key, StalePolicy.SOFT_REFRESH)}
    * handed to {@link #getWithSoftExpire(String, ReadPolicy)}.
    *
    * @param cacheKey the key to retrieve
@@ -347,8 +357,10 @@ public interface Zeta {
    * All keys share the same policy. The policy's TTLs are evaluated once for
    * the whole batch (the batch pipeline has no per-key lazy-TTL path); the
    * explicit {@code reader} argument governs loading ({@code policy.reader()}
-   * is ignored), and {@code null} results are always cached as short-TTL
-   * sentinels.
+   * is ignored — pass the loader positionally, a policy-carried reader is
+   * silently dropped), and {@code null} results honor
+   * {@code policy.nullCaching()} (sentinel when {@code true}, no entry when
+   * {@code false}, matching the single-key path).
    *
    * @param cacheKeys the keys to retrieve
    * @param reader    the value function for cache misses
@@ -562,7 +574,8 @@ public interface Zeta {
    * @param cacheKey the key to look up
    * @param <T>      the value type
    * @return an {@link Optional} containing the raw value if present
-   * @throws ZetaModeException when no cache is available (Worker-only mode)
+   * @throws ZetaModeException    when no cache is available (Worker-only mode)
+   * @throws ZetaBlockedException when the key matches a blacklist rule
    */
   public <T> Optional<T> peek(@NotNull @NotBlank String cacheKey);
 
@@ -589,8 +602,14 @@ public interface Zeta {
    *         detection/reporting fire only on the two hit forms
    * @throws ZetaModeException    when no cache is available (Worker-only mode)
    * @throws ZetaBlockedException when the key matches a blacklist rule
+   * @deprecated moved to {@link ZetaInternal#peekAndTag(String)} — the
+   *             detecting peek is an adapter SPI, not application API.
+   *             Kept delegating so legacy {@link Zeta} implementations keep
+   *             working; new implementations should implement
+   *             {@link ZetaInternal} instead.
    */
   @Internal
+  @Deprecated
   public Object peekAndTag(String cacheKey);
 
   /**
@@ -606,14 +625,29 @@ public interface Zeta {
    * {@code skipBroadcast}. <b>Ignored components:</b> {@code nullCaching},
    * {@code stalePolicy}, {@code reader}, {@code reportEnabled},
    * {@code failOnError}.
+   * <p>
+   * <b>HOT floor:</b> on a HOT entry the effective TTL is
+   * {@code max(override, configured hot default)} — a small override never
+   * shortens a HOT entry (promotion never shortens). <b>Oversized:</b> values
+   * over {@code max-value-size} bump the version and broadcast but take no
+   * local residency (WARN-logged) — the write "succeeds" but every read
+   * misses. <b>Degraded:</b> while Redis is unreachable the version falls
+   * back to the Snowflake space and a healthy existing entry keeps its
+   * pre-write value locally (WARN-logged) with no peer convergence until
+   * the next normal write. The writer runs inline outside transactions and
+   * at {@code afterCommit} inside one; a writer failure propagates instead
+   * of being swallowed.
    *
    * @param cacheKey the key to write
-   * @param value    the value to cache
+   * @param value    the value to cache ({@code null} stores a short-TTL null
+   *                 sentinel for penetration protection, mirroring the read path)
    * @param writer   the data-source mutation to execute before caching
    * @param policy   the cache policy supplying TTL overrides and broadcast
    *                 control
    * @param <T>      the value type
    * @throws ZetaModeException when no cache is available (Worker-only mode)
+   * @throws IllegalArgumentException when a permanent entry
+   *                 ({@link Long#MAX_VALUE} hard TTL) is combined with broadcast
    */
   public <T> void putThrough(String cacheKey, T value, Runnable writer, WritePolicy policy);
 
@@ -621,10 +655,19 @@ public interface Zeta {
    * Write a value directly into the local L1 cache with an explicit
    * {@link WritePolicy} controlling the entry's TTLs. Delegates to
    * {@link #putLocal(String, Object)} semantics — no version bump, no
-   * broadcast, no hot-key detection, and no reporting.
+   * broadcast, no hot-key detection, and no reporting. Transaction-aware:
+   * inside a transaction the write waits for commit (rollback drops it).
    *
    * <p>
-   * In Worker-only mode this method silently no-ops.
+   * On a Worker-managed (HOT/COOL) entry only the value is updated — the
+   * Worker's TTL regime is kept, so the passed TTLs are silently ignored
+   * there. Values over {@code max-value-size} take no residency (WARN-logged).
+   * {@code null} values are rejected with {@link NullPointerException}
+   * (unlike {@code putThrough}, which stores a null sentinel).
+   *
+   * <p>
+   * In Worker-only mode this method throws {@link ZetaModeException} like
+   * every other data-plane method.
    *
    * @param cacheKey the key to store
    * @param value    the value to cache
@@ -636,6 +679,18 @@ public interface Zeta {
    * Invalidate a single key from L1 with explicit broadcast control via
    * {@link InvalidatePolicy}: when {@code policy.skipBroadcast()} is
    * {@code true} the invalidation stays local (no REFRESH message to peers).
+   *
+   * <p><b>Peer convergence is best-effort and bounded by TTL, not by latency.</b>
+   * This node's entry is removed synchronously; peers are told through a
+   * fire-and-forget broadcast with no publisher confirms (ADR-0007), and the
+   * data plane never replays. A peer that misses the message stays stale until
+   * the entry's remaining hard TTL expires — default 5min, 1h while a Worker
+   * holds the key HOT. (ADR-0013's "&lt;1s" bound describes Worker HOT/COOL
+   * decisions, which are rebroadcast every 10s; it does not apply here.) The
+   * sync queue also carries {@code x-message-ttl = 60s}, so an INVALIDATE that
+   * sits in a backlog longer than that is dropped by the broker rather than
+   * delivered late — size consumers and prefetch accordingly, and watch
+   * {@code zeta.sync.send.failed.total}.
    *
    * @param cacheKey the key to invalidate
    * @param policy   the invalidation policy supplying broadcast control
@@ -669,25 +724,116 @@ public interface Zeta {
    * explicit broadcast control via {@link InvalidatePolicy} — see
    * {@link #invalidateAfterPut(String, Runnable, InvalidatePolicy)}.
    *
+   * <p>Each key is independent: a failing mutation skips only that key's
+   * invalidation, and a key this cache refuses to touch (blank, oversized, or
+   * matched by a rule that excludes it) is skipped without running its
+   * mutation. Both are reported in the returned set, which is the only way a
+   * caller can detect a partial batch — the single-key overload has no such
+   * ambiguity because it can only succeed or skip one key.
+   *
+   * <p><b>Transaction caveat:</b> the batch overload is rejected inside an
+   * active Spring transaction (it throws {@link IllegalStateException}) —
+   * mutations run at after-commit, so the returned set would be incomplete.
+   * Use single-key {@link #invalidateAfterPut(String, Runnable, InvalidatePolicy)}
+   * per key inside transactions.
+   *
    * @param mutations a map of key → mutation pairs
    * @param policy    the invalidation policy supplying broadcast control
+   * @return the keys that were not invalidated (never {@code null}; empty when
+   *         every key applied)
    * @throws ZetaModeException when no cache is available (Worker-only mode)
    */
-  public void invalidateAfterPut(Map<String, ? extends Runnable> mutations, InvalidatePolicy policy);
+  public Set<String> invalidateAfterPut(Map<String, ? extends Runnable> mutations, InvalidatePolicy policy);
 
   /**
-   * Invalidate all entries from the L1 cache without broadcasting.
+   * Invalidate a single key and return the allocated data version, so the
+   * caller can correlate this invalidation against peer state and logs.
+   * Delivery itself stays fire-and-forget (see
+   * {@link #invalidate(String, InvalidatePolicy)}); the version only makes
+   * the operation observable — it is NOT a delivery acknowledgement.
+   * Returns {@code -1} for a local-only invalidation
+   * ({@code policy.skipBroadcast() == true}) or an invalid (blank) key.
+   * A negative version other than {@code -1} is a degraded (Snowflake-fallback)
+   * version allocated while Redis was unreachable: it is broadcast but
+   * healthy peers holding a normal version will skip it by design.
+   *
+   * @param cacheKey the key to invalidate
+   * @param policy   the invalidation policy supplying broadcast control
+   * @return the allocated data version, or {@code -1} when local-only
+   * @throws ZetaModeException when no cache is available (Worker-only mode)
+   */
+  public long invalidateAndGetVersion(String cacheKey, InvalidatePolicy policy);
+
+  /**
+   * Invalidate a collection of keys, returning the per-key allocated versions
+   * (insertion-ordered, caller's key form; invalid keys map to {@code -1}).
+   *
+   * @param cacheKeys the keys to invalidate
+   * @param policy    the invalidation policy supplying broadcast control
+   * @return per-key versions (never {@code null})
+   * @throws ZetaModeException when no cache is available (Worker-only mode)
+   */
+  public Map<String, Long> invalidateAndGetVersions(Collection<String> cacheKeys, InvalidatePolicy policy);
+
+  /**
+   * Convenience form of {@link #invalidateAndGetVersion(String, InvalidatePolicy)}
+   * with broadcast on.
+   *
+   * @param cacheKey the key to invalidate
+   * @return the allocated data version
+   * @throws ZetaModeException when no cache is available (Worker-only mode)
+   */
+  public default long invalidateAndGetVersion(String cacheKey) {
+    return invalidateAndGetVersion(cacheKey, InvalidatePolicy.defaults());
+  }
+
+  /**
+   * Convenience form of {@link #invalidateAndGetVersions(Collection, InvalidatePolicy)}
+   * with broadcast on.
+   *
+   * @param cacheKeys the keys to invalidate
+   * @return per-key versions (never {@code null})
+   * @throws ZetaModeException when no cache is available (Worker-only mode)
+   */
+  public default Map<String, Long> invalidateAndGetVersions(Collection<String> cacheKeys) {
+    return invalidateAndGetVersions(cacheKeys, InvalidatePolicy.defaults());
+  }
+
+  /**
+   * Emergency flush of the LOCAL L1 cache without broadcasting.
    * <p>
    * This is an emergency flush — all cached values are removed immediately.
-   * No cross-instance sync messages are sent. Subsequent {@link #get} calls
-   * will reload data from the reader.
+   * No cross-instance sync messages are sent: peers keep serving their
+   * entries until their own TTL expires or they are flushed the same way.
+   * The {@code Emergency} name is load-bearing: this call clears one JVM, never
+   * the cluster.
+   * <p>
+   * <b>There is no cluster-wide clear.</b> Not because it is unimplemented by
+   * accident, but because a broadcast flush is fire-and-forget with no
+   * acknowledgement (ADR-0007), so a caller could never know whether peers
+   * actually cleared. The batch broadcast primitive that could implement one
+   * is reserved and unreachable from this facade. To converge a cluster, use
+   * per-key {@link #invalidate} (ordered, version-guarded, acknowledged by
+   * each peer's own processing) or a rolling restart.
    * <p>
    * Use with caution: flushing the local cache increases load on the backend
    * until entries are re-cached.
    *
    * @throws ZetaModeException when no cache is available (Worker-only mode)
    */
-  public void invalidateAllLocal();
+  public void flushLocalEmergency();
+
+  /**
+   * Invalidate all entries from the LOCAL L1 cache without broadcasting.
+   *
+   * @deprecated prefer {@link #flushLocalEmergency()} — same behavior, but the
+   *             name states the single-JVM scope and the emergency nature.
+   * @throws ZetaModeException when no cache is available (Worker-only mode)
+   */
+  @Deprecated
+  public default void invalidateAllLocal() {
+    flushLocalEmergency();
+  }
 
   /**
    * Attempt to acquire a distributed lock with the provider's default
@@ -751,13 +897,22 @@ public interface Zeta {
    *
    * <p>
    * Equivalent to {@code tryLockAndRun(key, expire, unit, action, -1, -1, -1)}.
+   * There is no fencing token: a lease can lapse mid-action (GC pause longer
+   * than the TTL, failover, partition) and mutual exclusion is then broken
+   * without an exception. The lease is re-checked after the action via
+   * {@link AutoReleaseLock#isHeld()}: {@code false} means the action ran but
+   * the section was not exclusive — treat it as a correctness incident.
+   * Long critical sections should additionally re-check {@code isHeld()}
+   * before each externally-visible step.
    *
    * @param key    the lock key
    * @param expire the time-to-live for the lock
    * @param unit   the time unit for {@code expire}
    * @param action the action to execute while holding the lock
-   * @return {@code true} if the lock was acquired and the action ran,
-   *         {@code false} otherwise
+   * @return {@code true} if the lock was acquired, the action ran, and the
+   *         lease was still held afterwards; {@code false} when the lock was
+   *         not acquired, the provider is unavailable, or the lease lapsed
+   *         mid-action
    */
   public boolean tryLockAndRun(String key, long expire, TimeUnit unit, Runnable action);
 
@@ -768,6 +923,8 @@ public interface Zeta {
    *
    * <p>
    * Any negative count falls back to the provider's configured default.
+   * The post-action lease recheck applies here exactly as in
+   * {@link #tryLockAndRun(String, long, TimeUnit, Runnable)}.
    *
    * @param key                 the lock key
    * @param expire              the time-to-live for the lock
@@ -779,8 +936,8 @@ public interface Zeta {
    *                            negative → default
    * @param tryLockUnlockCount  the number of {@code DEL} retries;
    *                            negative → default
-   * @return {@code true} if the lock was acquired and the action ran,
-   *         {@code false} otherwise
+   * @return {@code true} if the lock was acquired, the action ran, and the
+   *         lease was still held afterwards; {@code false} otherwise
    */
   public boolean tryLockAndRun(
     String key,
@@ -793,15 +950,17 @@ public interface Zeta {
   );
 
   /**
-   * Refresh the given key with an explicit {@link WritePolicy}: load via the
-   * supplier, evict the local entry, then cache the loaded value through
-   * write-through (version bump + broadcast). No broadcast is sent for the
-   * eviction itself.
+   * Refresh the given key with an explicit {@link WritePolicy}: allocate the
+   * version <i>before</i> the load, then apply the loaded value through the
+   * write-through guard (version bump + broadcast). No broadcast is sent for
+   * the eviction itself.
    *
    * <p>
-   * <b>Ordering note:</b> the load runs <i>before</i> the eviction so the
-   * local L1 miss window stays as short as possible; the refresh is not
-   * atomic against concurrent writers (see {@link #refresh(String, Supplier)}).
+   * <b>Ordering note:</b> the version is allocated before the load, so a
+   * concurrent {@code putThrough} landing during the load holds the newer
+   * version and this refresh's stale apply is skipped instead of regressing
+   * it. A {@code null} loader result keeps the evict-only contract (local
+   * drop, no broadcast).
    *
    * @param cacheKey the key to refresh
    * @param loader   the value supplier
@@ -918,7 +1077,7 @@ public interface Zeta {
    * Uses effective hard/soft TTL from configuration.
    *
    * @param cacheKey the key to write
-   * @param value    the value to cache
+   * @param value    the value to cache ({@code null} stores a short-TTL null sentinel)
    * @param writer   the data-source mutation to execute before caching
    * @param <T>      the value type
    * @throws ZetaModeException when no cache is available (Worker-only mode)
@@ -935,8 +1094,8 @@ public interface Zeta {
    * {@link io.github.hyshmily.zeta.model.CacheEntry} is created with
    * {@link io.github.hyshmily.zeta.model.KeyState#NORMAL}.
    * <p>
-   * Never throws {@code UnsupportedOperationException} in Worker-only mode;
-   * silently no-ops instead.
+   * In Worker-only mode throws {@link ZetaModeException} like every other
+   * data-plane method.
    *
    * @param cacheKey the key to store
    * @param value    the value to cache
@@ -984,10 +1143,11 @@ public interface Zeta {
    * that key is skipped (invalidation and broadcast are not performed).
    *
    * @param mutations a map of key → mutation pairs to execute before invalidation
+   * @return the keys that were not invalidated (never {@code null})
    * @throws ZetaModeException when no cache is available (Worker-only mode)
    */
-  public default void invalidateAfterPut(Map<String, ? extends Runnable> mutations) {
-    invalidateAfterPut(mutations, InvalidatePolicy.defaults());
+  public default Set<String> invalidateAfterPut(Map<String, ? extends Runnable> mutations) {
+    return invalidateAfterPut(mutations, InvalidatePolicy.defaults());
   }
 
   /**
@@ -1000,18 +1160,14 @@ public interface Zeta {
    * @param <T>      the value type
    */
   /**
-   * Refresh the given key: load via the supplier, evict the local entry, then
-   * cache the loaded value through write-through (version bump + broadcast).
+   * Refresh the given key: allocate the version <i>before</i> the load, then
+   * apply the loaded value through the write-through guard.
    * Uses default TTLs. No broadcast is sent for the eviction itself.
    *
    * <p>
-   * <b>Ordering note:</b> the load runs <i>before</i> the eviction so the
-   * local L1 miss window stays as short as possible. The refresh is not
-   * atomic against concurrent writers: a {@link #putThrough} landing between
-   * the load and the final cache update is overwritten by the (possibly
-   * older) loaded value, stamped with the newest version — last-writer-wins,
-   * tolerated per the same convergence contract as ADR-0013. Callers that
-   * need read-modify-write atomicity should use
+   * <b>Ordering note:</b> a {@link #putThrough} landing during the load holds
+   * the newer version, so this refresh's stale apply is skipped instead of
+   * regressing it. Callers that need read-modify-write atomicity should use
    * {@link #putThrough(String, Object, Runnable, WritePolicy)} instead
    * (last-writer-wins; no CAS is offered).
    *
@@ -1040,8 +1196,9 @@ public interface Zeta {
 
   /**
    * Observability view: L1 size/statistics and read-only snapshots.
-   * In Worker-only mode {@code stats()} returns {@code null},
-   * {@code estimatedSize()} returns {@code 0}, and {@code snapshotValues()} /
+   * In Worker-only mode {@code snapshot()} throws {@link ZetaModeException}
+   * (a null return manufactured NPEs at callers); {@code estimatedSize()}
+   * returns {@code 0} and {@code snapshotValues()} /
    * {@code localKeysWithPrefix()} return empty collections.
    */
   StatsAdmin stats();
@@ -1222,11 +1379,13 @@ public interface Zeta {
    */
   interface DetectorAdmin {
     /**
-     * Check whether a key is currently tracked as a local hot key in L1.
+     * Check whether a key is currently hot on this instance — either resident
+     * in L1 with {@link io.github.hyshmily.zeta.model.KeyState#HOT} (and not
+     * logically expired) or tracked by the local TopK detector (promotable
+     * but possibly not yet resident).
      *
      * @param cacheKey the key to inspect
-     * @return {@code true} if the key exists in L1 with
-     *         {@link io.github.hyshmily.zeta.model.KeyState#HOT}
+     * @return {@code true} if the key is L1-HOT or detector-tracked
      * @throws ZetaModeException when no cache is available (Worker-only mode)
      */
     boolean isLocalHotKey(String cacheKey);

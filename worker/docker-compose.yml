@@ -37,7 +37,7 @@ services:
       SPRING_RABBITMQ_HOST: rabbitmq
       SPRING_DATA_REDIS_HOST: redis
       ZETA_WORKER_ENABLED: "true"
-      # ZETA_WORKER_ROUTING_APP_NAME: "myapp"  # 必须与 App 侧 zeta.local.app-name 一致
+      # ZETA_APP_NAME: "myapp"  # App 侧与 Worker 侧共用同一个键
     depends_on:
       redis:      { condition: service_healthy }
       rabbitmq:   { condition: service_healthy }

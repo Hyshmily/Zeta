@@ -131,9 +131,15 @@ public class DefaultSyncDecisionHandler implements SyncDecisionHandler {
    *       no decision-version information, and clearing such an entry would discard
    *       its decision metadata and extended TTL (ADR-0021 / ADR-0024 depend on them
    *       surviving); it expires naturally or awaits the next Worker decision.</li>
-   *   <li><b>Guarded path:</b> Uses {@link VersionGuard#shouldSkipForSync} with the
-   *       4-case degraded comparison. Case 2 (existing normal, incoming degraded)
-   *       prevents a stale degraded INVALIDATE from wiping a healthy entry.</li>
+   *   <li><b>Guarded path:</b> Uses {@link VersionGuard#shouldSkipForRefresh} with the
+   *       4-case degraded comparison (equal version applies). An invalidation is
+   *       idempotent deletion: applying at equality is always safe, and it heals
+   *       the ADR-0033 probe-after-read over-stamp, where a racing read lands an
+   *       entry stamped with this message's own version (bump-first ordering,
+   *       ADR-0086) and the plain {@code >=} matrix would skip the delete and
+   *       pin the stale value for its whole TTL. Case 2 (existing normal,
+   *       incoming degraded) still prevents a stale degraded INVALIDATE from
+   *       wiping a healthy entry.</li>
    * </ul>
    *
    * <p>Double-checked locking (DCL): a fast version guard before the atomic
@@ -153,7 +159,7 @@ public class DefaultSyncDecisionHandler implements SyncDecisionHandler {
 
     if (
       !unconditional &&
-      VersionGuard.shouldSkipForSync(caffeineCache, sm.cacheKey(), sm.version(), sm.isVersionDegraded())
+      VersionGuard.shouldSkipForRefresh(caffeineCache, sm.cacheKey(), sm.version(), sm.isVersionDegraded())
     ) {
       log.debug("Stale invalidate ignored: key={}, incomingVersion={}", sm.cacheKey(), sm.version());
       return;
@@ -166,7 +172,7 @@ public class DefaultSyncDecisionHandler implements SyncDecisionHandler {
         if (
           !unconditional &&
           existing != null &&
-          VersionGuard.shouldSkipForSync(existing, sm.version(), sm.isVersionDegraded())
+          VersionGuard.shouldSkipForRefresh(existing, sm.version(), sm.isVersionDegraded())
         ) {
           return existing;
         }

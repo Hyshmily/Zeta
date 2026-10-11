@@ -288,6 +288,7 @@ public class RuleMatcherImpl implements RuleMatcher {
    * @return {@code true} if at least one rule was removed; {@code false}
    *         if no matching rule was found
    */
+  @Override
   public boolean removeRule(String pattern, RuleAction action) {
     StagedRules staged;
     boolean removed;
@@ -352,6 +353,7 @@ public class RuleMatcherImpl implements RuleMatcher {
    * to sibling instances. This ensures that all nodes converge to the
    * empty state.
    */
+  @Override
   public void clearRules() {
     StagedRules staged;
     synchronized (this) {
@@ -375,6 +377,7 @@ public class RuleMatcherImpl implements RuleMatcher {
    *               removed regardless of their pattern
    * @return the number of rules removed (zero if no matching rules exist)
    */
+  @Override
   public int removeRulesByAction(RuleAction action) {
     int removed;
     StagedRules staged = null;
@@ -408,6 +411,7 @@ public class RuleMatcherImpl implements RuleMatcher {
    *
    * @param index the zero-based index of the rule to remove
    */
+  @Override
   public void removeRule(int index) {
     StagedRules staged = null;
     synchronized (this) {
@@ -458,34 +462,47 @@ public class RuleMatcherImpl implements RuleMatcher {
    * @param incomingVersion the rulesVersion from the incoming message header,
    *                        or {@code 0L} for pre-version broadcasts
    */
+  @Override
   public void syncRules(String json, long incomingVersion) {
-    StagedRules staged;
+    // Lock-free stale pre-check: saves a Jackson parse on messages that are
+    // definitely stale. Racy by design — the authoritative check runs inside
+    // the monitor below, in the same critical section as the replace.
+    if (incomingVersion > 0L && incomingVersion <= rulesVersion.get()) {
+      log.debug("Stale rules sync ignored: incomingVersion={}, localVersion={}", incomingVersion, rulesVersion.get());
+      return;
+    }
+    // Parse outside the monitor: Jackson work must never hold the mutation lock.
+    final ParsedRuleSet parsed;
     try {
-      synchronized (this) {
-        if (incomingVersion > 0L && incomingVersion <= rulesVersion.get()) {
-          log.debug(
-            "Stale rules sync ignored: incomingVersion={}, localVersion={}",
-            incomingVersion,
-            rulesVersion.get()
-          );
-          return;
-        }
-        ParsedRuleSet parsed = parseRulesJson(json);
-        if (incomingVersion > 0L) {
-          replaceRules(parsed.rules());
-        } else {
-          replaceRules(mergeRules(List.of(rulesSnapshot), parsed.rules()));
-          rulesVersion.incrementAndGet();
-        }
-        rulesVersion.updateAndGet(v -> Math.max(v, Math.max(incomingVersion, parsed.version())));
-
-        long effectiveVersion = rulesVersion.get();
-        staged = new StagedRules(
-          serializeRules(List.of(rulesSnapshot), effectiveVersion),
-          effectiveVersion,
-          rulesSnapshot.length
-        );
+      parsed = parseRulesJson(json);
+    } catch (Exception e) {
+      log.error("Failed to sync rules from send", e);
+      return;
+    }
+    // Snapshot capture inside the monitor: the stale re-check, the replace,
+    // and the version bump stay in one atomic region so concurrent syncs cannot
+    // interleave (a newer replace is never overwritten by an older one).
+    // Serialization happens outside, on the captured copy.
+    final List<Rule> snapshotCopy;
+    final long effectiveVersion;
+    synchronized (this) {
+      if (incomingVersion > 0L && incomingVersion <= rulesVersion.get()) {
+        log.debug("Stale rules sync ignored: incomingVersion={}, localVersion={}", incomingVersion, rulesVersion.get());
+        return;
       }
+      if (incomingVersion > 0L) {
+        replaceRules(parsed.rules());
+      } else {
+        replaceRules(mergeRules(List.of(rulesSnapshot), parsed.rules()));
+        rulesVersion.incrementAndGet();
+      }
+      rulesVersion.updateAndGet(v -> Math.max(v, Math.max(incomingVersion, parsed.version())));
+      effectiveVersion = rulesVersion.get();
+      snapshotCopy = List.of(rulesSnapshot);
+    }
+    final StagedRules staged;
+    try {
+      staged = new StagedRules(serializeRules(snapshotCopy, effectiveVersion), effectiveVersion, snapshotCopy.size());
     } catch (Exception e) {
       log.error("Failed to sync rules from send", e);
       return;
@@ -506,6 +523,7 @@ public class RuleMatcherImpl implements RuleMatcher {
    * @param newRules the new rule list; each element is {@link Rule#prepare() prepared} before
    *     insertion, must not be {@code null}
    */
+  @Override
   public synchronized void replaceRules(List<Rule> newRules) {
     int oldSize = rulesSnapshot.length;
     Rule[] replacement = new Rule[newRules.size()];
@@ -521,6 +539,7 @@ public class RuleMatcherImpl implements RuleMatcher {
   }
 
   /** @return an unmodifiable snapshot of the current rules (safe for iteration). */
+  @Override
   public List<Rule> getAllRules() {
     return List.of(rulesSnapshot);
   }
@@ -542,6 +561,7 @@ public class RuleMatcherImpl implements RuleMatcher {
    *         {@code Optional.of(true)} if the rule action is {@link RuleAction#ALLOW_NO_REPORT},
    *         {@code Optional.of(false)} if no rule matches or the action is {@link RuleAction#ALLOW}
    */
+  @Override
   public Optional<Boolean> isAllowNoReport(String cacheKey, String operation) {
     RuleAction action = evaluateRule(cacheKey);
     if (action == RuleAction.BLOCK) {
@@ -567,6 +587,7 @@ public class RuleMatcherImpl implements RuleMatcher {
    * @param cacheKey the key to evaluate against all rules
    * @return the {@link RuleAction} of the first matching rule, or {@link RuleAction#ALLOW} if no rule matches
    */
+  @Override
   public RuleAction evaluateRule(String cacheKey) {
     Rule[] snapshot = rulesSnapshot;
     if (snapshot.length == 0) {
@@ -695,6 +716,7 @@ public class RuleMatcherImpl implements RuleMatcher {
    *
    * @return the number of persist/broadcast failures since startup
    */
+
   public long getRulesPersistFailures() {
     return rulesPersistFailures.get();
   }
@@ -723,7 +745,7 @@ public class RuleMatcherImpl implements RuleMatcher {
 
       log.debug("Rules persisted (version={}), total: {}", staged.version(), staged.total());
     } catch (Exception e) {
-      log.error("Failed to persist rules", e);
+      recordPersistFailure("persist/broadcast", e);
     }
   }
 
@@ -756,7 +778,7 @@ public class RuleMatcherImpl implements RuleMatcher {
       try {
         r.opsForValue().set(KEY_RULES, json);
       } catch (Exception e2) {
-        log.error("Redis fallback set also failed, skipping persist", e2);
+        recordPersistFailure("persist/broadcast", e2);
       }
     }
   }
@@ -877,6 +899,7 @@ public class RuleMatcherImpl implements RuleMatcher {
    * and send. If no {@link CacheSyncPublisher} is configured, the
    * method logs a warning and returns without broadcasting.
    */
+  @Override
   public void broadcastAllLocalRulesManually() {
     loadRulesFromRedis();
 
@@ -915,25 +938,37 @@ public class RuleMatcherImpl implements RuleMatcher {
    * also be invoked manually via {@link #broadcastAllLocalRulesManually()}
    * to refresh from Redis on demand.
    */
-  private synchronized void loadRulesFromRedis() {
-    redisTemplate.ifPresent(r -> {
-      try {
-        String json = r.opsForValue().get(KEY_RULES);
-
-        if (json == null || json.isEmpty()) {
-          log.info("No rules found in Redis, starting with empty rule set");
-          return;
-        }
-
-        ParsedRuleSet parsed = parseRulesJson(json);
-        replaceRules(parsed.rules());
-        rulesVersion.updateAndGet(v -> Math.max(v, parsed.version()));
-
-        log.info("Rules loaded from Redis: {} rules (version={})", parsed.rules().size(), rulesVersion.get());
-      } catch (Exception e) {
-        log.error("Failed to load rules from Redis", e);
-      }
-    });
+  private void loadRulesFromRedis() {
+    if (redisTemplate.isEmpty()) {
+      return;
+    }
+    // Fetch + parse outside the mutation monitor: the invariant is only the
+    // snapshot swap + version bump below. Holding the monitor across a Redis
+    // round-trip would serialize every rule mutation and RULES_SYNC behind
+    // the network (C2).
+    String json;
+    try {
+      json = redisTemplate.get().opsForValue().get(KEY_RULES);
+    } catch (Exception e) {
+      log.error("Failed to load rules from Redis", e);
+      return;
+    }
+    if (json == null || json.isEmpty()) {
+      log.info("No rules found in Redis, starting with empty rule set");
+      return;
+    }
+    ParsedRuleSet parsed;
+    try {
+      parsed = parseRulesJson(json);
+    } catch (Exception e) {
+      log.error("Failed to load rules from Redis", e);
+      return;
+    }
+    synchronized (this) {
+      replaceRules(parsed.rules());
+      rulesVersion.updateAndGet(v -> Math.max(v, parsed.version()));
+    }
+    log.info("Rules loaded from Redis: {} rules (version={})", parsed.rules().size(), rulesVersion.get());
   }
 
   /** Append a rule to a snapshot array, returning a new array (copy-on-write). */

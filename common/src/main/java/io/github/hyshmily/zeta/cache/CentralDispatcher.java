@@ -161,6 +161,19 @@ public class CentralDispatcher {
    * Currently only supports {@link SyncMessage#TYPE_INVALIDATE_ALL}:
    * calls {@link CacheSyncPublisher#broadcastLocalInvalidateAll}.
    *
+   * <p><b>Reserved entry point — no production caller today.</b> This is the
+   * only cluster-wide "clear these keys everywhere" primitive in the tree, and
+   * nothing in the public API reaches it: {@code Zeta.invalidateAllLocal()} is
+   * deliberately local-only (see its Javadoc for why a broadcast flush has no
+   * acknowledgement), and per-key invalidation goes through
+   * {@link #send(String, String, long, boolean)}. It is kept because the
+   * receiving side ({@code CacheSyncListener} →
+   * {@code handleLocalInvalidateAll}) must stay able to honour an
+   * {@code INVALIDATE_ALL} from an older peer during a rolling upgrade, and
+   * because a future coordinated flush needs this sender. Do not assume
+   * calling it clears the cluster: it is fire-and-forget with no
+   * acknowledgement, exactly as ADR-0007 describes.
+   *
    * @param cacheKeys the keys to send; null or empty is silently ignored
    * @param type      the operation type ({@link SyncMessage#TYPE_INVALIDATE_ALL})
    */

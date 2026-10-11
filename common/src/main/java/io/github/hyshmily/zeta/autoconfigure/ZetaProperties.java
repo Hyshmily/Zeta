@@ -156,11 +156,17 @@ public class ZetaProperties implements CacheCoreSettings, SpringCacheSettings, E
   private long hotSoftTtlMs;
 
   /** TTL (seconds) for null/cache-miss entries. Kept short to avoid caching negative results. */
+  @Min(1)
   private int nullValueTtlSeconds = 10;
 
   @Override
   public long effectiveNullTtlMs() {
-    return nullValueTtlSeconds > 0 ? nullValueTtlSeconds * 1000L : Long.MAX_VALUE;
+    if (nullValueTtlSeconds <= 0) {
+      throw new IllegalStateException(
+        "nullValueTtlSeconds must be positive (0 is not 'disable null caching' — it would pin a permanent negative entry; disable per-method via @NullCaching(false))"
+      );
+    }
+    return nullValueTtlSeconds * 1000L;
   }
 
   @Override

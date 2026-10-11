@@ -33,3 +33,21 @@ both listeners keep delegating `foreignAppDrops()` / `lastForeignApp()` so the
 Actuator surface is unchanged). The three rules, the compatibility contract, and
 all log wording are byte-identical — the extraction only removes the divergence
 the two copies had already developed.
+
+## 2026-10-10 amendment — single `zeta.app-name` key (breaking config change)
+
+A caller-side review found consequence 2 understated the failure: the two keys
+(`zeta.worker.routing.app-name` vs `zeta.local.app-name`) do not only drop
+decisions on the App side — the Worker's report binding
+(`reportToWorker.<appName>.<nodeId>`) is built from the Worker-side value while
+the App publishes to the App-side value, so a divergence ALSO drops 100% of
+reports at the broker and the Worker never produces decisions at all. Both
+links break, and the report half is invisible (broker-side drop, no log).
+
+Fix: one key, `zeta.app-name` (`ZetaAppProperties`, prefix `zeta`), bound by a
+single class consumed by both sides — `WorkerProperties.Routing` and
+`ZetaProperties.appName` are deleted. A same-broker multi-app deployment still
+sets distinct values per application (the default keeps single-app deployments
+working); a same-value pair, the only constructible state now, is correct by
+construction. The header, the three rules, and the header-less compatibility
+contract are unchanged.

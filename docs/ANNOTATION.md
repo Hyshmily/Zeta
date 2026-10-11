@@ -44,7 +44,7 @@ Zeta / HotKeyCache
 | --- | --- | --- | --- |
 | `@CacheTTL` | M/T | `@Cacheable` | Override hard/soft TTL. Static values and SpEL (`hardTtlSpEl`, `softTtlSpEl`). SpEL evaluated at most once per call, only on miss/promotion/refresh. Class-level annotation acts as fallback for all methods |
 | `@Intercept` | M | `@Cacheable` | Skip method body via trigger mode (`IS_LOCAL_HOT` / `FORCE` / `QPS` / `CONCURRENT_THREADS`). Mode-specific config through nested annotations: `@Intercept.QpsConfig` (`threshold`, `blockDurationMs`) and `@Intercept.ConcurrentConfig` (`threshold`). Fallback via `@Intercept.fallback()` → `@Fallback` → `peek()`. On interception the local detector is incremented (no Worker report) |
-| `@Fallback` | M | `@Cacheable` | Fallback value (SpEL) or convention method (`{methodName}Fallback`) when blocked / intercepted / exception |
+| `@Fallback` | M | `@Cacheable` | Fallback value (SpEL) or convention method (`{methodName}Fallback`) when intercepted / exception (a blacklist BLOCK never routes to fallback — it always propagates) |
 | `@NullCaching` | M | `@Cacheable` | **Opt-out**: null results are cached by default (short-TTL sentinel, penetration protection); `@NullCaching(false)` disables caching for that method |
 | `@SkipBroadcast` | M | all three | Suppress cross-instance AMQP sync messages (local-only write/evict, and local-only `@CacheCondition` purge) |
 | `@Preload` | M | `@Cacheable` | Pre-inflate HeavyKeeper counts for known hot keys (static `keys[]` or dynamic `keyExpr` SpEL) |
@@ -116,7 +116,7 @@ For a given read operation:
 
 1. **NORMAL entry creation** — positive `@CacheTTL` (static or SpEL) override wins; 0 → configured default (`zeta.local.*`).
 2. **Promotion to HOT / HOT renewal** — effective hot TTL = `max(override, hot default)`: an override may only raise the floor, so promotion never shortens an entry's lifetime. On a plain hit the override suppliers are not evaluated; promotion then uses the configured hot defaults.
-3. **Soft-expire (stale-while-revalidate)** — governed solely by global configuration. The annotation read path always enters via the soft-expire entry point, which self-degrades when the feature is globally disabled. TTL overrides never gate it.
+3. **Soft-expire (stale-while-revalidate)** — governed solely by global configuration. The annotation `sync=true` read path enters via the soft-expire entry point, which self-degrades when the feature is globally disabled; the default non-sync path serves via detecting peek (`peekAndTag`, expiry-checked) without background refresh. TTL overrides never gate it.
 4. **TTL jitter** — ±5% by default (`zeta.local.ttl-jitter-ratio`), applied to all expiry timestamps.
 
 ---

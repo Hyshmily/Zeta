@@ -4,6 +4,23 @@
 - Date: 2026-09-18
 - Related: ADR-0030 (bin-lock discipline / SingleFlight), ADR-0031 (valueless refresh fallback), docs/extension-points-review.md
 
+> **Symbol drift — read this before acting on the Decision text.** Several
+> names below were renamed after acceptance; the behaviour decided here is
+> unchanged, but the identifiers are not:
+>
+> | Written in this ADR | Current name |
+> |---|---|
+> | `ZetaCacheLoader<V>` (root SPI) | `CacheLoader<V>` (`cache/loader/CacheLoader.java`) — `ZetaLoadingSpec#loader()` returns it |
+> | `RegistryAwareCacheLoader` | `PrefixRoutedLoader` |
+> | `ZetaLoadingSpec.toPolicy(...)` | `ZetaLoadingSpec.toReadPolicy(...)` |
+> | `RedisCacheLoader` / `hotKeyRedisLoader` bean | `RedisValueLoader` / `hotKeyClusterLoader` bean |
+> | `reload(key, oldValue)` hook | removed — never had a consumer (see Consequences) |
+>
+> One behavioural correction is also folded in below: the no-reader `get` used
+> to drop the spec's `stalePolicy`, so `softTtlMs` never armed a background
+> refresh on that path. That was a contract violation, not a design choice, and
+> it is fixed — the read path now honours `stalePolicy` on every overload.
+
 ## Problem
 
 Zeta already implements Caffeine's `refreshAfterWrite` runtime semantics — soft TTL + `StalePolicy.SOFT_REFRESH` + `ExpireManager` background refresh, wrapped in SingleFlight deduplication, circuit breaking, and Worker reporting. But the reader is bound to the **call site** (`CachePolicy.reader`, `read(key).withPrimary(...)`): there is no way to register a loader once and read with `get(key)` alone.
@@ -42,8 +59,30 @@ The gap has a cost beyond ergonomics. The cluster paths load values exclusively 
 
 ## Verification
 
-- `ZetaLoaderRegistryTest` (12 cases): longest-prefix wins, floor fast path, the `ab/abZ/aba` fallback, empty registry, replace/unregister/clear, argument validation.
-- `RegistryAwareCacheLoaderTest` (6 cases): registry hit skips fallback, miss delegates, unchecked loader exceptions propagate to the consumer's failure handling.
-- `ZetaLoadingSpecTest` (9 cases): defaults, builder validation, `toPolicy` carries TTLs/knobs/reader, stale-policy override, `reload` default.
-- `ZetaTest` no-reader cases: load through registered spec (policy carries spec TTLs and reader), stale-policy override, forced SOFT_REFRESH, fail-fast without registry / without matching prefix.
-- `ZetaReadQueryTest`: `withStalePolicy` flows into the built `CachePolicy`; `null` rejected.
+Current suite (names as they exist in the tree — see the symbol-drift table above):
+
+- `ZetaLoaderRegistryTest` (12 cases): longest-prefix wins, floor fast path, the
+  `ab/abZ/aba` fallback, empty registry, replace/unregister/clear, argument validation.
+- `PrefixRoutedLoaderTest` (6 cases, formerly `RegistryAwareCacheLoaderTest`):
+  registry hit skips the Redis fallback, miss delegates, unchecked loader
+  exceptions propagate to the consumer's failure handling.
+- `ZetaLoadingSpecTest` (16 cases): defaults, builder validation (null loader and
+  negative TTLs rejected), `toReadPolicy` carries TTLs/knobs/reader and invokes
+  `load` per call, stale-policy override (null rejected), `withLoader` copy
+  semantics (source spec unchanged, knobs carried).
+- `ZetaTest` no-reader cases: load through the registered spec (the policy carries
+  the spec's TTLs and reader), forced `SOFT_REFRESH` via `getWithSoftExpire`,
+  fail-fast without a registry / without a matching prefix, and batch grouping by
+  spec (`getNoReaderBatch_shouldGroupBySpecAndMerge`).
+- `ZetaTest.getNoReaderBatch_carriesNullCachingAndStalePolicy`: the batch path
+  forwards the spec's `nullCaching` and `stalePolicy` — it used to hard-code
+  `true` / `SOFT_REFRESH`, which silently ignored a `nullCaching(false)` spec.
+- `ZetaReadQueryTest`: `withStalePolicy` flows into the built `ReadPolicy`;
+  `null` rejected.
+- Soft-expiry arming — the behaviour that makes `softTtlMs` real — is pinned in
+  `HotKeyCacheConflictTest`: a `SOFT_REFRESH` read of a soft-expired NORMAL entry
+  arms the background refresh on **both** `get` and `getWithSoftExpire`
+  (`get_plainOverloadWithSoftRefreshPolicy_triggersBackgroundRefresh`), with
+  `RETURN` as the no-refresh control. The plain-`get` case was broken when this
+  ADR was written — the overload dropped the policy's stale policy — and is now
+  the regression guard for it.

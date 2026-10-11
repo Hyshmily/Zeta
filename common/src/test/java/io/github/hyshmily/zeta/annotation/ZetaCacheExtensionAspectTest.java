@@ -802,7 +802,7 @@ class ZetaCacheExtensionAspectTest {
   // ── resolveKey: empty expression with 0 args ──
 
   @Test
-  @DisplayName("resolveKey with empty expression and 0 args returns 'empty'")
+  @DisplayName("null SpEL key (missing arg) fails fast instead of collapsing onto one hot key")
   void resolveKey_emptyExpressionWithNoArgs() throws Throwable {
     Method method = TestService.class.getMethod("find", String.class);
     Cacheable cacheable = mock(Cacheable.class);
@@ -819,8 +819,11 @@ class ZetaCacheExtensionAspectTest {
     when(pjp.getArgs()).thenReturn(new Object[0]);
     when(pjp.proceed()).thenReturn("ok");
 
-    aspect.aroundCacheable(pjp);
-    verify(pjp).proceed();
+    // The real TestService.find carries a SpEL key ('#p0') whose parameter is
+    // absent here — a null key would collapse every call onto one hot key,
+    // so resolution now fails fast instead of proceeding.
+    org.assertj.core.api.Assertions.assertThatThrownBy(() -> aspect.aroundCacheable(pjp))
+      .isInstanceOf(IllegalArgumentException.class);
   }
 
   @Test
@@ -846,7 +849,7 @@ class ZetaCacheExtensionAspectTest {
   }
 
   @Test
-  @DisplayName("resolveKey with empty expression and single null arg returns SimpleKey")
+  @DisplayName("null SpEL key (null arg) fails fast instead of collapsing onto one hot key")
   void resolveKey_emptyExpressionWithSingleNullArg() throws Throwable {
     Method method = TestService.class.getMethod("find", String.class);
     Cacheable cacheable = mock(Cacheable.class);
@@ -863,8 +866,10 @@ class ZetaCacheExtensionAspectTest {
     when(pjp.getArgs()).thenReturn(new Object[] { null });
     when(pjp.proceed()).thenReturn("ok");
 
-    aspect.aroundCacheable(pjp);
-    verify(pjp).proceed();
+    // A null SpEL key would collapse every null-arg call onto one hot key
+    // ('test::null') — fail fast instead of proceeding with a poisoned key.
+    org.assertj.core.api.Assertions.assertThatThrownBy(() -> aspect.aroundCacheable(pjp))
+      .isInstanceOf(IllegalArgumentException.class);
   }
 
   @Test

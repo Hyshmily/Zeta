@@ -15,6 +15,7 @@
 package io.github.hyshmily.zeta.cache.cachesupport;
 
 import io.github.hyshmily.zeta.Internal;
+import io.github.hyshmily.zeta.hotkeydetector.doublebuffer.WaveCounter;
 import io.github.hyshmily.zeta.sync.local.CacheSyncPublisher;
 import io.github.hyshmily.zeta.util.LogThrottle;
 import io.github.hyshmily.zeta.util.TimeSource;
@@ -139,6 +140,23 @@ public class BroadcastBuffer {
   private final Object scheduleLock = new Object();
 
   /**
+   * Approximate size of the pending map, maintained alongside the records.
+   *
+   * <p>{@code ConcurrentHashMap.size()} is {@code sumCount()} — a walk over the
+   * map's {@code counterCells}, i.e. O(cores) volatile reads, and it allocates
+   * {@code counterCells} under write contention, so the cost grows exactly when
+   * the buffer is busiest. The previous shape paid that on every single
+   * {@code record()} (i.e. every {@code putThrough}) just to decide whether to
+   * flush. {@link WaveCounter} reached the same conclusion for its own size
+   * guard and carries an explicit approximate counter for the same reason.
+   *
+   * <p>An approximate read is sufficient here because the value only gates
+   * <em>when</em> a flush is triggered, never correctness: the flush itself
+   * drains whatever the map actually holds.
+   */
+  private final AtomicLong pendingSizeApprox = new AtomicLong();
+
+  /**
    * Creates a BroadcastBuffer with explicit flush delay, max deferral and an optional dedicated
    * send executor (ADR-0037).
    *
@@ -207,25 +225,86 @@ public class BroadcastBuffer {
     // see the cancelled future). The version-ordering merge makes the redo
     // idempotent, so re-computing into the live map is always safe.
     ConcurrentHashMap<String, VersionInfo> map = pending;
-    map.compute(key, (k, old) -> mergeVersion(old, version, degraded));
+    map.compute(key, (k, old) -> {
+      if (old == null) {
+        // Count only insertions. A key already present was counted when it was
+        // first recorded, so the counter can over-count slightly (a compute that
+        // landed in a map a concurrent flush then discarded) but never
+        // under-count — the safe direction for a value that only gates when to
+        // flush. It is reset on every flush.
+        pendingSizeApprox.incrementAndGet();
+      }
+      return mergeVersion(old, version, degraded);
+    });
     int retries = 0;
     while (map != pending && retries++ < RECORD_SWAP_RETRIES) {
       map = pending;
-      map.compute(key, (k, old) -> mergeVersion(old, version, degraded));
+      map.compute(key, (k, old) -> {
+        if (old == null) {
+          pendingSizeApprox.incrementAndGet();
+        }
+        return mergeVersion(old, version, degraded);
+      });
     }
     try {
-      if (pending.size() > MAX_PENDING_ENTRIES) {
-        scheduler.execute(this::flushAndReset);
+      if (pendingSizeOpaque() > MAX_PENDING_ENTRIES) {
+        // Over the cap: the buffer is bounded, so flush now. scheduleFlush(0)
+        // re-uses the pending task instead of adding one, so a burst across the
+        // cap costs at most one extra schedule rather than one per record. The
+        // previous shape called scheduler.execute(this::flushAndReset) here with
+        // no guard at all, so every record past the cap enqueued another task
+        // into the shared scheduler's DelayedWorkQueue — an unbounded backlog
+        // that delayed the reporter flush tick and the sketch decay sharing the
+        // pool, and each of which had to run before the queue could be serviced.
+        scheduleFlush(0L);
       } else {
         rescheduleFlush();
       }
     } catch (RejectedExecutionException e) {
-      // Scheduler saturated or shutting down — the pending entry would never
-      // be flushed by a scheduled task, so degrade to a synchronous send on
-      // the calling thread. Without this, a lost REFRESH leaves peers on the
-      // stale value until the next write for the same key.
-      log.warn("Scheduler rejected flush scheduling, flushing synchronously (key={})", key, e);
+      // Scheduler saturated or shutting down — the pending entry would never be
+      // flushed by a scheduled task, so degrade to flushing on the calling
+      // thread. Without this, a lost REFRESH leaves peers on the stale value
+      // until the next write for the same key. This is bounded rather than a
+      // network call on the request thread: flush() only swaps the map and hands
+      // the batch to the dedicated send executor (ADR-0037), and only the
+      // legacy sendExecutor == null configuration sends inline.
+      log.warn("Scheduler rejected flush scheduling, flushing synchronously (key={})", key);
       flush();
+    }
+  }
+
+  /**
+   * Arm the flush task, re-using an already-pending one instead of adding
+   * another.
+   *
+   * <p>Used by the over-the-cap path, where the previous implementation called
+   * {@code scheduler.execute(...)} per record with no guard: past the cap every
+   * record enqueued another task, so the shared scheduler's queue grew without
+   * bound and the latency-sensitive periodic tasks sharing the pool (the
+   * reporter's flush tick, the sketch decay) queued behind no-op flushes.
+   *
+   * <p>An already-armed task that is already due is left in place — re-arming it
+   * would only add churn. One that is armed for later is re-armed at {@code 0} so
+   * the cap bound is honoured.
+   *
+   * @param delayMs delay for a newly armed task; {@code 0} when over the cap
+   * @throws RejectedExecutionException if the scheduler refuses the task
+   */
+  private void scheduleFlush(long delayMs) {
+    ScheduledFuture<?> scheduled = scheduledFlush;
+    if (scheduled != null && !scheduled.isDone()) {
+      if (delayMs == 0L && scheduled.getDelay(TimeUnit.MILLISECONDS) > 0L) {
+        synchronized (scheduleLock) {
+          cancelScheduledFlush();
+          scheduledFlush = scheduler.schedule(this::flushAndReset, 0L, TimeUnit.MILLISECONDS);
+        }
+      }
+      return;
+    }
+    synchronized (scheduleLock) {
+      if (scheduledFlush == null || scheduledFlush.isDone()) {
+        scheduledFlush = scheduler.schedule(this::flushAndReset, delayMs, TimeUnit.MILLISECONDS);
+      }
     }
   }
 
@@ -293,6 +372,10 @@ public class BroadcastBuffer {
         return;
       }
       pending = new ConcurrentHashMap<>();
+      // The swapped-out map is gone, so the approximate counter restarts here.
+      // Records that raced the swap re-record themselves into the fresh map and
+      // re-increment, so the count converges instead of drifting.
+      pendingSizeApprox.set(0L);
       toFlush = current;
     }
 
@@ -449,6 +532,17 @@ public class BroadcastBuffer {
       scheduledFlush.cancel(false);
       scheduledFlush = null;
     }
+  }
+
+  /**
+   * O(1) read of the approximate pending size, for the cap check on the write
+   * path. See {@link #pendingSizeApprox} for why the exact
+   * {@code ConcurrentHashMap.size()} is not used here.
+   *
+   * @return the approximate number of pending entries
+   */
+  private long pendingSizeOpaque() {
+    return pendingSizeApprox.get();
   }
 
   /** A simple record to hold version information. */

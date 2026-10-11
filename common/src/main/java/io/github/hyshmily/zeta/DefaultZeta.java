@@ -25,9 +25,9 @@ import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.TopK;
 import io.github.hyshmily.zeta.model.HotKey;
 import io.github.hyshmily.zeta.model.InvalidatePolicy;
 import io.github.hyshmily.zeta.model.ReadPolicy;
-import io.github.hyshmily.zeta.model.WritePolicy;
 import io.github.hyshmily.zeta.model.ReadPolicy;
 import io.github.hyshmily.zeta.model.StalePolicy;
+import io.github.hyshmily.zeta.model.WritePolicy;
 import io.github.hyshmily.zeta.model.ZetaCacheStats;
 import io.github.hyshmily.zeta.rule.Rule;
 import io.github.hyshmily.zeta.rule.RuleService;
@@ -74,18 +74,18 @@ import org.springframework.util.Assert;
  * Caffeine cache and HeavyKeeper sketch are designed for concurrent access.
  *
  * <p>
-  * <b>API shape — two-arity convention:</b> every operation family exposes
-  * exactly two positional forms — the common-case convenience form, and a
-  * full-control form whose last parameter is the family's closed policy
-  * record ({@link ReadPolicy}, {@link WritePolicy}, {@link InvalidatePolicy}).
-  * Intermediate positional overloads (per-parameter TTLs,
-  * boolean flags) intentionally do not exist: customize via
-  * {@code ReadPolicy.defaults().withHardTtl(...)}-style chains, or via the
-  * fluent {@link #read(String)}/{@link #write(String)} builders for complex
-  * chains. Each policy record carries exactly the knobs its family honors,
-  * so there is no honored/ignored matrix to consult. The single
-  * exception to the no-boolean rule is {@link #tag(String, boolean, boolean)},
-  * the transport for the {@code @Intercept} annotation path.
+ * <b>API shape — two-arity convention:</b> every operation family exposes
+ * exactly two positional forms — the common-case convenience form, and a
+ * full-control form whose last parameter is the family's closed policy
+ * record ({@link ReadPolicy}, {@link WritePolicy}, {@link InvalidatePolicy}).
+ * Intermediate positional overloads (per-parameter TTLs,
+ * boolean flags) intentionally do not exist: customize via
+ * {@code ReadPolicy.defaults().withHardTtl(...)}-style chains, or via the
+ * fluent {@link #read(String)}/{@link #write(String)} builders for complex
+ * chains. Each policy record carries exactly the knobs its family honors,
+ * so there is no honored/ignored matrix to consult. The single
+ * exception to the no-boolean rule is {@link #tag(String, boolean, boolean)},
+ * the transport for the {@code @Intercept} annotation path.
  *
  * <p>
  * Depending on the runtime mode, some dependencies may be absent:
@@ -109,7 +109,7 @@ import org.springframework.util.Assert;
  * that participate in cross-instance cache sync, or ensure
  * {@code versionKeyTtlMinutes} exceeds the entry's actual lifetime.
  */
-public class DefaultZeta implements Zeta, Zeta.RefreshAdmin, Zeta.StatsAdmin, DisposableBean {
+public class DefaultZeta implements ZetaInternal, Zeta.RefreshAdmin, Zeta.StatsAdmin, DisposableBean {
 
   private final HotKeyCache hotKeyCache;
 
@@ -227,7 +227,9 @@ public class DefaultZeta implements Zeta, Zeta.RefreshAdmin, Zeta.StatsAdmin, Di
     Objects.requireNonNull(policy, "policy must not be null");
     requireAppCache("getWithSoftExpire");
     requireAppDetector("getWithSoftExpire");
-    return hotKeyCache.getWithSoftExpire(cacheKey, policy);
+    // Naming contract: this overload forces SOFT_REFRESH regardless of the
+    // policy's stale policy — a caller that wants RETURN/REVALIDATE uses get().
+    return hotKeyCache.getWithSoftExpire(cacheKey, policy.withStalePolicy(StalePolicy.SOFT_REFRESH));
   }
 
   @Override
@@ -241,7 +243,16 @@ public class DefaultZeta implements Zeta, Zeta.RefreshAdmin, Zeta.StatsAdmin, Di
       List<String> keys = group.getValue();
       Function<String, T> groupReader = key -> (T) spec.loader().load(key);
       merged.putAll(
-        hotKeyCache.get(keys, groupReader, spec.hardTtlMs(), spec.softTtlMs(), spec.reportEnabled(), spec.failOnError())
+        hotKeyCache.get(
+          keys,
+          groupReader,
+          spec.hardTtlMs(),
+          spec.softTtlMs(),
+          spec.reportEnabled(),
+          spec.failOnError(),
+          spec.nullCaching(),
+          spec.stalePolicy()
+        )
       );
     }
     return unwrapPresent(merged);
@@ -264,7 +275,9 @@ public class DefaultZeta implements Zeta, Zeta.RefreshAdmin, Zeta.StatsAdmin, Di
           spec.hardTtlMs(),
           spec.softTtlMs(),
           spec.reportEnabled(),
-          spec.failOnError()
+          spec.failOnError(),
+          spec.nullCaching(),
+          StalePolicy.SOFT_REFRESH
         )
       );
     }
@@ -311,7 +324,16 @@ public class DefaultZeta implements Zeta, Zeta.RefreshAdmin, Zeta.StatsAdmin, Di
     long hardTtlMs = ttls.hardTtlMs();
     long softTtlMs = ttls.softTtlMs();
     return unwrapPresent(
-      hotKeyCache.get(cacheKeys, reader, hardTtlMs, softTtlMs, policy.reportEnabled(), policy.failOnError())
+      hotKeyCache.get(
+        cacheKeys,
+        reader,
+        hardTtlMs,
+        softTtlMs,
+        policy.reportEnabled(),
+        policy.failOnError(),
+        policy.nullCaching(),
+        policy.stalePolicy()
+      )
     );
   }
 
@@ -344,7 +366,9 @@ public class DefaultZeta implements Zeta, Zeta.RefreshAdmin, Zeta.StatsAdmin, Di
         hardTtlMs,
         softTtlMs,
         policy.reportEnabled(),
-        policy.failOnError()
+        policy.failOnError(),
+        policy.nullCaching(),
+        StalePolicy.SOFT_REFRESH
       )
     );
   }
@@ -427,6 +451,8 @@ public class DefaultZeta implements Zeta, Zeta.RefreshAdmin, Zeta.StatsAdmin, Di
   @SuppressWarnings("unchecked")
   public <V> V computeIfAbsent(String cacheKey, Supplier<V> loader) {
     Objects.requireNonNull(loader, "loader must not be null");
+    requireAppCache("computeIfAbsent");
+    requireAppDetector("computeIfAbsent");
     return (V) hotKeyCache.computeIfAbsent(cacheKey, ReadPolicy.of(loader)).orElse(null);
   }
 
@@ -452,6 +478,8 @@ public class DefaultZeta implements Zeta, Zeta.RefreshAdmin, Zeta.StatsAdmin, Di
   @SuppressWarnings("unchecked")
   public <V> V computeIfAbsentWithSoftExpire(String cacheKey, Supplier<V> loader) {
     Objects.requireNonNull(loader, "loader must not be null");
+    requireAppCache("computeIfAbsentWithSoftExpire");
+    requireAppDetector("computeIfAbsentWithSoftExpire");
     return (V) hotKeyCache.computeIfAbsentWithSoftExpire(cacheKey, ReadPolicy.of(loader)).orElse(null);
   }
 
@@ -482,12 +510,23 @@ public class DefaultZeta implements Zeta, Zeta.RefreshAdmin, Zeta.StatsAdmin, Di
   @Override
   public <T> void putThrough(String cacheKey, T value, Runnable writer, WritePolicy policy) {
     Assert.hasText(cacheKey, "cacheKey must not be empty");
-    Objects.requireNonNull(value, "value must not be null");
+    // C4: null values are allowed — the engine stores them as a short-TTL
+    // NullValue sentinel (penetration protection), mirroring the read path.
     Objects.requireNonNull(writer, "writer must not be null");
     Objects.requireNonNull(policy, "policy must not be null");
     ResolvedTtls ttls = resolveTtlsOrAssert(policy);
     long hardTtlMs = ttls.hardTtlMs();
     long softTtlMs = ttls.softTtlMs();
+    // S3: a permanent entry outlives the Redis version key (7-day TTL) — the
+    // next INCR restarts at 1 and peers silently reject the update. Fail fast
+    // when broadcast is on; local-only permanent entries stay allowed.
+    if (hardTtlMs == Long.MAX_VALUE && !policy.skipBroadcast()) {
+      throw new IllegalArgumentException(
+        "putThrough with Long.MAX_VALUE hard TTL cannot broadcast: the entry outlives the Redis " +
+          "version key and peers would silently reject later updates — use a bounded TTL or " +
+          "skipBroadcast for permanent entries"
+      );
+    }
     requireAppCache("putThrough");
     hotKeyCache.putThrough(cacheKey, value, writer, hardTtlMs, softTtlMs, !policy.skipBroadcast());
   }
@@ -500,9 +539,9 @@ public class DefaultZeta implements Zeta, Zeta.RefreshAdmin, Zeta.StatsAdmin, Di
     ResolvedTtls ttls = resolveTtlsOrAssert(policy);
     long hardTtlMs = ttls.hardTtlMs();
     long softTtlMs = ttls.softTtlMs();
-    if (hotKeyCache == null) {
-      return; // Worker-only mode: silently no-op
-    }
+    // C5: Worker-only must fail fast like every other data-plane method —
+    // the silent no-op hid wiring errors (caller thought the write landed).
+    requireAppCache("putLocal");
     hotKeyCache.putLocal(cacheKey, value, hardTtlMs, softTtlMs);
   }
 
@@ -533,18 +572,40 @@ public class DefaultZeta implements Zeta, Zeta.RefreshAdmin, Zeta.StatsAdmin, Di
   }
 
   @Override
-  public void invalidateAfterPut(Map<String, ? extends Runnable> mutations, InvalidatePolicy policy) {
+  public Set<String> invalidateAfterPut(Map<String, ? extends Runnable> mutations, InvalidatePolicy policy) {
     Objects.requireNonNull(mutations, "mutations must not be null");
     Objects.requireNonNull(policy, "policy must not be null");
     requireAppCache("invalidateAfterPut");
     requireAppDetector("invalidateAfterPut");
-    hotKeyCache.invalidateAfterPut(mutations, !policy.skipBroadcast());
+    return hotKeyCache.invalidateAfterPut(mutations, !policy.skipBroadcast());
   }
 
   @Override
+  public long invalidateAndGetVersion(String cacheKey, InvalidatePolicy policy) {
+    Assert.hasText(cacheKey, "cacheKey must not be empty");
+    Objects.requireNonNull(policy, "policy must not be null");
+    requireAppCache("invalidateAndGetVersion");
+    return hotKeyCache.invalidate(cacheKey, !policy.skipBroadcast());
+  }
+
+  @Override
+  public Map<String, Long> invalidateAndGetVersions(Collection<String> cacheKeys, InvalidatePolicy policy) {
+    Objects.requireNonNull(cacheKeys, "cacheKeys must not be null");
+    Objects.requireNonNull(policy, "policy must not be null");
+    requireAppCache("invalidateAndGetVersions");
+    return hotKeyCache.invalidate(cacheKeys, !policy.skipBroadcast());
+  }
+
+  @Override
+  public void flushLocalEmergency() {
+    requireAppCache("flushLocalEmergency");
+    hotKeyCache.flushLocalEmergency();
+  }
+
+  @Override
+  @Deprecated
   public void invalidateAllLocal() {
-    requireAppCache("invalidateAllLocal");
-    hotKeyCache.invalidateAllLocal();
+    flushLocalEmergency();
   }
 
   @Override
@@ -618,7 +679,11 @@ public class DefaultZeta implements Zeta, Zeta.RefreshAdmin, Zeta.StatsAdmin, Di
     try (AutoReleaseLock lock = tryLock(key, expire, unit)) {
       if (lock != null) {
         action.run();
-        return true;
+        // Lease recheck (P0-8): a GC pause / failover / partition longer than
+        // the TTL breaks mutual exclusion mid-action with no exception from
+        // close() — report false so the caller knows the critical section was
+        // not exclusive. Unobservable handles report true (no loss detected).
+        return lock.isHeld();
       }
       return false;
     }
@@ -641,7 +706,9 @@ public class DefaultZeta implements Zeta, Zeta.RefreshAdmin, Zeta.StatsAdmin, Di
     try (AutoReleaseLock lock = tryLock(key, expire, unit, tryLockLockCount, tryLockInquiryCount, tryLockUnlockCount)) {
       if (lock != null) {
         action.run();
-        return true;
+        // Lease recheck (P0-8): see the 3-arg overload — a lapsed lease
+        // reports false even though the action ran.
+        return lock.isHeld();
       }
       return false;
     }
@@ -692,7 +759,14 @@ public class DefaultZeta implements Zeta, Zeta.RefreshAdmin, Zeta.StatsAdmin, Di
     long hardTtlMs = ttls.hardTtlMs();
     long softTtlMs = ttls.softTtlMs();
     requireAppCache("registerRefresh");
-    long intervalMs = TimedRefreshCoordinator.intervalFor(hotKeyCache.resolveEffectiveSoftTtl(softTtlMs));
+    long effectiveSoft = hotKeyCache.resolveEffectiveSoftTtl(softTtlMs);
+    if (effectiveSoft <= 0) {
+      throw new IllegalArgumentException(
+        "registerRefresh requires a positive effective soft TTL (stale-while-revalidate cadence); " +
+          "got " + effectiveSoft + " — enable zeta.local.default-soft-ttl-ms or pass a positive softTtlMs"
+      );
+    }
+    long intervalMs = TimedRefreshCoordinator.intervalFor(effectiveSoft);
     // Freeze the per-tick policy outside the coordinator's map lock; the tick
     // does not rebuild the ReadPolicy on every firing.
     var ref = new Object() {
@@ -735,39 +809,59 @@ public class DefaultZeta implements Zeta, Zeta.RefreshAdmin, Zeta.StatsAdmin, Di
     long hardTtlMs = ttls.hardTtlMs();
     long softTtlMs = ttls.softTtlMs();
     requireAppCache("refresh");
-    V value = loader.get();
-    hotKeyCache.invalidate(cacheKey, false);
-    // A null loader result must not NPE inside putThrough after the entry was
-    // already evicted — the eviction alone is the refresh contract for a
-    // missing value (the next read reloads through the application reader).
-    if (value != null) {
-      hotKeyCache.putThrough(cacheKey, value, () -> {}, hardTtlMs, softTtlMs, !policy.skipBroadcast());
-    }
+    // C2: bump-before-load lives in HotKeyCache.refresh — a concurrent
+    // putThrough during the load holds the newer version and the stale apply
+    // is skipped instead of regressing it.
+    hotKeyCache.refresh(cacheKey, loader, hardTtlMs, softTtlMs, !policy.skipBroadcast());
   }
 
   @Override
   public void refreshAll(Map<String, Supplier<?>> loaders) {
     Objects.requireNonNull(loaders, "loaders must not be null");
     requireAppCache("refreshAll");
-    loaders.forEach(this::refresh);
+    // S1: refreshes are independent per key — a slow loader must not head-block
+    // the rest behind a sequential loop. Per-key isolation: one bad loader
+    // must not abort the batch — every key is attempted, failures are
+    // collected, and the first failure is rethrown after the batch completes
+    // (all keys attempted, caller still observes the failure).
+    List<RuntimeException> failures = java.util.Collections.synchronizedList(new java.util.ArrayList<>());
+    loaders
+      .entrySet()
+      .parallelStream()
+      .forEach(e -> {
+        try {
+          refresh(e.getKey(), e.getValue());
+        } catch (RuntimeException ex) {
+          failures.add(ex);
+        }
+      });
+    if (!failures.isEmpty()) {
+      throw failures.get(0);
+    }
   }
 
   @Override
   public boolean isApp() {
-    return hotKeyCache != null;
+    // Both collaborators are required: get-family paths guard on the cache
+    // AND the detector, so a cache-without-detector wiring must not report
+    // itself as usable (callers gate on this before calling get()).
+    return hotKeyCache != null && appHotKeyDetector != null;
   }
 
   /**
    * Returns a human-readable label of the current deployment mode.
    */
   private String currentModeLabel() {
-    if (hotKeyCache != null) {
+    if (hotKeyCache != null && appHotKeyDetector != null) {
       return "App-only mode";
     }
-    // The facade is only ever created with a null cache in Worker-only
-    // deployments (ZetaFacadeAutoConfiguration wires it via ObjectProvider);
-    // a cache-less facade in an app deployment would be a wiring error.
-    return "Worker-only mode (no app-side cache)";
+    if (hotKeyCache == null) {
+      // The facade is only ever created with a null cache in Worker-only
+      // deployments (ZetaFacadeAutoConfiguration wires it via ObjectProvider);
+      // a cache-less facade in an app deployment would be a wiring error.
+      return "Worker-only mode (no app-side cache)";
+    }
+    return "App-mode with missing TopK detector (partial wiring)";
   }
 
   private void requireAppCache(String operation) {
@@ -866,7 +960,7 @@ public class DefaultZeta implements Zeta, Zeta.RefreshAdmin, Zeta.StatsAdmin, Di
 
   private static final Zeta.RefreshAdmin INACTIVE_REFRESH_ADMIN = new Zeta.RefreshAdmin() {
     @Override
-  public <T> void registerRefresh(String key, Supplier<T> supplier, ReadPolicy policy) {
+    public <T> void registerRefresh(String key, Supplier<T> supplier, ReadPolicy policy) {
       throw new ZetaModeException(
         "registerRefresh",
         "Worker-only mode (no app-side cache)",
@@ -888,7 +982,9 @@ public class DefaultZeta implements Zeta, Zeta.RefreshAdmin, Zeta.StatsAdmin, Di
 
     @Override
     public ZetaCacheStats snapshot() {
-      return null;
+      // C5: returning null manufactured NPEs at the caller — fail fast like
+      // every other Worker-only data-plane method.
+      throw new ZetaModeException("snapshot", "Worker-only mode (no app-side cache)", "App-mode cache statistics");
     }
 
     @Override

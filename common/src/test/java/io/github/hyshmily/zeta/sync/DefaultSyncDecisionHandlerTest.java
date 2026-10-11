@@ -261,6 +261,43 @@ class DefaultSyncDecisionHandlerTest {
   }
 
   /**
+   * An <b>equal</b>-version INVALIDATE must land, not skip. ADR-0086 bumps the
+   * version before dropping L1, so a concurrent read can stamp a reloaded entry
+   * with the very version the INVALIDATE carries; the origin filter drops
+   * self-REFRESH but not self-INVALIDATE, so the message comes back to the
+   * originating instance. Under the plain {@code >=} matrix the equal version
+   * skipped and the instance that issued the invalidation kept serving its own
+   * pre-invalidation value for the whole hard TTL. Removal is idempotent, so
+   * applying an equal version has no downside — only the skip does.
+   */
+  @Test
+  void handleLocalInvalidate_equalVersion_shouldRemoveEntry() {
+    cache.put("key1", entry(5, false, KeyState.NORMAL));
+    SyncHook hook = mock(SyncHook.class);
+    handler = new DefaultSyncDecisionHandler(cache, loader, entryLifecycle, ruleMatcher, List.of(hook), null);
+
+    handler.handleLocalInvalidate(syncMessage("key1", SyncMessage.TYPE_INVALIDATE, 5L, false));
+
+    assertThat(cache.getIfPresent("key1"))
+      .as("an equal-version INVALIDATE is a removal — it must land")
+      .isNull();
+    verify(hook).afterInvalidate(eq("key1"), any());
+  }
+
+  /**
+   * Control: a strictly older INVALIDATE still skips — the equal-version change
+   * must not turn the guard into "always apply".
+   */
+  @Test
+  void handleLocalInvalidate_olderVersion_shouldBeSkipped() {
+    cache.put("key1", entry(7, false, KeyState.NORMAL));
+
+    handler.handleLocalInvalidate(syncMessage("key1", SyncMessage.TYPE_INVALIDATE, 5L, false));
+
+    assertThat(((CacheEntry) cache.getIfPresent("key1")).getDataVersion()).isEqualTo(7L);
+  }
+
+  /**
    * Verifies that a version-less (unconditional) INVALIDATE cannot clear a
    * Worker-managed HOT entry — decision metadata and extended TTL survive.
    */

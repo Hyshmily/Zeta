@@ -24,6 +24,7 @@ import io.github.hyshmily.zeta.util.LogThrottle;
 import io.github.hyshmily.zeta.util.id.SnowflakeIdGenerator;
 import io.github.hyshmily.zeta.util.version.VersionController;
 import io.github.hyshmily.zeta.util.version.VersionGuard;
+import java.time.Duration;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicLong;
 import lombok.RequiredArgsConstructor;
@@ -117,6 +118,43 @@ public class VersionControllerImpl implements VersionController {
    */
   private static final LogThrottle PROBE_WARN_THROTTLE = LogThrottle.perDefaultWindow();
 
+  /**
+   * Process-wide gate for the version-increment failure WARN (ADR-0037
+   * convention). A Redis outage reaches this branch on <em>every</em> write, so
+   * an unthrottled WARN — carrying a full stack trace — would emit at write rate
+   * and turn the log into its own availability problem. The increment path
+   * carries a full exception (unlike the probe path, which carries a message),
+   * so the admitted line is an ERROR and suppressed occurrences fall to DEBUG.
+   *
+   * <p>Process-wide rather than per instance because a Redis outage is a
+   * process-wide condition, and the diagnostic value lies in the rate, not in
+   * which key triggered it.
+   */
+  private static final LogThrottle.Counting INCREMENT_WARN_THROTTLE = new LogThrottle.Counting();
+
+  /**
+   * How far below the observed floor a freshly allocated version must fall
+   * before the counter is treated as genuinely restarted rather than as a
+   * benign concurrent interleaving, and is repaired.
+   *
+   * <p>{@code v < floor} alone is ambiguous: two concurrent INCRs on one key
+   * return consecutive values, and whichever commits its floor update first
+   * makes the other observe a value below the floor. That skew equals the
+   * number of concurrent allocations on the same key — single-digit in
+   * practice. A genuine restart (the version key expired, was evicted under an
+   * {@code allkeys-*} policy, was lost in a {@code FLUSHALL}, or a failover
+   * promoted a replica missing the key) resets INCR to 1, so the gap is the
+   * whole floor.
+   *
+   * <p>A margin of {@value #WRAPAROUND_REPAIR_MARGIN} is therefore far above any
+   * plausible concurrent skew and far below any floor worth repairing, which
+   * makes a false-positive repair effectively impossible. Residual: a restart
+   * combined with more than the margin of same-key writes in the very first
+   * moment is not repaired, and is reported by the wraparound alarm instead —
+   * the alarm is the fallback, not the repair.
+   */
+  private static final long WRAPAROUND_REPAIR_MARGIN = 1024L;
+
   /** Holder for the Redis INCR script — lazily loaded to avoid {@code NoClassDefFoundError} when Redis is absent. */
   @SuppressWarnings("java:S3985")
   private static class IncrScriptHolder {
@@ -178,6 +216,7 @@ public class VersionControllerImpl implements VersionController {
           // ADR-0022) or a benign concurrent interleaving; the alarm is
           // rate-limited either way (see LogThrottle.DEFAULT_WINDOW_MS).
           boolean[] regression = new boolean[1];
+          long[] floor = new long[1];
           versionFloorCache
             .asMap()
             .compute(cacheKey, (k, current) -> {
@@ -185,18 +224,103 @@ public class VersionControllerImpl implements VersionController {
                 return v;
               }
               regression[0] = true;
+              floor[0] = current;
               return current;
             });
           if (regression[0]) {
             reportWraparound(cacheKey, v);
+            return repairRestartedCounter(t, cacheKey, v, floor[0]);
           }
           return new VersionResult(v, false);
         } catch (Exception e) {
-          log.warn("Redis version increment failed, fallback to local counter: {}", cacheKey, e);
+          // A Redis outage lands here on every write, so an unthrottled WARN with
+          // a full stack trace would emit at write rate — the log becomes its own
+          // availability problem and evicts the diagnostics an operator needs.
+          // ADR-0037 one-per-window convention; the occurrence count rides along
+          // so a suppressed burst is still visible.
+          LogThrottle.Counting.Attempt attempt = INCREMENT_WARN_THROTTLE.record();
+          if (!attempt.admitted()) {
+            log.debug(
+              "Redis version increment failed, fallback to local counter ({} in current window): {}",
+              cacheKey,
+              attempt.count(),
+              e.toString()
+            );
+          } else if (attempt.count() > 0) {
+            log.error(
+              "Redis version increment failed for key {}, fallback to local counter ({} suppressed in the last window)",
+              cacheKey,
+              attempt.count(),
+              e
+            );
+          } else {
+            log.error("Redis version increment failed, fallback to local counter: {}", cacheKey, e);
+          }
           return fallbackVersion();
         }
       })
       .orElseGet(this::fallbackVersion);
+  }
+
+  /**
+   * Decide whether a version that regressed below the floor needs the Redis
+   * counter repaired, and do so.
+   *
+   * <p>Without the repair the regressed version is handed out and then
+   * <em>silently rejected everywhere</em>: this node's own L1 write is skipped by
+   * {@code VersionGuard.shouldSkipForSync} (the existing entry carries the
+   * higher version), every peer skips the broadcast for the same reason, and the
+   * value stays pinned until the INCR counter re-climbs past the floor — which
+   * on a cold key means 5000 more writes, i.e. potentially never. A lost
+   * {@code FLUSHALL}, an {@code allkeys-lru} eviction of {@code zeta:version:*},
+   * or a failover to a replica missing the key all reach this state without
+   * waiting out the 7-day TTL.
+   *
+   * <p>Repairs only when the gap exceeds {@link #WRAPAROUND_REPAIR_MARGIN}, which
+   * excludes benign same-key concurrent skew. The repair re-seeds the Redis
+   * counter to {@code floor + 1}, so the returned version is authoritative, the
+   * local write applies, and peers accept the broadcast.
+   *
+   * @param template  the Redis template, for the repair write
+   * @param cacheKey  the key whose counter restarted
+   * @param v         the observed (regressed) version
+   * @param floor     the highest version previously observed for this key
+   * @return a result carrying {@code floor + 1} when the counter was repaired,
+   *         otherwise the unmodified {@code v}
+   */
+  private VersionResult repairRestartedCounter(StringRedisTemplate template, String cacheKey, long v, long floor) {
+    if (floor - v <= WRAPAROUND_REPAIR_MARGIN) {
+      // Benign concurrent interleaving (or a restart too recent to separate
+      // from one): report the observed value unchanged, exactly as before. The
+      // write is applied by whoever holds the floor; this one loses the race,
+      // which is the correct outcome for two writes to the same key.
+      return new VersionResult(v, false);
+    }
+    long repaired = floor + 1;
+    try {
+      template
+        .opsForValue()
+        .set(VERSION_KEY_PREFIX + cacheKey, String.valueOf(repaired), Duration.ofMinutes(versionKeyTtlMinutes));
+      log.error(
+        "dataVersion counter restarted for key {}: INCR returned {} against an observed floor of {}. " +
+          "Re-seeded zeta:version:{} to {} so this write and its broadcast are not silently rejected. " +
+          "Increase versionKeyTtlMinutes (currently {} min) or avoid Long.MAX_VALUE hard TTL on this key.",
+        cacheKey,
+        v,
+        floor,
+        cacheKey,
+        repaired,
+        versionKeyTtlMinutes
+      );
+      return new VersionResult(repaired, false);
+    } catch (Exception repairFailure) {
+      // The counter is still behind the floor, so the write will be rejected by
+      // the version matrix. Degrade to reporting the observed value and let the
+      // alarm above carry the diagnosis — a failed repair must not turn into an
+      // exception on the write path.
+      log.warn("Failed to re-seed the dataVersion counter for key {} to {}", cacheKey, repaired, repairFailure);
+      return new VersionResult(v, false);
+    }
   }
 
   /**
