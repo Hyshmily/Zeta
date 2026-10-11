@@ -101,7 +101,7 @@ import org.springframework.util.Assert;
   }
 )
 @ConditionalOnClass(name = "org.springframework.amqp.rabbit.core.RabbitTemplate")
-@EnableConfigurationProperties({ ZetaProperties.class, CacheSyncProperties.class, WorkerListenerProperties.class })
+@EnableConfigurationProperties({ ZetaProperties.class, ZetaAppProperties.class, CacheSyncProperties.class, WorkerListenerProperties.class })
 @lombok.extern.slf4j.Slf4j
 public class ZetaAmqpAutoConfiguration {
 
@@ -352,9 +352,10 @@ public class ZetaAmqpAutoConfiguration {
     @SuppressWarnings("SpringJavaInjectionPointsAutowiringInspection")
     public ReportPublisher reportPublisher(
       @Qualifier("zetaReportRabbitTemplate") RabbitTemplate rabbitTemplate,
-      ZetaProperties properties
+      ZetaProperties properties,
+      ZetaAppProperties appProperties
     ) {
-      return new ReportPublisher(rabbitTemplate, properties.getReportExchange(), properties.getAppName());
+      return new ReportPublisher(rabbitTemplate, properties.getReportExchange(), appProperties.getAppName());
     }
 
     /**
@@ -438,6 +439,7 @@ public class ZetaAmqpAutoConfiguration {
       ReportPublisher reportPublisher,
       @Qualifier("hotKeyScheduler") ScheduledExecutorService hotKeyScheduler,
       ZetaProperties properties,
+      ZetaAppProperties appProperties,
       RingManager ringManager,
       ObjectProvider<HealthView> healthViewProvider,
       ObjectProvider<BbrRateLimiter> bbrRateLimiterProvider,
@@ -447,7 +449,7 @@ public class ZetaAmqpAutoConfiguration {
         reportPublisher,
         hotKeyScheduler,
         properties.getReportIntervalMs(),
-        properties.getAppName(),
+        appProperties.getAppName(),
         properties.getQueueCapacity(),
         properties.getQueueOfferTimeoutMs(),
         properties.effectiveConsumerCount(),
@@ -556,12 +558,12 @@ public class ZetaAmqpAutoConfiguration {
       @Qualifier("zetaSyncRabbitTemplate") RabbitTemplate rabbitTemplate,
       CacheSyncProperties properties,
       SnowflakeIdGenerator snowflakeIdGenerator,
-      ZetaProperties zetaProperties
+      ZetaAppProperties appProperties
     ) {
-      // The sync plane stamps zeta.local.app-name (ADR-0068 pattern) so peers on a
+      // The sync plane stamps zeta.app-name (ADR-0068 pattern) so peers on a
       // shared broker can drop another application's INVALIDATE / REFRESH /
       // INVALIDATE_ALL / RULES_SYNC instead of acting on them.
-      return new CacheSyncPublisher(rabbitTemplate, properties, snowflakeIdGenerator, zetaProperties.getAppName());
+      return new CacheSyncPublisher(rabbitTemplate, properties, snowflakeIdGenerator, appProperties.getAppName());
     }
 
     /**
@@ -625,36 +627,36 @@ public class ZetaAmqpAutoConfiguration {
       CacheSyncProperties properties,
       @Qualifier("hotKeySyncScheduler") ScheduledExecutorService syncScheduler,
       SyncDecisionHandler decisionHandler,
-      ZetaProperties zetaProperties
+      ZetaAppProperties appProperties
     ) {
       // Receiver-side half of the ADR-0068 sync-plane filter: a message stamped with
       // a different application's name is dropped (ack'd) instead of applied.
-      warnIfAppNameIsDefault(zetaProperties, "sync listener (peer INVALIDATE/REFRESH filtering)");
-      return new CacheSyncListener(properties, syncScheduler, decisionHandler, zetaProperties.getAppName());
+      warnIfAppNameIsDefault(appProperties, "sync listener (peer INVALIDATE/REFRESH filtering)");
+      return new CacheSyncListener(properties, syncScheduler, decisionHandler, appProperties.getAppName());
     }
 
     /**
      * Warns when application isolation is effectively off because {@code
-     * zeta.local.app-name} was left at its default.
+     * zeta.app-name} was left at its default.
      *
      * <p>ADR-0068's filter drops a message only when the sender <em>declared</em> a
      * different application name. Two applications that both leave the default
-     * ({@value io.github.hyshmily.zeta.autoconfigure.ZetaProperties#DEFAULT_APP_NAME})
+     * ({@value io.github.hyshmily.zeta.autoconfigure.ZetaAppProperties#DEFAULT_APP_NAME})
      * therefore consider each other "ours" and keep cross-talking on a shared broker —
      * silently, since nothing is malformed. The default cannot be made fail-closed
      * without breaking single-application deployments, so it is surfaced instead.
      *
-     * @param zetaProperties the application properties
-     * @param what           the component whose isolation is at stake, for the message
+     * @param appProperties the application-identity properties
+     * @param what          the component whose isolation is at stake, for the message
      */
     @SuppressWarnings("all")
-    private void warnIfAppNameIsDefault(ZetaProperties zetaProperties, String what) {
-      String configured = zetaProperties.getAppName();
-      if (configured == null || configured.isBlank() || ZetaProperties.DEFAULT_APP_NAME.equals(configured)) {
+    private void warnIfAppNameIsDefault(ZetaAppProperties appProperties, String what) {
+      String configured = appProperties.getAppName();
+      if (configured == null || configured.isBlank() || ZetaAppProperties.DEFAULT_APP_NAME.equals(configured)) {
         log.warn(
-          "zeta.local.app-name is not set (still '{}'); {} will NOT be isolated from other applications that share " +
-            "the same broker. Set zeta.local.app-name to a unique value per application — see ADR-0068.",
-          ZetaProperties.DEFAULT_APP_NAME,
+          "zeta.app-name is not set (still '{}'); {} will NOT be isolated from other applications that share " +
+            "the same broker. Set zeta.app-name to a unique value per application — see ADR-0068.",
+          ZetaAppProperties.DEFAULT_APP_NAME,
           what
         );
       }
@@ -888,7 +890,7 @@ public class ZetaAmqpAutoConfiguration {
      *
      * @param properties          the Worker listener configuration properties
      * @param decisionHandler     the strategy for processing HOT/COOL decisions
-     * @param zetaProperties      the HotKey configuration properties (appName source)
+     * @param appProperties       the application-identity properties (appName source)
      * @return a new {@link WorkerListener} instance
      */
     @Bean
@@ -897,9 +899,9 @@ public class ZetaAmqpAutoConfiguration {
       WorkerListenerProperties properties,
       @Qualifier("hotKeyWorkerSchedScheduler") ScheduledExecutorService workerSchedScheduler,
       WorkerDecisionHandler decisionHandler,
-      ZetaProperties zetaProperties
+      ZetaAppProperties appProperties
     ) {
-      return new WorkerListener(properties, workerSchedScheduler, decisionHandler, zetaProperties.getAppName());
+      return new WorkerListener(properties, workerSchedScheduler, decisionHandler, appProperties.getAppName());
     }
 
     /**

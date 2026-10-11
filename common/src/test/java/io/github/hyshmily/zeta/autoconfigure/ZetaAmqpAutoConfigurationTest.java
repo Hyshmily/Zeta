@@ -123,10 +123,11 @@ class ZetaAmqpAutoConfigurationTest {
     RabbitTemplate rabbitTemplate = mock(RabbitTemplate.class);
     ZetaProperties properties = new ZetaProperties();
     properties.setReportExchange("test.reportToWorker.exchange");
-    properties.setAppName("test-app");
+    ZetaAppProperties appProperties = new ZetaAppProperties();
+    appProperties.setAppName("test-app");
 
     ZetaAmqpAutoConfiguration.ReportConfiguration config = new ZetaAmqpAutoConfiguration.ReportConfiguration();
-    ReportPublisher publisher = config.reportPublisher(rabbitTemplate, properties);
+    ReportPublisher publisher = config.reportPublisher(rabbitTemplate, properties, appProperties);
 
     assertThat(publisher).isNotNull();
   }
@@ -148,6 +149,7 @@ class ZetaAmqpAutoConfigurationTest {
       reportPublisher,
       scheduler,
       properties,
+      new ZetaAppProperties(),
       new RingManagerImpl(150),
       healthViewProvider,
       bbrProvider,
@@ -158,17 +160,18 @@ class ZetaAmqpAutoConfigurationTest {
   }
 
   /**
-   * Verifies that ReportPublisher is configured with the app name from ZetaProperties.
+   * Verifies that ReportPublisher is configured with the app name from ZetaAppProperties.
    */
   @Test
   void reportPublisherUsesAppNameFromProperties() {
     RabbitTemplate rabbitTemplate = mock(RabbitTemplate.class);
     ZetaProperties properties = new ZetaProperties();
-    properties.setAppName("my-app");
+    ZetaAppProperties appProperties = new ZetaAppProperties();
+    appProperties.setAppName("my-app");
     properties.setReportExchange("my.exchange");
 
     ZetaAmqpAutoConfiguration.ReportConfiguration config = new ZetaAmqpAutoConfiguration.ReportConfiguration();
-    ReportPublisher publisher = config.reportPublisher(rabbitTemplate, properties);
+    ReportPublisher publisher = config.reportPublisher(rabbitTemplate, properties, appProperties);
 
     assertThat(publisher).isNotNull();
   }
@@ -328,7 +331,7 @@ class ZetaAmqpAutoConfigurationTest {
       props,
       scheduler,
       mock(SyncDecisionHandler.class),
-      new ZetaProperties()
+      new ZetaAppProperties()
     );
 
     assertThat(listener).isNotNull();
@@ -446,7 +449,7 @@ class ZetaAmqpAutoConfigurationTest {
       props,
       scheduler,
       mock(WorkerDecisionHandler.class),
-      new io.github.hyshmily.zeta.autoconfigure.ZetaProperties()
+      new io.github.hyshmily.zeta.autoconfigure.ZetaAppProperties()
     );
 
     assertThat(listener).isNotNull();
@@ -533,6 +536,7 @@ class ZetaAmqpAutoConfigurationTest {
       reportPublisher,
       scheduler,
       properties,
+      new ZetaAppProperties(),
       ringManager,
       healthViewProvider,
       bbrProvider,
@@ -552,7 +556,7 @@ class ZetaAmqpAutoConfigurationTest {
       rabbitTemplate,
       props,
       mock(SnowflakeIdGenerator.class),
-      new ZetaProperties()
+      new ZetaAppProperties()
     );
 
     assertThat(publisher).isNotNull();
@@ -873,6 +877,7 @@ class ZetaAmqpAutoConfigurationTest {
       reportPublisher,
       scheduler,
       properties,
+      new ZetaAppProperties(),
       ringManager,
       healthViewProvider,
       bbrProvider,

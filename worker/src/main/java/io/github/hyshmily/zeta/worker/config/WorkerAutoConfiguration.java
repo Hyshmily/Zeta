@@ -15,6 +15,7 @@
  */
 package io.github.hyshmily.zeta.worker.config;
 
+import io.github.hyshmily.zeta.autoconfigure.ZetaAppProperties;
 import io.github.hyshmily.zeta.constants.ZetaConstants;
 import io.github.hyshmily.zeta.detection.ZetaBayesianSM;
 import io.github.hyshmily.zeta.reporting.CompactAwareReportMessageConverter;
@@ -87,7 +88,7 @@ import org.springframework.util.Assert;
 @Configuration
 @ConditionalOnClass(name = "org.springframework.amqp.rabbit.core.RabbitTemplate")
 @ConditionalOnProperty(prefix = "zeta.worker", name = "enabled", havingValue = "true")
-@EnableConfigurationProperties(WorkerProperties.class)
+@EnableConfigurationProperties({ WorkerProperties.class, ZetaAppProperties.class })
 @EnableScheduling
 @RequiredArgsConstructor
 @Slf4j
@@ -423,6 +424,7 @@ public class WorkerAutoConfiguration {
   public WorkerBroadcaster workerBroadcaster(
     RabbitTemplate rabbitTemplate,
     WorkerProperties properties,
+    ZetaAppProperties appProperties,
     @Qualifier("workerNodeId") String nodeId,
     @Qualifier("workerEpochCounter") AtomicLong epochCounter,
     SnowflakeIdGenerator snowflakeIdGenerator,
@@ -432,7 +434,7 @@ public class WorkerAutoConfiguration {
     return new WorkerBroadcaster(
       rabbitTemplate,
       properties.getMessaging().getBroadcastExchange(),
-      properties.getRouting().getAppName(),
+      appProperties.getAppName(),
       nodeId,
       epochCounter,
       snowflakeIdGenerator,
@@ -502,8 +504,8 @@ public class WorkerAutoConfiguration {
    */
   @Bean
   @ConditionalOnMissingBean(name = "reportQueue")
-  public Queue reportQueue(WorkerProperties properties) {
-    String queueName = ZetaConstants.Routing.QUEUE_PREFIX_REPORT + properties.getRouting().getAppName() + "." + nodeId;
+  public Queue reportQueue(WorkerProperties properties, ZetaAppProperties appProperties) {
+    String queueName = ZetaConstants.Routing.QUEUE_PREFIX_REPORT + appProperties.getAppName() + "." + nodeId;
     return QueueBuilder.durable(queueName)
       .withArgument("x-expires", 604_800_000)
       .withArgument("x-max-length", properties.getReportQueue().getMaxLength())
@@ -523,8 +525,8 @@ public class WorkerAutoConfiguration {
    */
   @Bean
   @ConditionalOnMissingBean(name = "reportBinding")
-  public Binding reportBinding(Queue reportQueue, DirectExchange reportExchange, WorkerProperties properties) {
-    String routingKey = ZetaConstants.Routing.KEY_REPORT + properties.getRouting().getAppName() + "." + nodeId;
+  public Binding reportBinding(Queue reportQueue, DirectExchange reportExchange, ZetaAppProperties appProperties) {
+    String routingKey = ZetaConstants.Routing.KEY_REPORT + appProperties.getAppName() + "." + nodeId;
     return BindingBuilder.bind(reportQueue).to(reportExchange).with(routingKey);
   }
 

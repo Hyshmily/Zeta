@@ -17,20 +17,20 @@ package io.github.hyshmily.zeta.annotation.annotationsupporter;
 
 import io.github.hyshmily.zeta.Internal;
 import io.github.hyshmily.zeta.Zeta;
+import io.github.hyshmily.zeta.ZetaInternal;
 import io.github.hyshmily.zeta.model.InvalidatePolicy;
 import io.github.hyshmily.zeta.model.ReadPolicy;
 import io.github.hyshmily.zeta.model.WritePolicy;
 import jakarta.annotation.Nullable;
-import lombok.extern.slf4j.Slf4j;
-import org.jspecify.annotations.NonNull;
-import org.springframework.cache.Cache;
-import org.springframework.cache.support.AbstractValueAdaptingCache;
-
 import java.util.Collection;
 import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.Callable;
 import java.util.function.Supplier;
+import lombok.extern.slf4j.Slf4j;
+import org.jspecify.annotations.NonNull;
+import org.springframework.cache.Cache;
+import org.springframework.cache.support.AbstractValueAdaptingCache;
 
 /**
  * Spring {@link Cache} adapter that wraps the HotKey {@link Zeta} facade behind the
@@ -111,7 +111,9 @@ public class ZetaSpringCache extends AbstractValueAdaptingCache {
   @SuppressWarnings("all")
   public Object lookup(@NonNull Object key) {
     String prefixed = prefixedKey(key);
-    Object served = zeta.peekAndTag(prefixed);
+    // I5: the detecting peek is an adapter SPI — prefer ZetaInternal, fall
+    // back to the deprecated Zeta member only for legacy implementations.
+    Object served = zeta instanceof ZetaInternal internal ? internal.peekAndTag(prefixed) : zeta.peekAndTag(prefixed);
     // A sentinel hit is still a read (counted inside peekAndTag); surface
     // Spring's marker so Spring skips the method (fromStoreValue maps it to null).
     return served == null
@@ -131,13 +133,21 @@ public class ZetaSpringCache extends AbstractValueAdaptingCache {
    * {@code null} (sentinel) surfaces as {@code null} without re-invoking the
    * value loader. The non-sync read path enters via {@link #lookup}, which
    * applies the same detection/reporting invariant without a loader.
+   *
+   * <p>Spring-contract hardening: the policy is forced to fail-fast, so a
+   * throwing loader surfaces as {@code ValueRetrievalException} (never
+   * swallowed into a {@code null} miss) and a suppressed load (timeout /
+   * executor saturation with a closed breaker) surfaces as
+   * {@code ValueRetrievalException} wrapping {@code ZetaSuppressedException}.
+   * A breaker-open load with no serveable stale entry still resolves to
+   * {@code null} (graceful degradation wins over fail-fast there).
    */
   @Override
   @Nullable
   @SuppressWarnings("unchecked")
   public <T> T get(@NonNull Object key, @NonNull Callable<T> valueLoader) {
     String prefixed = prefixedKey(key);
-    ReadPolicy policy = ZetaCacheContext.get().current();
+    ReadPolicy policy = ZetaCacheContext.get().current().withFailOnError();
 
     Supplier<Object> loader = () -> {
       try {
@@ -147,10 +157,16 @@ public class ZetaSpringCache extends AbstractValueAdaptingCache {
       }
     };
 
-    return zeta
-      .computeIfAbsentWithSoftExpireOptional(prefixed, policy.withReader(loader))
-      .map(v -> (T) fromStoreValue(v))
-      .orElse(null);
+    try {
+      return zeta
+        .computeIfAbsentWithSoftExpireOptional(prefixed, policy.withReader(loader))
+        .map(v -> (T) fromStoreValue(v))
+        .orElse(null);
+    } catch (Cache.ValueRetrievalException e) {
+      throw e;
+    } catch (RuntimeException e) {
+      throw new Cache.ValueRetrievalException(key, valueLoader, e);
+    }
   }
 
   /**
@@ -232,7 +248,7 @@ public class ZetaSpringCache extends AbstractValueAdaptingCache {
    * true)} on one cache never nukes the entries of other caches (the previous
    * behavior wiped the entire L1). Implementation is an O(n) scan of the local
    * L1 key set (acceptable: {@code clear()} is a rare, explicit operation)
-    * followed by one batched {@link Zeta#invalidate(Collection, InvalidatePolicy)},
+   * followed by one batched {@link Zeta#invalidate(Collection, InvalidatePolicy)},
    * broadcast unless {@code @SkipBroadcast} applies so peers evict the same
    * namespace. Entries written after the snapshot are left for the next
    * eviction cycle.
@@ -244,8 +260,8 @@ public class ZetaSpringCache extends AbstractValueAdaptingCache {
       // nothing to evict. Silent until now, which read as a working eviction
       // that evicted nothing; say so once.
       log.warn(
-        "clear() called but no local L1 cache is available (non-app mode); "
-          + "@CacheEvict(allEntries = true) is a no-op"
+        "clear() called but no local L1 cache is available (non-app mode); " +
+          "@CacheEvict(allEntries = true) is a no-op"
       );
       return;
     }

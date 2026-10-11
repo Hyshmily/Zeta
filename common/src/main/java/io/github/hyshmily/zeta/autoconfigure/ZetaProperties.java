@@ -198,6 +198,11 @@ public class ZetaProperties implements CacheCoreSettings, SpringCacheSettings, E
     return getNullValueTtlSeconds();
   }
 
+  @Override
+  public long getMaxValueSize() {
+    return getCache().getMaxValueSize();
+  }
+
   /**
    * Effective hard TTL for normal keys.
    * Returns the override value if set, otherwise the default.
@@ -261,17 +266,10 @@ public class ZetaProperties implements CacheCoreSettings, SpringCacheSettings, E
   private int versionKeyTtlMinutes = 10080;
 
   /**
-   * Default application name. Kept for backward compatibility, but note that a
-   * <em>shared</em> default silently disables ADR-0068 application isolation: two
-   * applications that both keep it consider each other "the same app" and keep
-   * processing one another's broadcasts. Deployments that share a broker must set a
-   * unique {@code zeta.local.app-name}; a startup WARN flags the default.
+   * Application identity moved to {@link ZetaAppProperties}: one key
+   * ({@code zeta.app-name}) bound once and consumed by both the App side and
+   * the Worker side, so the two ends cannot disagree by construction.
    */
-  public static final String DEFAULT_APP_NAME = "default";
-
-  /** Application name used for queue naming and routing keys. Must match {@code [A-Za-z0-9_-]+}. */
-  @Pattern(regexp = "^[A-Za-z0-9_-]+$", message = "appName must match ^[A-Za-z0-9_-]+$")
-  private String appName = DEFAULT_APP_NAME;
 
   /** Exchange name for app-to-Worker reportToWorker routing. */
   private String reportExchange = ZetaConstants.Exchange.REPORT;
@@ -654,6 +652,16 @@ public class ZetaProperties implements CacheCoreSettings, SpringCacheSettings, E
      * Default 3 balances fast recovery with stability.
      */
     private int consecutiveSuccessThreshold = 3;
+
+    /**
+     * Maximum live per-prefix breaker shards (the key segment before the
+     * first {@code ':'} owns a shard; prefix-less keys share one bucket).
+     * Bounds memory when the key space is unbounded (LRU eviction past the
+     * cap, 30-minute access expiry). One sick datasource trips only its own
+     * shard instead of silencing every key.
+     */
+    @Min(1)
+    private int maxPrefixes = 64;
 
     /**
      * Exception class names (fully qualified) that should NOT trip the breaker.

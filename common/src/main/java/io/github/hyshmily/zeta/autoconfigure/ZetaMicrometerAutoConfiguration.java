@@ -29,6 +29,7 @@ import io.github.hyshmily.zeta.reporting.KeyReporter;
 import io.github.hyshmily.zeta.rule.impl.RuleMatcherImpl;
 import io.github.hyshmily.zeta.sharding.HealthView;
 import io.github.hyshmily.zeta.sync.dispatcher.DispatcherStats;
+import io.github.hyshmily.zeta.sync.distributedlock.LockProvider;
 import io.github.hyshmily.zeta.sync.local.CacheSyncListener;
 import io.github.hyshmily.zeta.sync.local.CacheSyncPublisher;
 import io.github.hyshmily.zeta.sync.worker.WorkerListener;
@@ -141,6 +142,10 @@ public class ZetaMicrometerAutoConfiguration {
    *   <tr><td>{@code zeta.worker.tracked.keys}</td><td>Keys tracked by state machine</td><td>&mdash;</td></tr>
    *   <tr><td>{@code zeta.cpu.load}</td><td>System CPU load EMA</td><td>&mdash;</td></tr>
    *   <tr><td>{@code zeta.rules.persist.failed}</td><td>Rule mutations that never reached Redis/broadcast (cluster divergence)</td><td>&mdash;</td></tr>
+   *   <tr><td>{@code zeta.lock.acquired.total}</td><td>Cumulative distributed-lock acquisitions</td><td>&mdash;</td></tr>
+   *   <tr><td>{@code zeta.lock.contended.total}</td><td>Cumulative tryLock nulls where a peer held the lock (normal contention)</td><td>&mdash;</td></tr>
+   *   <tr><td>{@code zeta.lock.error.total}</td><td>Cumulative tryLock nulls caused by provider failures (Redis down)</td><td>&mdash;</td></tr>
+   *   <tr><td>{@code zeta.sync.send.failed.total}</td><td>Cumulative sync-plane publish failures (broker errors)</td><td>&mdash;</td></tr>
    * </table>
    *
    * @param hotKeyDetectorProvider      provider for the app-side TopK (may be absent)
@@ -159,6 +164,8 @@ public class ZetaMicrometerAutoConfiguration {
    * @param cpuMonitorProvider          provider for the system CPU load monitor (may be absent)
    * @param refaultAdmissionProvider    provider for the refault admission gate (ADR-0079; its
    *                                    gauges register only when the gate is active, mode != off)
+   * @param lockProvider                provider for the distributed-lock provider (may be absent;
+   *                                    registers {@code zeta.lock.*} outcome counters)
    * @return a {@link MeterBinder} that registers HotKey-specific business metrics
    */
   @Bean
@@ -176,7 +183,8 @@ public class ZetaMicrometerAutoConfiguration {
     ObjectProvider<SystemLoadMonitor> cpuMonitorProvider,
     ObjectProvider<CacheSyncListener> syncListenerProvider,
     ObjectProvider<WorkerListener> workerListenerProvider,
-    ObjectProvider<RefaultAdmission> refaultAdmissionProvider
+    ObjectProvider<RefaultAdmission> refaultAdmissionProvider,
+    ObjectProvider<LockProvider> lockProvider
   ) {
     return registry -> {
       hotKeyDetectorProvider.ifAvailable(detector -> registerLocalTopKGauges(detector, registry));
@@ -194,6 +202,9 @@ public class ZetaMicrometerAutoConfiguration {
         singleFlightProvider,
         broadcastBufferProvider,
         healthViewProvider
+      );
+      cacheSyncPublisherProvider.ifAvailable(csp ->
+        Gauge.builder("zeta.sync.send.failed.total", csp, p -> (double) p.sendFailures()).register(registry)
       );
       backgroundRefresherProvider.ifAvailable(em -> {
         if (em.getRefreshLimiter() != null) {
@@ -251,6 +262,14 @@ public class ZetaMicrometerAutoConfiguration {
         if (gate.gating()) {
           registerRefaultGauges(gate, registry);
         }
+      });
+      // Distributed-lock outcome counters: tryLock() collapses "peer holds the
+      // lock" and "Redis is down" into the same null return, so both are counted
+      // separately here (a Redis outage is invisible otherwise).
+      lockProvider.ifAvailable(lp -> {
+        Gauge.builder("zeta.lock.acquired.total", lp, p -> (double) p.lockAcquiredCount()).register(registry);
+        Gauge.builder("zeta.lock.contended.total", lp, p -> (double) p.lockContendedCount()).register(registry);
+        Gauge.builder("zeta.lock.error.total", lp, p -> (double) p.lockErrorCount()).register(registry);
       });
     };
   }

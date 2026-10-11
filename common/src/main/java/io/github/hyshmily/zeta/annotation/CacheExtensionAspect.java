@@ -19,8 +19,8 @@ import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import io.github.hyshmily.zeta.Internal;
 import io.github.hyshmily.zeta.Zeta;
-import io.github.hyshmily.zeta.annotation.annotationsupporter.ZetaCacheContext;
 import io.github.hyshmily.zeta.annotation.annotationsupporter.SpringCacheSettings;
+import io.github.hyshmily.zeta.annotation.annotationsupporter.ZetaCacheContext;
 import io.github.hyshmily.zeta.exception.ZetaBlockedException;
 import io.github.hyshmily.zeta.model.InvalidatePolicy;
 import io.github.hyshmily.zeta.model.ReadPolicy;
@@ -29,8 +29,10 @@ import io.github.hyshmily.zeta.util.LogThrottle;
 import java.lang.annotation.Annotation;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -276,8 +278,15 @@ public class CacheExtensionAspect {
     Cacheable cacheable = method.getAnnotation(Cacheable.class);
     if (cacheable == null) return pjp.proceed();
 
-    String cacheName = resolveCacheName(cacheable);
-    String prefixedKey = cacheName + keySeparator + resolveKey(pjp, cacheable.key(), method);
+    String[] cacheNames = resolveCacheNames(cacheable);
+    String keyPart = resolveKey(pjp, cacheable.key(), method);
+    List<String> prefixedKeys = new ArrayList<>(cacheNames.length);
+    for (String cacheName : cacheNames) {
+      prefixedKeys.add(cacheName + keySeparator + keyPart);
+    }
+    // First namespace: log identity and peek-fallback key (single-name calls
+    // observe byte-identical behavior).
+    String prefixedKey = prefixedKeys.get(0);
 
     Preload preload = resolvePreloadAnnotation(method);
     AnnotationSet ann = resolveAnnotations(method);
@@ -293,21 +302,46 @@ public class CacheExtensionAspect {
 
     // Register preload keys so the local detector starts tracking them early.
     if (preload != null) {
-      handlePreload(preload, pjp, cacheName, method);
+      handlePreload(preload, pjp, cacheNames, method);
     }
 
     // Admission gate: the stateful interception rules (FORCE / IS_LOCAL_HOT /
     // QPS / CONCURRENT_THREADS) live in InterceptGate; a blocked call feeds
     // the local TopK (keeps the intercepted key hot so it cannot flap) and
-    // resolves the fallback chain without invoking the method.
-    InterceptGate.GateResult gateResult = InterceptGate.GateResult.PROCEED;
+    // resolves the fallback chain without invoking the method. Every cache
+    // namespace is gated independently — Spring reads/writes all of them, so
+    // the gate must too.
+    List<String> gatedKeys = new ArrayList<>(prefixedKeys.size());
+    List<String> blockedKeys = new ArrayList<>(1);
     if (intercept != null) {
-      gateResult = interceptGate.check(prefixedKey, intercept, zeta.detector()::isLocalHotKey);
-      if (gateResult == InterceptGate.GateResult.BLOCKED) {
-        notifyDetectorOnIntercept(prefixedKey);
-        return resolveInterceptFallback(pjp, fallback, intercept.fallback(), prefixedKey, method);
+      for (String key : prefixedKeys) {
+        InterceptGate.GateResult r = interceptGate.check(key, intercept, zeta.detector()::isLocalHotKey);
+        if (r == InterceptGate.GateResult.BLOCKED) {
+          blockedKeys.add(key);
+        } else if (r == InterceptGate.GateResult.PROCEED_WITH_RELEASE) {
+          gatedKeys.add(key);
+        }
+      }
+      if (!blockedKeys.isEmpty()) {
+        for (String blocked : blockedKeys) {
+          notifyDetectorOnIntercept(blocked);
+        }
+        try {
+          // Multi-namespace fix (I6): every listed namespace is gated, so the
+          // fallback peek must try every blocked key in order — peeking only
+          // the first namespace returns null even when a sibling namespace
+          // holds the value.
+          return resolveInterceptFallback(pjp, fallback, intercept.fallback(), blockedKeys, method);
+        } finally {
+          for (String gated : gatedKeys) {
+            interceptGate.release(gated);
+          }
+        }
       }
     }
+    InterceptGate.GateResult gateResult = gatedKeys.isEmpty()
+      ? InterceptGate.GateResult.PROCEED
+      : InterceptGate.GateResult.PROCEED_WITH_RELEASE;
 
     boolean nullCachingEnabled = nullCaching == null || nullCaching.value();
     boolean skipBroadcastFlag = skipBroadcast != null;
@@ -325,11 +359,14 @@ public class CacheExtensionAspect {
 
       // @CacheCondition: purge semantics — evaluate after proceed and evict
       // the freshly stored entry (plus any stale one) when the condition
-      // holds. The invalidation is broadcast unless @SkipBroadcast is present.
+      // holds. Every namespace is purged: Spring wrote all of them. The
+      // invalidation is broadcast unless @SkipBroadcast is present.
       if (cacheCondition != null && !cacheCondition.unless().isEmpty()) {
         boolean shouldSkip = evaluateCacheCondition(cacheCondition.unless(), pjp, method, result);
         if (shouldSkip) {
-          zeta.invalidate(prefixedKey, InvalidatePolicy.of(skipBroadcastFlag));
+          for (String key : prefixedKeys) {
+            zeta.invalidate(key, InvalidatePolicy.of(skipBroadcastFlag));
+          }
         }
       }
 
@@ -356,10 +393,12 @@ public class CacheExtensionAspect {
       }
       throw e;
     } finally {
-      // Cleanup: return the concurrent-thread slot if the gate took one,
+      // Cleanup: return the concurrent-thread slots if the gate took any,
       // and restore the previous thread-local context.
       if (gateResult == InterceptGate.GateResult.PROCEED_WITH_RELEASE) {
-        interceptGate.release(prefixedKey);
+        for (String gated : gatedKeys) {
+          interceptGate.release(gated);
+        }
       }
       ZetaCacheContext.get().restore(prev);
     }
@@ -378,25 +417,12 @@ public class CacheExtensionAspect {
    * @param method             the intercepted method
    * @return the read policy for this invocation
    */
-  private ReadPolicy buildPolicy(
-    CacheTTL ttl,
-    boolean nullCachingEnabled,
-    ProceedingJoinPoint pjp,
-    Method method
-  ) {
+  private ReadPolicy buildPolicy(CacheTTL ttl, boolean nullCachingEnabled, ProceedingJoinPoint pjp, Method method) {
     LongSupplier hardSupplier =
       ttl == null ? () -> 0L : () -> resolveTtlValue(ttl.hardTtlMs(), ttl.hardTtlSpEl(), pjp, method);
     LongSupplier softSupplier =
       ttl == null ? () -> 0L : () -> resolveTtlValue(ttl.softTtlMs(), ttl.softTtlSpEl(), pjp, method);
-    return new ReadPolicy(
-      hardSupplier,
-      softSupplier,
-      nullCachingEnabled,
-      StalePolicy.SOFT_REFRESH,
-      null,
-      true,
-      false
-    );
+    return new ReadPolicy(hardSupplier, softSupplier, nullCachingEnabled, StalePolicy.SOFT_REFRESH, null, true, false);
   }
 
   /**
@@ -562,22 +588,24 @@ public class CacheExtensionAspect {
    * method (it is needed to compute the dedup key), so keep {@code keyExpr}
    * expressions cheap.
    *
-   * @param preload   the {@link Preload} annotation instance
-   * @param pjp       the join point
-   * @param cacheName the cache name
-   * @param method    the intercepted method
+   * @param preload    the {@link Preload} annotation instance
+   * @param pjp        the join point
+   * @param cacheNames all cache namespaces (every one is preloaded)
+   * @param method     the intercepted method
    */
-  private void handlePreload(Preload preload, ProceedingJoinPoint pjp, String cacheName, Method method) {
+  private void handlePreload(Preload preload, ProceedingJoinPoint pjp, String[] cacheNames, Method method) {
     long preloadCount = preload.count() > 0 ? preload.count() : PRELOAD_UNLIMITED_COUNT;
 
-    Map<String, Boolean> registeredKeys = new HashMap<>(preload.keys().length + 1);
-    Map<String, Long> notifiedKeys = new HashMap<>(preload.keys().length + 1);
+    Map<String, Boolean> registeredKeys = new HashMap<>(preload.keys().length * cacheNames.length + 1);
+    Map<String, Long> notifiedKeys = new HashMap<>(preload.keys().length * cacheNames.length + 1);
     // Static keys specified directly in the annotation.
-    for (String staticKey : preload.keys()) {
-      String fullKey = cacheName + keySeparator + staticKey;
-      if (registeredPreloadKeys.getIfPresent(fullKey) == null) {
-        registeredKeys.put(fullKey, Boolean.TRUE);
-        notifiedKeys.put(fullKey, preloadCount);
+    for (String cacheName : cacheNames) {
+      for (String staticKey : preload.keys()) {
+        String fullKey = cacheName + keySeparator + staticKey;
+        if (registeredPreloadKeys.getIfPresent(fullKey) == null) {
+          registeredKeys.put(fullKey, Boolean.TRUE);
+          notifiedKeys.put(fullKey, preloadCount);
+        }
       }
     }
     registeredPreloadKeys.putAll(registeredKeys);
@@ -592,10 +620,12 @@ public class CacheExtensionAspect {
         );
         Object value = expression.getValue(buildEvaluationContext(pjp, method));
         if (value != null) {
-          String fullKey = cacheName + keySeparator + value;
-          if (registeredPreloadKeys.getIfPresent(fullKey) == null) {
-            zeta.detector().notifyLocalDetectorDirect(fullKey, preloadCount);
-            registeredPreloadKeys.put(fullKey, Boolean.TRUE);
+          for (String cacheName : cacheNames) {
+            String fullKey = cacheName + keySeparator + value;
+            if (registeredPreloadKeys.getIfPresent(fullKey) == null) {
+              zeta.detector().notifyLocalDetectorDirect(fullKey, preloadCount);
+              registeredPreloadKeys.put(fullKey, Boolean.TRUE);
+            }
           }
         }
       } catch (Exception e) {
@@ -679,21 +709,28 @@ public class CacheExtensionAspect {
   }
 
   /**
-   * Extracts the first cache name from the given {@link Cacheable} annotation.
+   * Resolves all cache names from the given {@link Cacheable} annotation,
+   * mirroring Spring's multi-namespace semantics: every listed namespace is
+   * read and written by the cache abstraction, so the detection gate,
+   * preload, and purge paths must cover all of them — not just the first.
    *
    * @param cacheable the annotation instance
-   * @return the cache name, or {@code "zeta"} as a fallback
+   * @return every cache name ({@code cacheNames} + {@code value} combined),
+   *         or {@code {"zeta"}} as a fallback
    */
-  private String resolveCacheName(Cacheable cacheable) {
+  private String[] resolveCacheNames(Cacheable cacheable) {
     String[] names = cacheable.cacheNames();
-    if (names.length > 0) {
-      return names[0];
-    }
     String[] value = cacheable.value();
-    if (value.length > 0) {
-      return value[0];
+    if (names.length == 0) {
+      return value.length > 0 ? value.clone() : new String[] { "zeta" };
     }
-    return "zeta";
+    if (value.length == 0) {
+      return names.clone();
+    }
+    String[] combined = new String[names.length + value.length];
+    System.arraycopy(names, 0, combined, 0, names.length);
+    System.arraycopy(value, 0, combined, names.length, value.length);
+    return combined;
   }
 
   /**
@@ -787,7 +824,7 @@ public class CacheExtensionAspect {
    * @param fallback          the method-level fallback annotation (may be null)
    * @param interceptFallback the SpEL expression from
    *                          {@code @Intercept.fallback()}
-   * @param prefixedKey       the fully qualified cache key
+   * @param blockedKeys       every gated namespace key, in declaration order
    * @param method            the intercepted method
    * @return the fallback value
    * @throws Throwable if no fallback can be resolved and the peeked value is null
@@ -796,7 +833,7 @@ public class CacheExtensionAspect {
     ProceedingJoinPoint pjp,
     Fallback fallback,
     String interceptFallback,
-    String prefixedKey,
+    List<String> blockedKeys,
     Method method
   ) throws Throwable {
     if (!interceptFallback.isBlank()) {
@@ -805,7 +842,13 @@ public class CacheExtensionAspect {
     if (fallback != null) {
       return resolveFallback(pjp, fallback, method);
     }
-    return zeta.peek(prefixedKey).orElse(null);
+    for (String prefixedKey : blockedKeys) {
+      Object peeked = zeta.peek(prefixedKey).orElse(null);
+      if (peeked != null) {
+        return peeked;
+      }
+    }
+    return null;
   }
 
   /**
@@ -850,6 +893,16 @@ public class CacheExtensionAspect {
     );
 
     if (fallbackMethod == null) {
+      // A missing convention-named fallback must not silently yield null —
+      // that value is indistinguishable from a legitimate null response and
+      // poisons the null-caching path. Warn once per window; keep the null
+      // return for backward compatibility.
+      warnRateLimited(
+        fallbackWarn,
+        "@Fallback declared but no {}Fallback method found on {} — returning null",
+        originalMethod.getName(),
+        target.getClass().getName()
+      );
       return null;
     }
 

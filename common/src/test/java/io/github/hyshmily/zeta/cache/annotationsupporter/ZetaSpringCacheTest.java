@@ -375,6 +375,31 @@ class ZetaSpringCacheTest {
   }
 
   @Test
+  @DisplayName("get forces fail-fast on the delegated policy (Spring contract)")
+  void get_forcesFailOnErrorOnDelegatedPolicy() {
+    when(zeta.computeIfAbsentWithSoftExpireOptional(anyString(), any(ReadPolicy.class)))
+      .thenReturn(Optional.empty());
+
+    cache.get("myKey", (Callable<String>) () -> "v");
+
+    ArgumentCaptor<ReadPolicy> policies = ArgumentCaptor.forClass(ReadPolicy.class);
+    verify(zeta).computeIfAbsentWithSoftExpireOptional(eq("test::myKey"), policies.capture());
+    assertThat(policies.getValue().failOnError()).isTrue();
+  }
+
+  @Test
+  @DisplayName("get propagates facade failures as ValueRetrievalException (never swallows to null)")
+  void get_whenFacadeThrows_wrapsInValueRetrievalException() {
+    when(zeta.computeIfAbsentWithSoftExpireOptional(anyString(), any(ReadPolicy.class))).thenThrow(
+      new IllegalStateException("downstream failure")
+    );
+
+    assertThatThrownBy(() -> cache.get("myKey", (Callable<String>) () -> "v")).isInstanceOf(
+      ValueRetrievalException.class
+    );
+  }
+
+  @Test
   @DisplayName("get wraps loader exception in ValueRetrievalException")
   void get_whenLoaderThrows_wrapsInValueRetrievalException() {
     when(zeta.computeIfAbsentWithSoftExpireOptional(anyString(), any(ReadPolicy.class))).thenAnswer(invocation -> {

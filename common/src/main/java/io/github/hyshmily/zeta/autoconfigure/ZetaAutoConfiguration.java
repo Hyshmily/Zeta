@@ -26,7 +26,6 @@ import io.github.hyshmily.zeta.cache.HotKeyCache;
 import io.github.hyshmily.zeta.cache.cachesupport.*;
 import io.github.hyshmily.zeta.scheduler.BackgroundRefresher;
 import io.github.hyshmily.zeta.scheduler.DefaultBackgroundRefresher;
-import io.github.hyshmily.zeta.cache.cachesupport.impl.CircuitBreakerImpl;
 import io.github.hyshmily.zeta.cache.cachesupport.impl.EntryLifecycleImpl;
 import io.github.hyshmily.zeta.cache.cachesupport.impl.SingleFlightImpl;
 import io.github.hyshmily.zeta.cache.codec.CacheCompressor;
@@ -137,20 +136,27 @@ public class ZetaAutoConfiguration {
   }
 
   /**
-   * Create the sliding-window circuit breaker protecting remote cache-load calls.
+   * Create the per-prefix circuit-breaker registry protecting remote cache-load calls.
+   *
+   * <p>One sick datasource trips only its own prefix shard — a global breaker
+   * would silence every key when a single source fails. Shards share one slide
+   * thread and the live breaker settings.
    *
    * <p>Registered as a Spring-managed {@link AutoCloseable} bean — the container infers
-   * {@code close()} as its destroy method, so the instance-level slide scheduler is shut
-   * down on context shutdown and hot-restart (new classloader) scenarios do not leak
-   * threads or breaker instances.
+   * {@code close()} as its destroy method, so every shard and the shared slide
+   * scheduler are shut down on context shutdown and hot-restart (new classloader)
+   * scenarios do not leak threads or breaker instances.
    *
    * @param properties the HotKey configuration properties (never {@code null})
-   * @return a new circuit breaker instance
+   * @return a new breaker registry
    */
-  @Bean
-  @ConditionalOnMissingBean(CircuitBreaker.class)
-  public CircuitBreaker circuitBreaker(ZetaProperties properties) {
-    return new CircuitBreakerImpl(properties.getCircuitBreaker());
+  @Bean(destroyMethod = "close")
+  @ConditionalOnMissingBean(CircuitBreakerRegistry.class)
+  public CircuitBreakerRegistry circuitBreakerRegistry(ZetaProperties properties) {
+    return new CircuitBreakerRegistry(
+      properties.getCircuitBreaker(),
+      properties.getCircuitBreaker().getMaxPrefixes()
+    );
   }
 
   /**
@@ -161,11 +167,11 @@ public class ZetaAutoConfiguration {
    * rather than duplicating the load. Configuration parameters (max in-flight entries,
    * TTL, timeout) are read from {@link ZetaProperties}.
    *
-   * @param properties     the HotKey configuration properties (never {@code null})
-   * @param loadExecutor   the interruptible pool reserved for
-   *                       {@link io.github.hyshmily.zeta.util.InterruptingAsync}
-   *                       loads (never {@code null})
-   * @param circuitBreaker the circuit breaker protecting remote load calls (never {@code null})
+   * @param properties      the HotKey configuration properties (never {@code null})
+   * @param loadExecutor    the interruptible pool reserved for
+   *                        {@link io.github.hyshmily.zeta.util.InterruptingAsync}
+   *                        loads (never {@code null})
+   * @param breakerRegistry the per-prefix breaker shards protecting remote load calls (never {@code null})
    * @return a new SingleFlight instance
    */
   @Bean
@@ -173,14 +179,14 @@ public class ZetaAutoConfiguration {
   public SingleFlight singleFlight(
     ZetaProperties properties,
     @Qualifier("interruptibleLoadExecutor") Executor loadExecutor,
-    CircuitBreaker circuitBreaker
+    CircuitBreakerRegistry breakerRegistry
   ) {
     return new SingleFlightImpl(
       properties.getInflightMaxSize(),
       properties.getInflightTtlSeconds(),
       properties.getInflightTimeoutSeconds(),
       loadExecutor,
-      circuitBreaker
+      breakerRegistry
     );
   }
 

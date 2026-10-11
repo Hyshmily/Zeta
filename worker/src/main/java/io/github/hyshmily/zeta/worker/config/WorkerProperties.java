@@ -71,13 +71,6 @@ public class WorkerProperties {
     private int bufferCapacity = 10_000;
   }
 
-  /** Routing configuration for app-level reportToWorker queue naming. Default constructor. */
-  @Data
-  public static class Routing {
-
-    private String appName = "default";
-  }
-
   /** AMQP exchange names for reportToWorker and send messages. Default constructor. */
   @Data
   public static class Messaging {
@@ -326,9 +319,6 @@ public class WorkerProperties {
   }
 
   private boolean enabled = false;
-
-  @Valid
-  private Routing routing = new Routing();
 
   @Valid
   private Messaging messaging = new Messaging();

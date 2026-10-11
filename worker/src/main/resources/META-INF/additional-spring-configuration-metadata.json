@@ -7,9 +7,9 @@
       "defaultValue": false
     },
     {
-      "name": "zeta.worker.routing.app-name",
+      "name": "zeta.app-name",
       "type": "java.lang.String",
-      "description": "Logical application name (tenant discriminator) for queue routing.",
+      "description": "Logical application name (tenant discriminator) for queue routing. Shared with the App side (zeta.app-name) — a single key both ends bind, so report bindings and decision headers always agree.",
       "defaultValue": "default"
     },
     {

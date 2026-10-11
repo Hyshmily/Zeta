@@ -22,7 +22,6 @@ import io.github.bucket4j.Bucket;
 import io.github.hyshmily.zeta.Internal;
 import io.github.hyshmily.zeta.util.TimeSource;
 import java.time.Duration;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Predicate;
 
@@ -99,8 +98,22 @@ public final class InterceptGate {
 
   /**
    * Atomic counters for tracking concurrent thread usage per cache key.
+   *
+   * <p>Bounded like the QPS bookkeeping caches: the key cardinality is
+   * user-driven and a one-time burst of distinct keys would otherwise pin
+   * counter instances for the process lifetime. {@code expireAfterAccess}
+   * ages out a counter whose key has gone quiet (a key that never releases
+   * its last slot holds an active counter, but that is precisely the
+   * over-limit caller — a short-lived overcount, not a leak); the size cap
+   * only trims on boundary crossing. A cap-driven eviction of a live
+   * counter fails open (the next arrival starts from 0 / over-admits one
+   * slot), which is the same failure shape as the historical "counter
+   * removed on zero" — acceptable for an admission heuristic.
    */
-  private final ConcurrentHashMap<String, AtomicInteger> concurrentCounters = new ConcurrentHashMap<>();
+  private final Cache<String, AtomicInteger> concurrentCounters = Caffeine.newBuilder()
+    .expireAfterAccess(QPS_BOOKKEEPING_EXPIRY)
+    .maximumSize(BOOKKEEPING_CACHE_MAX_SIZE)
+    .build();
 
   /**
    * Outcome of a single admission check.
@@ -167,10 +180,13 @@ public final class InterceptGate {
    * @param prefixedKey the cache key whose counter to decrement
    */
   public void release(String prefixedKey) {
-    concurrentCounters.computeIfPresent(prefixedKey, (k, v) -> {
-      int after = v.decrementAndGet();
-      return after == 0 ? null : v;
-    });
+    AtomicInteger counter = concurrentCounters.getIfPresent(prefixedKey);
+    if (counter != null && counter.decrementAndGet() == 0) {
+      // Best-effort removal so quiet keys age out eagerly; a lost race with a
+      // concurrent acquire is harmless (the counter restarts at 0 semantics
+      // are equivalent — the next acquire increments from whatever it reads).
+      concurrentCounters.invalidate(prefixedKey);
+    }
   }
 
   /**
@@ -222,7 +238,7 @@ public final class InterceptGate {
     if (maxThreads <= 0) {
       return GateResult.PROCEED;
     }
-    AtomicInteger counter = concurrentCounters.computeIfAbsent(prefixedKey, k -> new AtomicInteger(0));
+    AtomicInteger counter = concurrentCounters.get(prefixedKey, k -> new AtomicInteger(0));
     if (counter.incrementAndGet() > maxThreads) {
       // Exceeded the limit; roll the tentative increment back and block.
       release(prefixedKey);

@@ -203,9 +203,9 @@
       "defaultValue": 10080
     },
     {
-      "name": "zeta.local.app-name",
+      "name": "zeta.app-name",
       "type": "java.lang.String",
-      "description": "Application name used for report routing and queue naming.",
+      "description": "Application name used for report routing, queue naming, and the appName isolation header. One key shared by the App side and the Worker side — both ends always agree by construction.",
       "defaultValue": "default"
     },
     {

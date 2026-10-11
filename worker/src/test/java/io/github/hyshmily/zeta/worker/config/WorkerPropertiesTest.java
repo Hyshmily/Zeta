@@ -17,6 +17,7 @@ package io.github.hyshmily.zeta.worker.config;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import io.github.hyshmily.zeta.autoconfigure.ZetaAppProperties;
 import io.github.hyshmily.zeta.constants.ZetaConstants;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -42,11 +43,11 @@ class WorkerPropertiesTest {
   }
 
   /**
-   * Verifies the default value of the {@code routing.app-name} sub-property.
+   * Verifies the default value of the shared {@code zeta.app-name} identity.
    */
   @Test
   void shouldHaveDefaultAppName() {
-    assertThat(properties.getRouting().getAppName()).isEqualTo("default");
+    assertThat(new ZetaAppProperties().getAppName()).isEqualTo("default");
   }
 
   /**

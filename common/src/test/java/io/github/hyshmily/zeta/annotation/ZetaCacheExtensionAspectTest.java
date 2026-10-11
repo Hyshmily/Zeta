@@ -215,6 +215,16 @@ class ZetaCacheExtensionAspectTest {
     public String findWithDynamicPreload(String id) {
       return "result-" + id;
     }
+
+    /**
+     * Spring writes every named cache; Zeta must treat every namespace the
+     * same way instead of acting on {@code cacheNames[0]} only.
+     */
+    @Cacheable(cacheNames = { "primary", "secondary" }, key = "#p0")
+    @Preload(keys = { "preload-key-a" })
+    public String findMultiNamespace(String id) {
+      return "result-" + id;
+    }
   }
 
   static class NoArgService {
@@ -1206,6 +1216,38 @@ class ZetaCacheExtensionAspectTest {
       Map.of(
         "test::preload-key-a", (long) Integer.MAX_VALUE,
         "test::preload-key-b", (long) Integer.MAX_VALUE
+      )
+    );
+  }
+
+  /**
+   * {@code @Cacheable(cacheNames={"a","b"})} makes Spring read and write BOTH
+   * namespaces. The aspect used to keep {@code names[0]} only, so the second
+   * namespace's entries never joined hot-key detection and never got purged by
+   * {@code @CacheCondition} — a shadow namespace that silently diverged.
+   */
+  @Test
+  @DisplayName("every cache name is handled, not just cacheNames[0]")
+  void multipleCacheNames_allNamespacesAreHandled() throws Throwable {
+    Method method = TestService.class.getMethod("findMultiNamespace", String.class);
+    MethodSignature signature = mock(MethodSignature.class);
+
+    when(signature.getMethod()).thenReturn(method);
+
+    ProceedingJoinPoint pjp = mock(ProceedingJoinPoint.class);
+    when(pjp.getSignature()).thenReturn(signature);
+    when(pjp.getTarget()).thenReturn(new TestService());
+    when(pjp.getArgs()).thenReturn(new Object[] { "myId" });
+    when(pjp.proceed()).thenReturn("result-myId");
+
+    when(detectorAdmin.isLocalHotKey(anyString())).thenReturn(false);
+
+    aspect.aroundCacheable(pjp);
+
+    verify(detectorAdmin).notifyLocalDetectorDirect(
+      Map.of(
+        "primary::preload-key-a", (long) Integer.MAX_VALUE,
+        "secondary::preload-key-a", (long) Integer.MAX_VALUE
       )
     );
   }

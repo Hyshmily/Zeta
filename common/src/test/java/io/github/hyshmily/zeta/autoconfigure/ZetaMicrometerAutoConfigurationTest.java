@@ -32,6 +32,7 @@ import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.TopK;
 import io.github.hyshmily.zeta.reporting.KeyReporter;
 import io.github.hyshmily.zeta.sharding.HealthView;
 import io.github.hyshmily.zeta.sync.dispatcher.DispatcherStats;
+import io.github.hyshmily.zeta.sync.distributedlock.LockProvider;
 import io.github.hyshmily.zeta.sync.local.CacheSyncListener;
 import io.github.hyshmily.zeta.sync.local.CacheSyncPublisher;
 import io.github.hyshmily.zeta.sync.worker.WorkerListener;
@@ -136,6 +137,11 @@ class ZetaMicrometerAutoConfigurationTest {
     SystemLoadMonitor cpuMonitor = mock(SystemLoadMonitor.class);
     when(cpuMonitor.getCpuLoadEMA()).thenReturn(0.5);
 
+    LockProvider lockProvider = mock(LockProvider.class);
+    when(lockProvider.lockAcquiredCount()).thenReturn(4L);
+    when(lockProvider.lockContendedCount()).thenReturn(2L);
+    when(lockProvider.lockErrorCount()).thenReturn(1L);
+
     MeterBinder binder = config.hotKeyCustomMetrics(
       providerThatReturns(detector),
       providerThatReturns(sf),
@@ -149,7 +155,8 @@ class ZetaMicrometerAutoConfigurationTest {
       providerThatReturns(cpuMonitor),
       providerThatReturns(null),
       providerThatReturns(null),
-      providerThatReturns(RefaultAdmission.from(new ZetaProperties().getCache()))
+      providerThatReturns(RefaultAdmission.from(new ZetaProperties().getCache())),
+      providerThatReturns(lockProvider)
     );
     binder.bindTo(registry);
 
@@ -184,6 +191,11 @@ class ZetaMicrometerAutoConfigurationTest {
     assertGaugeValue("zeta.l1.refault.distance", -1.0);
     assertGaugeValue("zeta.l1.refault.capacity", 100_000.0);
     assertGaugeValue("zeta.l1.refault.clock.rate", 0.0);
+    // Distributed-lock outcomes: a null from tryLock() is ambiguous between
+    // "peer holds it" and "Redis is down", so both are counted separately.
+    assertGaugeValue("zeta.lock.acquired.total", 4.0);
+    assertGaugeValue("zeta.lock.contended.total", 2.0);
+    assertGaugeValue("zeta.lock.error.total", 1.0);
   }
 
   /**
@@ -192,6 +204,7 @@ class ZetaMicrometerAutoConfigurationTest {
   @Test
   void customMeterBinder_handlesNoDeps() {
     MeterBinder binder = config.hotKeyCustomMetrics(
+      providerThatReturns(null),
       providerThatReturns(null),
       providerThatReturns(null),
       providerThatReturns(null),
@@ -232,6 +245,7 @@ class ZetaMicrometerAutoConfigurationTest {
       providerThatReturns(null),
       providerThatReturns(null),
       providerThatReturns(null),
+      providerThatReturns(null),
       providerThatReturns(null)
     );
     binder.bindTo(registry);
@@ -258,6 +272,7 @@ class ZetaMicrometerAutoConfigurationTest {
     MeterBinder binder = config.hotKeyCustomMetrics(
       providerThatReturns(detector),
       providerThatReturns(sf),
+      providerThatReturns(null),
       providerThatReturns(null),
       providerThatReturns(null),
       providerThatReturns(null),
@@ -310,6 +325,7 @@ class ZetaMicrometerAutoConfigurationTest {
       providerThatReturns(null),
       providerThatReturns(syncListener),
       providerThatReturns(workerListener),
+      providerThatReturns(null),
       providerThatReturns(null)
     );
     binder.bindTo(registry);
@@ -352,6 +368,7 @@ class ZetaMicrometerAutoConfigurationTest {
       providerThatReturns(null),
       providerThatReturns(syncListener),
       providerThatReturns(workerListener),
+      providerThatReturns(null),
       providerThatReturns(null)
     );
     binder.bindTo(registry);

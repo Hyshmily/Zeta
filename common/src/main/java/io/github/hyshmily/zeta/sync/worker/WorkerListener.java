@@ -260,7 +260,7 @@ public class WorkerListener {
       long total = isolation.noteDrop(senderApp.toString());
       if (isolation.tryLog()) {
         log.warn(
-          "Dropped worker decision for foreign app: senderApp={}, localApp={} ({} total drops, further warnings suppressed for 10s; check zeta.local.app-name vs zeta.worker.routing.app-name)",
+            "Dropped worker decision for foreign app: senderApp={}, localApp={} ({} total drops, further warnings suppressed for 10s; check zeta.app-name)",
           senderApp,
           isolation.appName(),
           total
