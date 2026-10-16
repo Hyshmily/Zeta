@@ -252,6 +252,15 @@ class WaveCounterTest {
 
     deliverer.interrupt();
     deliverer.join(10_000);
+    // Two settle tides AFTER the deliverer is stopped: the interrupt can land
+    // between a tide's drain phase and its reservoir swap, and the catch-path
+    // single settle tide then re-drains the same side while counts that
+    // crossed the swap remain in the other reservoir. The first settle tide
+    // re-aligns the swap, the second drains the residual — both run on the
+    // main thread with all writers quiescent, so no writer-side data exists
+    // anymore and the pair is deterministic.
+    invokeDeliver(c);
+    invokeDeliver(c);
     c.destroy();
 
     long total = captured
@@ -373,6 +382,15 @@ class WaveCounterTest {
 
     deliverer.interrupt();
     deliverer.join(10_000);
+    // Two settle tides AFTER the deliverer is stopped: the interrupt can land
+    // between a tide's drain phase and its reservoir swap, and the catch-path
+    // single settle tide then re-drains the same side while counts that
+    // crossed the swap remain in the other reservoir. The first settle tide
+    // re-aligns the swap, the second drains the residual — both run on the
+    // main thread with all writers quiescent, so no writer-side data exists
+    // anymore and the pair is deterministic.
+    invokeDeliver(c);
+    invokeDeliver(c);
     c.destroy();
 
     long total = captured
@@ -544,6 +562,15 @@ class WaveCounterTest {
 
     deliverer.interrupt();
     deliverer.join(10_000);
+    // Two settle tides AFTER the deliverer is stopped: the interrupt can land
+    // between a tide's drain phase and its reservoir swap, and the catch-path
+    // single settle tide then re-drains the same side while counts that
+    // crossed the swap remain in the other reservoir. The first settle tide
+    // re-aligns the swap, the second drains the residual — both run on the
+    // main thread with all writers quiescent, so no writer-side data exists
+    // anymore and the pair is deterministic.
+    invokeDeliver(c);
+    invokeDeliver(c);
     c.destroy();
 
     double lossPct = (100.0 * (expected - consumed.get())) / expected;

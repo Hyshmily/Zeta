@@ -143,8 +143,9 @@ class WaveCounterRecyclingTest {
     Field poolField = WaveCounter.class.getDeclaredField("ebbReservoir");
     poolField.setAccessible(true);
     @SuppressWarnings("unchecked")
-    SoftReference<ConcurrentHashMap<String, LongAdder>> poolRef =
-      (SoftReference<ConcurrentHashMap<String, LongAdder>>) poolField.get(counter);
+    SoftReference<ConcurrentHashMap<String, LongAdder>> poolRef = (SoftReference<
+      ConcurrentHashMap<String, LongAdder>
+    >) poolField.get(counter);
     LongAdder original = poolRef.get().get("k");
     assertThat(original).isNotNull();
     counter.count("k", 1);
@@ -410,15 +411,17 @@ class WaveCounterRecyclingTest {
     Field poolField = WaveCounter.class.getDeclaredField("ebbReservoir");
     poolField.setAccessible(true);
     @SuppressWarnings("unchecked")
-    SoftReference<ConcurrentHashMap<String, LongAdder>> poolRef =
-      (SoftReference<ConcurrentHashMap<String, LongAdder>>) poolField.get(counter);
+    SoftReference<ConcurrentHashMap<String, LongAdder>> poolRef = (SoftReference<
+      ConcurrentHashMap<String, LongAdder>
+    >) poolField.get(counter);
     LongAdder original = poolRef.get().get("hot");
     assertThat(original).isNotNull();
     counter.count("hot", 1);
     invokeDeliver(counter);
     @SuppressWarnings("unchecked")
-    SoftReference<ConcurrentHashMap<String, LongAdder>> poolRef2 =
-      (SoftReference<ConcurrentHashMap<String, LongAdder>>) poolField.get(counter);
+    SoftReference<ConcurrentHashMap<String, LongAdder>> poolRef2 = (SoftReference<
+      ConcurrentHashMap<String, LongAdder>
+    >) poolField.get(counter);
     assertThat(poolRef2.get().get("hot")).as("tide 2 waveTo must steal the pooled adder").isSameAs(original);
   }
 
@@ -501,8 +504,9 @@ class WaveCounterRecyclingTest {
     w.join();
     Thread.sleep(10);
     @SuppressWarnings("unchecked")
-    ConcurrentHashMap<Thread, Object> registry =
-      (ConcurrentHashMap<Thread, Object>) registryField(counter).get(counter);
+    ConcurrentHashMap<Thread, Object> registry = (ConcurrentHashMap<Thread, Object>) registryField(counter).get(
+      counter
+    );
     Object ceils = registry.get(w);
     Field stampField = ceils.getClass().getDeclaredField("drainStamp");
     stampField.setAccessible(true);
@@ -516,8 +520,9 @@ class WaveCounterRecyclingTest {
     long after = (long) stampField.get(ceils);
     assertThat(after).as("stamp restored to a fresh even epoch (s+2)").isEqualTo(before + 2);
     @SuppressWarnings("unchecked")
-    ConcurrentHashMap<String, LongAdder> table =
-      (ConcurrentHashMap<String, LongAdder>) reservoirField(counter).get(counter);
+    ConcurrentHashMap<String, LongAdder> table = (ConcurrentHashMap<String, LongAdder>) reservoirField(counter).get(
+      counter
+    );
     assertThat(table.get("k").sum()).as("reconcile merges the residual into the shared table").isEqualTo(1);
     Field sizeField = ceils.getClass().getDeclaredField("size");
     sizeField.setAccessible(true);
@@ -537,8 +542,9 @@ class WaveCounterRecyclingTest {
     counter.count("k", 3);
 
     @SuppressWarnings("unchecked")
-    ConcurrentHashMap<Thread, Object> registry =
-      (ConcurrentHashMap<Thread, Object>) registryField(counter).get(counter);
+    ConcurrentHashMap<Thread, Object> registry = (ConcurrentHashMap<Thread, Object>) registryField(counter).get(
+      counter
+    );
     Object ceils = registry.get(Thread.currentThread());
     assertThat(ceils).as("current writer must be registered").isNotNull();
 
@@ -547,27 +553,30 @@ class WaveCounterRecyclingTest {
     assertThat((int) sizeField.get(ceils)).as("precondition: local map non-empty").isPositive();
 
     @SuppressWarnings("unchecked")
-    ConcurrentHashMap<String, LongAdder> table =
-      (ConcurrentHashMap<String, LongAdder>) reservoirField(counter).get(counter);
+    ConcurrentHashMap<String, LongAdder> table = (ConcurrentHashMap<String, LongAdder>) reservoirField(counter).get(
+      counter
+    );
     Field mergesField = WaveCounter.class.getDeclaredField("mergesInFlight");
     mergesField.setAccessible(true);
     Object merges = mergesField.get(counter);
     Field ebbField = WaveCounter.class.getDeclaredField("ebbReservoir");
     ebbField.setAccessible(true);
     @SuppressWarnings("unchecked")
-    SoftReference<ConcurrentHashMap<String, LongAdder>> ebb =
-      (SoftReference<ConcurrentHashMap<String, LongAdder>>) ebbField.get(counter);
+    SoftReference<ConcurrentHashMap<String, LongAdder>> ebb = (SoftReference<
+      ConcurrentHashMap<String, LongAdder>
+    >) ebbField.get(counter);
 
     Method m = ceils
       .getClass()
       .getDeclaredMethod(
         "tryDrainInto",
+        WaveCounter.class,
         ConcurrentHashMap.class,
-        WaveCounter.PaddedMergesInFlight.class,
+        LongAdder.class,
         SoftReference.class
       );
     m.setAccessible(true);
-    assertThat((boolean) m.invoke(ceils, table, merges, ebb)).as("tryLock drain should succeed").isTrue();
+    assertThat((boolean) m.invoke(ceils, counter, table, merges, ebb)).as("tryLock drain should succeed").isTrue();
 
     assertThat((int) sizeField.get(ceils)).as("tryDrainInto must reset size").isZero();
     assertThat(table.get("k").sum()).as("drained hot count must reach the shared table").isEqualTo(3);
@@ -590,8 +599,7 @@ class WaveCounterRecyclingTest {
     invokeDeliver(counter); // tide 1: reap the dead writer, pool its map
 
     @SuppressWarnings("unchecked")
-    ConcurrentLinkedQueue<Object> pool =
-      (ConcurrentLinkedQueue<Object>) poolField(counter).get(counter);
+    ConcurrentLinkedQueue<Object> pool = (ConcurrentLinkedQueue<Object>) poolField(counter).get(counter);
     assertThat(pool).as("dead writer's map enters the pool").hasSize(1);
     Object pooled = pool.peek();
 
@@ -602,8 +610,9 @@ class WaveCounterRecyclingTest {
     w2.join();
     Thread.sleep(10);
     @SuppressWarnings("unchecked")
-    ConcurrentHashMap<Thread, Object> registry =
-      (ConcurrentHashMap<Thread, Object>) registryField(counter).get(counter);
+    ConcurrentHashMap<Thread, Object> registry = (ConcurrentHashMap<Thread, Object>) registryField(counter).get(
+      counter
+    );
     assertThat(registry.get(w2)).as("new writer claims the pooled map").isSameAs(pooled);
     assertThat(pool).as("claim empties the pool").isEmpty();
   }
@@ -625,8 +634,7 @@ class WaveCounterRecyclingTest {
       invokeDeliver(counter);
     }
     @SuppressWarnings("unchecked")
-    ConcurrentLinkedQueue<Object> pool =
-      (ConcurrentLinkedQueue<Object>) poolField(counter).get(counter);
+    ConcurrentLinkedQueue<Object> pool = (ConcurrentLinkedQueue<Object>) poolField(counter).get(counter);
     assertThat(pool).as("pool holds at most the last dead writer's map").hasSizeLessThanOrEqualTo(1);
     assertThat(mergedTotal(batches)).as("churn loses no hot counts").isEqualTo(3);
   }
@@ -682,9 +690,7 @@ class WaveCounterRecyclingTest {
     Field emaField = rates.getClass().getDeclaredField("smoothedRenewal");
     emaField.setAccessible(true);
     double smoothed = (double) emaField.get(rates);
-    assertThat(smoothed)
-      .as("renewal counts only members, not the 600 new earners")
-      .isLessThan(0.1);
+    assertThat(smoothed).as("renewal counts only members, not the 600 new earners").isLessThan(0.1);
   }
 
   private static Object governorOf(WaveCounter c) throws Exception {
