@@ -19,8 +19,7 @@ import io.github.hyshmily.zeta.Internal;
 
 /**
  * Read-only view of the runtime configuration the cache core consumes: TTL
- * arithmetic (normal/hot defaults and overrides), the null-sentinel TTL, and
- * cache-key normalization.
+ * arithmetic (normal/hot defaults and overrides) and the null-sentinel TTL.
  *
  * <p>Implemented at the assembly layer by {@code ZetaProperties} (the
  * {@code zeta.local.*} binding). The cache packages never import the
@@ -31,9 +30,7 @@ import io.github.hyshmily.zeta.Internal;
  * {@link TtlPolicy} documents and {@code ZetaCacheTest} locks in).
  *
  * <p>Method names intentionally mirror the existing {@code ZetaProperties}
- * accessors so the implementation is signature-compatible without bridges
- * (except {@link #isStripQuery()}, which aggregates the nested cache-key
- * block).
+ * accessors so the implementation is signature-compatible without bridges.
  */
 @Internal
 public interface CacheCoreSettings {
@@ -50,25 +47,7 @@ public interface CacheCoreSettings {
   /** Effective soft TTL for hot keys: override if positive, else the default (0 = disabled). */
   long effectiveHotSoftTtlMs();
 
-  /**
-   * Effective null-sentinel TTL in ms: positive seconds × 1000, or
-   * {@link Long#MAX_VALUE} when disabled ({@code <= 0}).
-   */
-  long effectiveNullTtlMs();
-
-  /** Raw null/cache-miss TTL in seconds (no {@code <= 0} guard — callers apply their own semantics). */
-  int getNullValueTtlSeconds();
-
   /** Jitter ratio (0.0–1.0) applied to all TTL expiry timestamps. */
   double getTtlJitterRatio();
 
-  /** Whether query parameters ({@code ?key=val}) are stripped from cache keys before operations. */
-  boolean isStripQuery();
-
-  /**
-   * Single value size limit in bytes (0 = unlimited). Values whose estimated
-   * size exceeds this bound are served to the caller but never stored in L1 —
-   * the memory protection {@code zeta.local.cache.max-value-size} promises.
-   */
-  long getMaxValueSize();
 }

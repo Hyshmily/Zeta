@@ -24,7 +24,7 @@ import lombok.Getter;
  * fail-fast semantics.
  *
  * <p>Unlike "source returned null" (an empty result cached as a
- * {@code NullValue} sentinel), a suppression means the data source was never
+ * sentinel entry), a suppression means the data source was never
  * consulted or never answered — mapping it to {@code null} would let 500s
  * masquerade as 404s. Thrown only when {@code failOnError} is set; the
  * default swallow path still resolves suppressed loads to empty. Keeps its

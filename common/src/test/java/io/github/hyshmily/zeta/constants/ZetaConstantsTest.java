@@ -33,15 +33,15 @@ class ZetaConstantsTest {
 
   @Test
   void shouldHaveExpectedThreadPrefixes() {
-    assertThat(ZetaConstants.Thread.PREFIX_HOTKEY).isEqualTo("zeta-");
-    assertThat(ZetaConstants.Thread.PREFIX_SYNC).isEqualTo("zeta-sync");
-    assertThat(ZetaConstants.Thread.PREFIX_WORKER).isEqualTo("zeta-worker");
-    assertThat(ZetaConstants.Thread.PREFIX_REPORT).isEqualTo("zeta-reportToWorker");
+    assertThat(ZetaConstants.Threads.PREFIX_HOTKEY).isEqualTo("zeta-");
+    assertThat(ZetaConstants.Threads.PREFIX_SYNC).isEqualTo("zeta-sync");
+    assertThat(ZetaConstants.Threads.PREFIX_WORKER).isEqualTo("zeta-worker");
+    assertThat(ZetaConstants.Threads.PREFIX_REPORT).isEqualTo("zeta-report");
   }
 
   @Test
   void shouldHaveExpectedRoutingKeys() {
-    assertThat(ZetaConstants.Routing.KEY_BROADCAST).isEqualTo("send.");
+    assertThat(ZetaConstants.Routing.PREFIX_DECISION).isEqualTo("send.");
     assertThat(ZetaConstants.Routing.KEY_REPORT).isEqualTo("reportToWorker.");
   }
 
@@ -96,18 +96,14 @@ class ZetaConstantsTest {
 
   @Test
   void shouldHaveExpectedSchedulerThreadPrefix() {
-    assertThat(ZetaConstants.Thread.PREFIX_SCHEDULER).isEqualTo("zeta-scheduler");
+    assertThat(ZetaConstants.Threads.PREFIX_SCHEDULER).isEqualTo("zeta-scheduler");
   }
 
   @Test
   void shouldHaveExpectedNoSyncPublisherMessage() {
-    assertThat(ZetaConstants.NO_SYNC_PUBLISHER).isEqualTo("No sync publisher found, please enable zeta.sync");
+    assertThat(ZetaConstants.NO_SYNC_PUBLISHER_MESSAGE).isEqualTo("No sync publisher found, please enable zeta.sync");
   }
 
-  @Test
-  void shouldHaveExpectedRulesVersionHeader() {
-    assertThat(ZetaConstants.Amqp.HEADER_RULES_VERSION).isEqualTo("rulesVersion");
-  }
 
   @Test
   void shouldHaveExpectedRedisKeyRules() {

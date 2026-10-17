@@ -23,7 +23,6 @@ import static org.mockito.Mockito.when;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import io.github.hyshmily.zeta.autoconfigure.ZetaProperties;
-import io.github.hyshmily.zeta.cache.codec.CacheCompressor;
 import io.github.hyshmily.zeta.model.CacheEntry;
 import io.github.hyshmily.zeta.model.KeyState;
 import io.github.hyshmily.zeta.sharding.HealthView;
@@ -50,11 +49,11 @@ class DecisionValidityDemotionTest {
   }
 
   private EntryLifecycleImpl entryLifecycle() {
-    return new EntryLifecycleImpl(caffeineCache, ttlConfig, CacheCompressor.NONE, healthView);
+    return new EntryLifecycleImpl(caffeineCache, ttlConfig, healthView);
   }
 
   private EntryLifecycleImpl entryLifecycleWithoutHealthView() {
-    return new EntryLifecycleImpl(caffeineCache, ttlConfig, CacheCompressor.NONE, null);
+    return new EntryLifecycleImpl(caffeineCache, ttlConfig, null);
   }
 
   private CacheEntry normalEntry() {

@@ -21,14 +21,14 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.*;
 
 import io.github.hyshmily.zeta.Zeta;
-import io.github.hyshmily.zeta.annotation.annotationsupporter.ZetaCacheContext;
-import io.github.hyshmily.zeta.model.ReadPolicy;
+import io.github.hyshmily.zeta.ZetaInternal;
 import io.github.hyshmily.zeta.annotation.annotationsupporter.SpringCacheSettings;
+import io.github.hyshmily.zeta.annotation.annotationsupporter.ZetaCacheContext;
+import io.github.hyshmily.zeta.model.GetOptions;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 import java.util.concurrent.*;
 import org.aspectj.lang.ProceedingJoinPoint;
 import org.aspectj.lang.reflect.MethodSignature;
@@ -43,14 +43,14 @@ import org.springframework.cache.annotation.Cacheable;
 @DisplayName("CacheExtensionAspect tests")
 class ZetaCacheExtensionAspectTest {
 
-  private Zeta zeta;
+  private ZetaInternal zeta;
   private Zeta.DetectorAdmin detectorAdmin;
   private SpringCacheSettings settings;
   private CacheExtensionAspect aspect;
 
   @BeforeEach
   void setUp() {
-    zeta = mock(Zeta.class);
+    zeta = mock(ZetaInternal.class);
     detectorAdmin = mock(Zeta.DetectorAdmin.class);
     when(zeta.detector()).thenReturn(detectorAdmin);
     settings = mock(SpringCacheSettings.class);
@@ -123,31 +123,25 @@ class ZetaCacheExtensionAspectTest {
     }
 
     @Cacheable(cacheNames = "test", key = "#p0")
-    @CacheTTL(hardTtlMs = 5000)
+    @CacheTtl(hardTtlMs = 5000)
     public String findWithTtl(String id) {
       return "result-" + id;
     }
 
     @Cacheable(cacheNames = "test", key = "#p0")
-    @NullCaching(true)
-    public String findWithNullCaching(String id) {
-      return "result-" + id;
-    }
-
-    @Cacheable(cacheNames = "test", key = "#p0")
-    @SkipBroadcast
+    @SkipSync
     public String findBroadcastOff(String id) {
       return "result-" + id;
     }
 
     @CachePut(cacheNames = "test", key = "#p0")
-    @SkipBroadcast
+    @SkipSync
     public String putBroadcastOff(String id) {
       return "result-" + id;
     }
 
     @CacheEvict(cacheNames = "test", key = "#p0")
-    @SkipBroadcast
+    @SkipSync
     public void evictBroadcastOff(String id) {}
 
     @CachePut(cacheNames = "test", key = "#p0")
@@ -314,7 +308,7 @@ class ZetaCacheExtensionAspectTest {
     when(pjp.getArgs()).thenReturn(new Object[] { "myId" });
 
     when(detectorAdmin.isLocalHotKey("test::myId")).thenReturn(true);
-    when(zeta.peek("test::myId")).thenReturn(Optional.of("cached-value"));
+    when(zeta.peek("test::myId")).thenReturn("cached-value");
 
     Object result = aspect.aroundCacheable(pjp);
 
@@ -360,7 +354,7 @@ class ZetaCacheExtensionAspectTest {
     when(pjp.getArgs()).thenReturn(new Object[] { "myId" });
 
     when(detectorAdmin.isLocalHotKey("test::myId")).thenReturn(false);
-    when(zeta.peek("test::myId")).thenReturn(Optional.of("cached-value"));
+    when(zeta.peek("test::myId")).thenReturn("cached-value");
 
     Object result = aspect.aroundCacheable(pjp);
 
@@ -382,7 +376,7 @@ class ZetaCacheExtensionAspectTest {
     when(pjp.getArgs()).thenReturn(new Object[] { "myId" });
 
     when(detectorAdmin.isLocalHotKey("test::myId")).thenReturn(false);
-    when(zeta.peek("test::myId")).thenReturn(Optional.empty());
+    when(zeta.peek("test::myId")).thenReturn(null);
 
     Object result = aspect.aroundCacheable(pjp);
 
@@ -414,7 +408,7 @@ class ZetaCacheExtensionAspectTest {
   @Test
   @DisplayName("context is restored after proceed in finally block")
   void contextRestoredAfterProceed() throws Throwable {
-    ZetaCacheContext.get().push(ReadPolicy.of(999L, 888L));
+    ZetaCacheContext.get().push(GetOptions.of(999L, 888L));
 
     Method method = TestService.class.getMethod("find", String.class);
     Cacheable cacheable = method.getAnnotation(Cacheable.class);
@@ -431,7 +425,7 @@ class ZetaCacheExtensionAspectTest {
 
     assertThat(ZetaCacheContext.get().current().hardTtlMs().getAsLong()).isEqualTo(999L);
     assertThat(ZetaCacheContext.get().current().softTtlMs().getAsLong()).isEqualTo(888L);
-    assertThat(ZetaCacheContext.get().current().nullCaching()).isTrue();
+    assertThat(ZetaCacheContext.get().current().reportEnabled()).isTrue();
   }
 
   @Test
@@ -655,7 +649,7 @@ class ZetaCacheExtensionAspectTest {
   // ── TTL override tests ──
 
   @Test
-  @DisplayName("@CacheTTL applies hardTtlMs override to context")
+  @DisplayName("@CacheTtl applies hardTtlMs override to context")
   void ttlOverride_appliesToContext() throws Throwable {
     ZetaCacheContext.get().restore(null);
 
@@ -679,11 +673,11 @@ class ZetaCacheExtensionAspectTest {
     aspect.aroundCacheable(pjp);
   }
 
-  // ── @SkipBroadcast tests ──
+  // ── @SkipSync tests ──
 
   @Test
-  @DisplayName("@SkipBroadcast on @Cacheable sets skipBroadcast in context")
-  void broadcastFalse_onCacheable_setsSkipBroadcast() throws Throwable {
+  @DisplayName("@SkipSync on @Cacheable sets skipSync in context")
+  void broadcastFalse_onCacheable_setsSkipSync() throws Throwable {
     ZetaCacheContext.get().restore(null);
 
     Method method = TestService.class.getMethod("findBroadcastOff", String.class);
@@ -697,7 +691,7 @@ class ZetaCacheExtensionAspectTest {
     when(pjp.getTarget()).thenReturn(new TestService());
     when(pjp.getArgs()).thenReturn(new Object[] { "myId" });
     when(pjp.proceed()).thenAnswer(invocation -> {
-      assertThat(ZetaCacheContext.get().skipBroadcast()).isTrue();
+      assertThat(ZetaCacheContext.get().skipSync()).isTrue();
       return "result-myId";
     });
 
@@ -707,8 +701,8 @@ class ZetaCacheExtensionAspectTest {
   }
 
   @Test
-  @DisplayName("@SkipBroadcast on @CachePut sets skipBroadcast in context")
-  void broadcastFalse_onCachePut_setsSkipBroadcast() throws Throwable {
+  @DisplayName("@SkipSync on @CachePut sets skipSync in context")
+  void broadcastFalse_onCachePut_setsSkipSync() throws Throwable {
     ZetaCacheContext.get().restore(null);
 
     Method method = TestService.class.getMethod("putBroadcastOff", String.class);
@@ -721,7 +715,7 @@ class ZetaCacheExtensionAspectTest {
     when(pjp.getTarget()).thenReturn(new TestService());
     when(pjp.getArgs()).thenReturn(new Object[] { "myId" });
     when(pjp.proceed()).thenAnswer(invocation -> {
-      assertThat(ZetaCacheContext.get().skipBroadcast()).isTrue();
+      assertThat(ZetaCacheContext.get().skipSync()).isTrue();
       return "result-myId";
     });
 
@@ -729,8 +723,8 @@ class ZetaCacheExtensionAspectTest {
   }
 
   @Test
-  @DisplayName("@SkipBroadcast on @CacheEvict sets skipBroadcast in context")
-  void broadcastFalse_onCacheEvict_setsSkipBroadcast() throws Throwable {
+  @DisplayName("@SkipSync on @CacheEvict sets skipSync in context")
+  void broadcastFalse_onCacheEvict_setsSkipSync() throws Throwable {
     ZetaCacheContext.get().restore(null);
 
     Method method = TestService.class.getMethod("evictBroadcastOff", String.class);
@@ -743,7 +737,7 @@ class ZetaCacheExtensionAspectTest {
     when(pjp.getTarget()).thenReturn(new TestService());
     when(pjp.getArgs()).thenReturn(new Object[] { "myId" });
     when(pjp.proceed()).thenAnswer(invocation -> {
-      assertThat(ZetaCacheContext.get().skipBroadcast()).isTrue();
+      assertThat(ZetaCacheContext.get().skipSync()).isTrue();
       return null;
     });
 
@@ -751,7 +745,7 @@ class ZetaCacheExtensionAspectTest {
   }
 
   @Test
-  @DisplayName("without @SkipBroadcast on @CachePut does not set skipBroadcast")
+  @DisplayName("without @SkipSync on @CachePut does not set skipSync")
   void broadcastDefault_onCachePut_doesNotSkip() throws Throwable {
     ZetaCacheContext.get().restore(null);
 
@@ -765,44 +759,17 @@ class ZetaCacheExtensionAspectTest {
     when(pjp.getTarget()).thenReturn(new TestService());
     when(pjp.getArgs()).thenReturn(new Object[] { "myId" });
     when(pjp.proceed()).thenAnswer(invocation -> {
-      assertThat(ZetaCacheContext.get().skipBroadcast()).isFalse();
+      assertThat(ZetaCacheContext.get().skipSync()).isFalse();
       return "result-myId";
     });
 
     aspect.aroundCachePutOrEvict(pjp);
   }
 
-  // ── NullCaching tests ──
-
-  @Test
-  @DisplayName("@NullCaching(true) sets allowNull in context")
-  void nullCaching_appliesAllowNull() throws Throwable {
-    ZetaCacheContext.get().restore(null);
-
-    Method method = TestService.class.getMethod("findWithNullCaching", String.class);
-    Cacheable cacheable = method.getAnnotation(Cacheable.class);
-    MethodSignature signature = mock(MethodSignature.class);
-
-    when(signature.getMethod()).thenReturn(method);
-
-    ProceedingJoinPoint pjp = mock(ProceedingJoinPoint.class);
-    when(pjp.getSignature()).thenReturn(signature);
-    when(pjp.getTarget()).thenReturn(new TestService());
-    when(pjp.getArgs()).thenReturn(new Object[] { "myId" });
-    when(pjp.proceed()).thenAnswer(invocation -> {
-      assertThat(ZetaCacheContext.get().current().nullCaching()).isTrue();
-      return "result-myId";
-    });
-
-    when(detectorAdmin.isLocalHotKey(anyString())).thenReturn(false);
-
-    aspect.aroundCacheable(pjp);
-  }
-
   // ── resolveKey: empty expression with 0 args ──
 
   @Test
-  @DisplayName("null SpEL key (missing arg) fails fast instead of collapsing onto one hot key")
+  @DisplayName("bare @Cacheable passes through: key resolution belongs to Spring's interceptor")
   void resolveKey_emptyExpressionWithNoArgs() throws Throwable {
     Method method = TestService.class.getMethod("find", String.class);
     Cacheable cacheable = mock(Cacheable.class);
@@ -819,11 +786,15 @@ class ZetaCacheExtensionAspectTest {
     when(pjp.getArgs()).thenReturn(new Object[0]);
     when(pjp.proceed()).thenReturn("ok");
 
-    // The real TestService.find carries a SpEL key ('#p0') whose parameter is
-    // absent here — a null key would collapse every call onto one hot key,
-    // so resolution now fails fast instead of proceeding.
-    org.assertj.core.api.Assertions.assertThatThrownBy(() -> aspect.aroundCacheable(pjp))
-      .isInstanceOf(IllegalArgumentException.class);
+    // TestService.find is a bare @Cacheable (no companion annotation): the
+    // aspect no longer resolves the key itself — Spring's CacheInterceptor
+    // owns key resolution (and its own null-key rejection) on this path, so
+    // the advice passes straight through instead of failing fast here. Key
+    // validation still happens eagerly whenever an extension needs the key
+    // (@Intercept gating, @Preload, @CacheCondition veto).
+    Object result = aspect.aroundCacheable(pjp);
+    org.assertj.core.api.Assertions.assertThat(result).isEqualTo("ok");
+    verify(pjp).proceed();
   }
 
   @Test
@@ -849,7 +820,7 @@ class ZetaCacheExtensionAspectTest {
   }
 
   @Test
-  @DisplayName("null SpEL key (null arg) fails fast instead of collapsing onto one hot key")
+  @DisplayName("bare @Cacheable with null arg passes through: Spring owns the null-key rejection")
   void resolveKey_emptyExpressionWithSingleNullArg() throws Throwable {
     Method method = TestService.class.getMethod("find", String.class);
     Cacheable cacheable = mock(Cacheable.class);
@@ -866,10 +837,35 @@ class ZetaCacheExtensionAspectTest {
     when(pjp.getArgs()).thenReturn(new Object[] { null });
     when(pjp.proceed()).thenReturn("ok");
 
-    // A null SpEL key would collapse every null-arg call onto one hot key
-    // ('test::null') — fail fast instead of proceeding with a poisoned key.
-    org.assertj.core.api.Assertions.assertThatThrownBy(() -> aspect.aroundCacheable(pjp))
-      .isInstanceOf(IllegalArgumentException.class);
+    // Same bare-path contract as above: no Zeta-side key resolution, so no
+    // Zeta-side null-key rejection — Spring's interceptor rejects the null
+    // key when it resolves it (a null SpEL key never collapses onto one hot
+    // key in production; it fails in Spring's own key resolution).
+    Object result = aspect.aroundCacheable(pjp);
+    org.assertj.core.api.Assertions.assertThat(result).isEqualTo("ok");
+    verify(pjp).proceed();
+  }
+
+  @Test
+  @DisplayName("extension path still fails fast on null SpEL key (@Intercept needs the key)")
+  void resolveKey_extensionMethodWithNullArg_failsFast() throws Throwable {
+    Method method = TestService.class.getMethod("findInterceptedNoFallback", String.class);
+
+    MethodSignature signature = mock(MethodSignature.class);
+    when(signature.getMethod()).thenReturn(method);
+
+    ProceedingJoinPoint pjp = mock(ProceedingJoinPoint.class);
+    when(pjp.getSignature()).thenReturn(signature);
+    when(pjp.getTarget()).thenReturn(new TestService());
+    when(pjp.getArgs()).thenReturn(new Object[] { null });
+    when(pjp.proceed()).thenReturn("ok");
+
+    // Unlike the bare path, an @Intercept method needs the resolved key for
+    // gating — so a null SpEL key still fails fast in the aspect instead of
+    // reaching the gate with a poisoned key.
+    org.assertj.core.api.Assertions.assertThatThrownBy(() -> aspect.aroundCacheable(pjp)).isInstanceOf(
+      IllegalArgumentException.class
+    );
   }
 
   @Test
@@ -1054,7 +1050,7 @@ class ZetaCacheExtensionAspectTest {
     when(pjp.proceed()).thenReturn("result-myId");
 
     when(detectorAdmin.isLocalHotKey(anyString())).thenReturn(false);
-    when(zeta.peek(anyString())).thenReturn(Optional.empty());
+    when(zeta.peek(anyString())).thenReturn(null);
 
     // Exceed qps by calling 6 times (threshold = 5)
     Object ignored;
@@ -1108,7 +1104,7 @@ class ZetaCacheExtensionAspectTest {
     when(pjp.getTarget()).thenReturn(new TestService());
     when(pjp.getArgs()).thenReturn(new Object[] { "myId" });
     when(detectorAdmin.isLocalHotKey(anyString())).thenReturn(false);
-    when(zeta.peek(anyString())).thenReturn(Optional.of("cached-value"));
+    when(zeta.peek(anyString())).thenReturn("cached-value");
 
     CountDownLatch enterLatch = new CountDownLatch(2);
     CountDownLatch blockLatch = new CountDownLatch(1);
@@ -1148,7 +1144,7 @@ class ZetaCacheExtensionAspectTest {
   // ── @Preload tests ──
 
   @Test
-  @DisplayName("@Preload(keys={...}) calls notifyLocalDetectorDirect for static keys")
+  @DisplayName("@Preload(keys={...}) calls feedDetector for static keys")
   void staticPreload_inflatesDetector() throws Throwable {
     Method method = TestService.class.getMethod("findWithStaticPreload", String.class);
     Cacheable cacheable = method.getAnnotation(Cacheable.class);
@@ -1166,16 +1162,13 @@ class ZetaCacheExtensionAspectTest {
 
     aspect.aroundCacheable(pjp);
 
-    verify(detectorAdmin).notifyLocalDetectorDirect(
-      Map.of(
-        "test::preload-key-a", (long) Integer.MAX_VALUE,
-        "test::preload-key-b", (long) Integer.MAX_VALUE
-      )
+    verify(zeta).feedDetector(
+      Map.of("test::preload-key-a", (long) Integer.MAX_VALUE, "test::preload-key-b", (long) Integer.MAX_VALUE)
     );
   }
 
   @Test
-  @DisplayName("@Preload(keyExpr=\"#id\") calls notifyLocalDetectorDirect for dynamic key")
+  @DisplayName("@Preload(keyExpr=\"#id\") calls feedDetector for dynamic key")
   void dynamicPreload_inflatesDetector() throws Throwable {
     Method method = TestService.class.getMethod("findWithDynamicPreload", String.class);
     Cacheable cacheable = method.getAnnotation(Cacheable.class);
@@ -1193,7 +1186,7 @@ class ZetaCacheExtensionAspectTest {
 
     aspect.aroundCacheable(pjp);
 
-    verify(detectorAdmin).notifyLocalDetectorDirect("test::myDynamicKey", Integer.MAX_VALUE);
+    verify(zeta).feedDetector("test::myDynamicKey", Integer.MAX_VALUE);
   }
 
   @Test
@@ -1213,15 +1206,12 @@ class ZetaCacheExtensionAspectTest {
 
     when(detectorAdmin.isLocalHotKey(anyString())).thenReturn(false);
 
-    // Call twice — notifyLocalDetectorDirect should only be called once per key
+    // Call twice — feedDetector should only be called once per key
     aspect.aroundCacheable(pjp);
     aspect.aroundCacheable(pjp);
 
-    verify(detectorAdmin, times(1)).notifyLocalDetectorDirect(
-      Map.of(
-        "test::preload-key-a", (long) Integer.MAX_VALUE,
-        "test::preload-key-b", (long) Integer.MAX_VALUE
-      )
+    verify(zeta, times(1)).feedDetector(
+      Map.of("test::preload-key-a", (long) Integer.MAX_VALUE, "test::preload-key-b", (long) Integer.MAX_VALUE)
     );
   }
 
@@ -1249,11 +1239,8 @@ class ZetaCacheExtensionAspectTest {
 
     aspect.aroundCacheable(pjp);
 
-    verify(detectorAdmin).notifyLocalDetectorDirect(
-      Map.of(
-        "primary::preload-key-a", (long) Integer.MAX_VALUE,
-        "secondary::preload-key-a", (long) Integer.MAX_VALUE
-      )
+    verify(zeta).feedDetector(
+      Map.of("primary::preload-key-a", (long) Integer.MAX_VALUE, "secondary::preload-key-a", (long) Integer.MAX_VALUE)
     );
   }
 }

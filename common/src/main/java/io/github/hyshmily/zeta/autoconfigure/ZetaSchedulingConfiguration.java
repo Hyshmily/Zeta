@@ -121,7 +121,7 @@ public class ZetaSchedulingConfiguration {
    * Logs a truncated summary of up to 20 sample keys. Runs every 10 seconds.
    *
    * <p><b>Competing consumer warning:</b> this drain shares the expelled
-   * queue handed out by {@code Zeta#returnLocalExpelledHotKeys()} to user
+   * queue handed out by {@code Zeta#expelledHotKeys()} to user
    * consumers. The drain is a memory-protection measure — without it, an
    * undrained queue grows unbounded — but it silently swallows expelled-key
    * events: up to {@code 100_000} items per TopK per pass may be consumed

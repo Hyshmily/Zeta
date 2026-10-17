@@ -20,16 +20,15 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.*;
 
 import com.github.benmanes.caffeine.cache.Cache;
-import io.github.hyshmily.zeta.model.CacheEntry;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import io.github.hyshmily.zeta.cache.cachesupport.BroadcastBuffer;
-import io.github.hyshmily.zeta.scheduler.BackgroundRefresher;
-import io.github.hyshmily.zeta.cache.cachesupport.RefaultAdmission;
 import io.github.hyshmily.zeta.cache.cachesupport.SingleFlight;
 import io.github.hyshmily.zeta.detection.ZetaBayesianSM;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.Item;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.TopK;
+import io.github.hyshmily.zeta.model.CacheEntry;
 import io.github.hyshmily.zeta.reporting.KeyReporter;
+import io.github.hyshmily.zeta.scheduler.BackgroundRefresher;
 import io.github.hyshmily.zeta.sharding.HealthView;
 import io.github.hyshmily.zeta.sync.dispatcher.DispatcherStats;
 import io.github.hyshmily.zeta.sync.distributedlock.LockProvider;
@@ -113,12 +112,12 @@ class ZetaMicrometerAutoConfigurationTest {
   void customMeterBinder_registersAllMetrics_whenAllDepsPresent() {
     TopK detector = mockTopK(5, 100L, 3, 97);
     SingleFlight sf = mock(SingleFlight.class);
-    when(sf.estimatedInflightSize()).thenReturn(2L);
+    when(sf.estimatedInFlightSize()).thenReturn(2L);
     KeyReporter reporter = mock(KeyReporter.class);
     when(reporter.dispatcherDepth()).thenReturn(10);
     when(reporter.dispatcherDropped()).thenReturn(5L);
     when(reporter.dispatcherExpired()).thenReturn(3L);
-    when(reporter.getPendingKeyCount()).thenReturn(200L);
+    when(reporter.pendingKeyCount()).thenReturn(200L);
     BackgroundRefresher backgroundRefresher = mock(BackgroundRefresher.class);
     when(backgroundRefresher.getRefreshLimiter()).thenReturn(new Semaphore(8));
     VersionController vc = mock(VersionController.class);
@@ -128,8 +127,8 @@ class ZetaMicrometerAutoConfigurationTest {
     HealthView healthView = mock(HealthView.class);
     when(healthView.isClusterHealthy()).thenReturn(true);
     when(healthView.getAliveWorkerIds()).thenReturn(Set.of("worker-1"));
-    ZetaBayesianSM sm = mock(ZetaBayesianSM.class);
-    when(sm.getTrackedKeys()).thenReturn(12);
+    ZetaBayesianSM stateMachine = mock(ZetaBayesianSM.class);
+    when(stateMachine.getTrackedKeys()).thenReturn(12);
     BroadcastBuffer broadcastBuffer = mock(BroadcastBuffer.class);
     when(broadcastBuffer.sendFailures()).thenReturn(2L);
     when(broadcastBuffer.saturationDrops()).thenReturn(1L);
@@ -150,12 +149,11 @@ class ZetaMicrometerAutoConfigurationTest {
       providerThatReturns(backgroundRefresher),
       providerThatReturns(vc),
       providerThatReturns(csp),
-      providerThatReturns(sm),
+      providerThatReturns(stateMachine),
       providerThatReturns(healthView),
       providerThatReturns(cpuMonitor),
       providerThatReturns(null),
       providerThatReturns(null),
-      providerThatReturns(RefaultAdmission.from(new ZetaProperties().getCache())),
       providerThatReturns(lockProvider)
     );
     binder.bindTo(registry);
@@ -184,13 +182,6 @@ class ZetaMicrometerAutoConfigurationTest {
     assertGaugeValue("zeta.stall.redis_degraded.stopped", 0.0);
     assertGaugeValue("zeta.stall.redis_degraded.timeouts.total", 0.0);
     assertGaugeValue("zeta.stall.worker_partition.stopped", 0.0);
-    // Refault admission gauges (ADR-0079): the default SHADOW gate exposes the
-    // full trajectory — zero counters, no evidence yet, capacity from config.
-    assertGaugeValue("zeta.l1.refault.admit.total", 0.0);
-    assertGaugeValue("zeta.l1.refault.reject.total", 0.0);
-    assertGaugeValue("zeta.l1.refault.distance", -1.0);
-    assertGaugeValue("zeta.l1.refault.capacity", 100_000.0);
-    assertGaugeValue("zeta.l1.refault.clock.rate", 0.0);
     // Distributed-lock outcomes: a null from tryLock() is ambiguous between
     // "peer holds it" and "Redis is down", so both are counted separately.
     assertGaugeValue("zeta.lock.acquired.total", 4.0);
@@ -204,7 +195,6 @@ class ZetaMicrometerAutoConfigurationTest {
   @Test
   void customMeterBinder_handlesNoDeps() {
     MeterBinder binder = config.hotKeyCustomMetrics(
-      providerThatReturns(null),
       providerThatReturns(null),
       providerThatReturns(null),
       providerThatReturns(null),
@@ -245,7 +235,6 @@ class ZetaMicrometerAutoConfigurationTest {
       providerThatReturns(null),
       providerThatReturns(null),
       providerThatReturns(null),
-      providerThatReturns(null),
       providerThatReturns(null)
     );
     binder.bindTo(registry);
@@ -267,12 +256,11 @@ class ZetaMicrometerAutoConfigurationTest {
   void customMeterBinder_registersLocalOnly() {
     TopK detector = mockTopK(3, 50L, 0, 100);
     SingleFlight sf = mock(SingleFlight.class);
-    when(sf.estimatedInflightSize()).thenReturn(1L);
+    when(sf.estimatedInFlightSize()).thenReturn(1L);
 
     MeterBinder binder = config.hotKeyCustomMetrics(
       providerThatReturns(detector),
       providerThatReturns(sf),
-      providerThatReturns(null),
       providerThatReturns(null),
       providerThatReturns(null),
       providerThatReturns(null),
@@ -325,9 +313,8 @@ class ZetaMicrometerAutoConfigurationTest {
       providerThatReturns(null),
       providerThatReturns(syncListener),
       providerThatReturns(workerListener),
-      providerThatReturns(null),
       providerThatReturns(null)
-    );
+    );;
     binder.bindTo(registry);
 
     assertGaugeValue("zeta.dispatch.pending.units", "plane", "sync", 120.0);
@@ -368,9 +355,8 @@ class ZetaMicrometerAutoConfigurationTest {
       providerThatReturns(null),
       providerThatReturns(syncListener),
       providerThatReturns(workerListener),
-      providerThatReturns(null),
       providerThatReturns(null)
-    );
+    );;
     binder.bindTo(registry);
 
     assertThat(registry.find("zeta.dispatch.pending.units").gauge()).isNull();

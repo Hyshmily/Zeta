@@ -15,17 +15,16 @@
  */
 package io.github.hyshmily.zeta.autoconfigure;
 
+import io.github.hyshmily.zeta.DefaultZeta;
 import io.github.hyshmily.zeta.Internal;
 import io.github.hyshmily.zeta.Zeta;
-import io.github.hyshmily.zeta.DefaultZeta;
 import io.github.hyshmily.zeta.cache.HotKeyCache;
-import io.github.hyshmily.zeta.cache.loader.ZetaLoaderRegistry;
-import io.github.hyshmily.zeta.rule.RuleService;
 import io.github.hyshmily.zeta.constants.ZetaConstants;
 import io.github.hyshmily.zeta.endpoint.ZetaEndpoint;
 import io.github.hyshmily.zeta.hotkeydetector.HotKeyDetector;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.TopK;
 import io.github.hyshmily.zeta.reporting.KeyReporter;
+import io.github.hyshmily.zeta.rule.RuleService;
 import io.github.hyshmily.zeta.sharding.HealthView;
 import io.github.hyshmily.zeta.sharding.impl.HealthViewImpl;
 import io.github.hyshmily.zeta.sync.distributedlock.LockProvider;
@@ -83,7 +82,7 @@ public class ZetaFacadeAutoConfiguration {
   public ScheduledExecutorService hotKeyScheduler() {
     return new SafeScheduledExecutorService(
       properties.getSchedulerPoolSize(),
-      new ZetaThreadFactory(ZetaConstants.Thread.PREFIX_SCHEDULER)
+      new ZetaThreadFactory(ZetaConstants.Threads.PREFIX_SCHEDULER)
     );
   }
 
@@ -151,26 +150,32 @@ public class ZetaFacadeAutoConfiguration {
    * @param hotKeyCacheProvider provider for the HotKeyCache (app-only or coexistence mode)
    * @param appTopKProvider     provider for the app-side TopK detector
    * @param lockProvider        provider for distributed locks (absent when no Redis)
-   * @param loaderRegistryProvider provider for the prefix→loader registry backing
    *                               the no-reader {@code get(cacheKey)} overloads
    *                               (ADR-0070; absent unless an application declares the bean)
    * @return a new {@link Zeta} facade instance
    */
   @Bean
   @ConditionalOnMissingBean
+  @SuppressWarnings("SpringJavaInjectionPointsAutowiringInspection")
   public Zeta hotKey(
     ObjectProvider<HotKeyCache> hotKeyCacheProvider,
     @Qualifier("hotKeyDetector") ObjectProvider<HotKeyDetector> appTopKProvider,
     ObjectProvider<LockProvider> lockProvider,
-    ObjectProvider<ZetaLoaderRegistry> loaderRegistryProvider,
-    ObjectProvider<RuleService> ruleServiceProvider
+    ObjectProvider<RuleService> ruleServiceProvider,
+    @Qualifier("interruptibleLoadExecutor") ObjectProvider<java.util.concurrent.Executor> loadExecutorProvider
   ) {
-    return new DefaultZeta(
+    DefaultZeta facade = new DefaultZeta(
       hotKeyCacheProvider.getIfAvailable(),
       appTopKProvider.getIfAvailable(),
       lockProvider.getIfAvailable(),
-      loaderRegistryProvider.getIfAvailable(),
       ruleServiceProvider.getIfAvailable()
     );
+    // Bulk refresh fan-out must not park blocking IO on the JVM-global common
+    // pool (P1-3) — the dedicated load pool is shared, never shut down here.
+    java.util.concurrent.Executor loadExecutor = loadExecutorProvider.getIfAvailable();
+    if (loadExecutor != null) {
+      facade.setRefreshExecutor(loadExecutor);
+    }
+    return facade;
   }
 }

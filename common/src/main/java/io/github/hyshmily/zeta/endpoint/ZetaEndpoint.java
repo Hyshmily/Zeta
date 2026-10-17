@@ -26,7 +26,7 @@ import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.Item;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.TopK;
 import io.github.hyshmily.zeta.model.CacheEntry;
 import io.github.hyshmily.zeta.reporting.KeyReporter;
-import io.github.hyshmily.zeta.rule.RuleMatcher;
+import io.github.hyshmily.zeta.rule.RuleRepository;
 import io.github.hyshmily.zeta.sharding.HealthView;
 import io.github.hyshmily.zeta.sync.dispatcher.DispatcherStats;
 import io.github.hyshmily.zeta.sync.local.CacheSyncListener;
@@ -78,7 +78,7 @@ public class ZetaEndpoint {
   /** App-to-Worker reportToWorker aggregator. */
   private final KeyReporter hotKeyReporter;
   /** Blacklist/whitelist rule evaluator. */
-  private final RuleMatcher ruleMatcher;
+  private final RuleRepository ruleRepository;
   /** Entry lifecycle: guards, demotion, draft factory, TTL policy. */
   private final EntryLifecycle entryLifecycle;
 
@@ -205,14 +205,13 @@ private static void putDispatchStats(Map<String, Object> section, DispatcherStat
     if (caffeineCache != null) {
       local.put("cacheSize", caffeineCache.estimatedSize());
       local.put("cacheMaxSize", properties.cacheMaxSize());
-      local.put("cacheMaxWeight", properties.cacheMaxWeight());
     }
 
     if (singleFlight != null) {
-      local.put("inflightSize", singleFlight.estimatedInflightSize());
-      local.put("inflightMaxSize", properties.inflightMaxSize());
-      local.put("inflightTtlSec", properties.inflightTtlSeconds());
-      local.put("inflightTimeoutSec", properties.inflightTimeoutSeconds());
+      local.put("inFlightSize", singleFlight.estimatedInFlightSize());
+      local.put("inFlightMaxSize", properties.inFlightMaxSize());
+      local.put("inFlightTtlSec", properties.inFlightTtlSeconds());
+      local.put("inFlightTimeoutSec", properties.inFlightTimeoutSeconds());
     }
 
     if (hotKeyReporter != null) {
@@ -220,13 +219,13 @@ private static void putDispatchStats(Map<String, Object> section, DispatcherStat
       local.put("reportQueueCapacity", hotKeyReporter.dispatcherCapacity());
       local.put("reportExpiredCount", hotKeyReporter.dispatcherExpired());
       local.put("reportQueueFullCount", hotKeyReporter.dispatcherDropped());
-      local.put("reportPendingKeys", hotKeyReporter.getPendingKeyCount());
+      local.put("reportPendingKeys", hotKeyReporter.pendingKeyCount());
     }
 
-    if (ruleMatcher != null) {
+    if (ruleRepository != null) {
       local.put(
         "rules",
-        ruleMatcher
+        ruleRepository
           .getAllRules()
           .stream()
           .map(rule ->
@@ -248,11 +247,10 @@ private static void putDispatchStats(Map<String, Object> section, DispatcherStat
     }
 
     if (entryLifecycle != null) {
-      local.put("hardTtlMs", entryLifecycle.ttlPolicy().getEffectiveHardTtlMs());
-      local.put("softTtlMs", entryLifecycle.ttlPolicy().getEffectiveSoftTtlMs());
-      local.put("hotHardTtlMs", entryLifecycle.ttlPolicy().getEffectiveHotHardTtlMs());
-      local.put("hotSoftTtlMs", entryLifecycle.ttlPolicy().getEffectiveHotSoftTtlMs());
-      local.put("nullValueTtlSec", properties.nullValueTtlSeconds());
+      local.put("hardTtlMs", entryLifecycle.ttlPolicy().effectiveHardTtlMs());
+      local.put("softTtlMs", entryLifecycle.ttlPolicy().effectiveSoftTtlMs());
+      local.put("hotHardTtlMs", entryLifecycle.ttlPolicy().effectiveHotHardTtlMs());
+      local.put("hotSoftTtlMs", entryLifecycle.ttlPolicy().effectiveHotSoftTtlMs());
       if (backgroundRefresher != null && backgroundRefresher.getRefreshLimiter() != null) {
         local.put("refreshPoolAvailable", backgroundRefresher.getRefreshLimiter().availablePermits());
       }

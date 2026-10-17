@@ -74,8 +74,6 @@ public interface ZetaConstants {
     String HEADER_VERIFY_PING = "PING";
     /** Verification response type. */
     String HEADER_VERIFY_PONG = "PONG";
-    /** Rule set version (rulesVersion). */
-    String HEADER_RULES_VERSION = "rulesVersion";
     /** Fast-lane rule set version for Worker-to-Worker rules gossip (ADR-0025). */
     String HEADER_FASTLANE_RULES_VERSION = "fastlaneRulesVersion";
     /** Snowflake message ID for end-to-end tracing. */
@@ -90,11 +88,19 @@ public interface ZetaConstants {
      * origin is always processed.
      */
     String HEADER_ORIGIN_INSTANCE = "originInstance";
+    /**
+     * Real cache key carried in the AMQP header of {@code PUT} sync messages.
+     * A PUT's body is the JSON value payload (not a bare key), so receivers
+     * take the dispatch key from this header to keep per-key ordering on the
+     * shared ordered dispatcher — and drop the sender's own PUTs the same way
+     * self-REFRESH is dropped.
+     */
+    String HEADER_CACHE_KEY = "cacheKey";
   }
 
   /** Thread name prefixes for zeta thread pools. */
   @Internal
-  interface Thread {
+  interface Threads {
     /** General zeta operations. */
     String PREFIX_HOTKEY = "zeta-";
     /** Cross-instance sync tasks. */
@@ -102,7 +108,7 @@ public interface ZetaConstants {
     /** Worker-mode tasks. */
     String PREFIX_WORKER = "zeta-worker";
     /** Report submission tasks. */
-    String PREFIX_REPORT = "zeta-reportToWorker";
+    String PREFIX_REPORT = "zeta-report";
     /** Shared scheduler pool. */
     String PREFIX_SCHEDULER = "zeta-scheduler";
   }
@@ -110,8 +116,11 @@ public interface ZetaConstants {
   /** Routing keys and queue name prefixes. */
   @Internal
   interface Routing {
-    /** Prefix for send decisions (HOT/COOL) from worker to apps. */
-    String KEY_BROADCAST = "send.";
+    /**
+     * Prefix for HOT/COOL decision routing keys broadcast from Worker to apps
+     * (the key is the receiving app's name, appended after this prefix).
+     */
+    String PREFIX_DECISION = "send.";
     /** Prefix for reportToWorker messages from apps to worker. */
     String KEY_REPORT = "reportToWorker.";
     /** Prefix for heartbeat messages from workers to apps. */
@@ -172,7 +181,7 @@ public interface ZetaConstants {
 
   /** Shared capacity defaults for the library's auxiliary bounded caches. */
   @Internal
-  interface Cache {
+  interface Caches {
     /**
      * Default {@code maximumSize} for the auxiliary per-key memo/lookup caches
      * (the rule decision memo, the version floor cache, and the Worker's
@@ -194,5 +203,5 @@ public interface ZetaConstants {
   int TOPK_INCR = 1;
 
   /** Warning message logged when sync publisher is not available. */
-  String NO_SYNC_PUBLISHER = "No sync publisher found, please enable zeta.sync";
+  String NO_SYNC_PUBLISHER_MESSAGE = "No sync publisher found, please enable zeta.sync";
 }

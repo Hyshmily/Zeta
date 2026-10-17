@@ -17,23 +17,22 @@ package io.github.hyshmily.zeta.autoconfigure;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import io.github.hyshmily.zeta.Internal;
+import io.github.hyshmily.zeta.cache.CacheDependencies;
 import io.github.hyshmily.zeta.cache.CentralDispatcher;
 import io.github.hyshmily.zeta.cache.HotKeyCache;
 import io.github.hyshmily.zeta.cache.cachesupport.EntryLifecycle;
-import io.github.hyshmily.zeta.scheduler.BackgroundRefresher;
-import io.github.hyshmily.zeta.cache.cachesupport.RefaultAdmission;
 import io.github.hyshmily.zeta.cache.cachesupport.SingleFlight;
-import io.github.hyshmily.zeta.model.CacheEntry;
-import io.github.hyshmily.zeta.cache.codec.CacheCompressor;
 import io.github.hyshmily.zeta.hotkeydetector.HotKeyDetector;
-import io.github.hyshmily.zeta.rule.RuleMatcher;
+import io.github.hyshmily.zeta.model.CacheEntry;
+import io.github.hyshmily.zeta.rule.RuleEvaluator;
 import io.github.hyshmily.zeta.rule.impl.RuleMatcherImpl;
+import io.github.hyshmily.zeta.scheduler.BackgroundRefresher;
 import io.github.hyshmily.zeta.sharding.HealthView;
 import io.github.hyshmily.zeta.sync.local.CacheSyncPublisher;
 import io.github.hyshmily.zeta.util.id.SnowflakeIdGenerator;
+import io.github.hyshmily.zeta.util.version.VersionController;
 import io.github.hyshmily.zeta.util.version.impl.VersionControllerImpl;
 import java.util.Optional;
-import java.util.concurrent.Executor;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
@@ -62,7 +61,7 @@ import org.springframework.data.redis.core.StringRedisTemplate;
  * non-Redis variant, and after {@link RedisAutoConfiguration} so the Redis
  * infrastructure is ready.
  *
- * <p>Also creates a {@link RuleMatcher} with optional Redis persistence,
+ * <p>Also creates a rule engine with optional Redis persistence,
  * enabling rule CRUD operations to survive app restarts.
  */
 @Internal
@@ -75,7 +74,7 @@ import org.springframework.data.redis.core.StringRedisTemplate;
 public class ZetaRedisAutoConfiguration {
 
   /**
-   * Create the {@link RuleMatcher} with optional Redis persistence and send support.
+   * Create the rule engine with optional Redis persistence and send support.
    *
    * <p>When a {@link StringRedisTemplate} is available, rules (blacklist/whitelist)
    * are persisted in Redis under the key {@code zeta:rules}, surviving app restarts.
@@ -84,19 +83,40 @@ public class ZetaRedisAutoConfiguration {
    *
    * @param redisTemplateProvider optional provider for StringRedisTemplate (Redis persistence);
    *                              may be absent
-   * @param publisherProvider     optional provider for the cache sync publisher (cross-instance
-   *                              send); may be absent
-   * @return a new RuleMatcher instance with optional Redis-backed persistence
+   * @return a new rule engine instance with optional Redis-backed persistence
    */
   @Bean
   @ConditionalOnMissingBean
-  public RuleMatcher ruleMatcher(
+  public RuleMatcherImpl ruleMatcher(ObjectProvider<StringRedisTemplate> redisTemplateProvider) {
+    return new RuleMatcherImpl(Optional.ofNullable(redisTemplateProvider.getIfAvailable()));
+  }
+
+  /**
+   * Shared singleton {@link VersionController} (Redis-backed when available).
+   *
+   * <p>Created only when a {@code RedisTemplate} bean exists, while the non-Redis
+   * fallback in {@code ZetaAutoConfiguration} requires its absence — exactly one
+   * controller exists per context, so {@code HotKeyCache}, the worker decision
+   * handler, the actuator endpoint and the Micrometer gauges share one
+   * {@code versionFloorCache} and one degraded counter.
+   *
+   * @param redisTemplateProvider optional provider for StringRedisTemplate (version tracking)
+   * @param properties the HotKey configuration properties
+   * @param snowflakeIdGenerator the Snowflake generator for degraded versions
+   * @return the shared version controller
+   */
+  @Bean
+  @ConditionalOnMissingBean(VersionController.class)
+  @ConditionalOnBean(type = "org.springframework.data.redis.core.RedisTemplate")
+  public VersionController versionController(
     ObjectProvider<StringRedisTemplate> redisTemplateProvider,
-    ObjectProvider<CacheSyncPublisher> publisherProvider
+    ZetaProperties properties,
+    SnowflakeIdGenerator snowflakeIdGenerator
   ) {
-    return new RuleMatcherImpl(
+    return new VersionControllerImpl(
       Optional.ofNullable(redisTemplateProvider.getIfAvailable()),
-      Optional.ofNullable(publisherProvider.getIfAvailable())
+      properties.getVersionKeyTtlMinutes(),
+      snowflakeIdGenerator
     );
   }
 
@@ -115,13 +135,12 @@ public class ZetaRedisAutoConfiguration {
    * @param singleFlight       the deduplication layer for concurrent cache-load requests
    * @param entryLifecycle     the entry lifecycle manager for TTL control
    * @param backgroundRefresher the background soft-expire refresh executor
-   * @param hotKeyExecutor     the dedicated HotKey async executor
+   * @param snowflakeIdGenerator     the dedicated HotKey async executor
    * @param centralDispatcher  the central dispatcher for reporting and broadcasting
    * @param redisTemplateProvider optional provider for StringRedisTemplate (version tracking);
    *                              may be absent
    * @param properties         the HotKey configuration properties
-   * @param ruleMatcher        the rule matcher for blacklist/whitelist evaluation
-   * @param refaultAdmission   the shared refault admission gate (ADR-0079)
+   * @param ruleEvaluator        the rule matcher for blacklist/whitelist evaluation
    * @return a new Redis-backed HotKeyCache instance
    */
   @Bean
@@ -133,34 +152,32 @@ public class ZetaRedisAutoConfiguration {
     SingleFlight singleFlight,
     EntryLifecycle entryLifecycle,
     BackgroundRefresher backgroundRefresher,
-    @Qualifier("hotKeyExecutor") Executor hotKeyExecutor,
     CentralDispatcher centralDispatcher,
     ObjectProvider<StringRedisTemplate> redisTemplateProvider,
     ZetaProperties properties,
-    RuleMatcher ruleMatcher,
+    RuleEvaluator ruleEvaluator,
     ObjectProvider<HealthView> healthViewProvider,
-    CacheCompressor compressor,
     SnowflakeIdGenerator snowflakeIdGenerator,
-    RefaultAdmission refaultAdmission
+    ObjectProvider<VersionController> versionControllerProvider
   ) {
     return new HotKeyCache(
-      hotKeyDetector,
-      hotLocalCache,
-      singleFlight,
-      entryLifecycle,
-      backgroundRefresher,
-      hotKeyExecutor,
-      centralDispatcher,
-      ruleMatcher,
-      new VersionControllerImpl(
-        Optional.ofNullable(redisTemplateProvider.getIfAvailable()),
-        properties.getVersionKeyTtlMinutes(),
-        snowflakeIdGenerator
-      ),
-      properties,
-      ZetaAutoConfiguration.healthViewOrDefault(healthViewProvider, properties),
-      compressor,
-      refaultAdmission
+      new CacheDependencies(
+        hotKeyDetector,
+        hotLocalCache,
+        singleFlight,
+        entryLifecycle,
+        backgroundRefresher,
+        centralDispatcher,
+        ruleEvaluator,
+        versionControllerProvider.getIfAvailable(() ->
+          new VersionControllerImpl(
+            Optional.ofNullable(redisTemplateProvider.getIfAvailable()),
+            properties.getVersionKeyTtlMinutes(),
+            snowflakeIdGenerator
+          )
+        ),
+        ZetaAutoConfiguration.healthViewOrDefault(healthViewProvider, properties)
+      )
     );
   }
 }

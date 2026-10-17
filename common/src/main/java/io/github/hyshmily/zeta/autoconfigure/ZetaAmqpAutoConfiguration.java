@@ -17,21 +17,22 @@ package io.github.hyshmily.zeta.autoconfigure;
 
 import static io.github.hyshmily.zeta.constants.ZetaConstants.Routing.KEY_HEARTBEAT;
 
+import com.fasterxml.jackson.databind.DeserializationFeature;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.github.benmanes.caffeine.cache.Cache;
 import io.github.hyshmily.zeta.Internal;
 import io.github.hyshmily.zeta.cache.cachesupport.EntryLifecycle;
 import io.github.hyshmily.zeta.cache.cachesupport.SingleFlight;
 import io.github.hyshmily.zeta.cache.loader.CacheLoader;
-import io.github.hyshmily.zeta.model.CacheEntry;
-import io.github.hyshmily.zeta.cache.loader.PrefixRoutedLoader;
 import io.github.hyshmily.zeta.cache.loader.RedisValueLoader;
-import io.github.hyshmily.zeta.cache.loader.ZetaLoaderRegistry;
 import io.github.hyshmily.zeta.constants.ZetaConstants;
-import io.github.hyshmily.zeta.reporting.*;
+import io.github.hyshmily.zeta.model.CacheEntry;
+import io.github.hyshmily.zeta.reporting.BbrRateLimiter;
+import io.github.hyshmily.zeta.reporting.KeyReporter;
+import io.github.hyshmily.zeta.reporting.ReportPublisher;
 import io.github.hyshmily.zeta.reporting.impl.BbrRateLimiterImpl;
 import io.github.hyshmily.zeta.reporting.impl.KeyReporterImpl;
 import io.github.hyshmily.zeta.reporting.impl.ReportFeedLoop;
-import io.github.hyshmily.zeta.rule.RuleMatcher;
 import io.github.hyshmily.zeta.sharding.HealthView;
 import io.github.hyshmily.zeta.sharding.RingManager;
 import io.github.hyshmily.zeta.sharding.impl.RingManagerImpl;
@@ -57,6 +58,7 @@ import org.springframework.amqp.rabbit.connection.RabbitConnectionFactoryBean;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.amqp.rabbit.listener.SimpleMessageListenerContainer;
 import org.springframework.amqp.rabbit.listener.api.ChannelAwareMessageListener;
+import org.springframework.amqp.support.converter.Jackson2JsonMessageConverter;
 import org.springframework.amqp.support.converter.MessageConverter;
 import org.springframework.beans.factory.ListableBeanFactory;
 import org.springframework.beans.factory.NoSuchBeanDefinitionException;
@@ -81,7 +83,7 @@ import org.springframework.util.Assert;
  * <p>Conditionally activates when {@link RabbitTemplate} is on the classpath.
  * Sub-groups for cache sync and Worker listener additionally require Redis.
  *
- * <p><b>Report</b> ({@code zeta.local.reporter.enabled}, default {@code true}):
+ * <p><b>Report</b> ({@code zeta.report.enabled}, default {@code true}):
  * app instance aggregates access counts and sends them to the Worker via
  * {@link DirectExchange}. No Redis dependency.
  *
@@ -101,7 +103,9 @@ import org.springframework.util.Assert;
   }
 )
 @ConditionalOnClass(name = "org.springframework.amqp.rabbit.core.RabbitTemplate")
-@EnableConfigurationProperties({ ZetaProperties.class, ZetaAppProperties.class, CacheSyncProperties.class, WorkerListenerProperties.class })
+@EnableConfigurationProperties(
+  { ZetaProperties.class, ZetaAppProperties.class, CacheSyncProperties.class, WorkerListenerProperties.class }
+)
 @lombok.extern.slf4j.Slf4j
 public class ZetaAmqpAutoConfiguration {
 
@@ -137,18 +141,18 @@ public class ZetaAmqpAutoConfiguration {
    *
    * @param configuredPoolSize the configured minimum pool size
    * @param concurrentConsumers the AMQP consumer count the scheduler must back
-   * @param threadNameSuffix thread-name suffix for the factory ({@code "-sync"}, {@code "-worker"})
-   * @return a daemon-thread scheduled executor named {@code zeta-scheduler<suffix>-N}
+   * @param component thread-name component for the factory ({@code "sync"}, {@code "worker"})
+   * @return a daemon-thread scheduled executor named {@code zeta-scheduler-<component>-N}
    */
   private static ScheduledExecutorService newJitterScheduler(
     int configuredPoolSize,
     int concurrentConsumers,
-    String threadNameSuffix
+    String component
   ) {
     int poolSize = Math.max(configuredPoolSize, concurrentConsumers * 2);
     return Executors.newScheduledThreadPool(
       poolSize,
-      new ZetaThreadFactory(ZetaConstants.Thread.PREFIX_SCHEDULER + threadNameSuffix)
+      new ZetaThreadFactory(ZetaConstants.Threads.PREFIX_SCHEDULER + "-" + component + "-")
     );
   }
 
@@ -219,21 +223,8 @@ public class ZetaAmqpAutoConfiguration {
 
   /**
    * Cluster value loader used by the sync listener to refresh cache entries and
-   * by the Worker decision handler for HOT warm-up.
-   *
-   * <p>When a {@link ZetaLoaderRegistry} bean exists (ADR-0070), the returned
-   * loader is a {@link PrefixRoutedLoader}: keys matching a registered prefix
-   * load through the application's {@code CacheLoader}, so Worker HOT warm-up
-   * and peer REFRESH work for data sources without a Redis value channel;
-   * unregistered keys fall back to the plain {@link RedisValueLoader} (Redis
-   * GET). With no registry the plain {@link RedisValueLoader} is returned,
-   * preserving the historical behavior.
-   *
-   * <p><b>Call-chain contract:</b> {@link ZetaLoaderRegistry#match} is invoked
-   * in exactly two places — {@code Zeta#requireRegisteredSpec} (application
-   * read path, needs the full spec) and {@link PrefixRoutedLoader#load} (this
-   * path, needs the value only). New value-fetching paths must reuse one of the
-   * two.
+   * by the Worker decision handler for HOT warm-up: the plain
+   * {@link RedisValueLoader} (Redis GET on the physical key).
    *
    * <p><b>Why this bean lives at the top level (not inside
    * {@code SyncConfiguration}):</b> it depends only on Redis — not on any sync
@@ -241,25 +232,25 @@ public class ZetaAmqpAutoConfiguration {
    * the Worker decision handler. Keeping it behind
    * {@code zeta.sync.enabled=true} made {@code zeta.worker-listener.enabled=true}
    * alone fail at startup with {@code NoSuchBeanDefinitionException} (the
-   * handler's required {@code CacheLoader<Object>} had no producer). A static
+   * handler's required {@code CacheLoader<String, Object>} had no producer). A static
    * {@code @Bean} method needs no CGLIB proxying, so it is safe on this
    * private-constructor configuration class and its condition is evaluated
    * order-independently of the nested configuration classes.
    *
+   * <p><b>Bean-name condition (not type):</b> a user-supplied
+   * {@code CacheLoader} bean (the typed SPI for the facade/named caches) must
+   * not silently disable this cluster loader — the receiver-side contract
+   * (HOT warm-up / peer REFRESH reads the authoritative value from Redis)
+   * would break. Match on the bean name instead.
+   *
    * @param stringRedisTemplate the String-based Redis template for reading values
-   * @param registryProvider    provider for the optional prefix→loader registry
-   * @return a {@code CacheLoader<Object>} that routes through the registry or reads Redis
+   * @return a {@code CacheLoader<String, Object>} that reads the value from Redis
    */
   @Bean
   @ConditionalOnBean(StringRedisTemplate.class)
-  @ConditionalOnMissingBean(CacheLoader.class)
-  public static CacheLoader<Object> hotKeyClusterLoader(
-    StringRedisTemplate stringRedisTemplate,
-    ObjectProvider<ZetaLoaderRegistry> registryProvider
-  ) {
-    CacheLoader<Object> redisFallback = new RedisValueLoader(stringRedisTemplate);
-    ZetaLoaderRegistry registry = registryProvider.getIfAvailable();
-    return registry != null ? new PrefixRoutedLoader(registry, redisFallback) : redisFallback;
+  @ConditionalOnMissingBean(name = "hotKeyClusterLoader")
+  public static CacheLoader<String, Object> hotKeyClusterLoader(StringRedisTemplate stringRedisTemplate) {
+    return new RedisValueLoader(stringRedisTemplate);
   }
 
   /**
@@ -289,23 +280,15 @@ public class ZetaAmqpAutoConfiguration {
     /**
      * Create the {@link MessageConverter} for serializing report messages.
      * <p>
-     * JSON by default (Jackson, cross-version compatible — unknown fields are
-     * ignored, see ADR-0091); when
-     * {@code zeta.local.report-encoding=compact}, {@link ReportMessage}
-     * payloads are sent in the compact binary varint format (ADR-0074).
-     * The decode side of the returned converter always accepts both formats
-     * by first-byte sniffing, so the upgrade order is Workers first, then
-     * Apps flip to compact.
+     * Jackson JSON (cross-version compatible — unknown fields are ignored,
+     * see ADR-0091). Report messages are always JSON; no binary encoding.
      *
-     * @param properties the HotKey configuration properties
-     * @return a {@link CompactAwareReportMessageConverter} over a forward-compatible Jackson delegate
+     * @return a forward-compatible Jackson JSON converter
      */
     @Bean("zetaReportMessageConverter")
-    @SuppressWarnings("SpringJavaInjectionPointsAutowiringInspection")
-    public MessageConverter reportMessageConverter(ZetaProperties properties) {
-      return CompactAwareReportMessageConverter.forwardCompatible(
-        properties.getReportEncoding() == ZetaProperties.ReportEncoding.COMPACT
-      );
+    public MessageConverter reportMessageConverter() {
+      ObjectMapper mapper = new ObjectMapper().configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
+      return new Jackson2JsonMessageConverter(mapper);
     }
 
     /**
@@ -562,7 +545,7 @@ public class ZetaAmqpAutoConfiguration {
     ) {
       // The sync plane stamps zeta.app-name (ADR-0068 pattern) so peers on a
       // shared broker can drop another application's INVALIDATE / REFRESH /
-      // INVALIDATE_ALL / RULES_SYNC instead of acting on them.
+      // PUT messages instead of acting on them.
       return new CacheSyncPublisher(rabbitTemplate, properties, snowflakeIdGenerator, appProperties.getAppName());
     }
 
@@ -582,12 +565,12 @@ public class ZetaAmqpAutoConfiguration {
     @ConditionalOnMissingBean(name = "hotKeySyncScheduler")
     @SuppressWarnings("SpringJavaInjectionPointsAutowiringInspection")
     public ScheduledExecutorService hotKeySyncScheduler(CacheSyncProperties properties) {
-      return newJitterScheduler(properties.getSchedulerPoolSize(), properties.getConcurrentConsumers(), "-sync");
+      return newJitterScheduler(properties.getSchedulerPoolSize(), properties.getConcurrentConsumers(), "sync");
     }
 
     /**
      * Default {@link SyncDecisionHandler} that performs loader-backed REFRESH,
-     * version-guarded INVALIDATE, batch INVALIDATE_ALL, and RULES_SYNC. The
+     * version-guarded INVALIDATE and value-carrying PUT apply. The
      * optional SingleFlight collaborator lets applied removals also drop the
      * key's dedup entry (ADR-0067); when absent, the historical
      * no-invalidation behavior is kept. Resolves the top-level
@@ -598,9 +581,8 @@ public class ZetaAmqpAutoConfiguration {
     @ConditionalOnMissingBean(SyncDecisionHandler.class)
     public SyncDecisionHandler defaultSyncDecisionHandler(
       Cache<String, CacheEntry> hotLocalCache,
-      CacheLoader<Object> hotKeyClusterLoader,
+      CacheLoader<String, Object> hotKeyClusterLoader,
       EntryLifecycle entryLifecycle,
-      RuleMatcher ruleMatcher,
       ObjectProvider<SingleFlight> singleFlightProvider,
       ObjectProvider<SyncHook> syncHookProvider
     ) {
@@ -608,7 +590,6 @@ public class ZetaAmqpAutoConfiguration {
         hotLocalCache,
         hotKeyClusterLoader,
         entryLifecycle,
-        ruleMatcher,
         syncHookProvider.stream().toList(),
         singleFlightProvider.getIfAvailable()
       );
@@ -847,29 +828,41 @@ public class ZetaAmqpAutoConfiguration {
     @ConditionalOnMissingBean(name = "hotKeyWorkerSchedScheduler")
     @SuppressWarnings("SpringJavaInjectionPointsAutowiringInspection")
     public ScheduledExecutorService hotKeyWorkerSchedScheduler(WorkerListenerProperties properties) {
-      return newJitterScheduler(properties.getSchedulerPoolSize(), properties.getConcurrentConsumers(), "-worker");
+      return newJitterScheduler(properties.getSchedulerPoolSize(), properties.getConcurrentConsumers(), "worker");
     }
 
     /**
      * Default {@link WorkerDecisionHandler} that performs loader-backed HOT promotion
      * and COOL downgrade with SRE rate limiting and version guarding.
+     *
+     * <p>The shard-ownership refinement for stale cross-Worker COOLs (scale
+     * re-balance ghost-COOL kill — see
+     * {@link io.github.hyshmily.zeta.util.version.VersionGuard#shouldSkipStaleCool})
+     * is wired from the ring manager and the shared health view when present; both
+     * are optional so a report-disabled deployment still builds (the guard then
+     * fails open to the pure version-guard behaviour).
      */
     @Bean
     @ConditionalOnMissingBean(WorkerDecisionHandler.class)
     public WorkerDecisionHandler defaultWorkerDecisionHandler(
       Cache<String, CacheEntry> hotLocalCache,
-      CacheLoader<Object> hotKeyClusterLoader,
+      CacheLoader<String, Object> hotKeyClusterLoader,
       EntryLifecycle entryLifecycle,
       ObjectProvider<SreRateLimiter> sreRateLimiterProvider,
       StringRedisTemplate stringRedisTemplate,
       ZetaProperties zetaProperties,
       SnowflakeIdGenerator snowflakeIdGenerator,
-      ObjectProvider<WorkerDecisionHook> workerDecisionHookProvider
+      ObjectProvider<WorkerDecisionHook> workerDecisionHookProvider,
+      ObjectProvider<VersionController> versionControllerProvider,
+      ObjectProvider<RingManager> ringManagerProvider,
+      ObjectProvider<HealthView> healthViewProvider
     ) {
-      VersionController vc = new VersionControllerImpl(
-        Optional.ofNullable(stringRedisTemplate),
-        zetaProperties.getVersionKeyTtlMinutes(),
-        snowflakeIdGenerator
+      VersionController vc = versionControllerProvider.getIfAvailable(() ->
+        new VersionControllerImpl(
+          Optional.ofNullable(stringRedisTemplate),
+          zetaProperties.getVersionKeyTtlMinutes(),
+          snowflakeIdGenerator
+        )
       );
       return new DefaultWorkerDecisionHandler(
         hotLocalCache,
@@ -877,7 +870,9 @@ public class ZetaAmqpAutoConfiguration {
         entryLifecycle,
         sreRateLimiterProvider.getIfAvailable(),
         vc,
-        workerDecisionHookProvider.stream().toList()
+        workerDecisionHookProvider.stream().toList(),
+        ringManagerProvider.getIfAvailable(),
+        healthViewProvider.getIfAvailable()
       );
     }
 

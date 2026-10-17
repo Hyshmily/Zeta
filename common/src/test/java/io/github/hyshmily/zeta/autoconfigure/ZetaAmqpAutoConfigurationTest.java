@@ -26,11 +26,9 @@ import io.github.hyshmily.zeta.cache.cachesupport.EntryLifecycle;
 import io.github.hyshmily.zeta.cache.loader.CacheLoader;
 import io.github.hyshmily.zeta.constants.ZetaConstants;
 import io.github.hyshmily.zeta.reporting.BbrRateLimiter;
-import io.github.hyshmily.zeta.reporting.CompactAwareReportMessageConverter;
 import io.github.hyshmily.zeta.reporting.KeyReporter;
 import io.github.hyshmily.zeta.reporting.ReportPublisher;
 import io.github.hyshmily.zeta.reporting.impl.KeyReporterImpl;
-import io.github.hyshmily.zeta.rule.RuleMatcher;
 import io.github.hyshmily.zeta.sharding.HealthView;
 import io.github.hyshmily.zeta.sharding.RingManager;
 import io.github.hyshmily.zeta.sharding.impl.HealthViewImpl;
@@ -55,6 +53,7 @@ import org.springframework.amqp.rabbit.connection.CachingConnectionFactory;
 import org.springframework.amqp.rabbit.connection.ConnectionFactory;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.amqp.rabbit.listener.SimpleMessageListenerContainer;
+import org.springframework.amqp.support.converter.Jackson2JsonMessageConverter;
 import org.springframework.amqp.support.converter.MessageConverter;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.support.DefaultListableBeanFactory;
@@ -474,19 +473,16 @@ class ZetaAmqpAutoConfigurationTest {
   @Test
   void reportMessageConverterIsCreated() {
     ZetaAmqpAutoConfiguration.ReportConfiguration config = new ZetaAmqpAutoConfiguration.ReportConfiguration();
-    MessageConverter converter = config.reportMessageConverter(new ZetaProperties());
+    MessageConverter converter = config.reportMessageConverter();
 
     assertThat(converter).isNotNull();
   }
 
   @Test
-  void reportMessageConverter_compactEncodingFlag_followsConfiguration() {
+  void reportMessageConverter_isJacksonJsonConverter() {
     ZetaAmqpAutoConfiguration.ReportConfiguration config = new ZetaAmqpAutoConfiguration.ReportConfiguration();
-    ZetaProperties compact = new ZetaProperties();
-    compact.setReportEncoding(ZetaProperties.ReportEncoding.COMPACT);
 
-    assertThat(config.reportMessageConverter(new ZetaProperties())).isInstanceOf(CompactAwareReportMessageConverter.class);
-    assertThat(config.reportMessageConverter(compact)).isInstanceOf(CompactAwareReportMessageConverter.class);
+    assertThat(config.reportMessageConverter()).isInstanceOf(Jackson2JsonMessageConverter.class);
   }
 
   @Test
@@ -569,46 +565,9 @@ class ZetaAmqpAutoConfigurationTest {
       org.springframework.data.redis.core.StringRedisTemplate.class
     );
 
-    ZetaAmqpAutoConfiguration.SyncConfiguration config = new ZetaAmqpAutoConfiguration.SyncConfiguration();
-    CacheLoader<Object> loader = ZetaAmqpAutoConfiguration.hotKeyClusterLoader(
-      redisTemplate,
-      (org.springframework.beans.factory.ObjectProvider<io.github.hyshmily.zeta.cache.loader.ZetaLoaderRegistry>) mock(
-        org.springframework.beans.factory.ObjectProvider.class
-      )
-    );
+    CacheLoader<String, Object> loader = ZetaAmqpAutoConfiguration.hotKeyClusterLoader(redisTemplate);
 
     assertThat(loader).isNotNull();
-  }
-
-  @Test
-  @SuppressWarnings({"all", "unchecked"})
-  void hotKeyClusterLoader_withRegistry_isPrefixRouted() {
-    org.springframework.data.redis.core.StringRedisTemplate redisTemplate = mock(
-      org.springframework.data.redis.core.StringRedisTemplate.class
-    );
-    org.springframework.beans.factory.ObjectProvider<io.github.hyshmily.zeta.cache.loader.ZetaLoaderRegistry> provider =
-      mock(org.springframework.beans.factory.ObjectProvider.class);
-    when(provider.getIfAvailable()).thenReturn(new io.github.hyshmily.zeta.cache.loader.ZetaLoaderRegistry());
-
-    ZetaAmqpAutoConfiguration.SyncConfiguration config = new ZetaAmqpAutoConfiguration.SyncConfiguration();
-    CacheLoader<Object> loader = ZetaAmqpAutoConfiguration.hotKeyClusterLoader(redisTemplate, provider);
-
-    assertThat(loader).isInstanceOf(io.github.hyshmily.zeta.cache.loader.PrefixRoutedLoader.class);
-  }
-
-  @Test
-  @SuppressWarnings({"all", "unchecked"})
-  void hotKeyClusterLoader_withoutRegistry_isPlainRedisLoader() {
-    org.springframework.data.redis.core.StringRedisTemplate redisTemplate = mock(
-      org.springframework.data.redis.core.StringRedisTemplate.class
-    );
-    org.springframework.beans.factory.ObjectProvider<io.github.hyshmily.zeta.cache.loader.ZetaLoaderRegistry> provider =
-      mock(org.springframework.beans.factory.ObjectProvider.class);
-
-    ZetaAmqpAutoConfiguration.SyncConfiguration config = new ZetaAmqpAutoConfiguration.SyncConfiguration();
-    CacheLoader<Object> loader = ZetaAmqpAutoConfiguration.hotKeyClusterLoader(redisTemplate, provider);
-
-    assertThat(loader).isInstanceOf(io.github.hyshmily.zeta.cache.loader.RedisValueLoader.class);
   }
 
   @Test
@@ -885,5 +844,17 @@ class ZetaAmqpAutoConfigurationTest {
     );
 
     assertThat(reporter).isNotNull();
+  }
+
+  @Test
+  @SuppressWarnings("all")
+  void hotKeyClusterLoader_isPlainRedisLoader() {
+    org.springframework.data.redis.core.StringRedisTemplate redisTemplate = mock(
+      org.springframework.data.redis.core.StringRedisTemplate.class
+    );
+
+    CacheLoader<String, Object> loader = ZetaAmqpAutoConfiguration.hotKeyClusterLoader(redisTemplate);
+
+    assertThat(loader).isInstanceOf(io.github.hyshmily.zeta.cache.loader.RedisValueLoader.class);
   }
 }

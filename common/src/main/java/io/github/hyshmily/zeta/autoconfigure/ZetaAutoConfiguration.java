@@ -21,27 +21,27 @@ import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import com.github.benmanes.caffeine.cache.Expiry;
 import io.github.hyshmily.zeta.Internal;
+import io.github.hyshmily.zeta.cache.CacheDependencies;
 import io.github.hyshmily.zeta.cache.CentralDispatcher;
 import io.github.hyshmily.zeta.cache.HotKeyCache;
-import io.github.hyshmily.zeta.cache.cachesupport.*;
-import io.github.hyshmily.zeta.scheduler.BackgroundRefresher;
-import io.github.hyshmily.zeta.scheduler.DefaultBackgroundRefresher;
+import io.github.hyshmily.zeta.cache.cachesupport.BroadcastBuffer;
+import io.github.hyshmily.zeta.cache.cachesupport.CircuitBreakerRegistry;
+import io.github.hyshmily.zeta.cache.cachesupport.EntryLifecycle;
+import io.github.hyshmily.zeta.cache.cachesupport.SingleFlight;
 import io.github.hyshmily.zeta.cache.cachesupport.impl.EntryLifecycleImpl;
 import io.github.hyshmily.zeta.cache.cachesupport.impl.SingleFlightImpl;
-import io.github.hyshmily.zeta.cache.codec.CacheCompressor;
-import io.github.hyshmily.zeta.cache.codec.DefaultWeigher;
-import io.github.hyshmily.zeta.cache.codec.Lz4CacheCompressor;
-import io.github.hyshmily.zeta.cache.loader.ZetaLoaderRegistry;
-import io.github.hyshmily.zeta.cache.loader.ZetaLoadingSpec;
 import io.github.hyshmily.zeta.constants.ZetaConstants;
 import io.github.hyshmily.zeta.hotkeydetector.HotKeyDetector;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.HeavyKeeper;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.TopK;
 import io.github.hyshmily.zeta.model.CacheEntry;
 import io.github.hyshmily.zeta.reporting.KeyReporter;
-import io.github.hyshmily.zeta.rule.RuleMatcher;
+import io.github.hyshmily.zeta.rule.RuleEvaluator;
+import io.github.hyshmily.zeta.rule.RuleRepository;
 import io.github.hyshmily.zeta.rule.RuleService;
 import io.github.hyshmily.zeta.rule.impl.RuleMatcherImpl;
+import io.github.hyshmily.zeta.scheduler.BackgroundRefresher;
+import io.github.hyshmily.zeta.scheduler.DefaultBackgroundRefresher;
 import io.github.hyshmily.zeta.sharding.HealthView;
 import io.github.hyshmily.zeta.sharding.impl.HealthViewImpl;
 import io.github.hyshmily.zeta.sync.local.CacheSyncProperties;
@@ -153,10 +153,7 @@ public class ZetaAutoConfiguration {
   @Bean(destroyMethod = "close")
   @ConditionalOnMissingBean(CircuitBreakerRegistry.class)
   public CircuitBreakerRegistry circuitBreakerRegistry(ZetaProperties properties) {
-    return new CircuitBreakerRegistry(
-      properties.getCircuitBreaker(),
-      properties.getCircuitBreaker().getMaxPrefixes()
-    );
+    return new CircuitBreakerRegistry(properties.getCircuitBreaker(), properties.getCircuitBreaker().getMaxPrefixes());
   }
 
   /**
@@ -182,9 +179,9 @@ public class ZetaAutoConfiguration {
     CircuitBreakerRegistry breakerRegistry
   ) {
     return new SingleFlightImpl(
-      properties.getInflightMaxSize(),
-      properties.getInflightTtlSeconds(),
-      properties.getInflightTimeoutSeconds(),
+      properties.getInFlightMaxSize(),
+      properties.getInFlightTtlSeconds(),
+      properties.getInFlightTimeoutSeconds(),
       loadExecutor,
       breakerRegistry
     );
@@ -192,11 +189,10 @@ public class ZetaAutoConfiguration {
 
   /**
    * Create the entry lifecycle manager: TOCTOU invalidation guards,
-   * Decision-Validity demotion, the single draft factory, and value wrapping.
+   * Decision-Validity demotion and the single draft factory.
    *
    * @param hotLocalCache     the L1 Caffeine cache (never {@code null})
    * @param properties        the HotKey configuration properties (never {@code null})
-   * @param compressor        the value compressor (never {@code null})
    * @param clusterHealthView the cluster health view for decision validity (never {@code null})
    * @return a new EntryLifecycleImpl instance
    */
@@ -206,10 +202,9 @@ public class ZetaAutoConfiguration {
   public EntryLifecycle entryLifecycle(
     Cache<String, CacheEntry> hotLocalCache,
     ZetaProperties properties,
-    CacheCompressor compressor,
     HealthView clusterHealthView
   ) {
-    return new EntryLifecycleImpl(hotLocalCache, properties, compressor, clusterHealthView);
+    return new EntryLifecycleImpl(hotLocalCache, properties, clusterHealthView);
   }
 
   /**
@@ -223,7 +218,6 @@ public class ZetaAutoConfiguration {
    *                          refresh loads (never {@code null})
    * @param entryLifecycle    the entry lifecycle providing the shared TTL policy (never {@code null})
    * @param properties        the HotKey configuration properties (never {@code null})
-   * @param compressor        the value compressor (never {@code null})
    * @return a new DefaultBackgroundRefresher instance
    */
   @Bean
@@ -233,14 +227,12 @@ public class ZetaAutoConfiguration {
     Cache<String, CacheEntry> hotLocalCache,
     @Qualifier("interruptibleLoadExecutor") Executor loadExecutor,
     EntryLifecycle entryLifecycle,
-    ZetaProperties properties,
-    CacheCompressor compressor
+    ZetaProperties properties
   ) {
     return new DefaultBackgroundRefresher(
       hotLocalCache,
       loadExecutor,
       entryLifecycle.ttlPolicy(),
-      compressor,
       properties.getRefreshMaxPools()
     );
   }
@@ -264,7 +256,7 @@ public class ZetaAutoConfiguration {
   @Bean(name = "hotKeyExecutor", destroyMethod = "shutdownNow")
   @ConditionalOnMissingBean(name = "hotKeyExecutor")
   public Executor hotKeyExecutor(ZetaProperties properties) {
-    return newPool(properties, ZetaConstants.Thread.PREFIX_HOTKEY);
+    return newPool(properties, ZetaConstants.Threads.PREFIX_HOTKEY);
   }
 
   /**
@@ -290,7 +282,7 @@ public class ZetaAutoConfiguration {
    * source stalled, timed-out load tasks kept occupying pool threads (JDBC and
    * most Redis clients swallow {@code interrupt}), the pool saturated, and the
    * <em>write-through</em> tasks submitted by
-   * {@code TransactionSupport.runAsyncAfterCommit} were rejected. The transaction
+   * {@code TransactionSupport.runAfterCommit} were rejected. The transaction
    * was already committed at that point, so the L1 update, the Redis version
    * INCR and the peer REFRESH broadcast were silently dropped with only a WARN.
    * Separate pools make a slow data source degrade reads instead of losing writes.
@@ -344,7 +336,7 @@ public class ZetaAutoConfiguration {
     // instead of dropping the async work.
     var rejectionHandler =
       properties.getExecutorRejection() == ZetaProperties.ExecutorRejection.CALLER_RUNS
-        ? (RejectedExecutionHandler) new java.util.concurrent.ThreadPoolExecutor.CallerRunsPolicy()
+        ? (RejectedExecutionHandler) new ThreadPoolExecutor.CallerRunsPolicy()
         : (RejectedExecutionHandler) (r, exe) -> {
             log.warn(
               "Zeta executor task rejected: pool={}, corePool={}, maxPool={}, queueCapacity={}",
@@ -369,7 +361,7 @@ public class ZetaAutoConfiguration {
   }
 
   /**
-   * Create the {@link RuleMatcher} for key matching against user-defined rules.
+   * Create the rule engine for key matching against user-defined rules.
    *
    * <p>This variant is wired with an empty Redis provider and an optional sync
    * publisher, since no {@link StringRedisTemplate} is available in the non-Redis
@@ -377,31 +369,34 @@ public class ZetaAutoConfiguration {
    * When Redis is available, {@link ZetaRedisAutoConfiguration#ruleMatcher}
    * takes over with Redis persistence.
    *
-   * @param publisherProvider optional provider for the cache sync publisher (may be absent)
-   * @return a new RuleMatcher instance (in-memory only)
+   * @return a new rule engine instance (in-memory only)
    */
   @Bean
-  @ConditionalOnMissingBean(value = RuleMatcher.class, type = "org.springframework.data.redis.core.StringRedisTemplate")
-  public RuleMatcher ruleMatcher(ObjectProvider<CacheSyncPublisher> publisherProvider) {
-    return new RuleMatcherImpl(Optional.empty(), Optional.ofNullable(publisherProvider.getIfAvailable()));
+  @ConditionalOnMissingBean(
+    value = RuleMatcherImpl.class,
+    type = "org.springframework.data.redis.core.StringRedisTemplate"
+  )
+  public RuleMatcherImpl ruleMatcher() {
+    return new RuleMatcherImpl(Optional.empty());
   }
 
   /**
-   * Create the rule administration service over the {@link RuleMatcher}:
-   * blacklist/whitelist CRUD, evaluation, and rule-set snapshot/broadcast.
+   * Create the rule administration service over the rule engine:
+   * blacklist/whitelist CRUD, evaluation, and rule-set snapshot.
    *
-   * @param ruleMatcher the rule matcher (never {@code null})
-   * @param properties  the HotKey configuration properties (never {@code null})
+   * @param ruleRepository the rule mutation seam (never {@code null})
+   * @param ruleEvaluator  the rule evaluation seam (never {@code null})
    * @return a new RuleService instance
    */
   @Bean
   @ConditionalOnMissingBean
-  public RuleService ruleService(RuleMatcher ruleMatcher, ZetaProperties properties) {
-    return new RuleService(ruleMatcher, properties);
+  public RuleService ruleService(RuleRepository ruleRepository, RuleEvaluator ruleEvaluator) {
+    return new RuleService(ruleRepository, ruleEvaluator);
   }
 
   /**
-   * Create the deferred send buffer for putThrough cache-sync messages.
+   * Create the deferred send buffer for putThrough cache-sync messages
+   * (value-carrying PUT and version-only REFRESH broadcasts).
    */
   @Bean
   @ConditionalOnMissingBean
@@ -432,7 +427,33 @@ public class ZetaAutoConfiguration {
     BroadcastBuffer broadcastBuffer,
     HotKeyDetector hotKeyDetector
   ) {
-    return new CentralDispatcher(hotKeyReporter, syncPublisher, broadcastBuffer, hotKeyDetector);
+    return new CentralDispatcher(
+      hotKeyReporter.orElse(null),
+      syncPublisher.orElse(null),
+      broadcastBuffer,
+      hotKeyDetector
+    );
+  }
+
+  /**
+   * Shared singleton {@link VersionController} (fallback variant, no Redis).
+   *
+   * <p>Only active when {@code RedisTemplate} is absent; otherwise
+   * {@code ZetaRedisAutoConfiguration#versionController} takes over. Exposing the
+   * controller as a bean (instead of {@code new} per consumer) unifies the
+   * {@code versionFloorCache} and the degraded-version counter across
+   * {@code HotKeyCache}, the worker decision handler, the actuator endpoint and
+   * the Micrometer gauges.
+   *
+   * @param properties the HotKey configuration properties (never {@code null})
+   * @param snowflakeIdGenerator the Snowflake generator for degraded versions
+   * @return a node-local version controller
+   */
+  @Bean
+  @ConditionalOnMissingBean(value = VersionController.class, type = "org.springframework.data.redis.core.RedisTemplate")
+  @SuppressWarnings("SpringJavaInjectionPointsAutowiringInspection")
+  public VersionController versionController(ZetaProperties properties, SnowflakeIdGenerator snowflakeIdGenerator) {
+    return new VersionControllerImpl(Optional.empty(), properties.getVersionKeyTtlMinutes(), snowflakeIdGenerator);
   }
 
   /**
@@ -449,13 +470,11 @@ public class ZetaAutoConfiguration {
    * @param singleFlight              the deduplication layer (never {@code null})
    * @param entryLifecycle            the entry lifecycle manager (never {@code null})
    * @param backgroundRefresher       the background refresh executor (never {@code null})
-   * @param hotKeyExecutor            the dedicated HotKey executor (never {@code null})
+   * @param ruleEvaluator             the dedicated HotKey executor (never {@code null})
    * @param centralDispatcher         the central dispatcher for send coordination
    * @param properties                the HotKey configuration properties (never {@code null})
-   * @param ruleMatcher               the rule matcher instance (never {@code null})
+   * @param snowflakeIdGenerator               the rule matcher instance (never {@code null})
    * @param healthViewProvider        provider for the cluster health view (creates default if absent)
-   * @param compressor                the cache compressor for value serialization
-   * @param refaultAdmission          the shared refault admission gate (ADR-0079)
    * @return a new HotKeyCache instance with node-local version tracking
    */
   @Bean
@@ -467,29 +486,27 @@ public class ZetaAutoConfiguration {
     SingleFlight singleFlight,
     EntryLifecycle entryLifecycle,
     BackgroundRefresher backgroundRefresher,
-    @Qualifier("hotKeyExecutor") Executor hotKeyExecutor,
     CentralDispatcher centralDispatcher,
     ZetaProperties properties,
-    RuleMatcher ruleMatcher,
+    RuleEvaluator ruleEvaluator,
     ObjectProvider<HealthView> healthViewProvider,
-    CacheCompressor compressor,
     SnowflakeIdGenerator snowflakeIdGenerator,
-    RefaultAdmission refaultAdmission
+    ObjectProvider<VersionController> versionControllerProvider
   ) {
     return new HotKeyCache(
-      hotKeyDetector,
-      hotLocalCache,
-      singleFlight,
-      entryLifecycle,
-      backgroundRefresher,
-      hotKeyExecutor,
-      centralDispatcher,
-      ruleMatcher,
-      new VersionControllerImpl(Optional.empty(), properties.getVersionKeyTtlMinutes(), snowflakeIdGenerator),
-      properties,
-      healthViewOrDefault(healthViewProvider, properties),
-      compressor,
-      refaultAdmission
+      new CacheDependencies(
+        hotKeyDetector,
+        hotLocalCache,
+        singleFlight,
+        entryLifecycle,
+        backgroundRefresher,
+        centralDispatcher,
+        ruleEvaluator,
+        versionControllerProvider.getIfAvailable(() ->
+          new VersionControllerImpl(Optional.empty(), properties.getVersionKeyTtlMinutes(), snowflakeIdGenerator)
+        ),
+        healthViewOrDefault(healthViewProvider, properties)
+      )
     );
   }
 
@@ -510,49 +527,6 @@ public class ZetaAutoConfiguration {
     );
   }
 
-  @Bean
-  @ConditionalOnMissingBean
-  public CacheCompressor cacheCompressor() {
-    try {
-      return new Lz4CacheCompressor();
-    } catch (NoClassDefFoundError e) {
-      log.warn("lz4-java not on classpath, cache compression disabled");
-      return CacheCompressor.NONE;
-    }
-  }
-
-  /**
-   * Create the empty prefix→loader registry backing the no-reader
-   * {@code Zeta.get(cacheKey)} overloads and the composite sync-plane loader
-   * (ADR-0070). Applications register {@link ZetaLoadingSpec}s against key
-   * prefixes (e.g. {@code "user:"}) at startup or at runtime; an empty registry
-   * is a no-op — every consumer falls back to the Redis value channel, so this
-   * bean changes nothing for deployments that do not use the feature.
-   *
-   * @return a new empty {@link ZetaLoaderRegistry}
-   */
-  @Bean
-  @ConditionalOnMissingBean
-  public ZetaLoaderRegistry zetaLoaderRegistry() {
-    return new ZetaLoaderRegistry();
-  }
-
-  /**
-   * Create the refault distance admission gate (ADR-0079, the {@code mm/workingset.c}
-   * port). The gate and the L1 cache share this one instance: the cache's removal
-   * listener feeds it (clock + shadow table) and {@link HotKeyCache#loadCacheEntry}
-   * consults it before a load-path insert. Mode {@code off} yields an inert gate —
-   * no listener is attached and the cache behaves exactly as before.
-   *
-   * @param properties the HotKey configuration properties (never {@code null})
-   * @return the shared refault admission gate
-   */
-  @Bean
-  @ConditionalOnMissingBean
-  public RefaultAdmission refaultAdmission(ZetaProperties properties) {
-    return RefaultAdmission.from(properties.getCache());
-  }
-
   /**
    * Create the L1 Caffeine cache instance.
    *
@@ -564,18 +538,9 @@ public class ZetaAutoConfiguration {
    * manual invalidation. Reads never extend the expiry duration (no read-based
    * refresh), ensuring predictable TTL behavior.
    *
-   * <p>Eviction strategy: {@code max-weight} (> 0) enables memory-weighted eviction with {@link
-   * DefaultWeigher} configured by {@code weigh-walk-nodes} / {@code weigh-over-budget}; otherwise
-   * {@code max-size} limits entry count. Time-based TTL for entries without an explicit hard-expire
-   * timestamp defaults to {@code zeta.local.default-hard-ttl-ms}.
-   *
-   * <p>When refault admission is enabled (ADR-0079, mode != off) the removal listener
-   * slot is consumed by the gate's clock/shadow keeper — capacity evictions advance
-   * the eviction clock and stamp the key's shadow entry, except the gate's own
-   * solo-flight churn (entries flagged {@code soloFlight} re-stamp without advancing,
-   * so the reject rate never feeds back into the clock). Application customizers
-   * that need their own notifications must use {@code evictionListener} (a second
-   * removalListener would fail Caffeine's single-use setter check).
+   * <p>Eviction strategy: {@code max-size} limits entry count. Time-based TTL for
+   * entries without an explicit hard-expire timestamp defaults to
+   * {@code zeta.local.default-hard-ttl-ms}.
    *
    * <p>Stats recording is always enabled ({@code recordStats()}) so that
    * {@code Zeta#stats()} and the {@code cache.*} Micrometer metrics report
@@ -584,8 +549,6 @@ public class ZetaAutoConfiguration {
    * counters to be populated.
    *
    * @param properties the HotKey configuration properties (never {@code null})
-   * @param refaultAdmissionProvider provider for the shared refault gate (always present
-   *                                 unless the application replaced the bean)
    * @param customizerProvider ordered provider of application {@link ZetaCacheCustomizer}
    *                           beans, applied just before {@code build()} (ADR-0070)
    * @return a configured Caffeine {@link Cache} instance
@@ -594,32 +557,18 @@ public class ZetaAutoConfiguration {
   @ConditionalOnMissingBean
   public Cache<String, CacheEntry> hotLocalCache(
     ZetaProperties properties,
-    ObjectProvider<RefaultAdmission> refaultAdmissionProvider,
     ObjectProvider<ZetaCacheCustomizer> customizerProvider
   ) {
     var cfg = properties.getCache();
     Caffeine<Object, Object> builder = Caffeine.newBuilder();
-    if (cfg.getMaxWeight() > 0) {
-      // The weigher may run while holding a bin lock (Caffeine's computeIfAbsent path), so its
-      // node budget and over-budget policy come from configuration rather than a fixed singleton.
-      builder
-        .maximumWeight(cfg.getMaxWeight())
-        .weigher(
-          DefaultWeigher.of(
-            cfg.getWeighWalkNodes(),
-            cfg.getWeighOverBudget() == ZetaProperties.CacheConfig.WeighOverBudget.ABORT
-          )
-        );
-    } else {
-      builder.maximumSize(cfg.getMaxSize());
-    }
+    builder.maximumSize(cfg.getMaxSize());
     // Stats recording enables hit/miss/eviction counters for Zeta#stats() and the cache.*
     // Micrometer metrics; overhead is a few LongAdder increments per cache operation.
     builder.recordStats();
     // Narrowing call: captures the String/CacheEntry-typed reference for the
     // removalListener/customizer/build calls below (same mutated instance).
     Caffeine<String, CacheEntry> typed = builder.expireAfter(
-      new Expiry<String, CacheEntry>() {
+      new Expiry<>() {
         /**
          * Compute the time-to-live for a newly created cache entry.
          * Returns {@link Long#MAX_VALUE} for pure logical-expiry entries
@@ -633,13 +582,7 @@ public class ZetaAutoConfiguration {
          */
         @Override
         public long expireAfterCreate(@NonNull String key, @NonNull CacheEntry value, long currentTimeNanos) {
-          if (value.getHardExpireAtMs() == Long.MAX_VALUE) {
-            // Pure logical expiry: Caffeine never time-evicts this entry.
-            // See Expiry Javadoc: Long.MAX_VALUE signals "no expiration".
-            return Long.MAX_VALUE;
-          }
-          long remainingMs = value.getHardExpireAtMs() - currentTimeMillis();
-          return TimeUnit.MILLISECONDS.toNanos(Math.max(1, remainingMs));
+          return remainingHardTtlNanos(value.getHardExpireAtMs());
         }
 
         /**
@@ -660,12 +603,7 @@ public class ZetaAutoConfiguration {
           long currentTimeNanos,
           long currentDuration
         ) {
-          if (value.getHardExpireAtMs() == Long.MAX_VALUE) {
-            // Preserve pure logical expiry across updates (e.g. send refresh).
-            return Long.MAX_VALUE;
-          }
-          long remainingMs = value.getHardExpireAtMs() - currentTimeMillis();
-          return TimeUnit.MILLISECONDS.toNanos(Math.max(1, remainingMs));
+          return remainingHardTtlNanos(value.getHardExpireAtMs());
         }
 
         /**
@@ -689,23 +627,30 @@ public class ZetaAutoConfiguration {
         }
       }
     );
-    // Refault admission (ADR-0079): the gate's clock/shadow keeper owns the
-    // removalListener slot when the gate is active. Attached before application
-    // customizers so a conflicting customizer listener fails fast at startup
-    // (Caffeine setters are single-use) rather than silently dropping evidence.
-    //
-    // Typing note: Caffeine's narrowing setters (expireAfter/weigher) mutate
+    // Typing note: Caffeine's narrowing setters (expireAfter) mutate
     // this same builder instance in place and only narrow the static type, so
     // the captured `typed` reference above carries every setting.
-    refaultAdmissionProvider.ifAvailable(gate -> {
-      if (gate.gating()) {
-        typed.removalListener(gate::onRemoval);
-      }
-    });
     // Application customizers run last, in order, immediately before build() —
     // they may add orthogonal listeners/executors/schedulers but cannot replace
     // the capacity or expiry knobs set above (Caffeine setters are single-use).
     customizerProvider.orderedStream().forEach(customizer -> customizer.customize(typed));
     return typed.build();
+  }
+
+  /**
+   * Remaining Caffeine expiry in nanos for an entry whose logical hard expiry
+   * sits at {@code hardExpireAtMs}: {@link Long#MAX_VALUE} for pure
+   * logical-expiry entries (Caffeine never time-evicts them — the Expiry
+   * Javadoc defines {@code Long.MAX_VALUE} as "no expiration"); otherwise the
+   * remaining wall-clock time, floored at 1ms so a just-expired entry still
+   * gets one scheduling quantum instead of an immediate re-expiry storm.
+   */
+  private static long remainingHardTtlNanos(long hardExpireAtMs) {
+    if (hardExpireAtMs == Long.MAX_VALUE) {
+      return Long.MAX_VALUE;
+    }
+
+    long remainingMs = hardExpireAtMs - currentTimeMillis();
+    return TimeUnit.MILLISECONDS.toNanos(Math.max(1, remainingMs));
   }
 }

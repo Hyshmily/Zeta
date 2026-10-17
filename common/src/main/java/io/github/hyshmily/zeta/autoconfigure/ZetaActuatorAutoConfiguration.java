@@ -27,7 +27,7 @@ import io.github.hyshmily.zeta.endpoint.ZetaEndpoint;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.TopK;
 import io.github.hyshmily.zeta.model.CacheEntry;
 import io.github.hyshmily.zeta.reporting.KeyReporter;
-import io.github.hyshmily.zeta.rule.RuleMatcher;
+import io.github.hyshmily.zeta.rule.RuleRepository;
 import io.github.hyshmily.zeta.sharding.HealthView;
 import io.github.hyshmily.zeta.sharding.RingManager;
 import io.github.hyshmily.zeta.sync.local.CacheSyncListener;
@@ -85,7 +85,7 @@ public class ZetaActuatorAutoConfiguration {
    * @param hotLocalCacheProvider       provider for the L1 Caffeine cache (may be absent)
    * @param singleFlightProvider        provider for the SingleFlight dedup layer (may be absent)
    * @param hotKeyReporterProvider      provider for the HotKey reporter (may be absent)
-   * @param ruleMatcherProvider         provider for the rule matcher (may be absent)
+   * @param ruleRepositoryProvider provider for the rule repository (may be absent)
    * @param entryLifecycleProvider      provider for the entry lifecycle manager (may be absent)
    * @param backgroundRefresherProvider provider for the background refresh executor (may be absent)
    * @param versionControllerProvider   provider for the version controller (may be absent)
@@ -108,7 +108,7 @@ public class ZetaActuatorAutoConfiguration {
     ObjectProvider<Cache<String, CacheEntry>> hotLocalCacheProvider,
     ObjectProvider<SingleFlight> singleFlightProvider,
     ObjectProvider<KeyReporter> hotKeyReporterProvider,
-    ObjectProvider<RuleMatcher> ruleMatcherProvider,
+    ObjectProvider<RuleRepository> ruleRepositoryProvider,
     ObjectProvider<EntryLifecycle> entryLifecycleProvider,
     ObjectProvider<BackgroundRefresher> backgroundRefresherProvider,
     ObjectProvider<VersionController> versionControllerProvider,
@@ -125,7 +125,7 @@ public class ZetaActuatorAutoConfiguration {
       .singleFlight(singleFlightProvider.getIfAvailable())
       .properties(properties)
       .hotKeyReporter(hotKeyReporterProvider.getIfAvailable())
-      .ruleMatcher(ruleMatcherProvider.getIfAvailable())
+      .ruleRepository(ruleRepositoryProvider.getIfAvailable())
       .entryLifecycle(entryLifecycleProvider.getIfAvailable())
       .backgroundRefresher(backgroundRefresherProvider.getIfAvailable())
       .versionController(versionControllerProvider.getIfAvailable())
@@ -183,8 +183,9 @@ public class ZetaActuatorAutoConfiguration {
   @ConditionalOnMissingBean
   public StateMachineEndpoint stateMachineEndpoint(
     ZetaBayesianSM stateMachine,
+    ObjectProvider<java.util.concurrent.atomic.AtomicReference<io.github.hyshmily.zeta.sync.worker.SmConfigSnapshot>> configSnapshotProvider,
     ObjectProvider<java.util.concurrent.atomic.AtomicLong> configTimestampCounterProvider
   ) {
-    return new StateMachineEndpoint(stateMachine, configTimestampCounterProvider);
+    return new StateMachineEndpoint(stateMachine, configSnapshotProvider, configTimestampCounterProvider);
   }
 }

@@ -18,15 +18,14 @@ package io.github.hyshmily.zeta.autoconfigure;
 import com.github.benmanes.caffeine.cache.Cache;
 import io.github.hyshmily.zeta.Internal;
 import io.github.hyshmily.zeta.cache.cachesupport.BroadcastBuffer;
-import io.github.hyshmily.zeta.scheduler.BackgroundRefresher;
-import io.github.hyshmily.zeta.cache.cachesupport.RefaultAdmission;
 import io.github.hyshmily.zeta.cache.cachesupport.SingleFlight;
-import io.github.hyshmily.zeta.model.CacheEntry;
 import io.github.hyshmily.zeta.detection.ZetaBayesianSM;
 import io.github.hyshmily.zeta.endpoint.ZetaEndpoint;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.TopK;
+import io.github.hyshmily.zeta.model.CacheEntry;
 import io.github.hyshmily.zeta.reporting.KeyReporter;
 import io.github.hyshmily.zeta.rule.impl.RuleMatcherImpl;
+import io.github.hyshmily.zeta.scheduler.BackgroundRefresher;
 import io.github.hyshmily.zeta.sharding.HealthView;
 import io.github.hyshmily.zeta.sync.dispatcher.DispatcherStats;
 import io.github.hyshmily.zeta.sync.distributedlock.LockProvider;
@@ -131,7 +130,6 @@ public class ZetaMicrometerAutoConfiguration {
    *   <tr><td>{@code zeta.stall.*}</td><td>Stall-cause &times; state gauges &mdash; the "why is it slow"
    *       attribution view (RocksDB {@code write_stall_stats} pattern; see
    *       {@link #registerStallGauges})</td><td>&mdash;</td></tr>
-   *   <tr><td>{@code zeta.l1.refault.*}</td><td>Refault distance admission gate (ADR-0079):
    *       admit/reject verdicts, last distance, capacity estimate, eviction-clock rate;
    *       registered only when the gate is active (mode != off)</td><td>&mdash;</td></tr>
    *   <tr><td>{@code zeta.expire.refresh.available}</td><td>Available refresh limiter permits</td><td>&mdash;</td></tr>
@@ -162,7 +160,6 @@ public class ZetaMicrometerAutoConfiguration {
    * @param workerListenerProvider      provider for the decision-plane listener exposing its ordered
    *                                    dispatcher gate (may be absent)
    * @param cpuMonitorProvider          provider for the system CPU load monitor (may be absent)
-   * @param refaultAdmissionProvider    provider for the refault admission gate (ADR-0079; its
    *                                    gauges register only when the gate is active, mode != off)
    * @param lockProvider                provider for the distributed-lock provider (may be absent;
    *                                    registers {@code zeta.lock.*} outcome counters)
@@ -183,13 +180,12 @@ public class ZetaMicrometerAutoConfiguration {
     ObjectProvider<SystemLoadMonitor> cpuMonitorProvider,
     ObjectProvider<CacheSyncListener> syncListenerProvider,
     ObjectProvider<WorkerListener> workerListenerProvider,
-    ObjectProvider<RefaultAdmission> refaultAdmissionProvider,
     ObjectProvider<LockProvider> lockProvider
   ) {
     return registry -> {
       hotKeyDetectorProvider.ifAvailable(detector -> registerLocalTopKGauges(detector, registry));
       singleFlightProvider.ifAvailable(sf ->
-        Gauge.builder("zeta.singleflight.inflight", sf, s -> (double) s.estimatedInflightSize()).register(registry)
+        Gauge.builder("zeta.singleflight.inflight", sf, s -> (double) s.estimatedInFlightSize()).register(registry)
       );
       reporterProvider.ifAvailable(r -> registerReporterGauges(r, registry));
       // Stall-cause gauges: each (cause, state ≠ normal) pair is its own
@@ -224,9 +220,7 @@ public class ZetaMicrometerAutoConfiguration {
         Gauge.builder("zeta.expire.refresh.lease.suppressed.total", em, e ->
           (double) e.getLeaseSuppressedByClassifier()
         ).register(registry);
-        Gauge.builder("zeta.expire.refresh.lease.debt.keys", em, e ->
-          (double) e.leasedStaleness(Integer.MAX_VALUE).size()
-        ).register(registry);
+        Gauge.builder("zeta.expire.refresh.lease.debt.keys", em, e -> (double) e.leasedKeyCount()).register(registry);
       });
       versionControllerProvider.ifAvailable(vc ->
         Gauge.builder("zeta.version.degraded.total", vc, v -> (double) v.getDegradedVersionCount()).register(registry)
@@ -237,8 +231,8 @@ public class ZetaMicrometerAutoConfiguration {
       healthViewProvider.ifAvailable(hv ->
         Gauge.builder("zeta.worker.alive", hv, v -> v.isClusterHealthy() ? 1.0 : 0.0).register(registry)
       );
-      stateMachineProvider.ifAvailable(sm ->
-        Gauge.builder("zeta.worker.tracked.keys", sm, s -> (double) s.getTrackedKeys()).register(registry)
+      stateMachineProvider.ifAvailable(stateMachine ->
+        Gauge.builder("zeta.worker.tracked.keys", stateMachine, s -> (double) s.getTrackedKeys()).register(registry)
       );
       //noinspection Convert2MethodRef
       cpuMonitorProvider.ifAvailable(cpu ->
@@ -254,13 +248,6 @@ public class ZetaMicrometerAutoConfiguration {
       workerListenerProvider.ifAvailable(listener -> {
         if (listener.dispatcherStats() != null) {
           registerDispatchGauges(registry, "worker", listener::dispatcherStats);
-        }
-      });
-      // Refault admission gauges (ADR-0079): registered only when the gate is
-      // active — mode off has no machinery and no trajectory to expose.
-      refaultAdmissionProvider.ifAvailable(gate -> {
-        if (gate.gating()) {
-          registerRefaultGauges(gate, registry);
         }
       });
       // Distributed-lock outcome counters: tryLock() collapses "peer holds the
@@ -289,7 +276,9 @@ public class ZetaMicrometerAutoConfiguration {
   public MeterBinder hotKeyRulesMetrics(ObjectProvider<RuleMatcherImpl> ruleMatcherProvider) {
     return registry ->
       ruleMatcherProvider.ifAvailable(matcher ->
-        Gauge.builder("zeta.rules.persist.failed", matcher, m -> (double) m.getRulesPersistFailures()).register(registry)
+        Gauge.builder("zeta.rules.persist.failed", matcher, m -> (double) m.getRulesPersistFailures()).register(
+          registry
+        )
       );
   }
 
@@ -310,11 +299,7 @@ public class ZetaMicrometerAutoConfiguration {
    * @param plane    the {@code plane} tag value ({@code sync} or {@code worker})
    * @param supplier re-reads the plane's gate snapshot on each scrape
    */
-  private static void registerDispatchGauges(
-    MeterRegistry registry,
-    String plane,
-    Supplier<DispatcherStats> supplier
-  ) {
+  private static void registerDispatchGauges(MeterRegistry registry, String plane, Supplier<DispatcherStats> supplier) {
     Gauge.builder("zeta.dispatch.pending.units", supplier, s -> (double) snapshot(s).pendingUnits())
       .tag("plane", plane)
       .register(registry);
@@ -386,11 +371,13 @@ public class ZetaMicrometerAutoConfiguration {
     Gauge.builder("zeta.reporter.queue.expired.total", reporter, r -> (double) r.dispatcherExpired()).register(
       registry
     );
-    Gauge.builder("zeta.reporter.queue.expired.dead.total", reporter, r -> (double) r.dispatcherExpiredDeadTarget())
-      .register(registry);
-    Gauge.builder("zeta.reporter.queue.expired.stale.total", reporter, r -> (double) r.dispatcherExpiredStale())
-      .register(registry);
-    Gauge.builder("zeta.reporter.pending.keys", reporter, r -> (double) r.getPendingKeyCount()).register(registry);
+    Gauge.builder("zeta.reporter.queue.expired.dead.total", reporter, r ->
+      (double) r.dispatcherExpiredDeadTarget()
+    ).register(registry);
+    Gauge.builder("zeta.reporter.queue.expired.stale.total", reporter, r ->
+      (double) r.dispatcherExpiredStale()
+    ).register(registry);
+    Gauge.builder("zeta.reporter.pending.keys", reporter, r -> (double) r.pendingKeyCount()).register(registry);
     Gauge.builder("zeta.reporter.bbr.passed", reporter, r -> (double) r.bbrPassed()).register(registry);
     Gauge.builder("zeta.reporter.bbr.dropped", reporter, r -> (double) r.bbrDropped()).register(registry);
     Gauge.builder("zeta.reporter.bbr.inflight", reporter, r -> (double) r.bbrInFlight()).register(registry);
@@ -414,39 +401,6 @@ public class ZetaMicrometerAutoConfiguration {
       Gauge.builder("zeta.reporter.feedloop.score", reporter, r -> (double) r.feedLoopScoreBp()).register(registry);
       Gauge.builder("zeta.reporter.feedloop.batch", reporter, r -> (double) r.feedLoopBatchSize()).register(registry);
     }
-  }
-
-  /**
-   * Register the refault distance admission gauges (ADR-0079, the
-   * {@code mm/workingset.c} port).
-   *
-   * <table>
-   *   <tr><th>Metric name</th><th>Meaning</th></tr>
-   *   <tr><td>{@code zeta.l1.refault.admit.total}</td><td>Cumulative admit verdicts
-   *       (shadow mode: would-admit — every verdict admits)</td></tr>
-   *   <tr><td>{@code zeta.l1.refault.reject.total}</td><td>Cumulative reject verdicts
-   *       (shadow mode: the <em>would-reject</em> rate — the deploy-first
-   *       observation signal)</td></tr>
-   *   <tr><td>{@code zeta.l1.refault.distance}</td><td>Distance of the latest
-   *       evidence-backed decision (capacity evictions since the key last left
-   *       residency); -1 = decided without evidence (cold-key rule)</td></tr>
-   *   <tr><td>{@code zeta.l1.refault.capacity}</td><td>The static capacity estimate
-   *       (entries) distances are compared against</td></tr>
-   *   <tr><td>{@code zeta.l1.refault.clock.rate}</td><td>Capacity-eviction rate
-   *       (evictions/sec, EWMA over scrapes) — independently valuable as the
-   *       scan-pressure alarm: sustained non-zero means capacity thrashing,
-   *       whatever the gate decides</td></tr>
-   * </table>
-   *
-   * @param gate     the shared refault admission gate (active, mode != off)
-   * @param registry the meter registry to register into
-   */
-  private static void registerRefaultGauges(RefaultAdmission gate, MeterRegistry registry) {
-    Gauge.builder("zeta.l1.refault.admit.total", gate, g -> (double) g.admitCount()).register(registry);
-    Gauge.builder("zeta.l1.refault.reject.total", gate, g -> (double) g.rejectCount()).register(registry);
-    Gauge.builder("zeta.l1.refault.distance", gate, g -> (double) g.lastDistance()).register(registry);
-    Gauge.builder("zeta.l1.refault.capacity", gate, g -> (double) g.capacityEntries()).register(registry);
-    Gauge.builder("zeta.l1.refault.clock.rate", gate, RefaultAdmission::clockRatePerSec).register(registry);
   }
 
   /**
@@ -482,30 +436,28 @@ public class ZetaMicrometerAutoConfiguration {
     ObjectProvider<HealthView> healthViewProvider
   ) {
     reporterProvider.ifAvailable(r -> {
-      Gauge.builder("zeta.stall.report_backpressure.delayed", r, v -> (double) Math.max(0, v.dispatcherDepth()))
-        .register(registry);
-      Gauge.builder(
-        "zeta.stall.report_backpressure.stopped.total",
-        r,
-        v -> (double) Math.max(0, v.dispatcherDropped() + v.dispatcherExpired())
+      Gauge.builder("zeta.stall.report_backpressure.delayed", r, v ->
+        (double) Math.max(0, v.dispatcherDepth())
+      ).register(registry);
+      Gauge.builder("zeta.stall.report_backpressure.stopped.total", r, v ->
+        (double) Math.max(0, v.dispatcherDropped() + v.dispatcherExpired())
       ).register(registry);
     });
     broadcastBufferProvider.ifAvailable(bb ->
-      Gauge.builder(
-        "zeta.stall.broadcast_storm.stopped.total",
-        bb,
-        b -> (double) (b.sendFailures() + b.saturationDrops())
+      Gauge.builder("zeta.stall.broadcast_storm.stopped.total", bb, b ->
+        (double) (b.sendFailures() + b.saturationDrops())
       ).register(registry)
     );
     singleFlightProvider.ifAvailable(sf -> {
       Gauge.builder("zeta.stall.redis_degraded.stopped", sf, s -> s.isBreakerOpen() ? 1.0 : 0.0).register(registry);
-      Gauge.builder("zeta.stall.redis_degraded.timeouts.total", sf, s -> (double) s.getLoadTimeoutCount()).register(
+      Gauge.builder("zeta.stall.redis_degraded.timeouts.total", sf, s -> (double) s.loadTimeoutCount()).register(
         registry
       );
     });
     healthViewProvider.ifAvailable(hv ->
-      Gauge.builder("zeta.stall.worker_partition.stopped", hv, v -> v.getAliveWorkerIds().isEmpty() ? 1.0 : 0.0)
-        .register(registry)
+      Gauge.builder("zeta.stall.worker_partition.stopped", hv, v ->
+        v.getAliveWorkerIds().isEmpty() ? 1.0 : 0.0
+      ).register(registry)
     );
   }
 }

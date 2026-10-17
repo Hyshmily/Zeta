@@ -120,7 +120,7 @@ class ZetaReporterTest {
     reporter.reportToWorker("key1");
     reporter.reportToWorker("key1");
     reporter.reportToWorker("key2");
-    assertThat(reporter.getPendingKeyCount()).isPositive();
+    assertThat(reporter.pendingKeyCount()).isPositive();
   }
 
   @Test
@@ -128,7 +128,7 @@ class ZetaReporterTest {
     // The underlying WaveCounter silently ignores null/empty keys (see
     // WaveCounter.count), so the reporter must not throw either.
     reporter.reportToWorker(null);
-    assertThat(reporter.getPendingKeyCount()).isZero();
+    assertThat(reporter.pendingKeyCount()).isZero();
   }
 
   @Test

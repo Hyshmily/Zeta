@@ -42,23 +42,14 @@ public final class CacheKeysPolicy {
     return cacheKey == null || cacheKey.isBlank();
   }
 
+  /**
+   * Batch form of {@link #invalidCacheKey(String)}.
+   *
+   * @param cacheKeys the collection to validate
+   * @return {@code true} if the collection is {@code null} or empty
+   */
   public static boolean invalidCacheKey(Collection<String> cacheKeys) {
     return cacheKeys == null || cacheKeys.isEmpty();
-  }
-
-  /**
-   * Normalize a cache key by stripping query parameters (everything after {@code ?}).
-   *
-   * @param rawKey the raw cache key (may be {@code null})
-   * @return the normalized key, or {@code null} if the input was {@code null}
-   */
-  @Nullable
-  public static String normalizeKey(@Nullable String rawKey) {
-    if (rawKey == null) {
-      return null;
-    }
-    int idx = rawKey.indexOf('?');
-    return idx >= 0 ? rawKey.substring(0, idx) : rawKey;
   }
 
   /**

@@ -41,7 +41,8 @@ public class ZetaThreadFactory implements ThreadFactory {
    *                   (e.g. {@code "zeta-scheduler-"})
    */
   public ZetaThreadFactory(String namePrefix) {
-    this.namePrefix = namePrefix;
+    org.springframework.util.Assert.hasText(namePrefix, "namePrefix must not be blank");
+    this.namePrefix = namePrefix.endsWith("-") ? namePrefix : namePrefix + "-";
   }
 
   @Override

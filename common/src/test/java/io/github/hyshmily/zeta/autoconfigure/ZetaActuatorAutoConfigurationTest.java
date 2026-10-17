@@ -30,7 +30,7 @@ import io.github.hyshmily.zeta.endpoint.StateMachineEndpoint;
 import io.github.hyshmily.zeta.endpoint.ZetaEndpoint;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.TopK;
 import io.github.hyshmily.zeta.reporting.KeyReporter;
-import io.github.hyshmily.zeta.rule.RuleMatcher;
+import io.github.hyshmily.zeta.rule.RuleRepository;
 import io.github.hyshmily.zeta.sharding.HealthView;
 import io.github.hyshmily.zeta.sharding.RingManager;
 import io.github.hyshmily.zeta.sync.local.CacheSyncListener;
@@ -85,7 +85,7 @@ class ZetaActuatorAutoConfigurationTest {
     ObjectProvider<Cache<String, CacheEntry>> cacheProvider = mock(ObjectProvider.class);
     ObjectProvider<SingleFlight> sfProvider = mock(ObjectProvider.class);
     ObjectProvider<KeyReporter> reporterProvider = mock(ObjectProvider.class);
-    ObjectProvider<RuleMatcher> ruleMatcherProvider = mock(ObjectProvider.class);
+    ObjectProvider<RuleRepository> ruleMatcherProvider = mock(ObjectProvider.class);
     ObjectProvider<EntryLifecycle> entryLifecycleProvider = mock(ObjectProvider.class);
     ObjectProvider<BackgroundRefresher> backgroundRefresherProvider = mock(ObjectProvider.class);
     ObjectProvider<VersionController> versionControllerProvider = mock(ObjectProvider.class);
@@ -136,7 +136,7 @@ class ZetaActuatorAutoConfigurationTest {
     ObjectProvider<Cache<String, CacheEntry>> cacheProvider = mock(ObjectProvider.class);
     ObjectProvider<SingleFlight> sfProvider = mock(ObjectProvider.class);
     ObjectProvider<KeyReporter> reporterProvider = mock(ObjectProvider.class);
-    ObjectProvider<RuleMatcher> ruleMatcherProvider = mock(ObjectProvider.class);
+    ObjectProvider<RuleRepository> ruleMatcherProvider = mock(ObjectProvider.class);
     ObjectProvider<EntryLifecycle> entryLifecycleProvider = mock(ObjectProvider.class);
     ObjectProvider<BackgroundRefresher> backgroundRefresherProvider = mock(ObjectProvider.class);
     ObjectProvider<VersionController> versionControllerProvider = mock(ObjectProvider.class);
@@ -211,7 +211,7 @@ class ZetaActuatorAutoConfigurationTest {
     ObjectProvider<Cache<String, CacheEntry>> cacheProvider = mock(ObjectProvider.class);
     ObjectProvider<SingleFlight> sfProvider = mock(ObjectProvider.class);
     ObjectProvider<KeyReporter> reporterProvider = mock(ObjectProvider.class);
-    ObjectProvider<RuleMatcher> ruleMatcherProvider = mock(ObjectProvider.class);
+    ObjectProvider<RuleRepository> ruleMatcherProvider = mock(ObjectProvider.class);
     ObjectProvider<EntryLifecycle> entryLifecycleProvider = mock(ObjectProvider.class);
     ObjectProvider<BackgroundRefresher> backgroundRefresherProvider = mock(ObjectProvider.class);
     ObjectProvider<VersionController> versionControllerProvider = mock(ObjectProvider.class);

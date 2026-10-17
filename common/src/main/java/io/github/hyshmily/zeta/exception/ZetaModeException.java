@@ -26,7 +26,7 @@ import lombok.Getter;
  * throws this exception because there is no app-side cache. Callers can probe
  * the current mode before calling cache-dependent APIs:
  * <pre>{@code
- * if (hotKey.isApp()) {
+ * if (hotKey.isCacheAvailable()) {
  *     Optional<User> user = hotKey.get("user:42", repo::findById);
  * }
  * }</pre>
@@ -40,7 +40,7 @@ import lombok.Getter;
  *       required to perform the operation (e.g. {@code "App-mode cache"})</li>
  * </ul>
  *
- * @see Zeta#isApp()
+ * @see Zeta#isCacheAvailable()
  */
 @Getter
 public class ZetaModeException extends ZetaContextException {

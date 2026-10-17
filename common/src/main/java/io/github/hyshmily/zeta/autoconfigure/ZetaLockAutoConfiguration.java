@@ -114,7 +114,7 @@ public class ZetaLockAutoConfiguration {
   public ScheduledExecutorService hotKeyLockRenewScheduler() {
     return new SafeScheduledExecutorService(
       LOCK_RENEW_SCHEDULER_POOL_SIZE,
-      new ZetaThreadFactory(ZetaConstants.Thread.PREFIX_SCHEDULER)
+      new ZetaThreadFactory("zeta-lock-renew-")
     );
   }
 }

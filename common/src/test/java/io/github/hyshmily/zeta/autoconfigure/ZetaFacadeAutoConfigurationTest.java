@@ -16,12 +16,22 @@
 package io.github.hyshmily.zeta.autoconfigure;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 
+import io.github.hyshmily.zeta.DefaultZeta;
 import io.github.hyshmily.zeta.Zeta;
 import io.github.hyshmily.zeta.cache.HotKeyCache;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.TopK;
 import io.github.hyshmily.zeta.util.InstanceIdGenerator;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.Executor;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -67,6 +77,45 @@ class ZetaFacadeAutoConfigurationTest {
       .withBean(HotKeyCache.class, () -> mock(HotKeyCache.class))
       .withConfiguration(AutoConfigurations.of(ZetaFacadeAutoConfiguration.class))
       .run(ctx -> assertThat(ctx).hasSingleBean(Zeta.class));
+  }
+
+  /**
+   * P2 guard for the refreshAll fan-out: the auto-configuration must wire the
+   * dedicated {@code interruptibleLoadExecutor} into the facade, so a bulk
+   * refresh never parks blocking IO on the JVM-global {@code commonPool}.
+   * A capturing executor proves the fan-out tasks were submitted to the
+   * injected pool (the legacy parallelStream fallback would never touch it).
+   */
+  @Test
+  void refreshAll_fansOutThroughTheInjectedLoadExecutor_neverCommonPool() {
+    // Record AND run inline: recording alone would deadlock refreshAll (its
+    // allOf(...).join() waits for tasks this executor never starts), while
+    // the inline run still proves each fan-out task was submitted to the
+    // injected pool — the legacy parallelStream fallback would never touch it.
+    List<Runnable> submitted = new ArrayList<>();
+    Executor capturing = task -> {
+      submitted.add(task);
+      task.run();
+    };
+    new ApplicationContextRunner()
+      .withBean(ZetaProperties.class, ZetaProperties::new)
+      .withBean("hotKeyDetector", TopK.class, () -> mock(TopK.class))
+      .withBean("workerTopK", TopK.class, () -> mock(TopK.class))
+      .withBean(HotKeyCache.class, () -> mock(HotKeyCache.class))
+      .withBean("interruptibleLoadExecutor", Executor.class, () -> capturing)
+      .withConfiguration(AutoConfigurations.of(ZetaFacadeAutoConfiguration.class))
+      .run(ctx -> {
+        DefaultZeta facade = (DefaultZeta) ctx.getBean(Zeta.class);
+        HotKeyCache cache = ctx.getBean(HotKeyCache.class);
+
+        facade.refreshAll(Map.of("k1", () -> "v1", "k2", () -> "v2"));
+
+        // Fan-out went through the injected executor — one task per key,
+        // executed inline by the capturing pool (never the commonPool).
+        assertThat(submitted).hasSize(2);
+        verify(cache).refresh(eq("k1"), any(), anyLong(), anyLong(), anyBoolean());
+        verify(cache).refresh(eq("k2"), any(), anyLong(), anyLong(), anyBoolean());
+      });
   }
 
   /**

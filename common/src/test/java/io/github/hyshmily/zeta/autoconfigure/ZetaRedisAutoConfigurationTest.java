@@ -16,31 +16,32 @@
 package io.github.hyshmily.zeta.autoconfigure;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 import com.github.benmanes.caffeine.cache.Cache;
-import io.github.hyshmily.zeta.model.CacheEntry;
 import io.github.hyshmily.zeta.Zeta;
 import io.github.hyshmily.zeta.cache.CentralDispatcher;
 import io.github.hyshmily.zeta.cache.HotKeyCache;
 import io.github.hyshmily.zeta.cache.cachesupport.BroadcastBuffer;
 import io.github.hyshmily.zeta.cache.cachesupport.EntryLifecycle;
-import io.github.hyshmily.zeta.scheduler.BackgroundRefresher;
-import io.github.hyshmily.zeta.cache.cachesupport.RefaultAdmission;
 import io.github.hyshmily.zeta.cache.cachesupport.SingleFlight;
-import io.github.hyshmily.zeta.cache.codec.CacheCompressor;
 import io.github.hyshmily.zeta.hotkeydetector.HotKeyDetector;
+import io.github.hyshmily.zeta.model.CacheEntry;
 import io.github.hyshmily.zeta.reporting.KeyReporter;
-import io.github.hyshmily.zeta.rule.RuleMatcher;
 import io.github.hyshmily.zeta.rule.impl.RuleMatcherImpl;
+import io.github.hyshmily.zeta.scheduler.BackgroundRefresher;
 import io.github.hyshmily.zeta.sharding.HealthView;
 import io.github.hyshmily.zeta.sync.local.CacheSyncPublisher;
 import io.github.hyshmily.zeta.util.id.SnowflakeIdGenerator;
+import io.github.hyshmily.zeta.util.version.VersionController;
 import java.util.Optional;
 import java.util.concurrent.Executor;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.function.Supplier;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
@@ -65,9 +66,22 @@ class ZetaRedisAutoConfigurationTest {
   @Mock(lenient = true)
   private ObjectProvider<CacheSyncPublisher> publisherProvider;
 
+  @Mock(lenient = true)
+  private ObjectProvider<VersionController> versionControllerProvider;
+
   private final ScheduledExecutorService testScheduler = Executors.newSingleThreadScheduledExecutor();
 
   private final SnowflakeIdGenerator snowflakeIdGenerator = new SnowflakeIdGenerator(0, 1, 5L, false);
+
+  @BeforeEach
+  void stubHealthViewProvider() {
+    // Mirror a real ObjectProvider: no HealthView bean present → the auto-config's
+    // default supplier runs instead of returning null.
+    when(healthViewProvider.getIfAvailable(any())).thenAnswer(inv -> ((Supplier<HealthView>) inv.getArgument(0)).get());
+    when(versionControllerProvider.getIfAvailable(any())).thenAnswer(inv ->
+      ((Supplier<VersionController>) inv.getArgument(0)).get()
+    );
+  }
 
   private final ApplicationContextRunner runner = new ApplicationContextRunner().withConfiguration(
     AutoConfigurations.of(ZetaRedisAutoConfiguration.class)
@@ -97,13 +111,10 @@ class ZetaRedisAutoConfigurationTest {
     BackgroundRefresher backgroundRefresher = mock(BackgroundRefresher.class);
     Executor executor = mock(Executor.class);
 
-    RuleMatcher ruleMatcher = new RuleMatcherImpl(
-      Optional.<StringRedisTemplate>empty(),
-      Optional.<CacheSyncPublisher>empty()
-    );
+    RuleMatcherImpl ruleMatcher = new RuleMatcherImpl(Optional.empty());
     CentralDispatcher dispatcher = new CentralDispatcher(
-      Optional.empty(),
-      Optional.empty(),
+      null,
+      null,
       new BroadcastBuffer(testScheduler, Optional.empty(), 500, 2_000, null),
       detector
     );
@@ -114,15 +125,13 @@ class ZetaRedisAutoConfigurationTest {
       singleFlight,
       entryLifecycle,
       backgroundRefresher,
-      executor,
       dispatcher,
       redisTemplateProvider,
       properties,
       ruleMatcher,
       healthViewProvider,
-      CacheCompressor.NONE,
       snowflakeIdGenerator,
-      RefaultAdmission.from(properties.getCache())
+      versionControllerProvider
     );
 
     assertThat(cache).isNotNull();
@@ -142,14 +151,11 @@ class ZetaRedisAutoConfigurationTest {
     Executor executor = mock(Executor.class);
     CacheSyncPublisher publisher = mock(CacheSyncPublisher.class);
     KeyReporter reporter = mock(KeyReporter.class);
-    RuleMatcher ruleMatcher = new RuleMatcherImpl(
-      Optional.<StringRedisTemplate>empty(),
-      Optional.<CacheSyncPublisher>empty()
-    );
+    RuleMatcherImpl ruleMatcher = new RuleMatcherImpl(Optional.empty());
 
     CentralDispatcher dispatcher = new CentralDispatcher(
-      Optional.of(reporter),
-      Optional.of(publisher),
+      reporter,
+      publisher,
       new BroadcastBuffer(testScheduler, Optional.empty(), 500, 2_000, null),
       detector
     );
@@ -160,15 +166,13 @@ class ZetaRedisAutoConfigurationTest {
       singleFlight,
       entryLifecycle,
       backgroundRefresher,
-      executor,
       dispatcher,
       redisTemplateProvider,
       properties,
       ruleMatcher,
       healthViewProvider,
-      CacheCompressor.NONE,
       snowflakeIdGenerator,
-      RefaultAdmission.from(properties.getCache())
+      versionControllerProvider
     );
 
     assertThat(cache).isNotNull();
@@ -181,8 +185,7 @@ class ZetaRedisAutoConfigurationTest {
   void ruleMatcher_shouldCreateWithOptionalDependencies() {
     ZetaRedisAutoConfiguration config = new ZetaRedisAutoConfiguration();
     when(redisTemplateProvider.getIfAvailable()).thenReturn(mock(StringRedisTemplate.class));
-    when(publisherProvider.getIfAvailable()).thenReturn(mock(CacheSyncPublisher.class));
-    RuleMatcher matcher = config.ruleMatcher(redisTemplateProvider, publisherProvider);
+    RuleMatcherImpl matcher = config.ruleMatcher(redisTemplateProvider);
     assertThat(matcher).isNotNull();
     assertThat(matcher).isInstanceOf(RuleMatcherImpl.class);
   }
@@ -193,7 +196,7 @@ class ZetaRedisAutoConfigurationTest {
   @Test
   void ruleMatcher_shouldHandleAbsentProviders() {
     ZetaRedisAutoConfiguration config = new ZetaRedisAutoConfiguration();
-    RuleMatcher matcher = config.ruleMatcher(redisTemplateProvider, publisherProvider);
+    RuleMatcherImpl matcher = config.ruleMatcher(redisTemplateProvider);
     assertThat(matcher).isNotNull();
   }
 

@@ -176,7 +176,7 @@ public class ConsistentHashRing {
 
     int hashKey = hash(key);
     // Find the first index where hashes[i] >= hashKey (insertion point).
-    int startIdx = binarySearch(hashes, hashKey);
+    int startIdx = Arrays.binarySearch(hashes, hashKey);
     if (startIdx < 0) {
       startIdx = ~startIdx;
       // Wraparound to the beginning of the ring.
@@ -272,30 +272,5 @@ public class ConsistentHashRing {
    */
   private static int hash(String key) {
     return FastMath.murmur3_32FixedUtf8(key);
-  }
-
-  /**
-   * Performs a standard binary search on a sorted {@code int[]} array.
-   *
-   * @param a      the array to search (must be sorted in ascending order)
-   * @param target the value to search for
-   * @return index of the target if found; otherwise, {@code -(insertion point) - 1}
-   *         (same contract as {@link Arrays#binarySearch(int[], int)})
-   */
-  private static int binarySearch(int[] a, int target) {
-    int low = 0;
-    int high = a.length - 1;
-    while (low <= high) {
-      int mid = (low + high) >>> 1;
-      int midVal = a[mid];
-      if (midVal < target) {
-        low = mid + 1;
-      } else if (midVal > target) {
-        high = mid - 1;
-      } else {
-        return mid; // exact match
-      }
-    }
-    return ~low; // insertion point
   }
 }

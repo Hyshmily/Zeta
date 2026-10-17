@@ -72,7 +72,7 @@ public final class AmqpMessageReader {
 
   /**
    * Decodes an AMQP body as UTF-8 and bounds it for error-log output. Batch
-   * payloads (INVALIDATE_ALL key lists, RULES_SYNC rule sets) can be tens of
+   * payloads (PUT value payloads) can be tens of
    * KB; a parse-failure storm must not echo them into the log at message rate.
    *
    * @param body     the raw message body; may be null

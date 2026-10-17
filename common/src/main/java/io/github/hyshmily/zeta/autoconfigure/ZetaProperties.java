@@ -18,7 +18,6 @@ package io.github.hyshmily.zeta.autoconfigure;
 import io.github.hyshmily.zeta.annotation.annotationsupporter.SpringCacheSettings;
 import io.github.hyshmily.zeta.cache.cachesupport.CacheCoreSettings;
 import io.github.hyshmily.zeta.cache.cachesupport.CircuitBreakerSettings;
-import io.github.hyshmily.zeta.cache.cachesupport.RefaultAdmission;
 import io.github.hyshmily.zeta.constants.ZetaConstants;
 import io.github.hyshmily.zeta.endpoint.EndpointSettings;
 import jakarta.validation.Valid;
@@ -40,9 +39,8 @@ import org.springframework.validation.annotation.Validated;
  * and soft, for normal and hot keys), and reporting shard topology.
  *
  * <p>Implements the cache-core configuration views ({@link CacheCoreSettings},
- * plus the nested {@link CircuitBreakerSettings} and
- * {@link RefaultAdmission.Settings} blocks) so the cache packages never import
- * this assembly package — the dependency points one way
+ * plus the nested {@link CircuitBreakerSettings} block) so the cache packages
+ * never import this assembly package — the dependency points one way
  * (autoconfigure → cache, ADR-0082). The same holds for the annotation and
  * endpoint views ({@link SpringCacheSettings}, {@link EndpointSettings}).
  * The bridges delegate to the live bound bean, so runtime configuration
@@ -77,15 +75,15 @@ public class ZetaProperties implements CacheCoreSettings, SpringCacheSettings, E
 
   /** Maximum number of in-flight deduplication entries. */
   @Min(1)
-  private int inflightMaxSize = 50_000;
+  private int inFlightMaxSize = 50_000;
 
   /** TTL in seconds for in-flight deduplication entries. */
   @Min(1)
-  private int inflightTtlSeconds = 5;
+  private int inFlightTtlSeconds = 5;
 
   /** Timeout in seconds for waiting on an in-flight cache load. */
   @Min(1)
-  private int inflightTimeoutSeconds = 3;
+  private int inFlightTimeoutSeconds = 3;
 
   /** Core pool size for the HotKey async executor. */
   @Min(1)
@@ -155,20 +153,6 @@ public class ZetaProperties implements CacheCoreSettings, SpringCacheSettings, E
   /** Override soft TTL (ms) for hot keys. 0 means use {@link #defaultHotSoftTtlMs}. */
   private long hotSoftTtlMs;
 
-  /** TTL (seconds) for null/cache-miss entries. Kept short to avoid caching negative results. */
-  @Min(1)
-  private int nullValueTtlSeconds = 10;
-
-  @Override
-  public long effectiveNullTtlMs() {
-    if (nullValueTtlSeconds <= 0) {
-      throw new IllegalStateException(
-        "nullValueTtlSeconds must be positive (0 is not 'disable null caching' — it would pin a permanent negative entry; disable per-method via @NullCaching(false))"
-      );
-    }
-    return nullValueTtlSeconds * 1000L;
-  }
-
   @Override
   public String keySeparator() {
     return getSpringCache().getKeySeparator();
@@ -180,33 +164,18 @@ public class ZetaProperties implements CacheCoreSettings, SpringCacheSettings, E
   }
 
   @Override
-  public long cacheMaxWeight() {
-    return getCache().getMaxWeight();
+  public int inFlightMaxSize() {
+    return getInFlightMaxSize();
   }
 
   @Override
-  public int inflightMaxSize() {
-    return getInflightMaxSize();
+  public int inFlightTtlSeconds() {
+    return getInFlightTtlSeconds();
   }
 
   @Override
-  public int inflightTtlSeconds() {
-    return getInflightTtlSeconds();
-  }
-
-  @Override
-  public int inflightTimeoutSeconds() {
-    return getInflightTimeoutSeconds();
-  }
-
-  @Override
-  public int nullValueTtlSeconds() {
-    return getNullValueTtlSeconds();
-  }
-
-  @Override
-  public long getMaxValueSize() {
-    return getCache().getMaxValueSize();
+  public int inFlightTimeoutSeconds() {
+    return getInFlightTimeoutSeconds();
   }
 
   /**
@@ -280,28 +249,6 @@ public class ZetaProperties implements CacheCoreSettings, SpringCacheSettings, E
   /** Exchange name for app-to-Worker reportToWorker routing. */
   private String reportExchange = ZetaConstants.Exchange.REPORT;
 
-  /**
-   * Wire encoding for app-to-Worker report messages (see {@link ReportEncoding}).
-   * The Worker decode path always accepts both formats by first-byte
-   * sniffing, so the upgrade order is: Workers first (binary decode in
-   * place), then flip Apps to {@code COMPACT}.
-   */
-  private ReportEncoding reportEncoding = ReportEncoding.JSON;
-
-  /** Wire encoding for app-to-Worker report messages. */
-  public enum ReportEncoding {
-    /** Jackson JSON body (default) — human-readable, cross-version safe. */
-    JSON,
-
-    /**
-     * Compact binary body (varint + length-prefix framing, adapted from
-     * RocksDB {@code util/coding.h}; ADR-0074) — roughly 50-70% smaller than
-     * JSON for typical key-count batches. Identified by a fixed magic byte,
-     * so receivers accept it alongside JSON regardless of this setting.
-     */
-    COMPACT,
-  }
-
   /** Interval in ms at which the reporter flushes batches to RabbitMQ. */
   private long reportIntervalMs = 50;
 
@@ -356,7 +303,12 @@ public class ZetaProperties implements CacheCoreSettings, SpringCacheSettings, E
     ON,
   }
 
-  /** Number of shards for reportToWorker partitioning (only used when consistent-hashing is disabled). */
+  /**
+   * Number of shards for reportToWorker partitioning.
+   *
+   * @deprecated no longer read by any code path; kept only for property binding compatibility.
+   */
+  @Deprecated
   private int shardCount = 1;
 
   /** Capacity of the per-shard reportToWorker queue. */
@@ -385,114 +337,13 @@ public class ZetaProperties implements CacheCoreSettings, SpringCacheSettings, E
 
   private static final int CACHED_PROCESSORS = Runtime.getRuntime().availableProcessors();
 
-  /**
-   * L1 cache sizing and refault configuration. Implements the
-   * {@link RefaultAdmission.Settings} view consumed by
-   * {@code RefaultAdmission.from} at the assembly boundary.
-   */
+  /** L1 cache sizing configuration. */
   @Data
-  public static class CacheConfig implements RefaultAdmission.Settings {
+  public static class CacheConfig {
 
-    /** Maximum number of entries (ignored when {@link #maxWeight} > 0). */
+    /** Maximum number of entries. */
     private int maxSize = 100_000;
-
-    /** Memory weight limit (e.g. 268435456 for 256 MB). 0 = use {@link #maxSize}. */
-    private long maxWeight;
-
-    /** Single value size limit (bytes). 0 = unlimited. */
-    @Min(0)
-    private long maxValueSize;
-
-    /**
-     * Max object-graph nodes visited per {@code weigh()} call in max-weight mode. Bounds the
-     * per-write CPU cost of weight estimation (the weigher may run while holding Caffeine's bin
-     * lock); sampled containers do not consume this budget in bulk. Values whose graph exceeds the
-     * budget follow {@link #weighOverBudget}.
-     */
-    @Min(1)
-    private int weighWalkNodes = 128;
-
-    /**
-     * What happens when the weigh walk budget (see {@link #weighWalkNodes}) is exhausted:
-     * {@code EXTRAPOLATE} prices the unmeasured remainder conservatively from the walked prefix
-     * (default); {@code ABORT} prices the value above any budget so Caffeine evicts it immediately
-     * (Ehcache-style abort — for deployments that would rather not cache values they cannot
-     * measure).
-     */
-    private WeighOverBudget weighOverBudget = WeighOverBudget.EXTRAPOLATE;
-
-    /** Policy for values whose object graph exhausts the weigh walk budget. */
-    public enum WeighOverBudget {
-      /** Extrapolate the unmeasured remainder conservatively from the walked prefix (default). */
-      EXTRAPOLATE,
-
-      /** Treat the value as exceeding any budget: it is evicted immediately (Ehcache-style abort). */
-      ABORT,
-    }
-
-    /**
-     * ADR-0079 refault distance admission for the L1 load path (kernel
-     * {@code mm/workingset.c} port). The gate answers "would this key have
-     * survived until its next access" — measured as the number of capacity
-     * evictions since the key last left residency — before inserting a
-     * freshly loaded value. {@code off} disables the gate entirely (no
-     * removal listener, no shadow table); {@code shadow} (default) runs the
-     * full machinery and exposes the {@code zeta.l1.refault.*} gauges but
-     * admits everything; {@code on} enforces — a rejected key is stored only
-     * as a short-TTL solo-flight entry ({@link #refaultRejectTtlMs}) instead
-     * of a full-TTL residency.
-     */
-    @NotNull
-    private RefaultAdmissionMode refaultAdmission = RefaultAdmissionMode.SHADOW;
-
-    /**
-     * Hard TTL for entries stored after a refault rejection (the solo-flight
-     * coalescing window). Short by design: rejected keys must not accumulate
-     * residency, but a brief window merges concurrent/rapid re-reads so the
-     * backend load is coalesced rather than amplified. Only meaningful when
-     * {@link #refaultAdmission} = {@code on}.
-     */
-    @Min(1)
-    private long refaultRejectTtlMs = 200;
-
-    /**
-     * Capacity (in entries) the gate compares refault distances against.
-     * {@code 0} (default) derives the estimate from {@link #maxSize} — exact
-     * in size mode. In weight mode {@code maxSize} is not the entry bound, so
-     * deployments should set this to the expected steady-state entry count.
-     */
-    @Min(0)
-    private long refaultCapacityEntries;
-
-    /**
-     * Shadow table size as a power-of-two exponent (slots = 2^bits, 8 bytes
-     * per slot). {@code 0} (default) auto-derives the smallest table that
-     * covers 8x the capacity estimate, clamped to [2^8, 2^18]; larger
-     * deployments may pin the exponent explicitly (8..24).
-     */
-    @Min(0)
-    @Max(24)
-    private int refaultShadowBits;
-
-    /** {@link RefaultAdmission.Settings} bridge: the gate mode, mapped by name (same values). */
-    @Override
-    public RefaultAdmission.Mode mode() {
-      return RefaultAdmission.Mode.valueOf(refaultAdmission.name());
-    }
   }
-
-  /** Modes for the ADR-0079 refault distance admission gate. */
-  public enum RefaultAdmissionMode {
-    /** No gate: no listener, no shadow table, byte-identical to pre-ADR-0079 behavior. */
-    OFF,
-
-    /** Run the full machinery and expose gauges; never refuse residency (default). */
-    SHADOW,
-
-    /** Enforce: refault-rejected keys are stored only as short-TTL solo-flight entries. */
-    ON,
-  }
-
   /** L1 cache configuration. */
   @Valid
   private CacheConfig cache = new CacheConfig();
@@ -532,8 +383,7 @@ public class ZetaProperties implements CacheCoreSettings, SpringCacheSettings, E
   @Data
   public static class ReporterLimiter {
 
-    /** Whether BBR adaptive rate-limiting is enabled. */
-    @Getter(AccessLevel.NONE)
+    /** Whether BBR adaptive rate-limiting is enabled (binds {@code zeta.report.enabled}). */
     private boolean enabled = true;
 
     /** CPU threshold (0–1000, default 800 = 80 %). */
@@ -705,33 +555,16 @@ public class ZetaProperties implements CacheCoreSettings, SpringCacheSettings, E
     private String keySeparator = "::";
   }
 
-  @Data
-  public static class CacheKey {
-
-    /** Strip query parameters (?...) from cache keys for normalization. */
-    private boolean stripQuery = false;
-  }
-
-  /** Cache key normalization configuration. */
-  @Valid
-  private CacheKey cacheKey = new CacheKey();
-
-  /** {@link CacheCoreSettings} bridge: the live nested cache-key block. */
-  @Override
-  public boolean isStripQuery() {
-    return cacheKey.isStripQuery();
-  }
-
   /** Spring Cache integration configuration. */
   @Valid
   private SpringCache springCache = new SpringCache();
 
-  /** Number of {@code SET NX} retries for distributed lock acquisition. */
+  /** Number of {@code SET NX} retries for Redis distributed-lock acquisition (lock attempts). */
   private int tryLockLockCount = 2;
 
   /** Number of {@code GET} inquiries after a transient {@code SET NX} failure. */
   private int tryLockInquiryCount = 1;
 
-  /** Number of {@code DEL} retries for distributed lock release. */
+  /** Number of {@code DEL} retries for Redis distributed-lock release (unlock attempts). */
   private int tryLockUnlockCount = 2;
 }
