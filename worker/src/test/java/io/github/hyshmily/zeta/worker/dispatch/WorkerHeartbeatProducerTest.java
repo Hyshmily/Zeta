@@ -33,7 +33,8 @@ import java.nio.file.Path;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicLong;
+import io.github.hyshmily.zeta.sync.worker.SmConfigSnapshot;
+import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -47,7 +48,7 @@ import org.springframework.amqp.core.Message;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.data.redis.connection.RedisConnectionFactory;
 import org.springframework.data.redis.core.StringRedisTemplate;
-import org.springframework.data.redis.core.ValueOperations;
+import org.springframework.data.redis.core.script.RedisScript;
 import org.springframework.test.util.ReflectionTestUtils;
 
 /**
@@ -67,8 +68,8 @@ class WorkerHeartbeatProducerTest {
   @Mock
   private ZetaBayesianSM stateMachine;
 
-  @Mock
-  private AtomicLong configTimestampCounter;
+  /** Gossip snapshot the producer reads atomically per heartbeat (production shape, not a mock). */
+  private AtomicReference<SmConfigSnapshot> configSnapshot;
 
   @Captor
   private ArgumentCaptor<Message> messageCaptor;
@@ -76,6 +77,7 @@ class WorkerHeartbeatProducerTest {
   private static final String WORKER_ID = "worker1";
   private static final String HB_EXCHANGE = HEARTBEAT;
   private static final long PING_INTERVAL_MS = 1000L;
+  private static final long READY_GRACE_MS = 3_000L;
 
   /** Each file-based test gets its own temp directory for isolation. */
   @TempDir
@@ -83,6 +85,7 @@ class WorkerHeartbeatProducerTest {
 
   @BeforeEach
   void cleanEpochFile() {
+    configSnapshot = new AtomicReference<>(new SmConfigSnapshot(3, 10, 3, 0L));
     try {
       Files.deleteIfExists(epochFilePath());
     } catch (Exception e) {
@@ -105,7 +108,9 @@ class WorkerHeartbeatProducerTest {
     verify(rabbitTemplate).send(eq(HB_EXCHANGE), eq(KEY_HEARTBEAT + WORKER_ID), messageCaptor.capture());
     assertThat(messageCaptor.getValue().getMessageProperties().getHeaders())
       .extracting(HEADER_HEARTBEAT_EPOCH)
-      .isInstanceOfSatisfying(Long.class, epoch -> assertThat(epoch).isPositive().isGreaterThan(1_500_000_000_000_000L));
+      .isInstanceOfSatisfying(Long.class, epoch ->
+        assertThat(epoch).isPositive().isGreaterThan(1_500_000_000_000_000L)
+      );
   }
 
   /**
@@ -121,9 +126,10 @@ class WorkerHeartbeatProducerTest {
         HB_EXCHANGE,
         WORKER_ID,
         stateMachine,
-        configTimestampCounter,
+        configSnapshot,
         redisFactoryMock,
         PING_INTERVAL_MS,
+        READY_GRACE_MS,
         mock(ScheduledExecutorService.class),
         mock(SnowflakeIdGenerator.class)
       );
@@ -132,7 +138,9 @@ class WorkerHeartbeatProducerTest {
       verify(rabbitTemplate).send(eq(HB_EXCHANGE), eq(KEY_HEARTBEAT + WORKER_ID), messageCaptor.capture());
       assertThat(messageCaptor.getValue().getMessageProperties().getHeaders())
         .extracting(HEADER_HEARTBEAT_EPOCH)
-        .isInstanceOfSatisfying(Long.class, epoch -> assertThat(epoch).isPositive().isGreaterThan(1_500_000_000_000_000L));
+        .isInstanceOfSatisfying(Long.class, epoch ->
+          assertThat(epoch).isPositive().isGreaterThan(1_500_000_000_000_000L)
+        );
     }
   }
 
@@ -206,10 +214,8 @@ class WorkerHeartbeatProducerTest {
   @Test
   void sendHeartbeat_shouldDeliverAllFields() {
     long configTs = 456L;
-    when(stateMachine.getConfirmCount()).thenReturn(3);
-    when(stateMachine.getCoolCount()).thenReturn(10);
-    when(stateMachine.getPreCoolGraceCount()).thenReturn(3);
-    when(configTimestampCounter.get()).thenReturn(configTs);
+    // Gossip fields now travel inside the snapshot, not via stateMachine reads.
+    configSnapshot.set(new SmConfigSnapshot(3, 10, 3, configTs));
     when(stateMachine.getTrackedKeys()).thenReturn(1);
 
     var producer = newProducer();
@@ -294,12 +300,13 @@ class WorkerHeartbeatProducerTest {
    */
   @Test
   void stop_shouldCancelHeartbeatTaskWhenRunning() {
-    try (var construction = mockConstruction(
-      SafeScheduledExecutorService.class,
-      (mock, context) ->
-        when(mock.scheduleAtFixedRate(any(Runnable.class), anyLong(), anyLong(), any()))
-          .thenReturn(mock(ScheduledFuture.class))
-    )) {
+    try (
+      var construction = mockConstruction(SafeScheduledExecutorService.class, (mock, context) ->
+        when(mock.scheduleAtFixedRate(any(Runnable.class), anyLong(), anyLong(), any())).thenReturn(
+          mock(ScheduledFuture.class)
+        )
+      )
+    ) {
       var producer = newProducer();
       producer.start();
       // heartbeatTask is now non-null; stop() must cancel it and shut down
@@ -326,9 +333,10 @@ class WorkerHeartbeatProducerTest {
         HB_EXCHANGE,
         WORKER_ID,
         stateMachine,
-        configTimestampCounter,
+        configSnapshot,
         redisFactoryMock,
         PING_INTERVAL_MS,
+        READY_GRACE_MS,
         schedulerMock,
         mock(SnowflakeIdGenerator.class)
       );
@@ -360,7 +368,7 @@ class WorkerHeartbeatProducerTest {
    */
   @Test
   void sendHeartbeat_shouldCatchRabbitMqException() {
-    when(configTimestampCounter.get()).thenReturn(0L);
+    configSnapshot.set(new SmConfigSnapshot(3, 10, 3, 0L));
     doThrow(new RuntimeException("RabbitMQ unavailable")).when(rabbitTemplate).send(anyString(), anyString(), any());
 
     var producer = newProducer();
@@ -395,19 +403,24 @@ class WorkerHeartbeatProducerTest {
       HB_EXCHANGE,
       WORKER_ID,
       stateMachine,
-      configTimestampCounter,
+      configSnapshot,
       PING_INTERVAL_MS,
+      READY_GRACE_MS,
       mock(SnowflakeIdGenerator.class)
     );
   }
 
   @SuppressWarnings("all")
-  private static MockedConstruction.MockInitializer<StringRedisTemplate> redisReturning(Long value) {
-    return (mock, ctx) -> {
-      var ops = (ValueOperations<String, String>) mock(ValueOperations.class);
-      when(mock.opsForValue()).thenReturn(ops);
-      when(ops.increment(anyString())).thenReturn(value);
-    };
+  private static MockedConstruction.MockInitializer<StringRedisTemplate> redisReturning(Long incrValue) {
+    // Emulates the atomic Lua init script (max of INCR and the wall-clock floor);
+    // a null INCR passes through so production takes the local-file fallback.
+    return (mock, ctx) ->
+      when(mock.execute(any(RedisScript.class), anyList(), any())).thenAnswer(inv -> {
+        if (incrValue == null) {
+          return null;
+        }
+        return Math.max(incrValue, System.currentTimeMillis() * 1000L);
+      });
   }
 
   private static MockedConstruction.MockInitializer<StringRedisTemplate> redisThrowing() {

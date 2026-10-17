@@ -4,7 +4,12 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import io.github.hyshmily.zeta.worker.rule.FastLaneRuleManager;
 import java.util.List;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 
@@ -226,6 +231,70 @@ class FastLaneRuleManagerImplTest {
       assertThat(manager.getRulesVersion()).isEqualTo(published);
       assertThat(manager.match("versioned:x")).isNotNull();
       assertThat(manager.match("other:x")).isNull();
+    }
+  }
+
+  /**
+   * Snapshot convergence under concurrency, ported from
+   * {@code RuleMatcherTest$DecisionMemo#memo_shouldStayConsistentUnderConcurrency}.
+   *
+   * <p>A per-epoch match cache must never resurrect a stale match after the
+   * rule set moved on: the writer flips one pattern present/absent while the
+   * reader matches continuously. Only "matched" (non-null) or "no match"
+   * (null) are legal mid-flight; once the writer's final removal lands, the
+   * key must read as no match — no entry computed under a previous epoch may
+   * backfill the new epoch's cache.
+   */
+  @Nested
+  @DisplayName("Snapshot convergence")
+  class SnapshotConvergence {
+
+    @Test
+    @DisplayName("concurrent match and mutation converge: no stale match resurrects")
+    void concurrentMatchAndMutation_shouldConvergeWithoutStaleMatch() throws Exception {
+      FastLaneRuleManager concurrent = new FastLaneRuleManagerImpl(List.of());
+      int rounds = 100;
+      ExecutorService pool = Executors.newFixedThreadPool(4);
+      try {
+        Future<?> writer = pool.submit(() -> {
+          for (int i = 0; i < rounds; i++) {
+            concurrent.addRule("hot:*", 10);
+            concurrent.removeRule("hot:*");
+          }
+        });
+        Future<?> reader = pool.submit(() -> {
+          for (int i = 0; i < rounds * 20; i++) {
+            FastLaneRuleManager.FastLaneRule matched = concurrent.match("hot:k");
+            // Only present (rule installed) or absent (not yet added / already
+            // removed) are legal; any other outcome would be a stale epoch.
+            assertThat(matched == null || matched.threshold() == 10).isTrue();
+          }
+        });
+        writer.get(10, TimeUnit.SECONDS);
+        reader.get(10, TimeUnit.SECONDS);
+      } finally {
+        pool.shutdownNow();
+      }
+      // The writer's final removal emptied the set — a match cached under any
+      // previous epoch must not resurrect.
+      assertThat(concurrent.match("hot:k")).isNull();
+    }
+
+    @Test
+    @DisplayName("a rule added after a cached miss is honored on the very next match")
+    void match_shouldReflectAddedRuleImmediately() {
+      FastLaneRuleManager empty = new FastLaneRuleManagerImpl(List.of());
+      assertThat(empty.match("blocked:k")).isNull();
+      empty.addRule("blocked:*", 5);
+      assertThat(empty.match("blocked:k")).isNotNull();
+    }
+
+    @Test
+    @DisplayName("a removed rule is honored on the very next match")
+    void match_shouldReflectRemovedRuleImmediately() {
+      assertThat(manager.match("product:x")).isNotNull();
+      assertThat(manager.removeRule("product:*")).isTrue();
+      assertThat(manager.match("product:x")).isNull();
     }
   }
 }

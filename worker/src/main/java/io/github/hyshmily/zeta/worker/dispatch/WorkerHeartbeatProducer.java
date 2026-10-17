@@ -15,9 +15,8 @@
  */
 package io.github.hyshmily.zeta.worker.dispatch;
 
-import static io.github.hyshmily.zeta.constants.ZetaConstants.Routing.KEY_HEARTBEAT;
-
 import io.github.hyshmily.zeta.detection.ZetaBayesianSM;
+import io.github.hyshmily.zeta.sync.worker.SmConfigSnapshot;
 import io.github.hyshmily.zeta.sync.worker.WorkerHeartbeatMessage;
 import io.github.hyshmily.zeta.util.LogThrottle;
 import io.github.hyshmily.zeta.util.TimeSource;
@@ -26,20 +25,28 @@ import io.github.hyshmily.zeta.util.executor.SafeScheduledExecutorService;
 import io.github.hyshmily.zeta.util.id.SnowflakeIdGenerator;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
-import java.lang.management.ManagementFactory;
-import java.lang.management.OperatingSystemMXBean;
-import java.nio.channels.FileChannel;
-import java.nio.channels.FileLock;
-import java.nio.file.Path;
-import java.nio.file.StandardOpenOption;
-import java.util.concurrent.*;
-import java.util.concurrent.atomic.AtomicLong;
 import lombok.AccessLevel;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.data.redis.connection.RedisConnectionFactory;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.data.redis.core.script.DefaultRedisScript;
+
+import java.lang.management.ManagementFactory;
+import java.lang.management.OperatingSystemMXBean;
+import java.nio.channels.FileChannel;
+import java.nio.channels.FileLock;
+import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
+import java.util.List;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
+
+import static io.github.hyshmily.zeta.constants.ZetaConstants.Routing.KEY_HEARTBEAT;
 
 /**
  * Enhanced Worker heartbeat sender.
@@ -61,7 +68,7 @@ public class WorkerHeartbeatProducer {
   private final String heartbeatExchange;
   /** Unique identity of this Worker node. */
   private final String workerId;
-  /** State machine providing config-gossip fields (confirm/cool/grace counts). */
+  /** State machine providing tracked-keys for the ready-to-serve check. */
   private final ZetaBayesianSM stateMachine;
   /** Monotonically increasing epoch, persisted across restarts. */
   private final long epoch;
@@ -71,11 +78,14 @@ public class WorkerHeartbeatProducer {
   private final ScheduledExecutorService scheduler;
   /** Whether this instance owns the scheduler (self-created). */
   private final boolean ownsScheduler;
-  /** Shared monotonic counter for config-change timestamps embedded in heartbeats. */
-  private final AtomicLong configTimestampCounter;
+  /** Shared atomic gossip snapshot embedded in heartbeats; read wholesale to avoid torn fields. */
+  private final AtomicReference<SmConfigSnapshot> configSnapshot;
 
   /** Interval between consecutive heartbeat sends (milliseconds). */
   private final long pingIntervalMs;
+
+  /** Grace period (ms) before the Worker reports ready without tracked keys. */
+  private final long readyGraceMs;
 
   private final SnowflakeIdGenerator snowflakeIdGenerator;
   /** Handle for the scheduled heartbeat task. */
@@ -89,16 +99,29 @@ public class WorkerHeartbeatProducer {
 
   private static final String EPOCH_REDIS_KEY_PREFIX = "zeta:worker:epoch:";
 
+  /** Atomic epoch init: {@code INCR} the key, raise to the wall-clock floor when behind. */
+  private static final DefaultRedisScript<Long> INIT_EPOCH_SCRIPT = new DefaultRedisScript<>(
+    "local v = redis.call('INCR', KEYS[1])\n" +
+      "local floor = tonumber(ARGV[1])\n" +
+      "if v < floor then\n" +
+      "  redis.call('SET', KEYS[1], floor)\n" +
+      "  return floor\n" +
+      "end\n" +
+      "return v",
+    Long.class
+  );
+
   /**
    * Creates a new heartbeat producer with a shared external scheduler.
    *
    * @param rabbitTemplate         the RabbitMQ template for publishing heartbeat messages
    * @param heartbeatExchange      the target topic exchange for heartbeat messages
    * @param workerId               unique identity of this Worker node
-   * @param stateMachine           the state machine providing config-gossip fields
-   * @param configTimestampCounter the shared monotonic counter for config-change timestamps
+   * @param stateMachine           the state machine for the ready-to-serve tracked-keys check
+   * @param configSnapshot         the shared atomic gossip snapshot
    * @param redisConnectionFactory the Redis connection factory for epoch initialization
    * @param pingIntervalMs         interval between consecutive heartbeat sends (milliseconds)
+   * @param readyGraceMs           grace period (ms) before reporting ready without tracked keys
    * @param scheduler              the shared external scheduler for periodic heartbeat sends
    */
   @SuppressWarnings("all")
@@ -107,9 +130,10 @@ public class WorkerHeartbeatProducer {
     String heartbeatExchange,
     String workerId,
     ZetaBayesianSM stateMachine,
-    AtomicLong configTimestampCounter,
+    AtomicReference<SmConfigSnapshot> configSnapshot,
     RedisConnectionFactory redisConnectionFactory,
     long pingIntervalMs,
+    long readyGraceMs,
     ScheduledExecutorService scheduler,
     SnowflakeIdGenerator snowflakeIdGenerator
   ) {
@@ -122,8 +146,9 @@ public class WorkerHeartbeatProducer {
       TimeSource.monotonicMillis(),
       scheduler,
       false,
-      configTimestampCounter,
+      configSnapshot,
       pingIntervalMs,
+      readyGraceMs,
       snowflakeIdGenerator
     );
   }
@@ -135,10 +160,11 @@ public class WorkerHeartbeatProducer {
    * @param rabbitTemplate         the RabbitMQ template for publishing heartbeat messages
    * @param heartbeatExchange      the target topic exchange for heartbeat messages
    * @param workerId               unique identity of this Worker node
-   * @param stateMachine           the state machine providing config-gossip fields
-   * @param configTimestampCounter the shared monotonic counter for config-change timestamps
+   * @param stateMachine           the state machine for the ready-to-serve tracked-keys check
+   * @param configSnapshot         the shared atomic gossip snapshot
    * @param epoch                  the externally-computed epoch value
    * @param pingIntervalMs         interval between consecutive heartbeat sends (milliseconds)
+   * @param readyGraceMs           grace period (ms) before reporting ready without tracked keys
    * @param scheduler              the shared external scheduler for periodic heartbeat sends
    */
   @SuppressWarnings("all")
@@ -147,9 +173,10 @@ public class WorkerHeartbeatProducer {
     String heartbeatExchange,
     String workerId,
     ZetaBayesianSM stateMachine,
-    AtomicLong configTimestampCounter,
+    AtomicReference<SmConfigSnapshot> configSnapshot,
     long epoch,
     long pingIntervalMs,
+    long readyGraceMs,
     ScheduledExecutorService scheduler,
     SnowflakeIdGenerator snowflakeIdGenerator
   ) {
@@ -162,8 +189,9 @@ public class WorkerHeartbeatProducer {
       TimeSource.monotonicMillis(),
       scheduler,
       false,
-      configTimestampCounter,
+      configSnapshot,
       pingIntervalMs,
+      readyGraceMs,
       snowflakeIdGenerator
     );
   }
@@ -176,9 +204,10 @@ public class WorkerHeartbeatProducer {
    * @param rabbitTemplate         the RabbitMQ template for publishing heartbeat messages
    * @param heartbeatExchange      the target topic exchange for heartbeat messages
    * @param workerId               unique identity of this Worker node
-   * @param stateMachine           the state machine providing config-gossip fields
-   * @param configTimestampCounter the shared monotonic counter for config-change timestamps
+   * @param stateMachine           the state machine for the ready-to-serve tracked-keys check
+   * @param configSnapshot         the shared atomic gossip snapshot
    * @param pingIntervalMs         interval between consecutive heartbeat sends (milliseconds)
+   * @param readyGraceMs           grace period (ms) before reporting ready without tracked keys
    * @return a new heartbeat producer ready for testing
    */
   public static WorkerHeartbeatProducer forTesting(
@@ -186,8 +215,9 @@ public class WorkerHeartbeatProducer {
     String heartbeatExchange,
     String workerId,
     ZetaBayesianSM stateMachine,
-    AtomicLong configTimestampCounter,
+    AtomicReference<SmConfigSnapshot> configSnapshot,
     long pingIntervalMs,
+    long readyGraceMs,
     SnowflakeIdGenerator snowflakeIdGenerator
   ) {
     long epoch = initEpochFromLocalFile(workerId);
@@ -201,8 +231,9 @@ public class WorkerHeartbeatProducer {
       System.currentTimeMillis(),
       scheduler,
       true,
-      configTimestampCounter,
+      configSnapshot,
       pingIntervalMs,
+      readyGraceMs,
       snowflakeIdGenerator
     );
   }
@@ -218,32 +249,27 @@ public class WorkerHeartbeatProducer {
   }
 
   /**
-   * Initializes the epoch by atomically incrementing a Redis counter via
-   * {@code INCR}.  Uses a single atomic Redis command (no read-modify-write
-   * race) so concurrent Workers with the same {@code workerId} always
-   * receive distinct epoch values.
+   * Initializes the epoch with a single atomic Redis Lua script ({@code INCR} plus floor
+   * elevation in one round trip), so concurrent Workers sharing one {@code workerId} can never
+   * regress the key: the script returns {@code max(incr, floor)} and persists the floor
+   * when it wins.
    *
    * <p>Falls back to a local file if Redis is unavailable.
    *
    * @param redis the Redis template (created ad-hoc for this one-time operation)
    * @return the new epoch value for this Worker incarnation
    */
+  @SuppressWarnings("all")
   public static long doInitEpoch(StringRedisTemplate redis, String workerId) {
     try {
       long floor = System.currentTimeMillis() * 1000L;
       String key = EPOCH_REDIS_KEY_PREFIX + workerId;
-      Long incr = redis.opsForValue().increment(key);
-      if (incr == null) {
+      Long next = redis.execute(INIT_EPOCH_SCRIPT, List.of(key), String.valueOf(floor));
+      if (next == null) {
         return initEpochFromLocalFile(workerId);
       }
-      // Enforce floor: prevent epoch rollback when Redis counter was reset or
-      // fell behind the timestamp-based fallback space.
-      long next = Math.max(incr, floor);
-      if (next != incr) {
-        // Bring the Redis key up to the floor so the next incarnation benefits.
-        redis.opsForValue().set(key, String.valueOf(next));
-      }
-      log.info("Epoch initialized via Redis: workerId={}, incr={}, floor={}, epoch={}", workerId, incr, floor, next);
+
+      log.info("Epoch initialized via Redis: workerId={}, floor={}, epoch={}", workerId, floor, next);
       return next;
     } catch (Exception e) {
       log.warn("Redis unavailable for epoch, using local file fallback", e);
@@ -318,14 +344,18 @@ public class WorkerHeartbeatProducer {
 
   /**
    * Whether this Worker is ready to serve hot-key detection.
-   * Returns {@code true} after a 3-second startup grace period or as soon as
-   * the state machine has tracked at least one key.
+   *
+   * <p>Returns {@code true} once the configured ready-grace period
+   * ({@code zeta.worker.heartbeat.ready-grace-ms}, default 3000) has elapsed
+   * or as soon as the state machine has tracked at least one key. The grace
+   * only gates the ring-admission signal; early threshold learning and COOL
+   * suppression are governed separately by the learning period.
    *
    * @return {@code true} if the Worker considers itself ready
    */
   private boolean isReadyToServe() {
     long uptime = TimeSource.monotonicMillis() - startTime;
-    return uptime > 3000 || stateMachine.getTrackedKeys() > 0;
+    return uptime > readyGraceMs || stateMachine.getTrackedKeys() > 0;
   }
 
   /**
@@ -380,16 +410,19 @@ public class WorkerHeartbeatProducer {
    */
   void sendHeartbeat() {
     try {
+      // Single atomic read: the four gossip fields travel together, so a
+      // concurrent config adoption can never mix new counts with an old timestamp.
+      SmConfigSnapshot snapshot = configSnapshot.get();
       WorkerHeartbeatMessage hb = new WorkerHeartbeatMessage(
         snowflakeIdGenerator.nextId(),
         workerId,
         epoch,
         computeLoadFactor(),
         isReadyToServe(),
-        stateMachine.getConfirmCount(),
-        stateMachine.getCoolCount(),
-        stateMachine.getPreCoolGraceCount(),
-        configTimestampCounter.get()
+        snapshot.confirmCount(),
+        snapshot.coolCount(),
+        snapshot.preCoolGraceCount(),
+        snapshot.configTimestamp()
       );
       rabbitTemplate.send(heartbeatExchange, KEY_HEARTBEAT + workerId, hb.toMessage());
     } catch (Exception e) {

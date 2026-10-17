@@ -21,25 +21,30 @@ import io.github.hyshmily.zeta.util.TimeSource;
 import io.github.hyshmily.zeta.worker.rule.FastLaneRuleManager;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeUnit;
-import java.util.function.Function;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * Concurrent, cache-backed implementation of {@link FastLaneRuleManager}.
  *
- * <p>Rules are stored in a {@link ConcurrentHashMap} keyed by pattern string
- * and mirrored in a {@link java.util.concurrent.CopyOnWriteArrayList} for
- * insertion-order iteration. When multiple patterns match the same key, the
- * earliest-added rule wins.
+ * <p>Rules are held in an immutable {@link RuleSnapshot} published through an
+ * {@link AtomicReference}. Every mutation builds a fresh snapshot (new version,
+ * new rule list, new match cache) and swaps it atomically; readers load the
+ * snapshot reference once and evaluate against that exact triple. There is no
+ * shared mutable map, no shared match cache, and no cross-epoch backfill: a
+ * slow glob scan started under the old snapshot populates only the old
+ * snapshot's cache, which becomes unreachable the moment the new snapshot is
+ * published.
  *
- * <p>Key-to-rule lookups ({@link #match}) are accelerated by a Caffeine cache
- * with a 30-second TTL, ensuring repeated evaluations of the same key are
- * O(1) amortised. Negative results (no match) are cached via a sentinel so
- * non-fast-lane keys also benefit from O(1) amortised lookup. The cache is
- * invalidated on every write operation ({@link #addRule}, {@link #removeRule},
- * {@link #updateRule}, {@link #replaceAll}) so changes are visible immediately.
+ * <p>When multiple patterns match the same key, the earliest-added rule wins
+ * (insertion order of the snapshot list).
+ *
+ * <p>Key-to-rule lookups ({@link #match}) are accelerated by the snapshot's own
+ * Caffeine cache with a 30-second TTL, ensuring repeated evaluations of the
+ * same key are O(1) amortised. Negative results (no match) are cached via a
+ * sentinel so non-fast-lane keys also benefit from O(1) amortised lookup. An
+ * empty rule set short-circuits to {@code null} without touching the cache
+ * (zero allocation on the fast path).
  *
  * <p><b>Versioning (ADR-0025):</b> the rule set carries a wall-clock version
  * ({@link TimeSource#currentTimeMillis()} of the last local mutation, made
@@ -58,40 +63,63 @@ import java.util.function.Function;
  * clock drift) makes a fresh local edit carry a version at or below one already
  * published; every peer then rejects the broadcast as stale and the edit
  * silently never propagates (re-sending it does not help — it carries the same
- * low version). {@link #nextRulesVersion()} therefore derives each version from
- * the previous one as well as the clock.
+ * low version). The version mint therefore derives each version from the
+ * previous one as well as the clock.
  *
  * <p>Glob matching ({@code *} / {@code ?}) is used to compare cache keys
  * against rule patterns. See {@link #matchGlob} for the exact semantics.
  *
  * <p>Thread-safe. All mutations (local CRUD and gossip replace) are
  * {@code synchronized} — they are rare (operator-driven or once per gossip
- * interval) and must update the map, the ordered list, the version, and the
- * match cache atomically. Reads via {@link #match} stay Caffeine-internal
- * and lock-free.
+ * interval) and must mint the version and publish the snapshot atomically.
+ * Reads via {@link #match} stay lock-free (one volatile snapshot load plus
+ * Caffeine-internal concurrency).
  */
 public class FastLaneRuleManagerImpl implements FastLaneRuleManager {
 
   /** Sentinel for negative lookups — Caffeine does not cache null. */
   private static final FastLaneRule NO_MATCH = new FastLaneRule("", -1);
 
-  /** Registered rules, keyed by {@link FastLaneRule#keyPattern()}. */
-  private final ConcurrentHashMap<String, FastLaneRule> rules = new ConcurrentHashMap<>();
-
-  /** Insertion-ordered list for ordered iteration in {@link #match}. */
-  private final CopyOnWriteArrayList<FastLaneRule> orderedRules = new CopyOnWriteArrayList<>();
-
   /**
-   * Wall-clock version of the current rule set (ms since epoch). {@code 0}
-   * for YAML-loaded initial rules. Stamped on every local mutation and on
-   * every applied gossip snapshot. Written under the intrinsic lock,
-   * read via {@link #getRulesVersion()} (volatile).
+   * Immutable, atomically published rule-set snapshot: the version, the
+   * insertion-ordered rules, and the match cache that belongs to exactly this
+   * epoch. Readers pin one snapshot per {@link #match} call; writers replace
+   * the whole record under the intrinsic lock.
+   *
+   * @param version the rule-set version (ADR-0025)
+   * @param rules the insertion-ordered rules (unmodifiable, never {@code null})
+   * @param matchCache the per-epoch Caffeine match cache (never {@code null})
    */
-  private volatile long rulesVersion = 0L;
+  private record RuleSnapshot(long version, List<FastLaneRule> rules, Cache<String, FastLaneRule> matchCache) {}
+
+  /** Current rule-set snapshot; swapped atomically on every mutation. */
+  private final AtomicReference<RuleSnapshot> snapshot;
 
   /**
-   * Mint the next rule-set version: strictly greater than every version this
-   * instance has published so far, and never below the current wall clock.
+   * Build a fresh per-epoch match cache.
+   *
+   * <p>Prevents O(n) glob scanning for repeatedly-seen keys. Entries expire
+   * after 30 seconds as a backstop for in-place rule-object mutation (rules
+   * are records and cannot be mutated, so the TTL never fires on a legal
+   * path — every legal mutation publishes a fresh cache).
+   *
+   * <p>The 10k {@code maximumSize} cap is deliberate: fast-lane rule sets are
+   * operator-authored and typically single-digit, so a cache miss (only
+   * reachable past 10k concurrently-tracked distinct keys) degrades to an
+   * O(rules) glob scan — cheap at that size. The cap is what bounds the
+   * cache's memory for high-cardinality key spaces; raising it trades memory
+   * for hit rate with no other effect.
+   *
+   * @return a new empty match cache
+   */
+  private static Cache<String, FastLaneRule> newMatchCache() {
+    return Caffeine.newBuilder().maximumSize(10_000).expireAfterWrite(30, TimeUnit.SECONDS).build();
+  }
+
+  /**
+   * Mint the next rule-set version from the given current version: strictly
+   * greater than every version published so far, and never below the current
+   * wall clock.
    *
    * <p>Takes the clock through {@link TimeSource} rather than
    * {@code System.currentTimeMillis()} so the version also inherits TimeSource's
@@ -102,47 +130,15 @@ public class FastLaneRuleManagerImpl implements FastLaneRuleManager {
    * otherwise leave peers converging on whichever snapshot arrived last.
    *
    * <p><b>Callers must hold the intrinsic lock</b> (every mutation method is
-   * {@code synchronized}), so the read-modify-write on the volatile field is not
-   * racing another writer.
+   * {@code synchronized}), so the read of the current snapshot version races
+   * no other writer.
    *
+   * @param current the current snapshot version
    * @return the new, strictly greater rule-set version
    */
-  private long nextRulesVersion() {
-    long next = Math.max(rulesVersion + 1, TimeSource.currentTimeMillis());
-    rulesVersion = next;
-    return next;
+  private static long nextRulesVersion(long current) {
+    return Math.max(current + 1, TimeSource.currentTimeMillis());
   }
-
-  /**
-   * Caffeine cache from evaluated cache key to the matched rule.
-   *
-   * <p>Prevents O(n) glob scanning for repeatedly-seen keys. Entries expire
-   * after 30 seconds to pick up rule changes that bypass {@link #invalidateAll}
-   * (e.g. direct mutation of a shared map).
-   *
-   * <p>The 10k {@code maximumSize} cap is deliberate: fast-lane rule sets are
-   * operator-authored and typically single-digit, so a cache miss (only
-   * reachable past 10k concurrently-tracked distinct keys) degrades to an
-   * O(rules) glob scan — cheap at that size. The cap is what bounds the
-   * cache's memory for high-cardinality key spaces; raising it trades memory
-   * for hit rate with no other effect.
-   */
-  private final Cache<String, FastLaneRule> matchCache = Caffeine.newBuilder()
-    .maximumSize(10_000)
-    .expireAfterWrite(30, TimeUnit.SECONDS)
-    .build();
-
-  /**
-   * Reusable loader for {@link #matchCache}. Hoisted to a field so repeated {@link #match}
-   * calls share one lambda instance instead of allocating a capturing lambda per call —
-   * the cache is consulted once per reported key per evaluation batch.
-   */
-  private final Function<String, FastLaneRule> matchLoader = k -> {
-    for (FastLaneRule rule : orderedRules) {
-      if (matchGlob(k, rule.keyPattern())) return rule;
-    }
-    return NO_MATCH;
-  };
 
   /**
    * Create a manager pre-populated with the given rules.
@@ -150,58 +146,85 @@ public class FastLaneRuleManagerImpl implements FastLaneRuleManager {
    * @param initialRules rules to load on startup; may be {@code null} or empty
    */
   public FastLaneRuleManagerImpl(List<FastLaneRule> initialRules) {
-    if (initialRules != null) {
-      for (FastLaneRule rule : initialRules) {
-        rules.put(rule.keyPattern(), rule);
-        orderedRules.add(rule);
-      }
-    }
+    List<FastLaneRule> rules = initialRules == null ? List.of() : List.copyOf(initialRules);
+    snapshot = new AtomicReference<>(new RuleSnapshot(0L, rules, newMatchCache()));
   }
 
   /**
    * Add or replace a fast-lane rule.
    *
-   * <p>The match cache is invalidated so that subsequent {@link #match} calls
-   * reflect the new rule set. Stamps the gossip version (ADR-0025).
+   * <p>Builds a fresh snapshot (new version, new rule list, new match cache)
+   * and publishes it atomically, so subsequent {@link #match} calls reflect
+   * the new rule set with no stale backfill. Stamps the gossip version
+   * (ADR-0025).
    *
    * @param keyPattern the glob-style key pattern to match
    * @param threshold  the sliding-window sum threshold
    */
   @Override
   public synchronized void addRule(String keyPattern, long threshold) {
+    RuleSnapshot current = snapshot.get();
+    List<FastLaneRule> next = new ArrayList<>(current.rules());
     FastLaneRule rule = new FastLaneRule(keyPattern, threshold);
-    FastLaneRule old = rules.put(keyPattern, rule);
-    if (old == null) {
-      orderedRules.add(rule);
-    } else {
-      orderedRules.replaceAll(r -> r.keyPattern().equals(keyPattern) ? rule : r);
+    boolean replaced = false;
+    for (int i = 0; i < next.size(); i++) {
+      if (next.get(i).keyPattern().equals(keyPattern)) {
+        next.set(i, rule);
+        replaced = true;
+        break;
+      }
     }
-    nextRulesVersion();
-    matchCache.invalidateAll();
+
+    if (!replaced) {
+      next.add(rule);
+    }
+    snapshot.set(
+      new RuleSnapshot(nextRulesVersion(current.version()), List.copyOf(next), newMatchCache())
+    );
   }
 
   /**
    * Remove a fast-lane rule by its pattern.
+   *
+   * <p>A miss leaves the snapshot untouched (no version bump, no cache
+   * turnover); a hit publishes a fresh snapshot with a fresh match cache.
    *
    * @param keyPattern the key pattern to remove
    * @return {@code true} if a rule was actually removed
    */
   @Override
   public synchronized boolean removeRule(String keyPattern) {
-    boolean removed = rules.remove(keyPattern) != null;
-    if (removed) {
-      orderedRules.removeIf(r -> r.keyPattern().equals(keyPattern));
-      nextRulesVersion();
-      matchCache.invalidateAll();
+    RuleSnapshot current = snapshot.get();
+    boolean present = false;
+    for (FastLaneRule rule : current.rules()) {
+      if (rule.keyPattern().equals(keyPattern)) {
+        present = true;
+        break;
+      }
     }
-    return removed;
+
+    if (!present) {
+      return false;
+    }
+
+    List<FastLaneRule> next = new ArrayList<>(current.rules().size());
+    for (FastLaneRule rule : current.rules()) {
+      if (!rule.keyPattern().equals(keyPattern)) {
+        next.add(rule);
+      }
+    }
+
+    snapshot.set(
+      new RuleSnapshot(nextRulesVersion(current.version()), List.copyOf(next), newMatchCache())
+    );
+    return true;
   }
 
   /**
    * Atomically update the threshold of an existing rule.
    *
-   * <p>Uses {@link ConcurrentHashMap#computeIfPresent} to ensure the
-   * check-and-update is atomic.
+   * <p>A miss leaves the snapshot untouched; a hit publishes a fresh snapshot
+   * with a fresh match cache.
    *
    * @param keyPattern the key pattern to update
    * @param threshold  the new threshold value
@@ -209,14 +232,27 @@ public class FastLaneRuleManagerImpl implements FastLaneRuleManager {
    */
   @Override
   public synchronized boolean updateRule(String keyPattern, long threshold) {
-    boolean updated = rules.computeIfPresent(keyPattern, (k, v) -> new FastLaneRule(k, threshold)) != null;
-    if (updated) {
-      FastLaneRule rule = new FastLaneRule(keyPattern, threshold);
-      orderedRules.replaceAll(r -> r.keyPattern().equals(keyPattern) ? rule : r);
-      nextRulesVersion();
-      matchCache.invalidateAll();
+    RuleSnapshot current = snapshot.get();
+    boolean present = false;
+    for (FastLaneRule rule : current.rules()) {
+      if (rule.keyPattern().equals(keyPattern)) {
+        present = true;
+        break;
+      }
     }
-    return updated;
+
+    if (!present) {
+      return false;
+    }
+    FastLaneRule rule = new FastLaneRule(keyPattern, threshold);
+    List<FastLaneRule> next = new ArrayList<>(current.rules().size());
+    for (FastLaneRule existing : current.rules()) {
+      next.add(existing.keyPattern().equals(keyPattern) ? rule : existing);
+    }
+    snapshot.set(
+      new RuleSnapshot(nextRulesVersion(current.version()), List.copyOf(next), newMatchCache())
+    );
+    return true;
   }
 
   /**
@@ -227,7 +263,7 @@ public class FastLaneRuleManagerImpl implements FastLaneRuleManager {
    */
   @Override
   public long getRulesVersion() {
-    return rulesVersion;
+    return snapshot.get().version();
   }
 
   /**
@@ -238,26 +274,20 @@ public class FastLaneRuleManagerImpl implements FastLaneRuleManager {
    * idempotent re-delivery; same-version conflicts between different nodes
    * are pre-filtered by the receiver's nodeId tie-break). The incoming list
    * order is preserved so every Worker resolves overlapping patterns to the
-   * same winning rule. The match cache is invalidated on application.
+   * same winning rule. Application publishes a fresh snapshot with a fresh
+   * match cache, so no entry computed under the previous epoch can backfill.
    *
    * @param newRules the complete replacement rule set (may be empty = clear all)
    * @param version  the gossiped rule set version
    */
   @Override
   public synchronized void replaceAll(List<FastLaneRule> newRules, long version) {
-    if (version < rulesVersion) {
+    RuleSnapshot current = snapshot.get();
+    if (version < current.version()) {
       return;
     }
-    rules.clear();
-    orderedRules.clear();
-    if (newRules != null) {
-      for (FastLaneRule rule : newRules) {
-        rules.put(rule.keyPattern(), rule);
-        orderedRules.add(rule);
-      }
-    }
-    rulesVersion = version;
-    matchCache.invalidateAll();
+    List<FastLaneRule> rules = newRules == null ? List.of() : List.copyOf(newRules);
+    snapshot.set(new RuleSnapshot(version, rules, newMatchCache()));
   }
 
   /**
@@ -267,23 +297,46 @@ public class FastLaneRuleManagerImpl implements FastLaneRuleManager {
    */
   @Override
   public List<FastLaneRule> getRules() {
-    return new ArrayList<>(orderedRules);
+    return new ArrayList<>(snapshot.get().rules());
   }
 
   /**
    * Find the first fast-lane rule whose pattern matches the given cache key.
    *
-   * <p>Results (including negative results via sentinel) are cached in
-   * Caffeine for 30 seconds so repeated lookups for the same key avoid
-   * O(n) glob scanning.
+   * <p>Pins one snapshot per call and evaluates against that exact epoch. An
+   * empty rule set returns {@code null} without touching the match cache
+   * (zero allocation). Otherwise results (including negative results via
+   * sentinel) are cached in the snapshot's own Caffeine, so a slow scan under
+   * an old epoch can never backfill the new epoch's cache.
    *
    * @param key the cache key to test
    * @return the matching rule, or {@code null} if no rule matches
    */
   @Override
   public FastLaneRule match(String key) {
-    FastLaneRule r = matchCache.get(key, matchLoader);
-    return r == NO_MATCH ? null : r;
+    RuleSnapshot pinned = snapshot.get();
+    List<FastLaneRule> rules = pinned.rules();
+    if (rules.isEmpty()) {
+      return null;
+    }
+    FastLaneRule cached = pinned.matchCache().get(key, k -> scanSnapshot(rules, k));
+    return cached == NO_MATCH ? null : cached;
+  }
+
+  /**
+   * Ordered scan of one pinned snapshot; the first matching rule wins.
+   *
+   * @param rules the pinned snapshot rules (never {@code null})
+   * @param key the cache key to test
+   * @return the first matching rule, or the {@link #NO_MATCH} sentinel
+   */
+  private static FastLaneRule scanSnapshot(List<FastLaneRule> rules, String key) {
+    for (FastLaneRule rule : rules) {
+      if (matchGlob(key, rule.keyPattern())) {
+        return rule;
+      }
+    }
+    return NO_MATCH;
   }
 
   /**
