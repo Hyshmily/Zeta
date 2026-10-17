@@ -1,5 +1,7 @@
 # Annotation Three-Layer Responsibility Model
 
+> **Annotation drift (marked 2026-10-15) — read the Decision text with these renames/removals in mind.** `@NullCaching` and the short-TTL null sentinel are **removed** (v2 null contract: `null` is never cached on any path — Decision 2 below is historical); `@CacheTTL` is renamed `@CacheTtl`; `@SkipBroadcast` is renamed `@SkipSync`; the fluent `ZetaReadQuery`/`ZetaWriteCommand` path is removed (ADR-0096). The three-layer responsibility model itself (aspect / gate / context) remains in force.
+
 The Spring Cache annotation integration (`@Cacheable` + Zeta companion annotations) had accreted into a state where annotation semantics were defined nowhere: `@NullCaching` was written to the context but consumed by nobody, soft-expire was silently gated on the presence of a `@CacheTTL` override, the `@Intercept` path documented a detector increment that was never implemented, and `ZetaSpringCache` carried a "fast path" that bypassed logical-expiry checks for null sentinels (permanent null poisoning). This ADR records the three-layer responsibility model that now defines the annotation system, and the semantic decisions made for each annotation.
 
 ---

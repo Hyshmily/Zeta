@@ -16,6 +16,8 @@
 package io.github.hyshmily.zeta.worker.dispatch;
 
 import io.github.hyshmily.zeta.Internal;
+import io.github.hyshmily.zeta.detection.ZetaBayesianSM;
+import io.github.hyshmily.zeta.model.ZetaDecision;
 import io.github.hyshmily.zeta.util.LogThrottle;
 import io.github.hyshmily.zeta.util.ZetaThreadFactory;
 import jakarta.annotation.PreDestroy;
@@ -117,6 +119,57 @@ public class WorkerBroadcastBuffer {
       // ADR-0007/ADR-0024). The rollback is lock-only (no I/O), safe on the
       // AMQP consumer thread.
       onFailure.run();
+      noteFailure();
+    }
+  }
+
+  /**
+   * Submits a decision value object for asynchronous execution without caller-side closures.
+   *
+   * <p>Replaces the four per-decision allocations of the closure path (the HOT/COOL
+   * lambda, the rollback lambda, the {@code Report} record, and the deque node)
+   * with a single value-object handoff: the drain thread invokes the broadcaster
+   * and applies the state-machine rollback itself. {@code NONE} decisions are
+   * ignored.
+   *
+   * @param decision    the HOT or COOL decision to send; {@code NONE} is dropped silently
+   * @param broadcaster the broadcaster invoked on the drain thread
+   * @param stateMachine the state machine rolled back on send failure or saturation drop
+   */
+  public void submit(ZetaDecision decision, WorkerBroadcaster broadcaster, ZetaBayesianSM stateMachine) {
+    if (decision == null || decision.type() == ZetaDecision.DecisionType.NONE) {
+      return;
+    }
+
+    try {
+      sendExecutor.execute(() -> doSendDecision(decision, broadcaster, stateMachine));
+    } catch (RejectedExecutionException e) {
+      stateMachine.rollbackToPreviousState(decision.cacheKey(), decision.snapshot());
+      noteFailure();
+    }
+  }
+
+  /**
+   * Drains one decision value object on the single send thread: invokes the
+   * broadcaster by decision type and rolls the state back on failure. Never throws.
+   *
+   * @param decision    the decision to send
+   * @param broadcaster the broadcaster to invoke
+   * @param stateMachine the state machine receiving the rollback on failure
+   */
+  private void doSendDecision(ZetaDecision decision, WorkerBroadcaster broadcaster, ZetaBayesianSM stateMachine) {
+    boolean ok;
+    try {
+      ok = switch (decision.type()) {
+        case HOT -> broadcaster.broadcastHot(decision.cacheKey());
+        case COOL -> broadcaster.broadcastCool(decision.cacheKey());
+        case NONE -> true;
+      };
+    } catch (Exception e) {
+      ok = false;
+    }
+    if (!ok) {
+      stateMachine.rollbackToPreviousState(decision.cacheKey(), decision.snapshot());
       noteFailure();
     }
   }

@@ -136,7 +136,7 @@ class ZetaBayesianSMEdgeTest {
   @Test
   void evictStale_withEmptyState_shouldNotThrow() {
     ZetaBayesianSM m = machineWith(3, 10, 4);
-    m.evictStale(1000, k -> {});
+    m.evictStale(1000, k -> true);
     assertThat(m.getTrackedKeys()).isZero();
   }
 
@@ -217,7 +217,7 @@ class ZetaBayesianSMEdgeTest {
     ZetaBayesianSM m = machineWith(3, 10, 4);
     m.evaluate("stale", true, false, CTX);
     Thread.sleep(5);
-    m.evictStale(2, k -> {});
+    m.evictStale(2, k -> true);
     assertThat(m.getTrackedKeys()).isZero();
   }
 
@@ -235,15 +235,17 @@ class ZetaBayesianSMEdgeTest {
       if (m.getStateSnapshot(key) == null) {
         seen.set(key);
       }
+      return true;
     });
     assertThat(seen).hasValue("hot");
     assertThat(m.getTrackedKeys()).isZero();
   }
 
   @Test
-  void evictStale_throwingCallback_shouldNotAffectEviction() throws Exception {
-    // Pins the failure isolation: a throwing callback must abort neither the
-    // remaining keys' callbacks nor the removal, and must not propagate.
+  void evictStale_throwingCallback_shouldRetainFailedKeyButNotAffectOthers() throws Exception {
+    // Pins the retryable failure isolation: a throwing callback retains that
+    // key for the next scan, aborts neither the remaining keys' callbacks nor
+    // the enclosing cycle, and never propagates.
     ZetaBayesianSM m = machineWith(1, 5, 2);
     m.evaluate("bad", true, false, CTX);
     m.evaluate("good", true, false, CTX);
@@ -255,10 +257,32 @@ class ZetaBayesianSMEdgeTest {
         if (key.equals("bad")) {
           throw new IllegalStateException("AMQP down");
         }
+        return true;
       })
     ).doesNotThrowAnyException();
     assertThat(callbackCount).hasValue(2);
-    assertThat(m.getTrackedKeys()).isZero();
+    assertThat(m.getStateSnapshot("bad")).as("failed key retained for retry").isNotNull();
+    assertThat(m.getStateSnapshot("bad").currentState()).isEqualTo("CONFIRMED_HOT");
+    assertThat(m.getStateSnapshot("good")).as("successful key evicted").isNull();
+  }
+
+  @Test
+  void evictStale_falseCallback_shouldRetainStateUntouchedForRetry() throws Exception {
+    // P0: a COOL broadcast failure (false) must not drop the obligation — the
+    // CONFIRMED_HOT state is preserved without a timestamp touch so the next
+    // scan retries immediately.
+    ZetaBayesianSM m = machineWith(1, 5, 2);
+    m.evaluate("hot", true, false, CTX);
+    assertThat(m.getStateSnapshot("hot").currentState()).isEqualTo("CONFIRMED_HOT");
+    Thread.sleep(50);
+    m.evictStale(10, key -> false);
+    assertThat(m.getStateSnapshot("hot")).as("failed broadcast retains state").isNotNull();
+    assertThat(m.getStateSnapshot("hot").currentState()).isEqualTo("CONFIRMED_HOT");
+    // Retry with success evicts.
+    java.util.List<String> cooled = new java.util.ArrayList<>();
+    m.evictStale(10, cooled::add);
+    assertThat(cooled).containsExactly("hot");
+    assertThat(m.getStateSnapshot("hot")).isNull();
   }
 
   @Test
@@ -272,7 +296,10 @@ class ZetaBayesianSMEdgeTest {
     assertThat(m.getStateSnapshot("cooled").currentState()).isEqualTo("COLD");
     Thread.sleep(50);
     AtomicInteger callbackCount = new AtomicInteger();
-    m.evictStale(10, key -> callbackCount.incrementAndGet());
+    m.evictStale(10, key -> {
+      callbackCount.incrementAndGet();
+      return true;
+    });
     assertThat(callbackCount).hasValue(0);
     assertThat(m.getTrackedKeys()).isZero();
   }
@@ -297,6 +324,7 @@ class ZetaBayesianSMEdgeTest {
         m.evaluate(key.equals("a") ? "b" : "a", true, false, CTX);
       }
       callbackCount.incrementAndGet();
+      return true;
     });
     assertThat(callbackCount).hasValue(1);
     long alive = (m.getStateSnapshot("a") != null ? 1 : 0) + (m.getStateSnapshot("b") != null ? 1 : 0);
@@ -372,14 +400,14 @@ class ZetaBayesianSMEdgeTest {
     assertThat(m.evaluate("key", true, false, CTX).type()).isEqualTo(DecisionType.NONE);
     ZetaDecision d = m.evaluate("key", true, false, CTX);
     assertThat(d.type()).isEqualTo(DecisionType.NONE);
-    assertThat(d.snapShot()).isNotNull();
+    assertThat(d.snapshot()).isNotNull();
     assertThat(m.evaluate("key", true, false, CTX).type()).isEqualTo(DecisionType.HOT);
 
-    m.rollbackToPreviousState("key", d.snapShot());
+    m.rollbackToPreviousState("key", d.snapshot());
 
     StateSnapshot after = m.getStateSnapshot("key");
     assertThat(after.hotStreak()).isEqualTo(3);
-    assertThat(after.mutationSeq()).isEqualTo(2);
+    assertThat(after.mutationSeq()).isEqualTo(1);
   }
 
   @Test
@@ -396,10 +424,11 @@ class ZetaBayesianSMEdgeTest {
 
     m.rollbackToPreviousState("key", snap);
 
+    // Steady PRE_COOLING NONE carries no epoch (P0-1 transitionSeq): rollback succeeds.
     StateSnapshot after = m.getStateSnapshot("key");
     assertThat(after.currentState()).isEqualTo("PRE_COOLING");
-    assertThat(after.coolStreak()).isEqualTo(snap.coolStreak() + 1);
-    assertThat(after.mutationSeq()).isEqualTo(4);
+    assertThat(after.coolStreak()).isEqualTo(snap.coolStreak());
+    assertThat(after.mutationSeq()).isEqualTo(snap.mutationSeq());
   }
 
   @Test
@@ -407,7 +436,7 @@ class ZetaBayesianSMEdgeTest {
     ZetaBayesianSM m = machineWith(3, 10, 4);
     assertThat(m.evaluate("key", true, false, CTX).type()).isEqualTo(DecisionType.NONE);
     assertThat(m.evaluate("key", true, false, CTX).type()).isEqualTo(DecisionType.NONE);
-    StateSnapshot bad = new StateSnapshot("key", "NON_EXISTENT_STATE", 0, 0, BayesianConfidenceEstimator.PRIOR_MEAN, 0.0, 0, 1, false);
+    StateSnapshot bad = new StateSnapshot("key", "NON_EXISTENT_STATE", 0, 0, BayesianConfidenceEstimator.PRIOR_MEAN, 0.0, 0, 0, false);
     assertThatThrownBy(() -> m.rollbackToPreviousState("key", bad)).isInstanceOf(IllegalArgumentException.class);
   }
 
@@ -418,7 +447,7 @@ class ZetaBayesianSMEdgeTest {
     m.evaluate("key", true, false, CTX);
     m.reset("key");
     Thread.sleep(1);
-    m.evictStale(0, k -> {});
+    m.evictStale(0, k -> true);
     assertThat(m.getTrackedKeys()).isZero();
   }
 
@@ -426,7 +455,7 @@ class ZetaBayesianSMEdgeTest {
   void decisionSnapshot_shouldBeNullForNewKey() {
     ZetaBayesianSM m = machineWith(3, 10, 4);
     ZetaDecision d = m.evaluate("newKey", true, false, CTX);
-    assertThat(d.snapShot()).isNull();
+    assertThat(d.snapshot()).isNull();
   }
 
   @Test
@@ -436,11 +465,11 @@ class ZetaBayesianSMEdgeTest {
 
     ZetaDecision d = m.evaluate("key", true, false, CTX);
     assertThat(d.type()).isEqualTo(DecisionType.NONE);
-    assertThat(d.snapShot()).isNotNull();
-    assertThat(d.snapShot().key()).isEqualTo("key");
-    assertThat(d.snapShot().currentState()).isEqualTo("COLD");
-    assertThat(d.snapShot().hotStreak()).isEqualTo(1);
-    assertThat(d.snapShot().coolStreak()).isEqualTo(0);
+    assertThat(d.snapshot()).isNotNull();
+    assertThat(d.snapshot().key()).isEqualTo("key");
+    assertThat(d.snapshot().currentState()).isEqualTo("COLD");
+    assertThat(d.snapshot().hotStreak()).isEqualTo(1);
+    assertThat(d.snapshot().coolStreak()).isEqualTo(0);
   }
 
   @Test
@@ -450,7 +479,7 @@ class ZetaBayesianSMEdgeTest {
     ZetaDecision d = m.evaluate("key", true, false, CTX);
     assertThat(d.type()).isEqualTo(DecisionType.NONE);
 
-    m.rollbackToPreviousState("key", d.snapShot());
+    m.rollbackToPreviousState("key", d.snapshot());
 
     StateSnapshot restored = m.getStateSnapshot("key");
     assertThat(restored.currentState()).isEqualTo("COLD");
@@ -468,10 +497,10 @@ class ZetaBayesianSMEdgeTest {
     assertThat(m.evaluate("key", true, false, CTX).type()).isEqualTo(DecisionType.NONE);
     ZetaDecision hot = m.evaluate("key", true, false, CTX);
     assertThat(hot.type()).isEqualTo(DecisionType.HOT);
-    assertThat(hot.snapShot()).isNotNull();
-    assertThat(hot.snapShot().currentState()).isEqualTo("COLD");
-    assertThat(hot.snapShot().hotStreak()).isEqualTo(2);
-    assertThat(hot.snapShot().coolStreak()).isEqualTo(0);
+    assertThat(hot.snapshot()).isNotNull();
+    assertThat(hot.snapshot().currentState()).isEqualTo("COLD");
+    assertThat(hot.snapshot().hotStreak()).isEqualTo(2);
+    assertThat(hot.snapshot().coolStreak()).isEqualTo(0);
   }
 
   @Test
@@ -481,9 +510,9 @@ class ZetaBayesianSMEdgeTest {
     assertThat(m.evaluate("key", false, false, COLD_CTX).type()).isEqualTo(DecisionType.NONE);
     ZetaDecision cool = m.evaluate("key", false, false, COLD_CTX);
     assertThat(cool.type()).isEqualTo(DecisionType.COOL);
-    assertThat(cool.snapShot()).isNotNull();
-    assertThat(cool.snapShot().currentState()).isEqualTo("PRE_COOLING");
-    assertThat(cool.snapShot().hotStreak()).isEqualTo(0);
+    assertThat(cool.snapshot()).isNotNull();
+    assertThat(cool.snapshot().currentState()).isEqualTo("PRE_COOLING");
+    assertThat(cool.snapshot().hotStreak()).isEqualTo(0);
   }
 
   @Test
@@ -494,7 +523,7 @@ class ZetaBayesianSMEdgeTest {
 
     Thread.sleep(1);
     m.evaluate("key", true, false, CTX);
-    m.evictStale(100, k -> {});
+    m.evictStale(100, k -> true);
     assertThat(m.getTrackedKeys()).isEqualTo(1);
   }
 
@@ -549,7 +578,7 @@ class ZetaBayesianSMEdgeTest {
     assertThat(m.getStateSnapshot("key").currentState()).isEqualTo("CANDIDATE_HOT");
     ZetaDecision hot = m.evaluate("key", true, false, CTX);
     assertThat(hot.type()).isEqualTo(DecisionType.HOT);
-    assertThat(hot.snapShot().currentState()).isEqualTo("CANDIDATE_HOT");
+    assertThat(hot.snapshot().currentState()).isEqualTo("CANDIDATE_HOT");
   }
 
   @Test

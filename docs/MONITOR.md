@@ -40,8 +40,7 @@ Supports an optional `?limit=N` query parameter to cap the number of app-side To
 
     // ── L1 Caffeine cache ──
     "cacheSize": 87,                // Estimated current L1 size
-    "cacheMaxSize": 1000,           // L1 maximum entry count (used when max-weight is 0)
-    "cacheMaxWeight": 0,            // L1 memory weight limit in bytes (0 = entry-count mode)
+    "cacheMaxSize": 1000,           // L1 maximum entry count
 
     // ── SingleFlight dedup ──
     "inflightSize": 3,              // In-flight dedup requests
@@ -66,7 +65,6 @@ Supports an optional `?limit=N` query parameter to cap the number of app-side To
     "softTtlMs": 30000,             // Effective soft TTL — normal keys (ms)
     "hotHardTtlMs": 3600000,        // Effective hard TTL — hot keys (ms)
     "hotSoftTtlMs": 300000,         // Effective soft TTL — hot keys (ms)
-    "nullValueTtlSec": 10,          // TTL (seconds) for null/cache-miss entries
     "refreshPoolAvailable": 100,    // Available refresh limiter permits
     "refreshFailureLeased": 3,      // Cumulative background-refresh failures granted a lease (ADR-0036)
     "leaseStaleCapped": 1,          // Cumulative lease refusals by the 30-minute staleness cap
@@ -160,15 +158,10 @@ Standard Caffeine cache metrics via `CaffeineCacheMetrics.monitor()`:
 | `zeta.reporter.feedloop.batch`      | Gauge | —                    | Feed-loop averaged batch size (keys per completed flush) |
 | `zeta.stall.report_backpressure.delayed` | Gauge | —               | Reporter dispatcher queue depth (congestion building; ADR-0076) |
 | `zeta.stall.report_backpressure.stopped.total` | Gauge | —      | Batches lost to a full queue or staleness expiry |
-| `zeta.stall.broadcast_storm.stopped.total` | Gauge | —           | Refresh broadcasts lost to broker errors or a saturated send executor |
+| `zeta.stall.broadcast_storm.stopped.total` | Gauge | —           | Put/refresh broadcasts lost to broker errors or a saturated send executor |
 | `zeta.stall.redis_degraded.stopped` | Gauge | —                    | 1 while the circuit breaker is open (loads fast-fail) |
 | `zeta.stall.redis_degraded.timeouts.total` | Gauge | —             | Cumulative dedup loads resolved empty by a reader timeout |
 | `zeta.stall.worker_partition.stopped` | Gauge | —                  | 1 while no Worker shard is alive (report routing has no target) |
-| `zeta.l1.refault.admit.total` | Gauge | — | Cumulative admit verdicts (ADR-0079; registered only when `refault-admission` != off) |
-| `zeta.l1.refault.reject.total` | Gauge | — | Cumulative reject verdicts; shadow-mode rejects are the would-reject rate |
-| `zeta.l1.refault.distance` | Gauge | — | Distance of the latest evidence-backed decision, -1 = no evidence |
-| `zeta.l1.refault.capacity` | Gauge | — | Static capacity estimate the distances compare against |
-| `zeta.l1.refault.clock.rate` | Gauge | — | Capacity-eviction rate (evictions/sec, scan-pressure alarm) |
 | `zeta.rules.persist.failed` | Gauge | — | Rule mutations that reached memory but never Redis/broadcast |
 | `zeta.expire.refresh.available`     | Gauge | —                    | Available refresh limiter permits       |
 | `zeta.expire.refresh.failure.leased.total` | Gauge | —           | Cumulative refresh failures granted a lease (ADR-0036) |

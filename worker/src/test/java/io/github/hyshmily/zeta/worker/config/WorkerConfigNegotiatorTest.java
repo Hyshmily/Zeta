@@ -11,7 +11,8 @@ import static org.mockito.Mockito.when;
 
 import io.github.hyshmily.zeta.detection.ZetaBayesianSM;
 import io.github.hyshmily.zeta.sync.worker.WorkerHeartbeatMessage;
-import java.util.concurrent.atomic.AtomicLong;
+import io.github.hyshmily.zeta.sync.worker.SmConfigSnapshot;
+import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -26,14 +27,20 @@ class WorkerConfigNegotiatorTest {
   @Mock
   private ZetaBayesianSM stateMachine;
 
-  private final AtomicLong configTimestampCounter = new AtomicLong(0);
+  private final AtomicReference<SmConfigSnapshot> configSnapshot =
+    new AtomicReference<>(new SmConfigSnapshot(3, 10, 4, 0L));
+
+  /** Resets the gossip snapshot to the zero timestamp with the default counts. */
+  private void setConfigTs(long ts) {
+    configSnapshot.set(new SmConfigSnapshot(3, 10, 4, ts));
+  }
   private final String nodeId = "worker-1";
   private WorkerConfigNegotiator negotiator;
 
   @BeforeEach
   void setUp() {
-    configTimestampCounter.set(0);
-    negotiator = new WorkerConfigNegotiator(stateMachine, configTimestampCounter, nodeId, null);
+    setConfigTs(0);
+    negotiator = new WorkerConfigNegotiator(stateMachine, configSnapshot, nodeId, null);
   }
 
   private static Message createHeartbeatMessage(String workerId, long configTs) {
@@ -63,7 +70,7 @@ class WorkerConfigNegotiatorTest {
     negotiator.onHeartbeat(createMessageWithWrongType());
 
     verifyNoInteractions(stateMachine);
-    assertThat(configTimestampCounter.get()).isZero();
+    assertThat(configSnapshot.get().configTimestamp()).isZero();
   }
 
   @Test
@@ -73,18 +80,18 @@ class WorkerConfigNegotiatorTest {
     negotiator.onHeartbeat(msg);
 
     verifyNoInteractions(stateMachine);
-    assertThat(configTimestampCounter.get()).isZero();
+    assertThat(configSnapshot.get().configTimestamp()).isZero();
   }
 
   @Test
   void shouldIgnoreStaleTimestamp() {
-    configTimestampCounter.set(100);
+    setConfigTs(100);
     Message msg = createHeartbeatMessage("worker-2", 50);
 
     negotiator.onHeartbeat(msg);
 
     verifyNoInteractions(stateMachine);
-    assertThat(configTimestampCounter.get()).isEqualTo(100);
+    assertThat(configSnapshot.get().configTimestamp()).isEqualTo(100);
   }
 
   @Test
@@ -96,7 +103,7 @@ class WorkerConfigNegotiatorTest {
     verify(stateMachine).setConfirmCount(5);
     verify(stateMachine).setCoolCount(10);
     verify(stateMachine).setPreCoolGraceCount(3);
-    assertThat(configTimestampCounter.get()).isEqualTo(10);
+    assertThat(configSnapshot.get().configTimestamp()).isEqualTo(10);
   }
 
   /**
@@ -108,31 +115,33 @@ class WorkerConfigNegotiatorTest {
    */
   @Test
   void shouldIgnoreEqualTimestampFromLowerNodeId() {
-    configTimestampCounter.set(10);
+    setConfigTs(10);
     Message msg = createHeartbeatMessage("worker-0", 10);
 
     negotiator.onHeartbeat(msg);
 
     verifyNoInteractions(stateMachine);
-    assertThat(configTimestampCounter.get()).isEqualTo(10);
+    assertThat(configSnapshot.get().configTimestamp()).isEqualTo(10);
   }
 
   /**
-   * The winning side of the equal-timestamp tie: a remote with a HIGHER nodeId
-   * applies at the same timestamp, so simultaneous config edits converge
-   * deterministically instead of diverging forever.
+   * Equal timestamps are ignored outright (no nodeId tie-break any more): the
+   * wall-clock-seeded startup snapshot plus strictly-newer-only adoption means
+   * concurrent same-millisecond edits converge on the next strictly-newer
+   * write instead of flapping on tie-breaks. A remote heartbeat carrying the
+   * same timestamp as the local watermark must therefore leave both the state
+   * machine and the snapshot untouched.
    */
   @Test
-  void shouldApplyEqualTimestampFromHigherNodeId() {
-    configTimestampCounter.set(10);
+  void shouldIgnoreEqualTimestampEvenFromHigherNodeId() {
+    setConfigTs(10);
     Message msg = createHeartbeatMessage("worker-2", 10);
 
     negotiator.onHeartbeat(msg);
 
-    verify(stateMachine).setConfirmCount(5);
-    verify(stateMachine).setCoolCount(10);
-    verify(stateMachine).setPreCoolGraceCount(3);
-    assertThat(configTimestampCounter.get()).isEqualTo(10);
+    verifyNoInteractions(stateMachine);
+    assertThat(configSnapshot.get().configTimestamp()).isEqualTo(10);
+    assertThat(negotiator.hasReceivedConfig()).isFalse();
   }
 
   @Test
@@ -143,7 +152,7 @@ class WorkerConfigNegotiatorTest {
     negotiator.onHeartbeat(msg);
 
     verify(stateMachine).setConfirmCount(5);
-    assertThat(configTimestampCounter.get()).isEqualTo(5);
+    assertThat(configSnapshot.get().configTimestamp()).isEqualTo(5);
     assertThat(negotiator.hasReceivedConfig()).isTrue();
   }
 
@@ -169,7 +178,7 @@ class WorkerConfigNegotiatorTest {
     negotiator.onHeartbeat(msg);
 
     verifyNoInteractions(stateMachine);
-    assertThat(configTimestampCounter.get()).isEqualTo(0);
+    assertThat(configSnapshot.get().configTimestamp()).isEqualTo(0);
   }
 
   /**
@@ -180,15 +189,15 @@ class WorkerConfigNegotiatorTest {
   void shouldApplyMultipleHeartbeatUpdatesInOrder() {
     Message msg1 = createHeartbeatMessage("worker-2", 10);
     negotiator.onHeartbeat(msg1);
-    assertThat(configTimestampCounter.get()).isEqualTo(10);
+    assertThat(configSnapshot.get().configTimestamp()).isEqualTo(10);
 
     Message msg2 = createHeartbeatMessage("worker-2", 20);
     negotiator.onHeartbeat(msg2);
-    assertThat(configTimestampCounter.get()).isEqualTo(20);
+    assertThat(configSnapshot.get().configTimestamp()).isEqualTo(20);
 
     Message msg3 = createHeartbeatMessage("worker-2", 30);
     negotiator.onHeartbeat(msg3);
-    assertThat(configTimestampCounter.get()).isEqualTo(30);
+    assertThat(configSnapshot.get().configTimestamp()).isEqualTo(30);
   }
 
   /**
@@ -204,22 +213,22 @@ class WorkerConfigNegotiatorTest {
     negotiator.onHeartbeat(msg);
 
     verifyNoInteractions(stateMachine);
-    assertThat(configTimestampCounter.get()).isZero();
+    assertThat(configSnapshot.get().configTimestamp()).isZero();
   }
 
   /**
-   * Reproduces the repeated-apply symptom: a tie-win peer re-broadcasts the same
-   * config on every heartbeat, so once the values already match the local ones
-   * the negotiator must stop rewriting them instead of re-applying (and
-   * re-logging) once per second forever.
+   * Reproduces the repeated-apply symptom: a peer re-broadcasts the same
+   * config on every heartbeat. The first strictly-newer heartbeat advances
+   * the watermark WITHOUT rewriting the state machine (the gossiped values
+   * already match the local snapshot); every repeat then carries an equal
+   * timestamp and is ignored outright — no re-apply, no re-log, once per
+   * second forever.
    */
   @Test
-  void shouldApplyTieWinOnlyOnceWhenValuesAlreadyMatch() {
-    when(stateMachine.getConfirmCount()).thenReturn(5);
-    when(stateMachine.getCoolCount()).thenReturn(10);
-    when(stateMachine.getPreCoolGraceCount()).thenReturn(3);
-    configTimestampCounter.set(10);
-    Message msg = createHeartbeatMessage("worker-2", 10);
+  void shouldAdoptIdenticalValuesOnceForWatermarkThenDeduplicate() {
+    // Local snapshot already carries the values the peer gossips (5/10/3).
+    configSnapshot.set(new SmConfigSnapshot(5, 10, 3, 10L));
+    Message msg = createHeartbeatMessage("worker-2", 20);
 
     negotiator.onHeartbeat(msg);
     negotiator.onHeartbeat(msg);
@@ -228,7 +237,7 @@ class WorkerConfigNegotiatorTest {
     verify(stateMachine, never()).setConfirmCount(anyInt());
     verify(stateMachine, never()).setCoolCount(anyInt());
     verify(stateMachine, never()).setPreCoolGraceCount(anyInt());
-    assertThat(configTimestampCounter.get()).isEqualTo(10);
+    assertThat(configSnapshot.get().configTimestamp()).isEqualTo(20);
     assertThat(negotiator.hasReceivedConfig()).isTrue();
   }
 
@@ -239,15 +248,14 @@ class WorkerConfigNegotiatorTest {
    */
   @Test
   void shouldAdvanceWatermarkOnNewerTimestampWithIdenticalValues() {
-    when(stateMachine.getConfirmCount()).thenReturn(5);
-    when(stateMachine.getCoolCount()).thenReturn(10);
-    when(stateMachine.getPreCoolGraceCount()).thenReturn(3);
-    configTimestampCounter.set(10);
+    // Local snapshot already carries the gossiped values — the watermark must
+    // still advance so this Worker stops broadcasting a timestamp peers ignore.
+    configSnapshot.set(new SmConfigSnapshot(5, 10, 3, 10L));
     Message msg = createHeartbeatMessage("worker-2", 20);
 
     negotiator.onHeartbeat(msg);
 
-    assertThat(configTimestampCounter.get()).isEqualTo(20);
+    assertThat(configSnapshot.get().configTimestamp()).isEqualTo(20);
     verify(stateMachine, never()).setConfirmCount(anyInt());
     verify(stateMachine, never()).setCoolCount(anyInt());
     verify(stateMachine, never()).setPreCoolGraceCount(anyInt());

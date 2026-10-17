@@ -1,5 +1,7 @@
 # Centralized Cache Value Compression via ExpireManager
 
+> **Status:** **DEPRECATED (marked 2026-10-15) — the value codec described here was removed from the codebase** (ADR-0096): `CacheCompressor`, `Lz4CacheCompressor` and the `lz4-java` dependency are gone; values are stored in `CacheEntry` exactly as passed, with no wrap/unwrap step. The `ExpireManagerImpl` class itself was also later consolidated into the `EntryLifecycle`/`TtlPolicy` lifecycle. Kept for historical context only — **do not cite compression as current architecture.**
+
 Cache value compression (`Lz4CacheCompressor`) was previously applied by individual callers at the `HotKeyCache` level. This meant that `CacheSyncListener`, `WorkerListener`, and `ExpireManagerImpl` internal paths stored values uncompressed.
 
 **Decision:** `CacheCompressor` is now injected into `ExpireManagerImpl`. All four `createBuilder()` overloads call `compressor.wrap(value)` before storing the value in the `CacheEntry`. A new method `replaceEntryValue(CacheEntry, Object)` wraps and replaces the value in an existing entry. All callers (`HotKeyCache`, `WorkerListener`, `CacheSyncListener`) now go through these methods, ensuring every value entering a `CacheEntry` is compressed.

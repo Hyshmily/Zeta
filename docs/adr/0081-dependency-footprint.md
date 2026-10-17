@@ -1,5 +1,7 @@
 # Dependency Footprint of the Published Starter (guava / lucene-core / bucket4j)
 
+> **Footprint update (marked 2026-10-15):** `lucene-core` is removed from the build — its sole consumer `DefaultWeigher` (ADR-0069) was deleted together with the weight-based eviction path, and `lz4-java` was removed with the value codec (ADR-0096). Both the `common/pom.xml` dependency and the root `dependencyManagement` pin are dropped; no source or test references either artifact. `bucket4j` and `guava` remain in force (the `@Intercept` rate-limiter path and the worker's `Striped` locks / `FastMath` test respectively).
+
 `common/` is published to Maven Central, so every compile-scope dependency is a footprint and version-conflict surface carried by all downstream applications. This ADR audits the three heavy non-optional dependencies, records which are justified, which are removed (guava), and which are kept with an explicit re-calibration gate (lucene-core), so the "why is this dependency here" question has a documented answer that outlives the review that raised it.
 
 ## Status

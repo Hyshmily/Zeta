@@ -124,7 +124,13 @@
       "name": "zeta.worker.state-machine.evict-scan-interval-ms",
       "type": "java.lang.Long",
       "description": "Interval (ms) between periodic eviction scans over the detector, state machine, and evaluator maps. Housekeeping cadence knob, deliberately separate from the staleness threshold evict-interval-ms (ADR-0060). Minimum 1.",
-      "defaultValue": 1200000
+      "defaultValue": 60000
+    },
+    {
+      "name": "zeta.worker.state-machine.ready-grace-ms",
+      "type": "java.lang.Long",
+      "description": "Grace period (ms) before the Worker reports readyToServe without tracked keys. Only gates ring admission: after this long the Worker joins the hash ring even with zero tracked keys, breaking the cold-start chicken-and-egg. Early dynamic-threshold and COOL suppression stay on the separate learning-period-ms clock. Minimum 0.",
+      "defaultValue": 3000
     },
     {
       "name": "zeta.worker.state-machine.rebroadcast-interval-ms",

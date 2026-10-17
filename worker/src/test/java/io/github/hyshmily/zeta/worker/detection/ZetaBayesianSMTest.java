@@ -142,7 +142,7 @@ class ZetaBayesianSMTest {
   void evictStale_shouldRemoveOldKeys() {
     machine.evaluate("staleKey", true, false, CTX);
     TimeSource.setTimeOffsetForTest(0, 60_000);
-    machine.evictStale(10, k -> {});
+    machine.evictStale(10, k -> true);
     assertThat(machine.getStateSnapshot("staleKey")).isNull();
   }
 
@@ -244,6 +244,7 @@ class ZetaBayesianSMTest {
         // this lands before keyB's own re-check in the phase-3 loop).
         machine.evaluate("keyB", true, false, CTX);
       }
+      return true;
     });
 
     assertThat(cooled).as("keyB was live again — its COOL must be skipped").containsExactly("keyA");

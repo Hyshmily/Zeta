@@ -243,11 +243,11 @@ class ReportConsumerTest {
   }
 
   /**
-   * Verifies the global window total is sampled exactly once per batch (not
-   * once per key) and that every key of the batch sees the same ratio.
+   * Verifies the time-aligned ratio is read exactly once per batch (not once
+   * per key) and that every key of the batch sees the same value.
    */
   @Test
-  void shouldSampleGlobalTotalOncePerBatchAndPassSameRatioToAllKeys() {
+  void shouldReadGlobalRatioOncePerBatchAndPassSameValueToAllKeys() {
     ReportMessage message = new ReportMessage(
       0L,
       "testApp",
@@ -255,34 +255,73 @@ class ReportConsumerTest {
       Map.of("k1", 1L, "k2", 2L, "k3", 3L)
     );
     when(keyEvaluator.evaluate(anyString(), anyLong(), anyDouble())).thenReturn(ZetaDecision.none("k", null));
-    when(globalQpsEstimator.getWindowTotal()).thenReturn(0L);
+    when(globalQpsEstimator.getGlobalRatio()).thenReturn(2.0);
 
     consumer.onReport(message);
 
-    verify(globalQpsEstimator, times(1)).getWindowTotal();
+    verify(globalQpsEstimator, times(1)).getGlobalRatio();
     ArgumentCaptor<Double> ratios = ArgumentCaptor.forClass(Double.class);
     verify(keyEvaluator, times(3)).evaluate(anyString(), anyLong(), ratios.capture());
-    assertThat(ratios.getAllValues()).containsExactly(1.0, 1.0, 1.0);
+    assertThat(ratios.getAllValues()).containsExactly(2.0, 2.0, 2.0);
   }
 
   /**
-   * Verifies the batch ratio semantics: the first processed batch (no previous
-   * sample) and a zero sampled total both yield the neutral ratio 1.0 (never a
-   * division by zero and never the 0.1-clamp 10x trend inflation); a
-   * meaningful sample compares against the previous batch's sample.
+   * Verifies non-positive or NaN estimator samples map to the neutral ratio
+   * 1.0 (never a division by zero and never trend inflation); a meaningful
+   * sample passes through unchanged.
    */
   @Test
-  void shouldComputeBatchRatioAgainstPreviousBatchSample() {
+  void shouldSanitizeNonPositiveGlobalRatioToNeutral() {
     when(keyEvaluator.evaluate(anyString(), anyLong(), anyDouble())).thenReturn(ZetaDecision.none("k", null));
-    when(globalQpsEstimator.getWindowTotal()).thenReturn(0L, 1000L, 2000L);
+    when(globalQpsEstimator.getGlobalRatio()).thenReturn(0.0, -1.0, Double.NaN, 2.0);
 
-    consumer.onReport(batch("k1", 1L)); // total 0            -> neutral 1.0
-    consumer.onReport(batch("k2", 1L)); // 1000 vs prev 0    -> neutral 1.0
-    consumer.onReport(batch("k3", 1L)); // 2000 vs prev 1000 -> 2.0
+    consumer.onReport(batch("k1", 1L)); // 0.0       -> neutral 1.0
+    consumer.onReport(batch("k2", 1L)); // -1.0      -> neutral 1.0
+    consumer.onReport(batch("k3", 1L)); // NaN       -> neutral 1.0
+    consumer.onReport(batch("k4", 1L)); // 2.0       -> 2.0
 
     ArgumentCaptor<Double> ratios = ArgumentCaptor.forClass(Double.class);
-    verify(keyEvaluator, times(3)).evaluate(anyString(), anyLong(), ratios.capture());
-    assertThat(ratios.getAllValues()).containsExactly(1.0, 1.0, 2.0);
+    verify(keyEvaluator, times(4)).evaluate(anyString(), anyLong(), ratios.capture());
+    assertThat(ratios.getAllValues()).containsExactly(1.0, 1.0, 1.0, 2.0);
+  }
+
+  /**
+   * Verifies concurrent consumers observe the same time-aligned ratio without
+   * jitter: 8 threads processing batches concurrently must all pass the
+   * single estimator value to the evaluator (no per-thread ThreadLocal
+   * divergence).
+   */
+  @Test
+  void concurrentConsumers_shouldObserveSameGlobalRatioWithoutJitter() throws Exception {
+    int threads = 8;
+    when(keyEvaluator.evaluate(anyString(), anyLong(), anyDouble())).thenReturn(ZetaDecision.none("k", null));
+    when(globalQpsEstimator.getGlobalRatio()).thenReturn(1.5);
+
+    java.util.concurrent.ExecutorService pool = java.util.concurrent.Executors.newFixedThreadPool(threads);
+    java.util.concurrent.CountDownLatch start = new java.util.concurrent.CountDownLatch(1);
+    java.util.List<java.util.concurrent.Future<?>> futures = new java.util.ArrayList<>();
+    for (int i = 0; i < threads; i++) {
+      final int idx = i;
+      futures.add(pool.submit(() -> {
+        try {
+          start.await();
+        } catch (InterruptedException e) {
+          Thread.currentThread().interrupt();
+          return null;
+        }
+        consumer.onReport(batch("concurrent-" + idx, 1L));
+        return null;
+      }));
+    }
+    start.countDown();
+    for (java.util.concurrent.Future<?> f : futures) {
+      f.get(10, java.util.concurrent.TimeUnit.SECONDS);
+    }
+    pool.shutdown();
+
+    ArgumentCaptor<Double> ratios = ArgumentCaptor.forClass(Double.class);
+    verify(keyEvaluator, times(threads)).evaluate(anyString(), anyLong(), ratios.capture());
+    assertThat(ratios.getAllValues()).containsExactlyElementsOf(java.util.Collections.nCopies(threads, 1.5));
   }
 
   /**

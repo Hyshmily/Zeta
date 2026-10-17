@@ -19,8 +19,13 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 
 import io.github.hyshmily.zeta.detection.ZetaBayesianSM;
+import io.github.hyshmily.zeta.model.EvaluationContext;
+import io.github.hyshmily.zeta.model.ZetaDecision;
 import io.github.hyshmily.zeta.reporting.ReportMessage;
+import io.github.hyshmily.zeta.util.TimeSource;
 import io.github.hyshmily.zeta.util.id.SnowflakeIdGenerator;
+import io.github.hyshmily.zeta.worker.confidence.BayesianConfidenceEstimator;
+import io.github.hyshmily.zeta.worker.confidence.ConfidenceEvaluator;
 import io.github.hyshmily.zeta.worker.detection.Evaluator;
 import io.github.hyshmily.zeta.worker.detection.GlobalQpsEstimator;
 import io.github.hyshmily.zeta.worker.detection.SlidingWindowDetector;
@@ -409,7 +414,8 @@ class WorkerAutoConfigurationTest {
   /**
    * Verifies that {@code EvictStaleTask.evictStale()} applies the tiered
    * thresholds: the detector and evaluator get the short COLD tier, the state
-   * machine gets both tiers ({@code evictStale(hot, cold, callback)}).
+   * machine gets both tiers ({@code evictStale(hot, cold, callback)} with a
+   * retryable {@link java.util.function.Predicate} callback).
    */
   @Test
   @DisplayName("EvictStaleTask.evictStale should apply tiered thresholds to detector, stateMachine and evaluator")
@@ -433,7 +439,74 @@ class WorkerAutoConfigurationTest {
     long expectedColdStaleAfterMs = properties.getStateMachine().getColdEvictIntervalMs();
     Mockito.verify(detector).evictStale(expectedColdStaleAfterMs);
     Mockito.verify(evaluator).evictStale(expectedColdStaleAfterMs);
-    Mockito.verify(stateMachine).evictStale(Mockito.eq(expectedStaleAfterMs), Mockito.eq(expectedColdStaleAfterMs), Mockito.any());
+    Mockito.verify(stateMachine).evictStale(
+      Mockito.eq(expectedStaleAfterMs),
+      Mockito.eq(expectedColdStaleAfterMs),
+      Mockito.any(java.util.function.Predicate.class)
+    );
+  }
+
+  /**
+   * P0: a failed COOL broadcast from {@code EvictStaleTask} must retain the
+   * CONFIRMED_HOT state so the next scan retries; only a successful broadcast
+   * drops it.
+   */
+  @Test
+  @DisplayName("EvictStaleTask retains hot state when broadcastCool fails and retries on next scan")
+  void evictStaleTaskShouldRetainHotStateWhenBroadcastCoolFails() {
+    SlidingWindowDetector detector = Mockito.mock(SlidingWindowDetector.class);
+    Evaluator evaluator = Mockito.mock(Evaluator.class);
+    WorkerBroadcaster broadcaster = Mockito.mock(WorkerBroadcaster.class);
+    WorkerProperties properties = new WorkerProperties();
+    properties.getStateMachine().setEvictIntervalMs(10L);
+    properties.getStateMachine().setColdEvictIntervalMs(10L);
+
+    ConfidenceEvaluator confidence = new BayesianConfidenceEstimator(
+      BayesianConfidenceEstimator.PRIOR_MEAN,
+      2.0,
+      0.5,
+      0.95,
+      0.76
+    );
+    io.github.hyshmily.zeta.worker.detection.impl.ZetaBayesianSM realMachine =
+      new io.github.hyshmily.zeta.worker.detection.impl.ZetaBayesianSM(
+        1,
+        5,
+        2,
+        confidence,
+        BayesianConfidenceEstimator.PRIOR_MEAN,
+        10_000L,
+        0L
+      );
+    EvaluationContext ctx = new EvaluationContext(100L, 100L, 10L, Double.NaN, 0.0);
+    assertThat(realMachine.evaluate("staleHot", true, false, ctx).type()).isEqualTo(ZetaDecision.DecisionType.HOT);
+
+    WorkerAutoConfiguration.EvictStaleTask task = new WorkerAutoConfiguration.EvictStaleTask(
+      detector,
+      realMachine,
+      evaluator,
+      properties,
+      broadcaster
+    );
+
+    try {
+      TimeSource.setTimeOffsetForTest(0, 60_000);
+      Mockito.when(broadcaster.broadcastCool("staleHot")).thenReturn(false);
+      task.evictStale();
+      assertThat(realMachine.getStateSnapshot("staleHot"))
+        .as("failed COOL broadcast retains CONFIRMED_HOT state")
+        .isNotNull();
+      assertThat(realMachine.getStateSnapshot("staleHot").currentState()).isEqualTo("CONFIRMED_HOT");
+
+      Mockito.when(broadcaster.broadcastCool("staleHot")).thenReturn(true);
+      task.evictStale();
+      assertThat(realMachine.getStateSnapshot("staleHot"))
+        .as("retry after failure evicts on success")
+        .isNull();
+      Mockito.verify(broadcaster, Mockito.times(2)).broadcastCool("staleHot");
+    } finally {
+      TimeSource.setTimeOffsetForTest(0, 0);
+    }
   }
 
   /**
@@ -559,7 +632,7 @@ class WorkerAutoConfigurationTest {
    * Verifies the {@code EvictStaleTask} schedule is bound to the dedicated
    * {@code zeta.worker.state-machine.evict-scan-interval-ms} property
    * (ADR-0060) — not to the staleness threshold {@code evict-interval-ms} —
-   * and that its fallback mirrors the bean default (20 min).
+   * and that its fallback mirrors the bean default (1 min).
    */
   @Test
   @DisplayName("EvictStaleTask schedule reads the dedicated evict-scan-interval-ms property")
@@ -569,7 +642,7 @@ class WorkerAutoConfigurationTest {
       .getAnnotation(Scheduled.class);
     assertThat(scheduled).isNotNull();
     assertThat(scheduled.fixedDelayString())
-      .isEqualTo("${zeta.worker.state-machine.evict-scan-interval-ms:1200000}");
+      .isEqualTo("${zeta.worker.state-machine.evict-scan-interval-ms:60000}");
   }
 
   /**

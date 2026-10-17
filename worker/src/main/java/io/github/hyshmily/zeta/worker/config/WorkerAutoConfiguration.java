@@ -15,10 +15,12 @@
  */
 package io.github.hyshmily.zeta.worker.config;
 
+import com.fasterxml.jackson.databind.DeserializationFeature;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hyshmily.zeta.autoconfigure.ZetaAppProperties;
 import io.github.hyshmily.zeta.constants.ZetaConstants;
 import io.github.hyshmily.zeta.detection.ZetaBayesianSM;
-import io.github.hyshmily.zeta.reporting.CompactAwareReportMessageConverter;
+import io.github.hyshmily.zeta.sync.worker.SmConfigSnapshot;
 import io.github.hyshmily.zeta.util.InstanceIdGenerator;
 import io.github.hyshmily.zeta.util.id.SnowflakeIdGenerator;
 import io.github.hyshmily.zeta.worker.confidence.BayesianConfidenceEstimator;
@@ -40,6 +42,7 @@ import java.util.List;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.amqp.core.*;
@@ -47,6 +50,7 @@ import org.springframework.amqp.rabbit.config.SimpleRabbitListenerContainerFacto
 import org.springframework.amqp.rabbit.connection.ConnectionFactory;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.amqp.rabbit.listener.SimpleMessageListenerContainer;
+import org.springframework.amqp.support.converter.Jackson2JsonMessageConverter;
 import org.springframework.amqp.support.converter.MessageConverter;
 import org.springframework.amqp.support.converter.SimpleMessageConverter;
 import org.springframework.beans.factory.ObjectProvider;
@@ -212,7 +216,7 @@ public class WorkerAutoConfiguration {
    * Creates the sliding‑window detector.
    *
    * <p>If an absolute hot threshold is configured via
-   * {@code zeta.worker.hot-threshold} it is used directly; otherwise the
+   * {@code zeta.worker.threshold.hot-threshold} it is used directly; otherwise the
    * value is set to {@code Long.MAX_VALUE} and the ratio‑based threshold
    * will be calculated later by the dynamic‑threshold logic (not shown here).
    *
@@ -378,7 +382,8 @@ public class WorkerAutoConfiguration {
       stateMachine,
       properties.getReportConsumer().getStalenessThresholdMs(),
       broadcastBuffer.getIfAvailable(),
-      metrics.getIfAvailable()
+      metrics.getIfAvailable(),
+      properties.getGlobalQpsDynamicThreshold().getLearningPeriodMs()
     );
   }
 
@@ -706,18 +711,46 @@ public class WorkerAutoConfiguration {
   }
 
   /**
-   * Monotonically increasing counter for config-change timestamps.
+   * Atomic gossip snapshot for state-machine config.
    *
-   * <p>Every {@code POST /actuator/worker/state} call increments this counter.
-   * Receiving Workers compare their own counter against the incoming value;
-   * only strictly newer configs are applied.
+   * <p>Holds the confirm/cool/grace counts plus the gossip timestamp as one
+   * immutable value in a shared {@code AtomicReference}, so heartbeat
+   * production and gossip adoption never observe torn fields. Seeded from the
+   * static {@link WorkerProperties} with a wall-clock timestamp
+   * ({@link SmConfigSnapshot#initial}), never zero, so a stale replay can
+   * never reverse-cover the static configuration; later updates use strictly
+   * increasing wall-clock versions and receivers adopt only strictly newer
+   * values.
    *
-   * @return a new {@link AtomicLong} initialised to {@code 0}
+   * @param stateMachine the state machine supplying the static counts
+   * @return the shared snapshot reference
+   */
+  @Bean
+  @ConditionalOnMissingBean(name = "smConfigSnapshot")
+  public AtomicReference<SmConfigSnapshot> smConfigSnapshot(ZetaBayesianSM stateMachine) {
+    return new AtomicReference<>(
+      SmConfigSnapshot.initial(
+        stateMachine.getConfirmCount(),
+        stateMachine.getCoolCount(),
+        stateMachine.getPreCoolGraceCount()
+      )
+    );
+  }
+
+  /**
+   * Legacy monotonic counter for config-change timestamps.
+   *
+   * <p>Kept for actuator compatibility: {@code StateMachineEndpoint} still
+   * bumps it on every write. Seeded with the wall clock (not zero) so the
+   * same reverse-cover rule holds for readers still on the counter. New code
+   * should read {@code smConfigSnapshot} instead.
+   *
+   * @return a new {@link AtomicLong} seeded with the wall clock
    */
   @Bean
   @ConditionalOnMissingBean(name = "configTimestampCounter")
   public AtomicLong configTimestampCounter() {
-    return new AtomicLong(0);
+    return new AtomicLong(Math.max(System.currentTimeMillis(), 0L));
   }
 
   /**
@@ -728,7 +761,7 @@ public class WorkerAutoConfiguration {
    * from {@link WorkerProperties.StateMachine#evictIntervalMs}, which
    * defaults to {@code 2 * coolDurationMs} = 20 minutes. The scan cadence is
    * a separate knob — {@code zeta.worker.state-machine.evict-scan-interval-ms}
-   * (default 20 min, ADR-0060).
+   * (default 1 min, ADR-0060).
    *
    * @param detector     the sliding-window detector whose idle keys will be evicted
    * @param stateMachine the state machine whose idle entries will be evicted
@@ -755,7 +788,7 @@ public class WorkerAutoConfiguration {
    *
    * <p>The schedule cadence is bound to
    * {@code zeta.worker.state-machine.evict-scan-interval-ms} (default
-   * 1_200_000 = 20 min) — deliberately a different property from the
+   * 60_000 = 1 min) — deliberately a different property from the
    * staleness threshold {@code evict-interval-ms} it applies (ADR-0060):
    * the cadence is a housekeeping-cost knob, the threshold a correctness knob
    * that must stay &gt;= 2 × cool-duration-ms.
@@ -766,7 +799,8 @@ public class WorkerAutoConfiguration {
    * the key is still being reported, so the short tier bounds per-key memory
    * under high cardinality. CONFIRMED_HOT/PRE_COOLING state keeps the full
    * {@code evict-interval-ms} retention in the state machine — its eviction
-   * is what emits the COOL broadcast.
+   * is what emits the COOL broadcast. A failed COOL broadcast retains the
+   * state untouched for a retry on the next scan.
    */
   @RequiredArgsConstructor
   public static class EvictStaleTask {
@@ -777,22 +811,34 @@ public class WorkerAutoConfiguration {
     private final WorkerProperties properties;
     private final WorkerBroadcaster broadcaster;
 
-    @Scheduled(fixedDelayString = "${zeta.worker.state-machine.evict-scan-interval-ms:1200000}")
+    @Scheduled(fixedDelayString = "${zeta.worker.state-machine.evict-scan-interval-ms:60000}")
     public void evictStale() {
       try {
         long staleAfterMs = properties.getStateMachine().getEvictIntervalMs();
         long coldStaleAfterMs = properties.getStateMachine().getColdEvictIntervalMs();
         detector.evictStale(coldStaleAfterMs);
-        stateMachine.evictStale(staleAfterMs, coldStaleAfterMs, key -> {
-          if (!broadcaster.broadcastCool(key)) {
-            log.warn("Failed to broadcast COOL for stale key: {}", key);
-          }
-        });
+        stateMachine.evictStale(staleAfterMs, coldStaleAfterMs, key -> broadcastCoolRetainOnFailure(key));
         evaluator.evictStale(coldStaleAfterMs);
         log.debug("EvictStale tick: staleAfterMs={}, coldStaleAfterMs={}", staleAfterMs, coldStaleAfterMs);
       } catch (Exception e) {
         log.error("Scheduled evictStale failed", e);
       }
+    }
+
+    /**
+     * Broadcasts COOL for one stale-evicted hot key with retryable semantics.
+     *
+     * @param key the stale hot key owing a COOL broadcast
+     * @return {@code true} when the broadcast succeeded and the state may be
+     *         dropped; {@code false} to retain the state untouched for a retry
+     *         on the next scan
+     */
+    private boolean broadcastCoolRetainOnFailure(String key) {
+      boolean ok = broadcaster.broadcastCool(key);
+      if (!ok) {
+        log.warn("Failed to broadcast COOL for stale key, state retained for retry: {}", key);
+      }
+      return ok;
     }
   }
 
@@ -857,25 +903,24 @@ public class WorkerAutoConfiguration {
    * Fallback report message converter for report messages. Active only when the
    * common module's {@code zetaReportMessageConverter} is absent (e.g. in tests).
    * <p>
-   * Decodes both wire formats (Jackson JSON and the compact binary body,
-   * ADR-0074) by first-byte sniffing; never encodes compact (a Worker does
-   * not emit report messages). Unknown JSON fields are ignored (ADR-0091).
+   * Jackson JSON only; unknown JSON fields are ignored (ADR-0091).
    *
-   * @return a dual-format {@code CompactAwareReportMessageConverter} over a forward-compatible Jackson delegate
+   * @return a forward-compatible Jackson JSON converter
    */
   @Bean("reportMessageConverter")
   @ConditionalOnMissingBean(name = "reportMessageConverter")
   public MessageConverter reportMessageConverter() {
-    return CompactAwareReportMessageConverter.forwardCompatible(false);
+    ObjectMapper mapper = new ObjectMapper().configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
+    return new Jackson2JsonMessageConverter(mapper);
   }
 
   /**
    * Container factory for the {@link ReportConsumer}'s {@code @RabbitListener}.
    * Lifts throughput above Spring Boot's default (concurrency=1) by exposing
-   * concurrent-consumers and prefetch via {@code zeta.worker.reportToWorker-consumer.*}.
+   * concurrent-consumers and prefetch via {@code zeta.worker.report-consumer.*}.
    *
    * @param connectionFactory the RabbitMQ connection factory
-   * @param reportMessageConverter the JSON message converter for reportToWorker messages
+   * @param reportMessageConverter the JSON message converter for report messages
    * @param properties worker configuration properties
    * @return a configured {@link SimpleRabbitListenerContainerFactory} instance
    */
@@ -899,7 +944,7 @@ public class WorkerAutoConfiguration {
 
   /**
    * Listens for gossip from peer Workers and applies it: state-machine config
-   * when the embedded timestamp is newer (ADR-0003), and fast-lane rule sets
+   * when the embedded timestamp is strictly newer, and fast-lane rule sets
    * last-writer-wins by wall-clock version (ADR-0025).
    *
    * <p>Schedules a one-shot startup check (~3s) on the shared worker
@@ -908,23 +953,23 @@ public class WorkerAutoConfiguration {
    * replaces the former dedicated sleeping thread: the check exists only to
    * log, and the shared scheduler already exists.
    *
-   * @param stateMachine           the worker's state machine
-   * @param configTimestampCounter the shared config-change timestamp counter
-   * @param fastLaneRuleManager    the rule manager receiving gossiped rule sets
-   * @param scheduler              the shared worker scheduler
+   * @param stateMachine        the worker's state machine
+   * @param configSnapshot      the shared atomic gossip snapshot
+   * @param fastLaneRuleManager the rule manager receiving gossiped rule sets
+   * @param scheduler           the shared worker scheduler
    * @return a new {@link WorkerConfigNegotiator} instance
    */
   @Bean
   @ConditionalOnMissingBean
   public WorkerConfigNegotiator workerConfigNegotiator(
     ZetaBayesianSM stateMachine,
-    @Qualifier("configTimestampCounter") AtomicLong configTimestampCounter,
+    @Qualifier("smConfigSnapshot") AtomicReference<SmConfigSnapshot> configSnapshot,
     FastLaneRuleManager fastLaneRuleManager,
     @Qualifier("hotKeyScheduler") ScheduledExecutorService scheduler
   ) {
     WorkerConfigNegotiator negotiator = new WorkerConfigNegotiator(
       stateMachine,
-      configTimestampCounter,
+      configSnapshot,
       nodeId,
       fastLaneRuleManager
     );
@@ -950,7 +995,7 @@ public class WorkerAutoConfiguration {
    * <p>The learner runs at the interval specified by
    * {@code zeta.worker.global-qps-dynamic-threshold.recalculate-interval-ms}.
    * The first run fires immediately (initial delay 0) so that when
-   * {@code zeta.worker.hot-threshold} is unset — the detector threshold sits
+   * {@code zeta.worker.threshold.hot-threshold} is unset — the detector threshold sits
    * at {@code Long.MAX_VALUE}, where NO key can ever be promoted — the
    * ratio-based threshold is installed as soon as the learner's own learning
    * period elapses. With the initial delay equal to the interval, the first
@@ -1098,9 +1143,9 @@ public class WorkerAutoConfiguration {
    *
    * @param rabbitTemplate         the heartbeat-dedicated RabbitMQ template
    * @param properties             worker configuration providing exchange and interval settings
-   * @param stateMachine           the state machine providing config gossip fields
+   * @param stateMachine           the state machine for the ready-to-serve tracked-keys check
    * @param epochCounter           the shared epoch counter (initialised via Redis INTR)
-   * @param configTimestampCounter the shared monotonic counter for config-change timestamps
+   * @param configSnapshot         the shared atomic gossip snapshot
    * @param scheduler              the shared worker scheduler for periodic heartbeat sends
    * @return a new {@link WorkerHeartbeatProducer} instance
    */
@@ -1111,7 +1156,7 @@ public class WorkerAutoConfiguration {
     WorkerProperties properties,
     ZetaBayesianSM stateMachine,
     @Qualifier("workerEpochCounter") AtomicLong epochCounter,
-    @Qualifier("configTimestampCounter") AtomicLong configTimestampCounter,
+    @Qualifier("smConfigSnapshot") AtomicReference<SmConfigSnapshot> configSnapshot,
     @Qualifier("hotKeyScheduler") ScheduledExecutorService scheduler,
     SnowflakeIdGenerator snowflakeIdGenerator
   ) {
@@ -1120,9 +1165,10 @@ public class WorkerAutoConfiguration {
       properties.getMessaging().getHeartbeatExchange(),
       nodeId,
       stateMachine,
-      configTimestampCounter,
+      configSnapshot,
       epochCounter.get(),
       properties.getHeartbeat().getPingIntervalMs(),
+      properties.getHeartbeat().getReadyGraceMs(),
       scheduler,
       snowflakeIdGenerator
     );

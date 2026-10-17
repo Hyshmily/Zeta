@@ -18,24 +18,32 @@ package io.github.hyshmily.zeta.worker.config;
 import static io.github.hyshmily.zeta.constants.ZetaConstants.Amqp.HEADER_TYPE;
 
 import io.github.hyshmily.zeta.detection.ZetaBayesianSM;
+import io.github.hyshmily.zeta.sync.worker.SmConfigSnapshot;
 import io.github.hyshmily.zeta.sync.worker.WorkerHeartbeatMessage;
 import io.github.hyshmily.zeta.worker.rule.FastLaneRuleManager;
 import io.github.hyshmily.zeta.worker.rule.FastLaneRulesMessage;
 import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.amqp.core.Message;
 import org.springframework.amqp.rabbit.annotation.RabbitListener;
 
 /**
  * Listens for heartbeat-based config updates from peer Workers and applies them
- * if the received config timestamp is newer than the local one.
+ * only when the received timestamp is strictly newer than the local one.
+ *
+ * <p>The gossip configuration (confirm/cool/grace counts plus timestamp) is held
+ * as a single atomic {@link SmConfigSnapshot} in a shared {@code AtomicReference},
+ * so readers observe all four fields at once and torn reads are impossible.
+ * The snapshot is seeded at startup with the wall clock
+ * ({@link SmConfigSnapshot#initial}), never zero, so a stale replay can never
+ * reverse-cover the static configuration.
  *
  * <p>The config queue carries two message types, demultiplexed by the
  * {@code type} header:
  * <ul>
  *   <li>{@code WORKER_HB} — state-machine config gossip (confirm/cool/grace
- *       counts), applied when the embedded timestamp is newer (ADR-0003).</li>
+ *       counts), applied when the embedded timestamp is strictly newer.</li>
  *   <li>{@code FASTLANE_RULES} — full fast-lane rule set with a wall-clock
  *       version, applied last-writer-wins via
  *       {@link FastLaneRuleManager#replaceAll} (ADR-0025).</li>
@@ -52,8 +60,8 @@ public class WorkerConfigNegotiator {
 
   /** State machine whose config (confirm/cool/grace counts) is updated from heartbeat messages. */
   private final ZetaBayesianSM stateMachine;
-  /** Monotonically increasing counter tracking the latest config-change timestamp. */
-  private final AtomicLong configTimestampCounter;
+  /** Shared atomic snapshot of the gossip configuration; replaced wholesale on every adoption. */
+  private final AtomicReference<SmConfigSnapshot> configSnapshot;
   /** Unique identifier for this Worker node, used in queue names and heartbeat identification. */
   private final String nodeId;
   /** Fast-lane rule manager receiving gossiped rule sets; may be {@code null} (rules gossip disabled). */
@@ -63,21 +71,30 @@ public class WorkerConfigNegotiator {
   /**
    * Full constructor with fast-lane rules gossip support.
    *
-   * @param stateMachine           the worker's state machine
-   * @param configTimestampCounter the shared config-change timestamp counter
-   * @param nodeId                 unique identifier for this Worker node
-   * @param fastLaneRuleManager    the rule manager receiving gossiped rule sets (may be {@code null})
+   * @param stateMachine        the worker's state machine
+   * @param configSnapshot      the shared atomic gossip snapshot
+   * @param nodeId              unique identifier for this Worker node
+   * @param fastLaneRuleManager the rule manager receiving gossiped rule sets (may be {@code null})
    */
   public WorkerConfigNegotiator(
     ZetaBayesianSM stateMachine,
-    AtomicLong configTimestampCounter,
+    AtomicReference<SmConfigSnapshot> configSnapshot,
     String nodeId,
     FastLaneRuleManager fastLaneRuleManager
   ) {
     this.stateMachine = stateMachine;
-    this.configTimestampCounter = configTimestampCounter;
+    this.configSnapshot = configSnapshot;
     this.nodeId = nodeId;
     this.fastLaneRuleManager = fastLaneRuleManager;
+  }
+
+  /**
+   * Returns the current atomic gossip snapshot.
+   *
+   * @return the latest adopted configuration, never {@code null}
+   */
+  public SmConfigSnapshot snapshot() {
+    return configSnapshot.get();
   }
 
   /**
@@ -163,15 +180,14 @@ public class WorkerConfigNegotiator {
     }
 
     long remoteTs = hb.configTimestamp();
-    long localTs = configTimestampCounter.get();
-    // Same-millisecond ties are broken by nodeId lexicographic order, mirroring
-    // the fast-lane rules gossip tie-break (ADR-0025): without it, two Workers
-    // configured within the same millisecond would each ignore the other's
-    // heartbeat (remoteTs <= localTs) and keep two permanently divergent
-    // configs with no convergence path.
-    boolean newer = remoteTs > localTs;
-    boolean tieWin = remoteTs == localTs && hb.workerId().compareTo(nodeId) > 0;
-    if (!newer && !tieWin) {
+    SmConfigSnapshot local = configSnapshot.get();
+    long localTs = local.configTimestamp();
+    // Strictly newer only: equal timestamps (including same-millisecond
+    // concurrent edits) are ignored. Combined with the wall-clock-seeded
+    // startup snapshot, a stale replay can never reverse-cover the static
+    // configuration, and concurrent same-millisecond edits converge on the
+    // next strictly-newer write instead of flapping on tie-breaks.
+    if (remoteTs <= localTs) {
       return;
     }
 
@@ -191,17 +207,13 @@ public class WorkerConfigNegotiator {
       return;
     }
     // Values already equal to the local ones carry no new configuration, so
-    // rewriting the state machine and logging the same three numbers is pure
-    // noise: the heartbeat repeats this message on every ping (1 s by default)
-    // and the counter was advanced to the received timestamp by the first
-    // apply, so a tie-win peer would otherwise re-apply forever. Mirrors the
-    // equal-content skip in doOnRulesMessage. The watermark below is
-    // still advanced, so this Worker never keeps broadcasting a timestamp that
+    // rewriting the state machine is pure noise: the heartbeat repeats this
+    // message on every ping (1 s by default). The snapshot below is still
+    // replaced, so this Worker never keeps broadcasting a timestamp that
     // peers ignore.
+    SmConfigSnapshot current = configSnapshot.get();
     boolean sameValues =
-      cc == stateMachine.getConfirmCount() &&
-      gc == stateMachine.getCoolCount() &&
-      pgc == stateMachine.getPreCoolGraceCount();
+      cc == current.confirmCount() && gc == current.coolCount() && pgc == current.preCoolGraceCount();
     if (!sameValues) {
       stateMachine.setConfirmCount(cc);
       stateMachine.setCoolCount(gc);
@@ -217,7 +229,7 @@ public class WorkerConfigNegotiator {
       );
     }
 
-    configTimestampCounter.set(remoteTs);
+    configSnapshot.set(new SmConfigSnapshot(cc, gc, pgc, remoteTs));
 
     if (startupLatch.getCount() > 0) {
       startupLatch.countDown();

@@ -19,8 +19,8 @@ import io.github.hyshmily.zeta.Internal;
 import io.github.hyshmily.zeta.model.EvaluationContext;
 import io.github.hyshmily.zeta.model.StateSnapshot;
 import io.github.hyshmily.zeta.model.ZetaDecision;
-import java.util.function.Consumer;
-import java.util.function.LongSupplier;
+import java.util.function.Predicate;
+import java.util.function.ToLongFunction;
 
 /**
  * Per-key state machine that governs hot-key lifecycle transitions on the
@@ -63,12 +63,15 @@ import java.util.function.LongSupplier;
  *       {@code zeta.worker.state-machine.evict-scan-interval-ms}, ADR-0060)
  *       and scans for keys whose {@code lastUpdateTime} exceeds the staleness
  *       threshold ({@code evict-interval-ms}, default 2 × coolDurationMs).
- *       Any key in CONFIRMED_HOT or PRE_COOLING state at eviction triggers
- *       the {@code onCoolEvict} callback to broadcast COOL to all app
- *       instances, then removes the key from the state map. This is the
- *       safety net that cleans up keys left in HOT state after the
- *       worker has stopped receiving reports (e.g. the app instance died
- *       or the network partition healed).</li>
+  *       Any key in CONFIRMED_HOT or PRE_COOLING state at eviction triggers
+  *       the {@code onCoolEvict} callback to broadcast COOL to all app
+  *       instances. The callback reports success ({@code true}) or failure
+  *       ({@code false}; a thrown exception counts as failure): on failure the
+  *       key state is retained untouched (no timestamp update) so the next
+  *       scan retries. Only a successful broadcast removes the key. This is the
+  *       safety net that cleans up keys left in HOT state after the
+  *       worker has stopped receiving reports (e.g. the app instance died
+  *       or the network partition healed).</li>
  * </ul>
  *
  * <p><b>Replacing the default implementation:</b> implement this interface and
@@ -130,6 +133,11 @@ public interface ZetaBayesianSM {
    * the evaluator's per-key EMA of reported counts, not a HeavyKeeper sketch)
    * to produce a confidence-gated decision.
    *
+   * <p>The window-sum reader is a {@link ToLongFunction} applied to the key
+   * inside the per-key lock (re-reads the current sliding-window sum to close
+   * the TOCTOU race). Callers pass a shared method reference such as
+   * {@code detector::getWindowSum} — no per-evaluation capturing lambda.
+   *
    * @param key             the cache key (must not be {@code null})
    * @param isFastlane      {@code true} if the key is in fastlane mode; {@code false} otherwise
    * @param isHotThisWindow {@code true} if the sliding-window frequency sum
@@ -137,6 +145,8 @@ public interface ZetaBayesianSM {
    *                        cycle; {@code false} otherwise
    * @param ctx             aggregated observation data for Bayesian evaluation
    *                        (must not be {@code null})
+   * @param windowSumReader re-reads the current sliding-window sum for the key
+   *                        inside the per-key lock (must not be {@code null})
    * @return a non-null {@link ZetaDecision} indicating what action the
    *         caller should take (HOT, COOL, or NONE)
    */
@@ -145,16 +155,30 @@ public interface ZetaBayesianSM {
     boolean isHotThisWindow,
     boolean isFastlane,
     EvaluationContext ctx,
-    LongSupplier windowSumSupplier
+    ToLongFunction<String> windowSumReader
   );
 
   /**
-   * Convenience overload that uses {@code () -> ctx.windowSum()} as the
-   * window-sum supplier, matching the pre-LongSupplier behaviour.
+   * Convenience overload that uses {@code k -> ctx.windowSum()} as the
+   * window-sum reader, matching the pre-reader behaviour.
    */
   default ZetaDecision evaluate(String key, boolean isHotThisWindow, boolean isFastlane, EvaluationContext ctx) {
-    return evaluate(key, isHotThisWindow, isFastlane, ctx, ctx::windowSum);
+    return evaluate(key, isHotThisWindow, isFastlane, ctx, k -> ctx.windowSum());
   }
+
+  /**
+   * Returns {@code true} when the key has lifecycle state in the machine.
+   *
+   * <p>Lock-free {@code states.containsKey} check used by the evaluator's
+   * cold-key fast path: an untracked key below half the threshold short-circuits
+   * to {@code NONE} without materializing evaluation state. Tracked keys
+   * (candidates, hot keys, cooling keys with momentum) always run the full
+   * Bayesian path so quasi-hot preheat is preserved.
+   *
+   * @param key the cache key (must not be {@code null})
+   * @return {@code true} when lifecycle state exists for the key
+   */
+  boolean isTracked(String key);
 
   /** Remove all tracked state for the given key, resetting it to COLD. */
   void reset(String key);
@@ -162,8 +186,8 @@ public interface ZetaBayesianSM {
   /** Approximate number of keys currently tracked. */
   int getTrackedKeys();
 
-  /** Garbage-collect stale keys. */
-  void evictStale(long staleAfterMs, Consumer<String> onCoolEvict);
+  /** Garbage-collect stale keys with retryable COOL eviction. */
+  void evictStale(long staleAfterMs, Predicate<String> onCoolEvict);
 
   /**
    * Garbage-collects stale keys with tiered staleness: COLD-state keys are
@@ -182,9 +206,12 @@ public interface ZetaBayesianSM {
    * @param coldStaleAfterMs  maximum idle time before a COLD key is evicted;
    *                          values {@code >= staleAfterMs} disable the tiering
    * @param onCoolEvict       callback invoked (outside the per-key lock) for every
-   *                          evicted key that owes a COOL broadcast
+   *                          evicted key that owes a COOL broadcast; return
+   *                          {@code true} on successful broadcast, {@code false}
+   *                          (or throw) to retain the key state untouched for a
+   *                          retry on the next scan
    */
-  default void evictStale(long staleAfterMs, long coldStaleAfterMs, Consumer<String> onCoolEvict) {
+  default void evictStale(long staleAfterMs, long coldStaleAfterMs, Predicate<String> onCoolEvict) {
     evictStale(staleAfterMs, onCoolEvict);
   }
 

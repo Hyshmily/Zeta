@@ -1,5 +1,7 @@
 # Cache-Core Configuration Views (Cutting the cache→autoconfigure Package Cycle)
 
+> **Note (2026-10-14):** one of the five classes this ADR's view split covered — `RefaultAdmission` — was later **removed from the codebase together with the ADR-0079 gate** (see ADR-0079's deprecation banner). The view pattern itself (`CacheCoreSettings`, `CircuitBreakerSettings`, live-read semantics) remains in force.
+
 The five cache-core classes that read runtime configuration (`HotKeyCache`, `TtlPolicy`, `ExpireManagerImpl`, `CircuitBreakerImpl`, `RefaultAdmission`) imported `autoconfigure.ZetaProperties` directly, making `cache → autoconfigure` the only real package cycle inside `common` (the 2026-10-04 architecture review, finding F1). We cut the cycle with narrow read-only configuration **view interfaces owned by the cache layer** and implemented by `ZetaProperties` at the assembly layer, rather than the constructor-time snapshot the review originally sketched — because verification proved the live-read semantics are documented behavior with a locking test, and a snapshot would have silently broken them.
 
 ## Status

@@ -185,10 +185,10 @@ class ZetaBayesianSMKernelInspiredTest {
 
     // The snapshot carried by the COOL decision was taken pre-mutation: the
     // gate was not armed yet. Rolling the failed broadcast back must undo it.
-    assertThat(cool.snapShot().demoteHysteresisActive()).isFalse();
+    assertThat(cool.snapshot().demoteHysteresisActive()).isFalse();
     assertThat(machine.getStateSnapshot("k").demoteHysteresisActive()).isTrue();
 
-    machine.rollbackToPreviousState(cool.snapShot());
+    machine.rollbackToPreviousState(cool.snapshot());
     StateSnapshot restored = machine.getStateSnapshot("k");
     assertThat(restored.currentState()).isEqualTo("PRE_COOLING");
     assertThat(restored.demoteHysteresisActive()).isFalse();
@@ -200,7 +200,7 @@ class ZetaBayesianSMKernelInspiredTest {
     demote("k");
     assertThat(machine.getStateSnapshot("k").demoteHysteresisActive()).isTrue();
 
-    ZetaDecision d = machine.evaluate("k", true, true, EvaluationContext.FASTLANE, () -> 0L);
+    ZetaDecision d = machine.evaluate("k", true, true, EvaluationContext.FASTLANE, k -> 0L);
     assertThat(d.type()).isEqualTo(DecisionType.HOT);
     assertThat(machine.getStateSnapshot("k").demoteHysteresisActive()).isFalse();
   }

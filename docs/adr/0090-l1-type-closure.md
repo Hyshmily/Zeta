@@ -12,7 +12,9 @@ rejects it). Shipped as a breaking change with explicit waiver: self-supplied
 ## Status
 
 implemented (2026-10-06). `HotKeyCache`, `LocalPromotion`, `EntryLifecycle`,
-`VersionGuard`, `RefaultAdmission`, both decision handlers, the background
+`VersionGuard`, `RefaultAdmission` (that class was later removed from the
+codebase together with the ADR-0079 gate — see ADR-0079's deprecation banner),
+both decision handlers, the background
 refresher, and all autoconfigure wiring carry `Cache<String, CacheEntry>`;
 `unwrapForStats`/`unwrapRawValue` lost their bare-value branches;
 `EntryLifecycle.decisionOf` takes a `CacheEntry`.

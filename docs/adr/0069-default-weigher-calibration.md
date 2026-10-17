@@ -1,6 +1,8 @@
 # ADR-0069: DefaultWeigher Calibration (max-weight mode)
 
-- Status: Accepted
+> **Status:** **DEPRECATED — implementation removed from the codebase.** `DefaultWeigher` and the whole weight-based eviction path it served (`zeta.local.cache.max-weight`, `Weighable`, `Unweighed`, the walk-node budget) were **deleted**; the L1 is now bounded by `maximumSize` entry count only (`zeta.local.cache.max-size`). This ADR is kept for historical context — the calibration methodology and the external precedents table below still inform any future size-estimation work — but **do not cite `DefaultWeigher` or max-weight as current architecture.**
+
+- Status: Accepted (superseded by removal, marked 2026-10-15)
 - Date: 2026-09-18
 - Related: ADR-0023 (annotation three-layer responsibility model), `zeta.local.cache.max-weight` (CONFIG.md)
 

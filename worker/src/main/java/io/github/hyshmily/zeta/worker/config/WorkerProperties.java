@@ -209,11 +209,12 @@ public class WorkerProperties {
      * {@link #evictIntervalMs} (the staleness threshold): the scan cadence is a
      * housekeeping-cost decision, the threshold a correctness decision (it must
      * stay &gt;= 2 × coolDurationMs so cooling keys are not evicted prematurely).
-     * Default 1_200_000 (20 min) — equal to the staleness default so a stale key
-     * is collected on the first scan after crossing the threshold.
+     * Default 60_000 (1 min, bounded by min(coldEvictIntervalMs / 2, 60s)) so a
+     * stale key is collected promptly after crossing the threshold without a
+     * 20-minute blind window.
      */
     @Min(1)
-    private long evictScanIntervalMs = 1_200_000;
+    private long evictScanIntervalMs = 60_000;
 
     /**
      * Minimum interval (ms) between periodic HOT rebroadcasts for a key that
@@ -265,6 +266,18 @@ public class WorkerProperties {
   public static class Heartbeat {
 
     private int pingIntervalMs = 1_000;
+
+    /**
+     * Grace period (ms) before the Worker reports ready without tracked keys.
+     *
+     * <p>Only gates the ring-admission ({@code readyToServe}) signal: after this
+     * long the Worker joins the hash ring even with no tracked keys. Early
+     * dynamic-threshold and COOL suppression stay on the separate
+     * {@code global-qps-dynamic-threshold.learning-period-ms} clock, so traffic
+     * is received (and HOT is reported for warmup) while cooling stays held.
+     */
+    @Min(0)
+    private long readyGraceMs = 3_000;
   }
 
   /** Bayesian confidence estimation for hot-key decisions. Default constructor. */
@@ -361,8 +374,7 @@ public class WorkerProperties {
    * @return window count for the confirmation phase
    */
   public int getConfirmWindows() {
-    double sliceMs = (double) stateMachine.getSmDurationMs() / stateMachine.getSmSlices();
-    return (int) Math.ceil(stateMachine.getConfirmDurationMs() / sliceMs);
+    return toSmWindows(stateMachine.getConfirmDurationMs());
   }
 
   /**
@@ -371,8 +383,7 @@ public class WorkerProperties {
    * @return window count for the cool phase
    */
   public int getCoolWindows() {
-    double sliceMs = (double) stateMachine.getSmDurationMs() / stateMachine.getSmSlices();
-    return (int) Math.ceil(stateMachine.getCoolDurationMs() / sliceMs);
+    return toSmWindows(stateMachine.getCoolDurationMs());
   }
 
   /**
@@ -381,7 +392,15 @@ public class WorkerProperties {
    * @return window count for the pre-cool grace phase
    */
   public int getPreCoolGraceWindows() {
+    return toSmWindows(stateMachine.getPreCoolGraceMs());
+  }
+
+  /**
+   * Number of state-machine slices that fit within the given duration, using
+   * {@code stateMachine.smDurationMs / stateMachine.smSlices} as the slice size.
+   */
+  private int toSmWindows(long durationMs) {
     double sliceMs = (double) stateMachine.getSmDurationMs() / stateMachine.getSmSlices();
-    return (int) Math.ceil(stateMachine.getPreCoolGraceMs() / sliceMs);
+    return (int) Math.ceil(durationMs / sliceMs);
   }
 }

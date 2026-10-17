@@ -1,8 +1,10 @@
 # ADR-0070: Prefix Loader Registry (LoadingCache-style read-through) and L1 cache customizers
 
-- Status: Accepted
+- Status: Accepted (registry half: **DEPRECATED**, removed 2026-10; customizer half: in force)
 - Date: 2026-09-18
 - Related: ADR-0030 (bin-lock discipline / SingleFlight), ADR-0031 (valueless refresh fallback), docs/extension-points-review.md
+
+> **Partial deprecation (marked 2026-10-15) — the loader-registry half of this ADR is gone; only the cache-customizer half remains in force.** `ZetaLoaderRegistry`, `PrefixRoutedLoader`, `ZetaLoadingSpec`, and the no-reader `get` overloads they served were **removed from the codebase** (recorded in ADR-0096). The symbol-drift table below is superseded by that removal. The `ZetaCacheCustomizer` contract and its `ZetaAutoConfiguration#hotLocalCache` wiring are still live. Do not cite the registry as current architecture.
 
 > **Symbol drift — read this before acting on the Decision text.** Several
 > names below were renamed after acceptance; the behaviour decided here is

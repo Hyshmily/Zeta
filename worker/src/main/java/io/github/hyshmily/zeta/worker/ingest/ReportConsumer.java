@@ -22,6 +22,7 @@ import io.github.hyshmily.zeta.model.StateSnapshot;
 import io.github.hyshmily.zeta.model.ZetaDecision;
 import io.github.hyshmily.zeta.reporting.ReportMessage;
 import io.github.hyshmily.zeta.util.LogThrottle;
+import io.github.hyshmily.zeta.util.TimeSource;
 import io.github.hyshmily.zeta.worker.detection.Evaluator;
 import io.github.hyshmily.zeta.worker.detection.GlobalQpsEstimator;
 import io.github.hyshmily.zeta.worker.dispatch.WorkerBroadcastBuffer;
@@ -31,7 +32,6 @@ import java.util.ArrayDeque;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Supplier;
-import lombok.Builder;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.amqp.rabbit.annotation.RabbitListener;
 
@@ -119,24 +119,6 @@ public class ReportConsumer {
   private final LogThrottle broadcastErrorLogThrottle = LogThrottle.perDefaultWindow();
 
   /**
-   * Previous batch's per-thread sample of
-   * {@link GlobalQpsEstimator#getWindowTotal()},
-   * used to compute the batch-sampled global traffic ratio passed to
-   * {@link Evaluator#evaluate(String, long, double)}.
-   *
-   * <p>
-   * ThreadLocal rather than a shared field: report consumers are concurrent
-   * ({@code concurrentConsumers}), and a shared volatile would let two
-   * consumers interleave samples so one thread's ratio compares against
-   * <em>another</em> thread's batch — mixing unrelated batches into one trend
-   * sample. Each consumer thread tracks its own previous sample; the threads
-   * are container-managed and long-lived, so nothing leaks. Written once per
-   * batch, not once per message.
-   */
-  @SuppressWarnings("java:S5164")
-  private final ThreadLocal<Long> prevGlobalWindowTotal = ThreadLocal.withInitial(() -> 0L);
-
-  /**
    * Optional dedicated decision-send buffer (ADR-0061). When present,
    * broadcasts are handed to its bounded single-threaded executor instead of
    * publishing synchronously on the AMQP consumer thread; {@code null} keeps
@@ -151,6 +133,19 @@ public class ReportConsumer {
    * "null keeps the legacy path" convention for optional collaborators.
    */
   private final WorkerDetectionMetrics metrics;
+
+  /**
+   * Learning period (ms) during which COOL broadcasts are suppressed while HOT
+   * warmup still flows. Decouples ring admission from early cooling: the Worker
+   * receives traffic and reports HOT from the first batch, but threshold
+   * adaptation (in {@code ThresholdLearner}) and COOL emission stay held until
+   * the estimator has observed a full period. Suppressed COOL decisions roll
+   * their state back so the next evaluation re-emits them after warmup.
+   */
+  private final long learningPeriodMs;
+
+  /** Worker start time on the monotonic clock; anchors the learning-period check. */
+  private final long workerStartTimeMs;
 
   /**
    * Constructs a consumer with the optional decision-send buffer and the
@@ -173,6 +168,31 @@ public class ReportConsumer {
     WorkerBroadcastBuffer broadcastBuffer,
     WorkerDetectionMetrics metrics
   ) {
+    this(evaluator, broadcaster, globalQpsEstimator, stateMachine, stalenessThresholdMs, broadcastBuffer, metrics, 0L);
+  }
+
+  /**
+   * Constructs a consumer with learning-period COOL suppression.
+   *
+   * @param evaluator            the key evaluator
+   * @param broadcaster          the HOT/COOL decision broadcaster
+   * @param globalQpsEstimator   the global throughput estimator
+   * @param stateMachine         the per-key lifecycle state machine
+   * @param stalenessThresholdMs the optional report staleness threshold ({@code 0} disables it)
+   * @param broadcastBuffer      the decision-send buffer, or {@code null} for the synchronous drain
+   * @param metrics              the detection-plane meters, or {@code null} to leave batches untimed
+   * @param learningPeriodMs     the warmup window (ms) suppressing COOL; {@code 0} disables suppression
+   */
+  public ReportConsumer(
+    Evaluator evaluator,
+    WorkerBroadcaster broadcaster,
+    GlobalQpsEstimator globalQpsEstimator,
+    ZetaBayesianSM stateMachine,
+    long stalenessThresholdMs,
+    WorkerBroadcastBuffer broadcastBuffer,
+    WorkerDetectionMetrics metrics,
+    long learningPeriodMs
+  ) {
     this.evaluator = evaluator;
     this.broadcaster = broadcaster;
     this.globalQpsEstimator = globalQpsEstimator;
@@ -180,6 +200,17 @@ public class ReportConsumer {
     this.stalenessThresholdMs = stalenessThresholdMs;
     this.broadcastBuffer = broadcastBuffer;
     this.metrics = metrics;
+    this.learningPeriodMs = Math.max(0L, learningPeriodMs);
+    this.workerStartTimeMs = TimeSource.monotonicMillis();
+  }
+
+  /**
+   * Whether the Worker is still inside its learning period.
+   *
+   * @return {@code true} while warmup suppression applies
+   */
+  boolean isInLearningPeriod() {
+    return learningPeriodMs > 0 && TimeSource.monotonicMillis() - workerStartTimeMs < learningPeriodMs;
   }
 
   /**
@@ -229,21 +260,17 @@ public class ReportConsumer {
 
     if (keyCounts.isEmpty()) return;
 
-    // Sample the global window total ONCE per batch, before the per-key loop.
-    // Per-key sampling microseconds apart yields a ratio of ≈1.000 always —
-    // the documented global-fluctuation normalisation never engaged and only
-    // injected sawtooth noise into trendStrength (plus a volatile write per
-    // message). A non-positive sample (estimator absent, cold shard, first
-    // batch) maps to the neutral ratio 1.0 — no division, no 10× trend
-    // inflation through the 0.1 clamp.
-    long globalTotal = globalQpsEstimator != null ? Math.max(0, globalQpsEstimator.getWindowTotal()) : 0L;
-    double globalRatio = computeGlobalRatio(globalTotal);
-    prevGlobalWindowTotal.set(globalTotal);
+    // Time-aligned global traffic ratio maintained inside the estimator on
+    // fixed time slices: every consumer thread reads the same volatile value,
+    // so concurrent batches never interleave per-thread samples into a
+    // distorted trend. A non-positive or NaN sample maps to the neutral 1.0.
+    double globalRatio = sanitizeGlobalRatio(globalQpsEstimator != null ? globalQpsEstimator.getGlobalRatio() : 1.0);
 
     // Iterate entrySet directly to avoid the ArrayList copy; reuse a single
     // ArrayDeque across chunks to avoid per-chunk allocation. Chunks still
     // bound the pending-broadcast queue size (bounded memory per batch).
-    ArrayDeque<Report> pendingBroadcasts = new ArrayDeque<>();
+    // Decisions travel as value objects: no per-key lambda or record wrapper.
+    ArrayDeque<ZetaDecision> pendingBroadcasts = new ArrayDeque<>();
     int chunkKeyCount = 0;
 
     // Per-batch evaluation timing (ADR-0080). Monotonic clock only: the stamp is
@@ -272,7 +299,7 @@ public class ReportConsumer {
             "BayesianEvaluator decision: key={}, type={}, snapshot={},time={},delay={}ms",
             key,
             decision.type(),
-            decision.snapShot(),
+            decision.snapshot(),
             now,
             now - message.timestamp()
           );
@@ -280,24 +307,21 @@ public class ReportConsumer {
 
         switch (decision.type()) {
           case HOT ->
-            // A new hot key has been confirmed. Enqueue to send; the actual
-            // AMQP send — and the decision-version allocation inside the
-            // broadcaster — happens on the consumer thread after the per-key
-            // loop completes.
-            pendingBroadcasts.add(
-              Report.builder()
-                .key(key)
-                .task(() -> broadcaster.broadcastHot(key))
-                .snapShot(decision.snapShot())
-                .build()
-            );
-          case COOL -> pendingBroadcasts.add(
-            Report.builder()
-              .key(key)
-              .task(() -> broadcaster.broadcastCool(key))
-              .snapShot(decision.snapShot())
-              .build()
-          );
+            // A new hot key has been confirmed. Enqueue the value object; the
+            // actual AMQP send — and the decision-version allocation inside
+            // the broadcaster — happens after the per-key loop completes.
+            pendingBroadcasts.add(decision);
+          case COOL -> {
+            // Warmup suppression: inside the learning period COOL is held so
+            // fresh HOT entries can preheat, while HOT still flows. The state
+            // is rolled back so the decision re-emits after warmup instead of
+            // leaking a HOT entry that never cools.
+            if (isInLearningPeriod()) {
+              stateMachine.rollbackToPreviousState(decision.cacheKey(), decision.snapshot());
+            } else {
+              pendingBroadcasts.add(decision);
+            }
+          }
           case NONE -> {
             // No state transition occurred – the key remains in its
             // current lifecycle stage. Nothing to do.
@@ -305,7 +329,7 @@ public class ReportConsumer {
         }
       } catch (Exception e) {
         log.error(
-          "Error processing reportToWorker entry: appName={}, key={}, count={}",
+          "Error processing report entry: appName={}, key={}, count={}",
           message.appName(),
           entry.getKey(),
           entry.getValue(),
@@ -334,46 +358,39 @@ public class ReportConsumer {
    * Dispatches the chunk's pending decision broadcasts.
    *
    * <p>
-   * With a {@link WorkerBroadcastBuffer} (ADR-0061) each decision is handed
-   * to its bounded single-threaded executor — the AMQP consumer thread never
-   * blocks on AMQP publishes, so a mass-heat event cannot stall report
-   * consumption; a send failure applies the state rollback on the drain
+   * With a {@link WorkerBroadcastBuffer} (ADR-0061) each decision value object
+   * is handed to its bounded single-threaded executor — the AMQP consumer
+   * thread never blocks on AMQP publishes, so a mass-heat event cannot stall
+   * report consumption; a send failure applies the state rollback on the drain
    * thread, a saturation drop applies it right here on the caller thread.
    * Without a buffer the legacy synchronous drain ({@link #processReport})
    * runs, consistent with the sequential in-chunk evaluation.
    *
    * @param pendingBroadcasts the chunk's collected decisions (drained)
    */
-  private void dispatchBroadcasts(ArrayDeque<Report> pendingBroadcasts) {
+  private void dispatchBroadcasts(ArrayDeque<ZetaDecision> pendingBroadcasts) {
     if (broadcastBuffer != null) {
-      pendingBroadcasts.forEach(r ->
-        broadcastBuffer.submit(r.task(), () -> stateMachine.rollbackToPreviousState(r.key(), r.snapShot()))
-      );
+      pendingBroadcasts.forEach(decision -> broadcastBuffer.submit(decision, broadcaster, stateMachine));
       return;
     }
     processReport(pendingBroadcasts);
   }
 
   /**
-   * Computes the batch-sampled global traffic ratio: this batch's sampled
-   * global window total divided by the previous batch's sample. A
-   * non-positive sample on either side (estimator absent, cold shard, first
-   * processed batch) yields the neutral {@code 1.0} — callers never divide
-   * by zero and the trend signal is never inflated.
+   * Sanitizes a time-aligned global traffic ratio from the estimator: only a
+   * strictly positive finite value is a meaningful trend signal, anything else
+   * (estimator absent, cold shard, first window) maps to the neutral
+   * {@code 1.0} — callers never divide by zero and the trend is never
+   * inflated.
    *
-   * @param globalTotal the global window total sampled for this batch
-   *                    ({@code >= 0})
+   * @param ratio the raw ratio from {@link GlobalQpsEstimator#getGlobalRatio()}
    * @return the ratio to pass to the evaluator; always strictly positive
    */
-  private double computeGlobalRatio(long globalTotal) {
-    long prev = prevGlobalWindowTotal.get();
-    if (globalTotal <= 0 || prev <= 0) {
-      return 1.0;
-    }
-    return (double) globalTotal / prev;
+  private static double sanitizeGlobalRatio(double ratio) {
+    return ratio > 0 && Double.isFinite(ratio) ? ratio : 1.0;
   }
 
-  private void processReport(ArrayDeque<Report> pendingBroadcasts) {
+  private void processReport(ArrayDeque<ZetaDecision> pendingBroadcasts) {
     // Drain pending broadcasts serially on the consumer thread, consistent
     // with the sequential in-chunk evaluation above. Per ADR-0007, lost
     // messages are tolerated by the next periodic cycle.
@@ -384,19 +401,29 @@ public class ReportConsumer {
     // RabbitMQ outage cannot flood the log (ADR-0037 convention). The
     // broadcast failure itself (with full stack) is logged once at the send
     // site in {@link WorkerBroadcaster}.
-    Report r;
+    ZetaDecision decision;
     int failed = 0;
     String firstFailureKey = null;
     StateSnapshot firstFailureSnapshot = null;
 
-    while ((r = pendingBroadcasts.poll()) != null) {
-      if (!Boolean.TRUE.equals(r.task().get())) {
+    while ((decision = pendingBroadcasts.poll()) != null) {
+      boolean ok;
+      try {
+        ok = switch (decision.type()) {
+          case HOT -> broadcaster.broadcastHot(decision.cacheKey());
+          case COOL -> broadcaster.broadcastCool(decision.cacheKey());
+          case NONE -> true;
+        };
+      } catch (Exception e) {
+        ok = false;
+      }
+      if (!ok) {
         failed++;
         if (firstFailureKey == null) {
-          firstFailureKey = r.key();
-          firstFailureSnapshot = r.snapShot();
+          firstFailureKey = decision.cacheKey();
+          firstFailureSnapshot = decision.snapshot();
         }
-        stateMachine.rollbackToPreviousState(r.key(), r.snapShot());
+        stateMachine.rollbackToPreviousState(decision.cacheKey(), decision.snapshot());
       }
     }
 
@@ -411,7 +438,4 @@ public class ReportConsumer {
       );
     }
   }
-
-  @Builder
-  record Report(String key, Supplier<Boolean> task, StateSnapshot snapShot) {}
 }

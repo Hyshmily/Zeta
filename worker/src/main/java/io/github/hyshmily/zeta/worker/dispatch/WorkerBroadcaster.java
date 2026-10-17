@@ -16,7 +16,7 @@
 package io.github.hyshmily.zeta.worker.dispatch;
 
 import static io.github.hyshmily.zeta.constants.ZetaConstants.Amqp.*;
-import static io.github.hyshmily.zeta.constants.ZetaConstants.Routing.KEY_BROADCAST;
+import static io.github.hyshmily.zeta.constants.ZetaConstants.Routing.PREFIX_DECISION;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
@@ -29,6 +29,7 @@ import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.LongConsumer;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.amqp.core.Message;
 import org.springframework.amqp.core.MessageProperties;
@@ -181,16 +182,13 @@ public class WorkerBroadcaster {
   private final AtomicLong decisionVersionCounter = new AtomicLong(0L);
 
   /**
-   * Per‑instance 100 ms debounce cache; prevents the same key+type from being
-   * broadcast twice by <em>this</em> Worker within the expiry window.  The
-   * original intent was cross‑Worker dedup during ring convergence, but a
-   * per‑JVM Caffeine cache cannot see broadcasts from other Workers.  Actual
-   * cross‑Worker convergence is provided by consistent‑hash sharding (one
-   * owner per key) plus the {@code decisionVersion >=} guard on the App side.
+   * Per-key 100 ms debounce cache; records the last successfully sent decision
+   * type per key. Only a repeated decision of the <em>same</em> type inside the
+   * window is elided — a HOT → COOL → HOT flip always emits the third send.
    *
    * <p>The real value is local debounce: the state‑machine path and the
    * FastLane / TopKValidator path may both evaluate the same key within
-   * 100 ms, and this cache silently elides the duplicate.  See ADR-0013.
+   * 100 ms, and this cache silently elides the duplicate. See ADR-0013.
    *
    * <p>Note: {@code put} happens <em>after</em> a successful
    * {@link #sendBroadcast}, so a failed send leaves the cache clean and the
@@ -206,7 +204,7 @@ public class WorkerBroadcaster {
    * and closing the gap with a putIfAbsent reservation would add a
    * failed-send cleanup path for no observable gain.
    */
-  private final Cache<String, Boolean> broadcastDedupCache = Caffeine.newBuilder()
+  private final Cache<String, String> broadcastDedupCache = Caffeine.newBuilder()
     .expireAfterWrite(100, TimeUnit.MILLISECONDS)
     .maximumSize(1_000)
     .build();
@@ -215,7 +213,7 @@ public class WorkerBroadcaster {
    * Atomically allocates the next decision version for this Worker.
    *
    * <p>Sole allocation point for broadcast ordering, called internally by
-   * {@link #broadcastHot} and {@link #broadcastCool} immediately before each
+   * {@link #broadcastDecision} immediately before each
    * send (sends are synchronous on the consumer thread — historically
    * {@code ReportConsumer} pre-allocated versions before an async send, which
    * no longer exists).
@@ -239,33 +237,7 @@ public class WorkerBroadcaster {
    * @param cacheKey the key that has been confirmed as hot
    */
   public boolean broadcastHot(String cacheKey) {
-    String dedupKey = cacheKey + ":" + WorkerMessage.TYPE_HOT;
-    if (broadcastDedupCache.getIfPresent(dedupKey) != null) {
-      // Duplicate elided inside the 100 ms debounce window: nothing is emitted, so
-      // nothing is counted — the decision being deduplicated was already counted
-      // when it was sent. The caller still sees success and must not roll back.
-      return true;
-    }
-    long dv = nextDecisionVersion();
-    try {
-      sendBroadcast(cacheKey, WorkerMessage.TYPE_HOT, dv);
-      if (metrics != null) {
-        metrics.countHotDecision();
-      }
-
-      broadcastDedupCache.put(dedupKey, Boolean.TRUE);
-      log.debug("Broadcast HOT: key={}, dv={}", cacheKey, dv);
-    } catch (Exception e) {
-      // ADR-0037 log discipline: the send site stays quiet (DEBUG, no stack) —
-      // WorkerBroadcastBuffer aggregates send failures into one rate-limited
-      // WARN per window with counts, which is the signal operators read. A
-      // per-decision ERROR with a full stack would flood the log exactly when
-      // a broker outage collides with a mass-heat wave (ADR-0061's own
-      // motivation), drowning the aggregated warning that matters.
-      log.debug("Failed to broadcast HOT decision for key={}: {}", cacheKey, e.toString());
-      return false;
-    }
-    return true;
+    return broadcastDecision(cacheKey, WorkerMessage.TYPE_HOT, null);
   }
 
   /**
@@ -280,27 +252,58 @@ public class WorkerBroadcaster {
    * @param cacheKey the key that has been confirmed as fully cooled
    */
   public boolean broadcastCool(String cacheKey) {
-    String dedupKey = cacheKey + ":" + WorkerMessage.TYPE_COOL;
-    if (broadcastDedupCache.getIfPresent(dedupKey) != null) {
-      // Elided duplicate: see broadcastHot — nothing emitted, nothing counted.
+    return broadcastDecision(cacheKey, WorkerMessage.TYPE_COOL, dv -> scheduleCoolRepeats(cacheKey, dv));
+  }
+
+  /**
+   * Shared decision-broadcast funnel for {@link #broadcastHot} and
+   * {@link #broadcastCool}: dedup check → version allocation → send → count →
+   * dedup put → DEBUG log → post-send action, with the ADR-0037 failure
+   * discipline (send site stays at DEBUG without a stack; the aggregated WARN
+   * lives in WorkerBroadcastBuffer).
+   *
+   * @param cacheKey the key the decision is about
+   * @param type     the message type ({@link WorkerMessage#TYPE_HOT} or
+   *                 {@link WorkerMessage#TYPE_COOL})
+   * @param onSent   type-specific post-send action receiving the allocated
+   *                 decision version (COOL repeat scheduling), or {@code null};
+                 runs inside the try so its failure counts as a failed broadcast
+   * @return {@code true} when the decision was sent or elided by the debounce
+   *         cache (the caller must not roll back); {@code false} on send failure
+   */
+  private boolean broadcastDecision(String cacheKey, String type, LongConsumer onSent) {
+    if (type.equals(broadcastDedupCache.getIfPresent(cacheKey))) {
+      // Duplicate elided inside the 100 ms debounce window: nothing is emitted, so
+      // nothing is counted — the decision being deduplicated was already counted
+      // when it was sent. The caller still sees success and must not roll back.
       return true;
     }
     long dv = nextDecisionVersion();
     try {
-      sendBroadcast(cacheKey, WorkerMessage.TYPE_COOL, dv);
+      sendBroadcast(cacheKey, type, dv);
       if (metrics != null) {
-        metrics.countCoolDecision();
+        if (WorkerMessage.TYPE_COOL.equals(type)) {
+          metrics.countCoolDecision();
+        } else {
+          metrics.countHotDecision();
+        }
       }
-      broadcastDedupCache.put(dedupKey, Boolean.TRUE);
+      broadcastDedupCache.put(cacheKey, type);
       // ADR-0064: per-key state transitions are DEBUG — a mass-heat wave emits
       // one line per key, which is exactly the flood the transition-log
       // throttling was introduced to stop.
-      log.debug("Broadcast COOL: key={}, dv={}", cacheKey, dv);
-      scheduleCoolRepeats(cacheKey, dv);
+      log.debug("Broadcast {}: key={}, dv={}", type, cacheKey, dv);
+      if (onSent != null) {
+        onSent.accept(dv);
+      }
     } catch (Exception e) {
-      // Same ADR-0037 discipline as broadcastHot: aggregate WARN lives in
-      // WorkerBroadcastBuffer, the send site stays at DEBUG without a stack.
-      log.debug("Failed to broadcast COOL decision for key={}: {}", cacheKey, e.toString());
+      // ADR-0037 log discipline: the send site stays quiet (DEBUG, no stack) —
+      // WorkerBroadcastBuffer aggregates send failures into one rate-limited
+      // WARN per window with counts, which is the signal operators read. A
+      // per-decision ERROR with a full stack would flood the log exactly when
+      // a broker outage collides with a mass-heat wave (ADR-0061's own
+      // motivation), drowning the aggregated warning that matters.
+      log.debug("Failed to broadcast {} decision for key={}: {}", type, cacheKey, e.toString());
       return false;
       // no throw — ADR-0007 fire-and-forget
     }
@@ -384,6 +387,6 @@ public class WorkerBroadcaster {
     props.setHeader(HEADER_MESSAGE_ID, snowflakeIdGenerator.nextId());
 
     Message msg = new Message(cacheKey.getBytes(StandardCharsets.UTF_8), props);
-    rabbitTemplate.send(broadcastExchange, KEY_BROADCAST + appName, msg);
+    rabbitTemplate.send(broadcastExchange, PREFIX_DECISION + appName, msg);
   }
 }

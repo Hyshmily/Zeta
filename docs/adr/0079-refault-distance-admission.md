@@ -1,10 +1,12 @@
 # Refault Distance Admission for L1 Warming (the `workingset.c` Port)
 
+> **Status:** **DEPRECATED — implementation removed from the codebase.** The refault admission gate described below was implemented on 2026-09-25 and has since been **deleted**: no `RefaultAdmission` class, no `refault-*` config knobs, no `RemovalCause.SIZE` listener, no `zeta.l1.refault.*` gauges, and no gate logic in `loadCacheEntry` remain. This ADR is kept for historical context only — **do not cite it as current architecture, and do not assume the gate exists in the code.**
+
 The kernel-inspired optimization report (§4) proposed porting `mm/workingset.c`'s shadow-entry refault distance to the L1 write path: a key re-fetched after eviction is admitted only if the distance, measured in eviction-clock ticks since its last eviction, would have fit inside the current cache — "it would have survived" as the admission evidence, complementary to TinyLFU's frequency and HeavyKeeper's expelledQueue. This ADR accepts the port in principle, corrects two fail-closed defects in the report's pseudo-design (before the fixes, the report's own "worst case degrades to full admission" safety claim is false), and fixes the rollout plan.
 
 ## Status
 
-accepted, implemented (2026-09-25)
+deprecated (marked 2026-10-14). History: accepted, implemented (2026-09-25); the implementation was subsequently removed from the codebase (`RefaultAdmission`, its config knobs, gauges, and gate logic are gone). Not a constraint on current or future design. See the header banner above.
 
 ## Context
 

@@ -18,10 +18,11 @@ package io.github.hyshmily.zeta.worker.detection;
 import io.github.hyshmily.zeta.detection.ZetaBayesianSM;
 import io.github.hyshmily.zeta.model.EvaluationContext;
 import io.github.hyshmily.zeta.model.ZetaDecision;
-import io.github.hyshmily.zeta.util.TimeSource;
 import io.github.hyshmily.zeta.util.FastMath;
+import io.github.hyshmily.zeta.util.TimeSource;
 import io.github.hyshmily.zeta.worker.rule.FastLaneRuleManager;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.ToLongFunction;
 
 /**
  * Hot-key evaluator with integrated fast-lane support.
@@ -49,20 +50,19 @@ import java.util.concurrent.ConcurrentHashMap;
  * CV history for Bayesian likelihood adjustment is maintained only for
  * non-fast-lane keys.
  *
- * <p>Trend normalisation: {@code ReportConsumer} samples the
- * {@link GlobalQpsEstimator} window total <b>once per report batch</b> and
- * passes the sampled ratio (vs the previous batch's sample) into
- * {@link #evaluate(String, long, double)}. A per-key (per-message) sample
- * would be microseconds apart and yield a ratio of ≈1.000 always, so the
- * documented global-fluctuation normalisation never engaged — batch
- * granularity makes the signal meaningful, and a sampled total of
- * {@code <= 0} maps to the neutral ratio {@code 1.0} (no division, no
- * trend inflation).
- *
- * <p>Fast-lane rules are managed by a {@link FastLaneRuleManager} that
- * supports runtime CRUD via {@link
- * io.github.hyshmily.zeta.worker.endpoint.FastLaneEndpoint}.
- */
+  * <p>Trend normalisation: {@code ReportConsumer} reads the time-aligned
+  * {@link GlobalQpsEstimator#getGlobalRatio()} (maintained on fixed time
+  * slices inside the estimator, shared by all consumer threads) and passes it
+  * into {@link #evaluate(String, long, double)}. A per-key (per-message)
+  * sample would be microseconds apart and yield a ratio of ≈1.000 always, so
+  * the documented global-fluctuation normalisation never engaged — estimator
+  * granularity makes the signal meaningful, and a non-positive sample maps to
+  * the neutral ratio {@code 1.0} (no division, no trend inflation).
+  *
+  * <p>Fast-lane rules are managed by a {@link FastLaneRuleManager} that
+  * supports runtime CRUD via {@link
+  * io.github.hyshmily.zeta.worker.endpoint.FastLaneEndpoint}.
+  */
 public class DefaultEvaluator implements Evaluator {
 
   /**
@@ -138,6 +138,20 @@ public class DefaultEvaluator implements Evaluator {
   private static final int MAX_TRACKED_CMS_KEYS = 100_000;
 
   /**
+   * Shared window-sum reader for the state machine re-read: a bound method
+   * reference to {@link SlidingWindowDetector#getWindowSum}, allocated once in
+   * the constructor and reused for every Bayesian evaluation — no per-call
+   * capturing lambda.
+   */
+  private final ToLongFunction<String> windowSumReader;
+
+  /**
+   * Shared no-op reader for the fast-lane path (the state machine never
+   * re-reads on fast-lane). Non-capturing lambda — a single instance.
+   */
+  private static final ToLongFunction<String> ZERO_READER = k -> 0L;
+
+  /**
    * Constructs the evaluator with the given dependencies and the fast-lane gate.
    *
    * @param detector             the sliding-window detector
@@ -161,6 +175,7 @@ public class DefaultEvaluator implements Evaluator {
     // a degenerate configuration) yields 0 — clamp to 1ms to keep the
     // time-constant divisions finite.
     this.momentumWindowSpanMs = Math.max(1L, detector.getWindowSize() * detector.getTimeMillisPerSlice());
+    this.windowSumReader = detector::getWindowSum;
   }
 
   /**
@@ -184,11 +199,11 @@ public class DefaultEvaluator implements Evaluator {
    * <p>The sliding window is always updated first. Then — when the fast-lane
    * gate is enabled — the fast-lane rules are consulted. If the key matches a
    * rule the fast-lane path is taken; otherwise the full Bayesian pipeline
-   * runs with the batch-sampled {@code globalRatio} trend normalisation.
+   * runs with the time-aligned {@code globalRatio} trend normalisation.
    *
    * @param key         the cache key being reported
    * @param count       the access count in this report batch
-   * @param globalRatio batch-sampled global traffic ratio (see
+   * @param globalRatio time-aligned global traffic ratio (see
    *                    {@link Evaluator#evaluate(String, long, double)});
    *                    non-positive values are treated as the neutral {@code 1.0}
    * @return a non-null {@link ZetaDecision} — {@code HOT}, {@code COOL},
@@ -216,12 +231,19 @@ public class DefaultEvaluator implements Evaluator {
    * @return a non-null {@link ZetaDecision} — {@code HOT} if promoted
    */
   public ZetaDecision toFastlane(String key) {
-    return stateMachine.evaluate(key, true, true, EvaluationContext.FASTLANE, () -> 0L);
+    return stateMachine.evaluate(key, true, true, EvaluationContext.FASTLANE, ZERO_READER);
   }
 
   /**
    * Bayesian evaluation path: sliding-window sum, trend normalisation, window
    * moving average, and confidence-gated state machine.
+   *
+   * <p>Cold-key fast path: an untracked key whose window sum is below half the
+   * threshold returns {@code NONE} immediately — no {@code PerKeyEvalState}
+   * materialization, no {@code sqrt}/{@code log}, no {@code EvaluationContext}
+   * allocation, no window-sum reader capture. Quasi-hot keys
+   * ({@code windowSum} in [{@code threshold * 0.5}, {@code threshold})) and
+   * tracked keys always run the full path so momentum preheat is preserved.
    *
    * <p>Assembles an {@link EvaluationContext} with all per-key metrics needed
    * for the Bayesian posterior computation:
@@ -232,7 +254,7 @@ public class DefaultEvaluator implements Evaluator {
    *   <li><b>CV</b> — coefficient of variation for dynamic likelihood std
    *       adjustment</li>
    *   <li><b>trendStrength</b> — ratio of the current window sum (normalised
-   *       by the batch-sampled {@code globalRatio}) to the mean of the three
+   *       by the time-aligned {@code globalRatio}) to the mean of the three
    *       preceding windows (upward/downward momentum)</li>
    *   <li><b>windowAverage</b> — per-key time-decayed moving average of the
    *       window sums (one-window-span time constant) for gradual-decay
@@ -246,7 +268,7 @@ public class DefaultEvaluator implements Evaluator {
    *
    * @param key         the cache key being evaluated
    * @param windowSum   the current sliding-window sum (pre-computed by caller)
-   * @param globalRatio batch-sampled global traffic ratio; non-positive values
+   * @param globalRatio time-aligned global traffic ratio; non-positive values
    *                    are treated as the neutral {@code 1.0}
    * @return a non-null {@link ZetaDecision} — {@code HOT}, {@code COOL},
    *         or {@code NONE}
@@ -256,10 +278,19 @@ public class DefaultEvaluator implements Evaluator {
     long threshold = detector.getThreshold();
     boolean isWindowHot = windowSum >= threshold;
 
+    // Cold-key short-circuit: untracked keys far below the threshold cannot
+    // promote (promotion needs a hot window and HIGH confidence); skip the
+    // per-key state, math, and allocation. The arithmetic check runs before
+    // the map probe so quasi-hot keys preserve their momentum preheat without
+    // a lookup.
+    if (!isWindowHot && windowSum < threshold * 0.5 && !stateMachine.isTracked(key)) {
+      return ZetaDecision.none(key, null);
+    }
+
     // Normalise per-key trend by global traffic: when global QPS doubles, a
     // key that doubles is not trending — it is keeping pace. The ratio is
-    // sampled ONCE per report batch by ReportConsumer and passed down here;
-    // a non-positive sample (estimator absent, cold shard, first batch) maps
+    // time-aligned inside the estimator and shared by all consumer threads;
+    // a non-positive sample (estimator absent, cold shard, first window) maps
     // to the neutral 1.0 — no division, no trend inflation.
     double ratio = globalRatio > 0 && !Double.isNaN(globalRatio) ? globalRatio : 1.0;
 
@@ -302,7 +333,7 @@ public class DefaultEvaluator implements Evaluator {
       trendStrength
     );
 
-    return stateMachine.evaluate(key, isWindowHot, false, ctx, () -> detector.getWindowSum(key));
+    return stateMachine.evaluate(key, isWindowHot, false, ctx, windowSumReader);
   }
 
   /**
@@ -327,7 +358,7 @@ public class DefaultEvaluator implements Evaluator {
    * within the given time window.
    *
    * <p>The merged per-key state needs no periodic EMA decay pass — decay is
-   * applied lazily on read (see {@link PerKeyEvalState#updateEma}). A
+   * applied lazily on read (see {@link PerKeyEvalState#updateWindowAverage}). A
    * size-gated sweep still runs when the map exceeds
    * {@link #MAX_TRACKED_CMS_KEYS}, decaying stale EMA cells by elapsed time
    * and dropping entries whose EMA has decayed below 1.0 so dead keys cannot
@@ -342,7 +373,7 @@ public class DefaultEvaluator implements Evaluator {
     evalStates.values().removeIf(state -> now - state.lastEvalTime > staleAfterMs);
     if (evalStates.size() > MAX_TRACKED_CMS_KEYS) {
       // The sweep's decay runs under the entry's monitor — the same one
-      // updateEma uses — so it can never mutate a live cell concurrently with
+      // updateWindowAverage uses — so it can never mutate a live cell concurrently with
       // an evaluation. (The pre-merge sweep mutated the double[] cell in
       // place outside any lock; torn reads could yield NaN and poison the
       // momentum/z-score classification.)

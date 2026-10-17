@@ -176,4 +176,61 @@ class GlobalQpsEstimatorTest {
     // Correct formula: new 50 + ~1-2 valid pre-gap values ≈ 150-250.
     assertThat(total).isLessThan(400);
   }
+
+  /**
+   * Verifies a new estimator reports the neutral ratio {@code 1.0} before any
+   * sealed window exists.
+   */
+  @Test
+  void shouldReportNeutralRatioInitially() {
+    GlobalQpsEstimator estimator = new GlobalQpsEstimator(1000, 10);
+    assertThat(estimator.getGlobalRatio()).isEqualTo(1.0);
+    estimator.addTotal(100);
+    assertThat(estimator.getGlobalRatio()).isEqualTo(1.0);
+  }
+
+  /**
+   * Verifies the sealed-window ratio: after two full ratio windows the ratio
+   * equals sealed-current / sealed-previous, shared time-aligned across
+   * readers.
+   */
+  @Test
+  void shouldComputeSealedWindowRatio() {
+    GlobalQpsEstimator estimator = new GlobalQpsEstimator(1000, 10);
+    try {
+      estimator.addTotal(100);
+      io.github.hyshmily.zeta.util.TimeSource.setTimeOffsetForTest(0, 1000);
+      estimator.addTotal(200);
+      // First sealed window had no predecessor -> still neutral.
+      assertThat(estimator.getGlobalRatio()).isEqualTo(1.0);
+      io.github.hyshmily.zeta.util.TimeSource.setTimeOffsetForTest(0, 2000);
+      estimator.addTotal(10);
+      // Sealed 200 / sealed 100 = 2.0.
+      assertThat(estimator.getGlobalRatio()).isCloseTo(2.0, Offset.offset(1e-9));
+    } finally {
+      io.github.hyshmily.zeta.util.TimeSource.setTimeOffsetForTest(0, 0);
+    }
+  }
+
+  /**
+   * Verifies a multi-window gap resets the ratio to neutral instead of
+   * dividing by a stale predecessor.
+   */
+  @Test
+  void shouldResetRatioToNeutralAfterGap() {
+    GlobalQpsEstimator estimator = new GlobalQpsEstimator(1000, 10);
+    try {
+      estimator.addTotal(100);
+      io.github.hyshmily.zeta.util.TimeSource.setTimeOffsetForTest(0, 1000);
+      estimator.addTotal(200);
+      io.github.hyshmily.zeta.util.TimeSource.setTimeOffsetForTest(0, 2000);
+      estimator.addTotal(10);
+      assertThat(estimator.getGlobalRatio()).isCloseTo(2.0, Offset.offset(1e-9));
+      io.github.hyshmily.zeta.util.TimeSource.setTimeOffsetForTest(0, 5000);
+      estimator.addTotal(10);
+      assertThat(estimator.getGlobalRatio()).isEqualTo(1.0);
+    } finally {
+      io.github.hyshmily.zeta.util.TimeSource.setTimeOffsetForTest(0, 0);
+    }
+  }
 }

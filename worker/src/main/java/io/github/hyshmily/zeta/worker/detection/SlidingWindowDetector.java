@@ -17,12 +17,11 @@ package io.github.hyshmily.zeta.worker.detection;
 
 import io.github.hyshmily.zeta.util.TimeSource;
 import io.github.hyshmily.zeta.worker.config.WorkerAutoConfiguration;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicLongArray;
 import lombok.Getter;
 import lombok.Setter;
 import lombok.extern.slf4j.Slf4j;
-
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.atomic.AtomicLongArray;
 
 /**
  * A high‑performance sliding‑window detector for real‑time hot‑key
@@ -238,11 +237,24 @@ public class SlidingWindowDetector {
       });
     }
 
-    long sum = 0;
     window.slices.addAndGet(currentIndex, count);
+    return sumWindow(window, currentIndex);
+  }
+
+  /**
+   * Honest O(windowSize) loop over the circular buffer: the {@code windowSize}
+   * slices ending at {@code currentIndex}, oldest first. Concurrent adders
+   * from many App instances share the same window, so a cached sum would go
+   * stale between adds — every read walks the buffer.
+   *
+   * @param window       the key's window entry
+   * @param currentIndex the current slice index (sum window ends here)
+   * @return the sum of the last {@link #windowSize} slices
+   */
+  private long sumWindow(KeyWindow window, int currentIndex) {
+    long sum = 0;
     for (int i = 0; i < windowSize; i++) {
-      int idx = (currentIndex - i) & lengthMask;
-      sum += window.slices.get(idx);
+      sum += window.slices.get((currentIndex - i) & lengthMask);
     }
     return sum;
   }
@@ -287,11 +299,7 @@ public class SlidingWindowDetector {
     if (window == null) return 0L;
     long now = TimeSource.monotonicMillis();
     int currentIndex = (int) ((now / timeMillisPerSlice) & lengthMask);
-    long sum = 0L;
-    for (int i = 0; i < windowSize; i++) {
-      sum += window.slices.get((currentIndex - i) & lengthMask);
-    }
-    return sum;
+    return sumWindow(window, currentIndex);
   }
 
   /**

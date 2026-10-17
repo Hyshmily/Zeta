@@ -186,12 +186,12 @@ class WorkerPropertiesTest {
 
   /**
    * Verifies the default of the dedicated eviction-scan cadence property
-   * (ADR-0060): 1_200_000 ms (20 min), matching the bound staleness-threshold
-   * default so a stale key is collected on the first scan after crossing it.
+   * (ADR-0060): 60_000 ms (1 min, bounded by min(coldEvictIntervalMs / 2, 60s))
+   * so a stale key is collected promptly after crossing the threshold.
    */
   @Test
-  void shouldDefaultEvictScanIntervalToTwentyMinutes() {
-    assertThat(properties.getStateMachine().getEvictScanIntervalMs()).isEqualTo(1_200_000);
+  void shouldDefaultEvictScanIntervalToOneMinute() {
+    assertThat(properties.getStateMachine().getEvictScanIntervalMs()).isEqualTo(60_000);
   }
 
   /**

@@ -33,6 +33,12 @@ import io.github.hyshmily.zeta.util.TimeSource;
  * without blocking; a stale-but-consistent snapshot is acceptable — the
  * padded volatile slice fields guarantee individual element visibility.
  *
+ * <p>The time-aligned traffic ratio ({@link #getGlobalRatio}) is maintained
+ * internally on fixed time slices: every {@code windowDurationMs} the just
+ * sealed window total is divided by its predecessor (non-positive on either
+ * side yields the neutral {@code 1.0}). All consumer threads read the same
+ * volatile value, so concurrent batches never interleave per-thread samples
+ * into a distorted trend.
  *
  * <p><b>Known limitation — per‑shard only:</b> This estimator only sees
  * traffic routed to <em>this</em> Worker shard by the consistent‑hash ring.
@@ -65,6 +71,30 @@ public class GlobalQpsEstimator {
 
   private long lastAddTotalTime;
 
+  /**
+   * Fixed time slice for the sealed-window ratio: one full sliding-window
+   * span ({@code windowSize * timeMillisPerSlice}). Ratio epochs advance on
+   * this cadence, independent of per-batch sampling.
+   */
+  private final long ratioWindowMs;
+
+  /**
+   * Time-aligned global traffic ratio (sealed current window / sealed previous
+   * window, or {@code 1.0} when either side is non-positive). Written only
+   * under the {@code addTotal} monitor on epoch rotation; read lock-free by
+   * all consumer threads via {@link #getGlobalRatio}.
+   */
+  private volatile double cachedRatio = 1.0;
+
+  /** Epoch index ({@code now / ratioWindowMs}) of the currently open ratio window. */
+  private volatile long ratioEpoch;
+
+  /** Accumulated total of the currently open ratio window (guarded by the {@code addTotal} monitor). */
+  private long currentEpochTotal;
+
+  /** Sealed total of the previous ratio window (guarded by the {@code addTotal} monitor). */
+  private long prevEpochTotal;
+
   private static final class QpsSlice extends QpsPadding.SliceRef {}
 
   /**
@@ -87,16 +117,19 @@ public class GlobalQpsEstimator {
     for (int i = 0; i < this.slices.length; i++) {
       this.slices[i] = new QpsSlice();
     }
+    this.ratioWindowMs = (long) aligned * this.timeMillisPerSlice;
+    this.ratioEpoch = TimeSource.monotonicMillis() / this.ratioWindowMs;
   }
 
   /**
    * Adds the sum of all per-key counts in a batch to the current time slice.
    *
    * <p>Also clears stale slices that have fallen out of the window, keeping
-   * the circular buffer consistent.  This method is {@code synchronized} to
-   * protect the clear-before-add sequence against concurrent calls from
-   * multiple {@link io.github.hyshmily.zeta.worker.ingest.ReportConsumer}
-   * threads.
+   * the circular buffer consistent, and rotates the sealed-window ratio epoch
+   * when a fixed {@code ratioWindowMs} boundary was crossed. This method is
+   * {@code synchronized} to protect the clear-before-add sequence and the
+   * ratio rotation against concurrent calls from multiple
+   * {@link io.github.hyshmily.zeta.worker.ingest.ReportConsumer} threads.
    *
    * @param totalCount the total number of access counts across all keys in
    *                   the batch; must be non-negative
@@ -119,7 +152,60 @@ public class GlobalQpsEstimator {
     );
     lastAddTotalTime = now;
 
+    rotateRatioEpoch(now);
+    currentEpochTotal += totalCount;
+
     slices[currentIndex].value += totalCount;
+  }
+
+  /**
+   * Rotates the sealed-window ratio epoch when {@code now} crossed a fixed
+   * {@code ratioWindowMs} boundary. Must run under the {@code addTotal}
+   * monitor.
+   *
+   * <p>On a single-epoch step the just sealed window total is divided by its
+   * predecessor (non-positive on either side yields the neutral {@code 1.0});
+   * on a multi-epoch gap the intermediate windows are empty so the ratio
+   * resets to {@code 1.0}; on a backward step (test clock reset) the
+   * accumulator resets to the current epoch.
+   *
+   * @param now current monotonic millis
+   */
+  private void rotateRatioEpoch(long now) {
+    long epoch = now / ratioWindowMs;
+    if (epoch == ratioEpoch) {
+      return;
+    }
+    if (epoch == ratioEpoch + 1) {
+      double next =
+        (prevEpochTotal > 0 && currentEpochTotal > 0) ? (double) currentEpochTotal / prevEpochTotal : 1.0;
+      cachedRatio = next > 0 && Double.isFinite(next) ? next : 1.0;
+      prevEpochTotal = currentEpochTotal;
+    } else if (epoch > ratioEpoch + 1) {
+      cachedRatio = 1.0;
+      prevEpochTotal = 0;
+    } else {
+      cachedRatio = 1.0;
+      prevEpochTotal = 0;
+    }
+    currentEpochTotal = 0;
+    ratioEpoch = epoch;
+  }
+
+  /**
+   * Returns the time-aligned global traffic ratio: the sealed current window
+   * total divided by the sealed previous window total.
+   *
+   * <p>The value changes only on fixed {@code ratioWindowMs} boundaries and
+   * is shared by all consumer threads — concurrent batches observe the same
+   * trend signal instead of per-thread batch-sampled ratios that distort
+   * under interleaving. A non-positive window on either side yields the
+   * neutral {@code 1.0}.
+   *
+   * @return the global traffic ratio; always strictly positive and finite
+   */
+  public double getGlobalRatio() {
+    return cachedRatio;
   }
 
   /**

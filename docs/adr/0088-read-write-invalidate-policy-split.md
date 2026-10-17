@@ -1,5 +1,7 @@
 # Read/Write/Invalidate Policy Split
 
+> **Status:** **SUPERSEDED (marked 2026-10-15) — the three policy records were folded into the v2 closed per-verb option records.** `model.ReadPolicy` / `model.WritePolicy` / `model.InvalidatePolicy` no longer exist; `GetOptions` / `PutOptions` / `InvalidateOptions` (with the `skipSync` flag and the `ZetaCacheContext.Snapshot` transport) carry the same semantics. This ADR is kept for the reasoning behind per-verb knob sets only — **do not cite the `ReadPolicy`/`WritePolicy`/`InvalidatePolicy` type names as current architecture.**
+
 `CachePolicy` is one 8-knob object (`hardTtlMs`/`softTtlMs`, `reader`,
 `nullCaching`, `stalePolicy`, `reportEnabled`, `failOnError`,
 `skipBroadcast`) shared by three orthogonal call families — reads, writes,

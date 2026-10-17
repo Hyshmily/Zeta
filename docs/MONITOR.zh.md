@@ -40,8 +40,7 @@ Zeta 端点是 Actuator `@Endpoint` Bean（不是普通的 `@RestController`）�
 
     // ── L1 Caffeine 缓存 ──
     "cacheSize": 87,                // L1 预估大小
-    "cacheMaxSize": 1000,           // L1 最大条目数（max-weight 为 0 时使用）
-    "cacheMaxWeight": 0,            // L1 内存权重上限（字节，0 = 条目数模式）
+    "cacheMaxSize": 1000,           // L1 最大条目数
 
     // ── SingleFlight 去重 ──
     "inflightSize": 3,              // 进行中的去重请求数
@@ -66,7 +65,6 @@ Zeta 端点是 Actuator `@Endpoint` Bean（不是普通的 `@RestController`）�
     "softTtlMs": 30000,             // 有效软 TTL——普通 key（毫秒）
     "hotHardTtlMs": 3600000,        // 有效硬 TTL——热 key（毫秒）
     "hotSoftTtlMs": 300000,         // 有效软 TTL——热 key（毫秒）
-    "nullValueTtlSec": 10,          // null 缓存条目 TTL（秒）
     "refreshPoolAvailable": 100,    // 刷新信号量可用许可数
     "refreshFailureLeased": 3,      // 累计获准续租的后台刷新失败数（ADR-0036）
     "leaseStaleCapped": 1,          // 因 30 分钟陈旧上限被拒的续租累计数
@@ -81,10 +79,34 @@ Zeta 端点是 Actuator `@Endpoint` Bean（不是普通的 `@RestController`）�
     // ── Worker 健康状态 ──
     "health": "healthy",                  // 集群健康状态："healthy" 或 "unhealthy"
     "msSinceLastAnyHeartbeat": 1234,      // 距最近一次任意 Worker 心跳的毫秒数（-1 = 尚未收到）
-    "trackedKeys": 42                     // 状态机追踪的 key 数
+    "trackedKeys": 42,                    // 状态机追踪的 key 数
+
+    // ── 决策面分发闸门（容量：zeta.worker-listener.max-pending-units）──
+    "dispatchPendingUnits": 0,            // 闸门当前记账的加权积压量
+    "dispatchRemainingUnits": 200000,     // 闸门剩余容量（耗尽后提交被丢弃）
+    "dispatchMaxPendingUnits": 200000,    // 配置的闸门容量
+    "dispatchActiveKeys": 0,              // 持有工作（运行中或排队中）的 key 数
+    "dispatchBacklogged": false,          // 是否仍有已提交的决策未处理完
+    "dispatchDropped": 0,                 // 全局闸门累计丢弃的提交数
+    "dispatchRejected": 0,                // 单 key 队列上限累计拒绝的提交数
+
+    // ── 共享 broker 的 appName 隔离（ADR-0068）──
+    "foreignAppDrops": 0,               // 因 appName 不匹配而累计丢弃的 HOT/COOL 决策数（出现外来 appName 说明另一应用以不同 zeta.app-name 共享了同一 broker）
+    "lastForeignApp": "appB"            // 最近一次外来发送方的 appName（仅在发生丢弃后出现）
   },
   "sync": {
-    "dedupCacheSize": 20            // 广播去重缓存条目数
+    "dedupCacheSize": 20,                 // 广播去重缓存条目数
+    "foreignAppDrops": 0,                 // 因 appName 不匹配而累计丢弃的同步消息数
+    "lastForeignApp": "appB",             // 最近一次外来发送方的 appName（仅在发生丢弃后出现）
+
+    // ── 同步面分发闸门（容量：zeta.sync.max-pending-units）──
+    "dispatchPendingUnits": 0,            // 闸门当前记账的加权积压量
+    "dispatchRemainingUnits": 50000,      // 闸门剩余容量（耗尽后提交被丢弃）
+    "dispatchMaxPendingUnits": 50000,     // 配置的闸门容量
+    "dispatchActiveKeys": 0,              // 持有工作（运行中或排队中）的 key 数
+    "dispatchBacklogged": false,          // 是否仍有已提交的同步任务未处理完
+    "dispatchDropped": 0,                 // 全局闸门累计丢弃的提交数
+    "dispatchRejected": 0                 // 单 key 队列上限累计拒绝的提交数
   }
 }
 ```
@@ -136,15 +158,10 @@ Zeta 端点是 Actuator `@Endpoint` Bean（不是普通的 `@RestController`）�
 | `zeta.reporter.feedloop.batch`      | Gauge | —                    | FeedLoop 平均批大小（每次完成 flush 的键数） |
 | `zeta.stall.report_backpressure.delayed` | Gauge | —               | Reporter 队列深度（拥塞前兆，ADR-0076） |
 | `zeta.stall.report_backpressure.stopped.total` | Gauge | —      | 因队列满或过期而丢失的批次数      |
-| `zeta.stall.broadcast_storm.stopped.total` | Gauge | —           | 因 Broker 错误或发送线程池饱和而丢失的刷新广播数 |
+| `zeta.stall.broadcast_storm.stopped.total` | Gauge | —           | 因 Broker 错误或发送线程池饱和而丢失的 PUT/刷新广播数 |
 | `zeta.stall.redis_degraded.stopped` | Gauge | —                    | 熔断器打开时为 1（加载快速失败）  |
 | `zeta.stall.redis_degraded.timeouts.total` | Gauge | —             | 因读取超时而解析为空的去重加载数  |
 | `zeta.stall.worker_partition.stopped` | Gauge | —                  | 无存活 Worker 分片时为 1（报告路由无目标） |
-| `zeta.l1.refault.admit.total` | Gauge | — | 累计放行判定数（ADR-0079；仅 `refault-admission` != off 时注册） |
-| `zeta.l1.refault.reject.total` | Gauge | — | 累计拒绝判定数；shadow 模式为 would-reject 率 |
-| `zeta.l1.refault.distance` | Gauge | — | 最近一次有证据判定的距离，-1 = 无证据 |
-| `zeta.l1.refault.capacity` | Gauge | — | 距离比较用的静态容量估计 |
-| `zeta.l1.refault.clock.rate` | Gauge | — | 容量驱逐速率（次/秒，扫描压力告警） |
 | `zeta.rules.persist.failed` | Gauge | — | 已入内存但未到达 Redis/广播的规则变更数 |
 | `zeta.expire.refresh.available`     | Gauge | —                    | 刷新信号量可用许可数             |
 | `zeta.expire.refresh.failure.leased.total` | Gauge | —           | 获准续租的刷新失败累计数（ADR-0036） |

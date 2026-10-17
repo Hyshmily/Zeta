@@ -45,26 +45,8 @@
     {
       "name": "zeta.local.cache.max-size",
       "type": "java.lang.Integer",
-      "description": "Maximum number of L1 cache entries (ignored when max-weight > 0).",
+      "description": "Maximum number of L1 cache entries.",
       "defaultValue": 100000
-    },
-    {
-      "name": "zeta.local.cache.max-weight",
-      "type": "java.lang.Long",
-      "description": "Memory weight limit for L1 cache (bytes). 0 = use max-size.",
-      "defaultValue": 0
-    },
-    {
-      "name": "zeta.local.cache.max-value-size",
-      "type": "java.lang.Long",
-      "description": "Single value size limit (bytes). 0 = unlimited.",
-      "defaultValue": 0
-    },
-    {
-      "name": "zeta.local.cache-key.strip-query",
-      "type": "java.lang.Boolean",
-      "description": "Strip query parameters (?key=val) from cache keys before cache operations.",
-      "defaultValue": false
     },
     {
       "name": "zeta.local.sketch-window-count",
@@ -133,7 +115,7 @@
       "defaultValue": 20,
       "deprecation": {
         "level": "warning",
-        "reason": "No longer used; decay is driven by HotKeySchedulingConfiguration."
+        "reason": "No longer used; decay is driven by ZetaSchedulingConfiguration."
       }
     },
     {
@@ -224,7 +206,8 @@
       "name": "zeta.local.shard-count",
       "type": "java.lang.Integer",
       "description": "Deprecated legacy knob: no code path reads this property (superseded by consistent-hashing routing and auto consumer count). Setting it has no effect.",
-      "defaultValue": 1
+      "defaultValue": 1,
+      "deprecated": true
     },
     {
       "name": "zeta.local.queue-capacity",
@@ -374,13 +357,13 @@
       "name": "zeta.sync.flush-delay-ms",
       "type": "java.lang.Long",
       "description": "Delay in ms before pending sync records are flushed.",
-      "defaultValue": 500
+      "defaultValue": 50
     },
     {
       "name": "zeta.sync.max-defer-ms",
       "type": "java.lang.Long",
       "description": "Maximum deferral in ms before a flush is forced, even under continuous writes.",
-      "defaultValue": 2000
+      "defaultValue": 500
     },
     {
       "name": "zeta.local.circuit-breaker.enabled",

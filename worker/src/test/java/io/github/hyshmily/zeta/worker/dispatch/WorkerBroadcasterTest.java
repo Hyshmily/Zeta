@@ -63,7 +63,7 @@ class WorkerBroadcasterTest {
   @Test
   void shouldSendHotWithCorrectRoutingKeyAndHeaders() {
     broadcaster.broadcastHot("myKey");
-    verify(rabbitTemplate).send(eq(BROADCAST), eq(KEY_BROADCAST + "testApp"), messageCaptor.capture());
+    verify(rabbitTemplate).send(eq(BROADCAST), eq(PREFIX_DECISION + "testApp"), messageCaptor.capture());
     Message sent = messageCaptor.getValue();
     assertThat(new String(sent.getBody())).isEqualTo("myKey");
     assertThat(sent.getMessageProperties().getHeaders().get(HEADER_TYPE)).isEqualTo(WorkerMessage.TYPE_HOT);
@@ -78,7 +78,7 @@ class WorkerBroadcasterTest {
   @Test
   void shouldSendCoolWithCorrectRoutingKeyAndHeaders() {
     broadcaster.broadcastCool("myKey");
-    verify(rabbitTemplate).send(eq(BROADCAST), eq(KEY_BROADCAST + "testApp"), messageCaptor.capture());
+    verify(rabbitTemplate).send(eq(BROADCAST), eq(PREFIX_DECISION + "testApp"), messageCaptor.capture());
     Message sent = messageCaptor.getValue();
     assertThat(new String(sent.getBody())).isEqualTo("myKey");
     assertThat(sent.getMessageProperties().getHeaders().get(HEADER_TYPE)).isEqualTo(WorkerMessage.TYPE_COOL);
@@ -97,7 +97,7 @@ class WorkerBroadcasterTest {
     broadcaster.broadcastHot("k2");
     broadcaster.broadcastHot("k3");
 
-    verify(rabbitTemplate, times(4)).send(any(), eq(KEY_BROADCAST + "testApp"), messageCaptor.capture());
+    verify(rabbitTemplate, times(4)).send(any(), eq(PREFIX_DECISION + "testApp"), messageCaptor.capture());
     long v0 = (Long) messageCaptor.getAllValues().get(0).getMessageProperties().getHeaders().get(HEADER_VERSION);
     long v3 = (Long) messageCaptor.getAllValues().get(3).getMessageProperties().getHeaders().get(HEADER_VERSION);
     assertThat(v3).isGreaterThan(v0);
@@ -211,7 +211,7 @@ class WorkerBroadcasterTest {
 
     scheduled.forEach(Runnable::run);
 
-    verify(rabbitTemplate, times(3)).send(eq(BROADCAST), eq(KEY_BROADCAST + "testApp"), messageCaptor.capture());
+    verify(rabbitTemplate, times(3)).send(eq(BROADCAST), eq(PREFIX_DECISION + "testApp"), messageCaptor.capture());
     java.util.List<Message> sent = messageCaptor.getAllValues();
     Object v0 = sent.get(0).getMessageProperties().getHeaders().get(HEADER_VERSION);
     assertThat(sent.get(1).getMessageProperties().getHeaders().get(HEADER_VERSION)).isEqualTo(v0);

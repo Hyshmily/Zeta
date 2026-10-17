@@ -1,5 +1,7 @@
 # Compact Binary Encoding for App→Worker Report Messages
 
+> **Status:** **DEPRECATED (marked 2026-10-15) — the compact encoding described here was removed from the codebase** (ADR-0096): `ReportMessageCodec`, `CompactAwareReportMessageConverter`, the `report-encoding` config knob and the `0x5A` magic sniffing are gone; report bodies are Jackson JSON only. Kept for historical context only — **do not cite the dual-format contract as current behavior.**
+
 `ReportMessage` batches traveled as Jackson JSON bodies on both the App-side `zetaReportRabbitTemplate` and the Worker-side `reportListenerContainerFactory`. For a typical key-count batch (counts are 1-2 digit integers) JSON pays a per-entry `"key":N,` framing overhead of 4-5 bytes plus structural fields, inflating AMQP frame count and Worker-side parse cost. We add an opt-in compact binary encoding for the report wire format — varint continuation encoding with length-prefix framing, adapted from RocksDB `util/coding.h` — selected by configuration on the send side and auto-detected on the receive side.
 
 ## Status
