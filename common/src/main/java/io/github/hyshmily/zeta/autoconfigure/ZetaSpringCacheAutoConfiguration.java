@@ -62,7 +62,7 @@ public class ZetaSpringCacheAutoConfiguration {
 
   /**
    * Create the companion aspect that enables {@code @Intercept}, {@code @Fallback},
-   * and {@code @CacheTTL} on {@code @Cacheable} methods.
+   * and {@code @CacheTtl} on {@code @Cacheable} methods.
    *
    * @param zeta     the HotKey facade
    * @param properties the HotKey configuration properties
