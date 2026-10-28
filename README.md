@@ -17,6 +17,10 @@
 
 Zeta is an automated, high-performance, low-cost lightweight distributed cache and preheating framework — no key pre-registration; hotspot detection, decision, warming, and degradation form a fully automated closed loop. It gives burst hot keys eventually-consistent caching across the cluster at minimal cost, fully decoupling business code from distributed coordination infrastructure via Redis and RabbitMQ.
 
+> [!NOTE]
+> 
+> A more complete and stable production version will be released soon
+
 ### Positioning
 
 **Good fit:**
