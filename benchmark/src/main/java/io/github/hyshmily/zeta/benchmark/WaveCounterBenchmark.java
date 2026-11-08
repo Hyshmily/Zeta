@@ -15,7 +15,7 @@
  */
 package io.github.hyshmily.zeta.benchmark;
 
-import io.github.hyshmily.zeta.hotkeydetector.doublebuffer.WaveCounter;
+import io.github.hyshmily.zeta.counter.WaveCounter;
 import java.util.concurrent.TimeUnit;
 import org.openjdk.jmh.annotations.Benchmark;
 import org.openjdk.jmh.annotations.BenchmarkMode;
@@ -76,7 +76,7 @@ public class WaveCounterBenchmark {
 
   @Setup(Level.Trial)
   public void setup() {
-    counter = new WaveCounter(batch -> {});
+    counter = new WaveCounter((batch, windowMs) -> {});
     counter.afterPropertiesSet();
     keys = new String[keySpace];
     for (int k = 0; k < keySpace; k++) {

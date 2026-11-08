@@ -16,55 +16,55 @@
 package io.github.hyshmily.zeta.benchmark;
 
 import com.github.benmanes.caffeine.cache.Cache;
-import com.github.benmanes.caffeine.cache.Caffeine;
 import io.github.hyshmily.zeta.autoconfigure.ZetaProperties;
+import io.github.hyshmily.zeta.cache.AccessCounter;
+import io.github.hyshmily.zeta.cache.BroadcastBuffer;
 import io.github.hyshmily.zeta.cache.CentralDispatcher;
 import io.github.hyshmily.zeta.cache.HotKeyCache;
-import io.github.hyshmily.zeta.cache.cachesupport.BroadcastBuffer;
-import io.github.hyshmily.zeta.cache.cachesupport.EntryLifecycle;
-import io.github.hyshmily.zeta.cache.cachesupport.LoaderOutcome;
-import io.github.hyshmily.zeta.cache.cachesupport.SingleFlight;
-import io.github.hyshmily.zeta.cache.cachesupport.impl.EntryLifecycleImpl;
-import io.github.hyshmily.zeta.cache.codec.CacheCompressor;
+import io.github.hyshmily.zeta.cache.cachesupport.lifecycle.EntryLifecycle;
+import io.github.hyshmily.zeta.cache.cachesupport.lifecycle.EntryLifecycleImpl;
+import io.github.hyshmily.zeta.cache.cachesupport.loader.LoaderOutcome;
+import io.github.hyshmily.zeta.cache.cachesupport.loader.singleflight.SingleFlight;
+import io.github.hyshmily.zeta.cache.cachesupport.policy.GetPolicy;
+import io.github.hyshmily.zeta.cache.cachesupport.raw.CacheEntry;
+import io.github.hyshmily.zeta.cache.cachesupport.raw.EntryDraft;
 import io.github.hyshmily.zeta.hotkeydetector.HotKeyDetector;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.HeavyKeeper;
-import io.github.hyshmily.zeta.model.CacheEntry;
 import io.github.hyshmily.zeta.model.KeyState;
-import io.github.hyshmily.zeta.model.ReadPolicy;
+import io.github.hyshmily.zeta.reporting.KeyReporter;
 import io.github.hyshmily.zeta.reporting.ReportMessage;
 import io.github.hyshmily.zeta.reporting.ReportPublisher;
 import io.github.hyshmily.zeta.reporting.impl.KeyReporterImpl;
-import io.github.hyshmily.zeta.rule.Rule;
-import io.github.hyshmily.zeta.rule.impl.RuleMatcherImpl;
+import io.github.hyshmily.zeta.scheduler.BackgroundRefresher;
 import io.github.hyshmily.zeta.scheduler.DefaultBackgroundRefresher;
-import io.github.hyshmily.zeta.sharding.impl.HealthViewImpl;
-import io.github.hyshmily.zeta.sharding.impl.RingManagerImpl;
-import io.github.hyshmily.zeta.util.id.SnowflakeIdGenerator;
-import io.github.hyshmily.zeta.util.version.impl.VersionControllerImpl;
-import org.openjdk.jmh.annotations.*;
-
-import java.util.Map;
-import java.util.Optional;
+import io.github.hyshmily.zeta.sharding.ConsistentHashRing;
+import io.github.hyshmily.zeta.sharding.ConsistentHashRingImpl;
+import io.github.hyshmily.zeta.sharding.HealthView;
+import io.github.hyshmily.zeta.sharding.HealthViewImpl;
+import io.github.hyshmily.zeta.util.clock.MonotonicStampClock;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
-import java.util.function.Function;
 import java.util.function.Supplier;
+import org.openjdk.jmh.annotations.*;
 
 /**
  * Cost of a full L1-hit {@code get} — the single hottest read path in the
- * library: normalize → rule memo probe → Caffeine lookup → unwrap →
+ * library: Caffeine lookup → unwrap →
  * detector add + buffered report → local-promotion check.
  *
  * <p>Wiring mirrors production ({@code ZetaAutoConfiguration} shapes: real
- * {@link HeavyKeeper}, {@link HotKeyDetector}, {@link KeyReporterImpl} with
- * a dropping publisher sink) except:
+ * {@link HeavyKeeper}, {@link HotKeyDetector}, {@link KeyReporter} with
+ * a dropping publisher sink, and the L1 table built by
+ * {@link HitPathAuditBenchmark#buildL1Table} in the production form —
+ * maximumSize + {@code recordStats()} + variable expiry; the table shape must
+ * keep mirroring the auto-configuration) except:
  * <ul>
  *   <li>{@link SingleFlight} is a pass-through fake — the hit path never
  *       touches dedup (a miss would, and misses are out of scope here).</li>
  *   <li>No Worker is registered, so each 50ms flush reconciles to an empty
  *       alive set and drops before routing. The per-hit cost under test is
- *       the buffered append ({@code WaveCounter.count}); routing/publish are
+ *       the buffered append ({@code WaveCounter.add}); routing/publish are
  *       amortized background work, identical to a production App whose
  *       Workers are (transiently) unreachable.</li>
  *   <li>Keys are pre-warmed into the sketch ({@code addDirect}), so the
@@ -73,11 +73,9 @@ import java.util.function.Supplier;
  *       far-future).</li>
  * </ul>
  *
- * <p>Scenarios isolate the three per-hit shape costs: plain small-String
- * values (no compression anywhere), 1&nbsp;KB Strings (LZ4 decompress on
- * every hit — written once via the real {@code putLocal} path), and a
- * 10-rule matcher (memo probe on every hit; see {@code RuleBenchmark} for
- * the matcher matrix itself).
+ * <p>Scenarios isolate the per-hit shape costs: plain small-String values,
+ * 1&nbsp;KB Strings (written once via the real {@code putLocal} path), and the
+ * 8-thread contention shape.
  *
  * <p>Run with the shaded jar:
  *
@@ -95,9 +93,10 @@ public class HotHitBenchmark {
 
   private static final int KEY_SPACE = 64;
 
-  /** Tripwire reader: a hit must never invoke it. */
-  private static final ReadPolicy HIT_POLICY = ReadPolicy.of(HotHitBenchmark::unreachableReader);
+  /** Default get options: no TTL override, no stale policy — the plain-read shape under test. */
+  private static final GetPolicy HIT_OPTIONS = GetPolicy.defaults();
 
+  /** Tripwire reader: a hit must never invoke it. */
   private static <T> T unreachableReader() {
     throw new AssertionError("reader invoked on an L1 hit");
   }
@@ -111,27 +110,39 @@ public class HotHitBenchmark {
     }
 
     @Override
-    public long estimatedInflightSize() {
+    public boolean isBreakerOpen(String cacheKey) {
+      return false;
+    }
+
+    @Override
+    public long estimatedInFlightSize() {
       return 0;
     }
 
     @Override
-    public <T> Optional<T> load(String cacheKey, Supplier<T> reader) {
+    public <T> LoaderOutcome<T> load(
+      String cacheKey,
+      Supplier<T> reader,
+      boolean callerRuns,
+      java.util.function.Consumer<? super T> leaderCommit
+    ) {
       throw new AssertionError("SingleFlight.load invoked on an L1 hit");
     }
 
     @Override
-    public <T> LoaderOutcome<T> loadOutcome(String cacheKey, Supplier<T> reader) {
-      throw new AssertionError("SingleFlight.loadOutcome invoked on an L1 hit");
-    }
-
-    @Override
-    public <T> Map<String, Optional<T>> load(Iterable<String> cacheKeys, Function<? super String, ? extends T> reader) {
-      throw new AssertionError("SingleFlight.load invoked on an L1 hit");
+    public <T> LoaderOutcome<T> loadIsolated(
+      String cacheKey,
+      Supplier<T> reader,
+      java.util.function.Consumer<? super T> leaderCommit
+    ) {
+      throw new AssertionError("SingleFlight.loadIsolated invoked on an L1 hit");
     }
 
     @Override
     public void invalidate(String cacheKey) {}
+
+    @Override
+    public void invalidateAll() {}
   }
 
   /** Publisher sink: drops every batch (no broker in benchmarks). */
@@ -147,9 +158,8 @@ public class HotHitBenchmark {
 
   ScheduledExecutorService scheduler;
   HotKeyDetector detector;
-  KeyReporterImpl reporter;
+  KeyReporter reporter;
   HotKeyCache cachePlain;
-  HotKeyCache cacheRuled;
   String[] keys;
   String[] bigKeys;
 
@@ -167,52 +177,36 @@ public class HotHitBenchmark {
   @Setup(Level.Trial)
   public void setup() {
     scheduler = Executors.newSingleThreadScheduledExecutor();
-    Cache<String, CacheEntry> caffeine = Caffeine.newBuilder().maximumSize(100_000).build();
-    ZetaProperties ttlConfig = new ZetaProperties();
-    SnowflakeIdGenerator snowflake = new SnowflakeIdGenerator(0, 1, 5L, false);
-    HealthViewImpl healthView = new HealthViewImpl(30_000, 3);
+    ZetaProperties zetaProps = new ZetaProperties();
+    // Production table shape (recordStats + variable expiry): a bare
+    // Caffeine table measures a path production never runs — the table form
+    // must mirror ZetaAutoConfiguration (buildL1Table), see HitPathAuditBenchmark.
+    Cache<String, CacheEntry> caffeine = HitPathAuditBenchmark.buildL1Table(zetaProps);
+    MonotonicStampClock stampClock = new MonotonicStampClock(1L, MonotonicStampClock.DEFAULT_MAX_FORWARD_DRIFT_MS);
+    HealthView healthView = new HealthViewImpl(30_000, 3, false, 0);
     HeavyKeeper sketch = new HeavyKeeper(
-      ttlConfig.getTopK(),
-      ttlConfig.getWidth(),
-      ttlConfig.getDepth(),
-      ttlConfig.getDecay(),
-      ttlConfig.getMinCount(),
-      ttlConfig.getExpelledQueueCapacity(),
-      ttlConfig.getSketchWindowCount(),
+      zetaProps.getTopK(),
+      zetaProps.getWidth(),
+      zetaProps.getDepth(),
+      zetaProps.getDecay(),
+      zetaProps.getMinCount(),
+      zetaProps.getExpelledQueueCapacity(),
+      zetaProps.getSketchWindowCount(),
       true
     );
-    HotKeyDetector detector = new HotKeyDetector(sketch, scheduler);
-    detector.afterPropertiesSet();
-    this.detector = detector;
-    EntryLifecycle entryLifecycle = new EntryLifecycleImpl(caffeine, ttlConfig, CacheCompressor.NONE, healthView);
-    RuleMatcherImpl plainRules = new RuleMatcherImpl(Optional.empty(), Optional.empty());
-    RuleMatcherImpl tenRules = new RuleMatcherImpl(Optional.empty(), Optional.empty());
-    addTenRules(tenRules);
-    DefaultBackgroundRefresher refresher = new DefaultBackgroundRefresher(
-      caffeine,
-      Runnable::run,
-      entryLifecycle.ttlPolicy(),
-      CacheCompressor.NONE,
-      10
-    );
-    BroadcastBuffer broadcast = new BroadcastBuffer(scheduler, Optional.empty(), 500, 2_000, null);
-    RingManagerImpl ring = new RingManagerImpl(150);
-    KeyReporterImpl reporter = new KeyReporterImpl(
-      new DropPublisher(),
-      scheduler,
-      50,
-      "bench",
-      1000,
-      100,
-      1,
-      ring,
-      healthView,
-      snowflake
-    );
+    this.detector = new HotKeyDetector(sketch);
+    EntryLifecycle entryLifecycle = new EntryLifecycleImpl(caffeine, zetaProps, healthView);
+    BackgroundRefresher refresher = new DefaultBackgroundRefresher(caffeine, Runnable::run, entryLifecycle, 10);
+    BroadcastBuffer broadcast = new BroadcastBuffer(scheduler, null, 500, 2_000, null);
+    ConsistentHashRing ring = new ConsistentHashRingImpl(150);
+    KeyReporter reporter = new KeyReporterImpl(new DropPublisher(), "bench", 1000, 100, 1, ring, healthView);
     reporter.start();
     this.reporter = reporter;
-    CentralDispatcher dispatcher = new CentralDispatcher(Optional.of(reporter), Optional.empty(), broadcast, detector);
-    VersionControllerImpl versions = new VersionControllerImpl(Optional.empty(), 60, snowflake);
+    // design decisions: access counting: one shared access counter feeds detection AND reporting; the
+    // per-hit cost under test is exactly one buffered append.
+    AccessCounter accessCounter = new AccessCounter(detector, reporter, scheduler, 50L, 500L);
+    accessCounter.afterPropertiesSet();
+    CentralDispatcher dispatcher = new CentralDispatcher(accessCounter, null, broadcast, null);
     SingleFlight flight = new PassThroughFlight();
     cachePlain = new HotKeyCache(
       detector,
@@ -220,29 +214,9 @@ public class HotHitBenchmark {
       flight,
       entryLifecycle,
       refresher,
-      Runnable::run,
       dispatcher,
-      plainRules,
-      versions,
-      ttlConfig,
-      healthView,
-      CacheCompressor.NONE,
-      null
-    );
-    cacheRuled = new HotKeyCache(
-      detector,
-      caffeine,
-      flight,
-      entryLifecycle,
-      refresher,
-      Runnable::run,
-      dispatcher,
-      tenRules,
-      versions,
-      ttlConfig,
-      healthView,
-      CacheCompressor.NONE,
-      null
+      stampClock,
+      healthView
     );
 
     long farFuture = System.currentTimeMillis() + 300_000;
@@ -256,75 +230,50 @@ public class HotHitBenchmark {
     String bigValue = "v".repeat(1024);
     for (int k = 0; k < KEY_SPACE; k++) {
       bigKeys[k] = "bench:big:" + k;
-      // Real write path (compresses once here); every measured hit below
-      // pays the matching decompress.
+      // Real write path, once per key: values are stored exactly as passed
+      // (design decisions: api surface removed the value codec), so every measured hit below is a
+      // plain L1 unwrap with no decode step.
       cachePlain.putLocal(bigKeys[k], bigValue, 0, 0);
       detector.addDirect(bigKeys[k], 100_000L);
     }
   }
 
   private static CacheEntry entry(String value, long farFuture) {
-    return CacheEntry.builder()
+    return EntryDraft.blank(null)
       .value(value)
-      .dataVersion(1)
-      .isVersionDegraded(false)
-      .decisionVersion(0)
-      .hardTtlMs(300_000)
-      .hardExpireAtMs(farFuture)
-      .softTtlMs(30_000)
-      .softExpireAtMs(farFuture)
+      .version(1)
+      .ttl(300_000, 30_000, 300_000, 30_000)
+      .expiryAt(farFuture, farFuture)
       .keyState(KeyState.NORMAL)
-      .normalHardTtlMs(300_000)
-      .normalSoftTtlMs(30_000)
       .build();
-  }
-
-  private static void addTenRules(RuleMatcherImpl matcher) {
-    matcher.addRule(new Rule(Rule.RuleType.PREFIX, "bench:nope:p0:", Rule.RuleAction.BLOCK));
-    matcher.addRule(new Rule(Rule.RuleType.PREFIX, "bench:nope:p1:", Rule.RuleAction.BLOCK));
-    matcher.addRule(new Rule(Rule.RuleType.PREFIX, "bench:nope:p2:", Rule.RuleAction.BLOCK));
-    matcher.addRule(new Rule(Rule.RuleType.WILDCARD, "bench:*:nope:w0", Rule.RuleAction.BLOCK));
-    matcher.addRule(new Rule(Rule.RuleType.WILDCARD, "bench:*:nope:w1", Rule.RuleAction.BLOCK));
-    matcher.addRule(new Rule(Rule.RuleType.REGEX, "bench:\\d+:nope:r0", Rule.RuleAction.BLOCK));
-    matcher.addRule(new Rule(Rule.RuleType.REGEX, "bench:\\d+:nope:r1", Rule.RuleAction.BLOCK));
-    matcher.addRule(new Rule(Rule.RuleType.REGEX, "bench:\\d+:nope:r2", Rule.RuleAction.BLOCK));
-    matcher.addRule(new Rule(Rule.RuleType.EXACT, "bench:never:exact0", Rule.RuleAction.BLOCK));
-    matcher.addRule(new Rule(Rule.RuleType.EXACT, "bench:never:exact1", Rule.RuleAction.BLOCK));
   }
 
   @TearDown(Level.Trial)
   public void tearDown() {
-    // Orderly first: stop the tide loops before killing their shared
+    // Orderly first: stop the tide loop before killing the shared
     // scheduler, otherwise an in-flight reschedule logs a shutdown-race
     // ERROR (harmless, but noisy).
     reporter.stop();
-    detector.destroy();
     scheduler.shutdownNow();
   }
 
-  /** Full hit, small-String values, empty rule set. */
+  /** Full hit, small-String values. */
   @Benchmark
-  public Optional<String> get_hit_smallString() {
-    return cachePlain.get(next(keys), HIT_POLICY);
+  public String get_hit_smallString() {
+    return cachePlain.get(next(keys), HotHitBenchmark::unreachableReader, HIT_OPTIONS);
   }
 
   /** Full hit, small-String values, 8 contending readers. */
   @Benchmark
   @Threads(8)
-  public Optional<String> get_hit_smallString_8t() {
-    return cachePlain.get(next(keys), HIT_POLICY);
+  public String get_hit_smallString_8t() {
+    return cachePlain.get(next(keys), HotHitBenchmark::unreachableReader, HIT_OPTIONS);
   }
 
-  /** Full hit, 1KB LZ4 values: adds one decompress per hit vs the small-String shape. */
+  /** Full hit, 1KB String values. */
   @Benchmark
-  public Optional<String> get_hit_lz4String() {
-    return cachePlain.get(next(bigKeys), HIT_POLICY);
-  }
-
-  /** Full hit, small-String values, 10-rule matcher: adds one memo probe per hit. */
-  @Benchmark
-  public Optional<String> get_hit_ruled() {
-    return cacheRuled.get(next(keys), HIT_POLICY);
+  public String get_hit_1kString() {
+    return cachePlain.get(next(bigKeys), HotHitBenchmark::unreachableReader, HIT_OPTIONS);
   }
 
   /**
@@ -333,7 +282,7 @@ public class HotHitBenchmark {
    * on top of.
    */
   @Benchmark
-  public Optional<String> peek_hit() {
+  public String peek_hit() {
     return cachePlain.peek(next(keys));
   }
 }
