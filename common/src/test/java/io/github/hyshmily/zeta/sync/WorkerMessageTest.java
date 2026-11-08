@@ -18,6 +18,7 @@ package io.github.hyshmily.zeta.sync;
 import static io.github.hyshmily.zeta.constants.ZetaConstants.Amqp.*;
 import static org.assertj.core.api.Assertions.assertThat;
 
+import io.github.hyshmily.zeta.sync.worker.WorkerDecisionType;
 import io.github.hyshmily.zeta.sync.worker.WorkerMessage;
 import java.nio.charset.StandardCharsets;
 import org.junit.jupiter.api.Test;
@@ -36,14 +37,29 @@ class WorkerMessageTest {
   @Test
   void from_shouldParseHotMessage() {
     MessageProperties props = new MessageProperties();
-    props.setHeader(HEADER_TYPE, WorkerMessage.TYPE_HOT);
+    props.setHeader(HEADER_TYPE, WorkerDecisionType.HOT.code());
     props.setHeader(HEADER_VERSION, 10L);
+    props.setHeader(HEADER_NODE_ID, "worker-1");
     Message msg = new Message("cacheKey".getBytes(StandardCharsets.UTF_8), props);
-    WorkerMessage wm = WorkerMessage.from(msg);
-    assertThat(wm).isNotNull();
-    assertThat(wm.cacheKey()).isEqualTo("cacheKey");
-    assertThat(wm.type()).isEqualTo(WorkerMessage.TYPE_HOT);
-    assertThat(wm.decisionVersion()).isEqualTo(10L);
+    WorkerMessage workerMessage = WorkerMessage.from(msg);
+    assertThat(workerMessage).isNotNull();
+    assertThat(workerMessage.cacheKey()).isEqualTo("cacheKey");
+    assertThat(workerMessage.type()).isEqualTo(WorkerDecisionType.HOT);
+    assertThat(workerMessage.stamp().decisionVersion()).isEqualTo(10L);
+  }
+
+  /** The wire type and the lease kind are one contract. */
+  @Test
+  void from_coolMessage_shouldCarryCoolKind() {
+    MessageProperties props = new MessageProperties();
+    props.setHeader(HEADER_TYPE, WorkerDecisionType.COOL.code());
+    props.setHeader(HEADER_VERSION, 10L);
+    Message msg = new Message("key".getBytes(StandardCharsets.UTF_8), props);
+
+    WorkerMessage workerMessage = WorkerMessage.from(msg);
+
+    assertThat(workerMessage).isNotNull();
+    assertThat(workerMessage.stamp().isCool()).isTrue();
   }
 
   /**
@@ -55,16 +71,30 @@ class WorkerMessageTest {
     assertThat(WorkerMessage.from(msg)).isNull();
   }
 
+  /** A blank body is not a cache key; it would reach the loader as an unservable key. */
+  @Test
+  void from_shouldReturnNullForBlankKey() {
+    MessageProperties props = new MessageProperties();
+    props.setHeader(HEADER_TYPE, WorkerDecisionType.HOT.code());
+    Message msg = new Message("   ".getBytes(StandardCharsets.UTF_8), props);
+    assertThat(WorkerMessage.from(msg)).isNull();
+  }
+
   /**
-   * Verifies that from() uses default version 0 when the version header is missing.
+   * A decision without a positive version is unorderable: the wire boundary drops it
+   * before it can create an entry, so the handler never sees a zero stamp.
    */
   @Test
-  void from_shouldUseDefaultVersionWhenMissing() {
+  void from_shouldReturnNullWhenVersionMissingOrNonPositive() {
     MessageProperties props = new MessageProperties();
-    props.setHeader(HEADER_TYPE, WorkerMessage.TYPE_COOL);
-    Message msg = new Message("key".getBytes(StandardCharsets.UTF_8), props);
-    WorkerMessage wm = WorkerMessage.from(msg);
-    assertThat(wm.decisionVersion()).isZero();
+    props.setHeader(HEADER_TYPE, WorkerDecisionType.COOL.code());
+    Message missing = new Message("key".getBytes(StandardCharsets.UTF_8), props);
+    assertThat(WorkerMessage.from(missing)).isNull();
+
+    props.setHeader(HEADER_VERSION, 0L);
+    assertThat(WorkerMessage.from(missing)).isNull();
+    props.setHeader(HEADER_VERSION, -1L);
+    assertThat(WorkerMessage.from(missing)).isNull();
   }
 
   /**
@@ -72,38 +102,35 @@ class WorkerMessageTest {
    */
   @Test
   void shouldHaveExpectedTypeConstants() {
-    assertThat(WorkerMessage.TYPE_HOT).isEqualTo("HOT");
-    assertThat(WorkerMessage.TYPE_COOL).isEqualTo("COOL");
+    assertThat(WorkerDecisionType.HOT.code()).isEqualTo("HOT");
+    assertThat(WorkerDecisionType.COOL.code()).isEqualTo("COOL");
   }
 
   /**
-   * Verifies that timestamp and nodeId headers are parsed correctly.
+   * Verifies that the nodeId header is parsed correctly and defaults to null when missing.
    */
   @Test
-  void from_withTimestampAndNodeId_shouldParse() {
+  void from_withNodeId_shouldParse() {
     MessageProperties props = new MessageProperties();
-    props.setHeader(HEADER_TYPE, WorkerMessage.TYPE_HOT);
+    props.setHeader(HEADER_TYPE, WorkerDecisionType.HOT.code());
     props.setHeader(HEADER_VERSION, 10L);
-    props.setHeader(HEADER_TIMESTAMP, 123456L);
     props.setHeader(HEADER_NODE_ID, "worker-1");
     Message msg = new Message("key".getBytes(StandardCharsets.UTF_8), props);
-    WorkerMessage wm = WorkerMessage.from(msg);
-    assertThat(wm.timestamp()).isEqualTo(123456L);
-    assertThat(wm.nodeId()).isEqualTo("worker-1");
+    WorkerMessage workerMessage = WorkerMessage.from(msg);
+    assertThat(workerMessage.stamp().decisionNodeId()).isEqualTo("worker-1");
   }
 
   /**
-   * Verifies that missing timestamp and nodeId headers default to 0 and null respectively.
+   * Verifies that a missing nodeId header defaults to null.
    */
   @Test
-  void from_withMissingTimestampAndNodeId_shouldDefault() {
+  void from_withMissingNodeId_shouldDefault() {
     MessageProperties props = new MessageProperties();
-    props.setHeader(HEADER_TYPE, WorkerMessage.TYPE_HOT);
+    props.setHeader(HEADER_TYPE, WorkerDecisionType.HOT.code());
     props.setHeader(HEADER_VERSION, 10L);
     Message msg = new Message("key".getBytes(StandardCharsets.UTF_8), props);
-    WorkerMessage wm = WorkerMessage.from(msg);
-    assertThat(wm.timestamp()).isZero();
-    assertThat(wm.nodeId()).isNull();
+    WorkerMessage workerMessage = WorkerMessage.from(msg);
+    assertThat(workerMessage.stamp().decisionNodeId()).isNull();
   }
 
   /**
@@ -112,11 +139,12 @@ class WorkerMessageTest {
   @Test
   void from_withVersionAsInteger_shouldHandle() {
     MessageProperties props = new MessageProperties();
-    props.setHeader(HEADER_TYPE, WorkerMessage.TYPE_HOT);
+    props.setHeader(HEADER_TYPE, WorkerDecisionType.HOT.code());
     props.setHeader(HEADER_VERSION, 42);
+    props.setHeader(HEADER_NODE_ID, "worker-1");
     Message msg = new Message("key".getBytes(StandardCharsets.UTF_8), props);
-    WorkerMessage wm = WorkerMessage.from(msg);
-    assertThat(wm.decisionVersion()).isEqualTo(42L);
+    WorkerMessage workerMessage = WorkerMessage.from(msg);
+    assertThat(workerMessage.stamp().decisionVersion()).isEqualTo(42L);
   }
 
   // ── P0-2: Epoch ──
@@ -127,14 +155,14 @@ class WorkerMessageTest {
   @Test
   void from_withEpoch_shouldParse() {
     MessageProperties props = new MessageProperties();
-    props.setHeader(HEADER_TYPE, WorkerMessage.TYPE_HOT);
+    props.setHeader(HEADER_TYPE, WorkerDecisionType.HOT.code());
     props.setHeader(HEADER_VERSION, 10L);
     props.setHeader(HEADER_EPOCH, 3L);
     props.setHeader(HEADER_NODE_ID, "worker-1");
     Message msg = new Message("key".getBytes(StandardCharsets.UTF_8), props);
-    WorkerMessage wm = WorkerMessage.from(msg);
-    assertThat(wm.epoch()).isEqualTo(3L);
-    assertThat(wm.nodeId()).isEqualTo("worker-1");
+    WorkerMessage workerMessage = WorkerMessage.from(msg);
+    assertThat(workerMessage.stamp().decisionEpoch()).isEqualTo(3L);
+    assertThat(workerMessage.stamp().decisionNodeId()).isEqualTo("worker-1");
   }
 
   /**
@@ -143,11 +171,12 @@ class WorkerMessageTest {
   @Test
   void from_withMissingEpoch_shouldDefaultToZero() {
     MessageProperties props = new MessageProperties();
-    props.setHeader(HEADER_TYPE, WorkerMessage.TYPE_HOT);
+    props.setHeader(HEADER_TYPE, WorkerDecisionType.HOT.code());
     props.setHeader(HEADER_VERSION, 10L);
+    props.setHeader(HEADER_NODE_ID, "worker-1");
     Message msg = new Message("key".getBytes(StandardCharsets.UTF_8), props);
-    WorkerMessage wm = WorkerMessage.from(msg);
-    assertThat(wm.epoch()).isZero();
+    WorkerMessage workerMessage = WorkerMessage.from(msg);
+    assertThat(workerMessage.stamp().decisionEpoch()).isZero();
   }
 
   /**
@@ -156,11 +185,32 @@ class WorkerMessageTest {
   @Test
   void from_withEpochAsInteger_shouldHandle() {
     MessageProperties props = new MessageProperties();
-    props.setHeader(HEADER_TYPE, WorkerMessage.TYPE_HOT);
+    props.setHeader(HEADER_TYPE, WorkerDecisionType.HOT.code());
     props.setHeader(HEADER_VERSION, 10L);
     props.setHeader(HEADER_EPOCH, 2);
+    props.setHeader(HEADER_NODE_ID, "worker-1");
     Message msg = new Message("key".getBytes(StandardCharsets.UTF_8), props);
-    WorkerMessage wm = WorkerMessage.from(msg);
-    assertThat(wm.epoch()).isEqualTo(2L);
+    WorkerMessage workerMessage = WorkerMessage.from(msg);
+    assertThat(workerMessage.stamp().decisionEpoch()).isEqualTo(2L);
+  }
+
+  /** The parser switch is exhaustive over the enum's wire codes; unknown values are null. */
+  @Test
+  void decisionTypeRoundTripsEveryWireCode() {
+    for (WorkerDecisionType type : WorkerDecisionType.values()) {
+      assertThat(WorkerDecisionType.parse(type.code())).isSameAs(type);
+    }
+    assertThat(WorkerDecisionType.parse("UNKNOWN")).isNull();
+    assertThat(WorkerDecisionType.parse(3)).isNull();
+    assertThat(WorkerDecisionType.parse(null)).isNull();
+  }
+
+  /** HOT needs the start-jitter loader park; COOL is the budget-exempt control signal. */
+  @Test
+  void decisionTypeFlagsMatchTheAdmissionContract() {
+    assertThat(WorkerDecisionType.HOT.isControl()).isFalse();
+    assertThat(WorkerDecisionType.HOT.needsJitter()).isTrue();
+    assertThat(WorkerDecisionType.COOL.isControl()).isTrue();
+    assertThat(WorkerDecisionType.COOL.needsJitter()).isFalse();
   }
 }

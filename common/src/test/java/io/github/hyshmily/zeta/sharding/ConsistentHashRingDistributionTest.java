@@ -27,16 +27,17 @@ import org.junit.jupiter.api.Test;
  * Quantifies distribution evenness of {@link ConsistentHashRing} across different
  * virtual-node counts using the coefficient of variation (CV = stdDev / mean).
  *
- * <p>Lower CV means more even load distribution.  These tests serve as a regression
- * guard and provide documentary evidence that the default virtual-node count (150)
- * produces acceptable distribution quality.
+ * <p>Lower CV means more even load distribution. These tests serve as a regression
+ * guard across the vnode tiers; the production default is 500 virtual nodes per
+ * Worker ({@code zeta.local.consistent-hashing.virtual-nodes}), guarded by the
+ * 500-vnode and 100-node cases below.
  */
 class ConsistentHashRingDistributionTest {
 
   private static final int N_KEYS = 10_000;
 
   /**
-   * Route {@code N_KEYS} through a ring with the given nodes and virtual-node count,
+   * Route {@code N_KEYS} through a ring with the given nodes and virtual-node add,
    * then return the coefficient of variation of the per-node key counts.
    */
   private static double cv(int virtualNodeCount, Set<String> nodes) {
@@ -44,7 +45,7 @@ class ConsistentHashRingDistributionTest {
   }
 
   private static double cv(int virtualNodeCount, Set<String> nodes, int keyCount) {
-    ConsistentHashRing ring = new ConsistentHashRing(virtualNodeCount);
+    ConsistentHashRing ring = new ConsistentHashRingImpl(virtualNodeCount);
     ring.rebuild(nodes);
 
     Map<String, Integer> counts = new HashMap<>();
@@ -78,7 +79,7 @@ class ConsistentHashRingDistributionTest {
   @Test
   void vnode150_shouldHaveGoodDistribution() {
     double cv = cv(150, nodes(10));
-    assertThat(cv).as("CV with 150 vnodes (default) should be good").isLessThan(0.15);
+    assertThat(cv).as("CV with 150 vnodes should be good").isLessThan(0.15);
   }
 
   @Test
@@ -123,7 +124,9 @@ class ConsistentHashRingDistributionTest {
   @Test
   void largeCluster_shouldMaintainGoodDistribution() {
     double cv = cv(500, nodes(100), 100_000);
-    assertThat(cv).as("CV with 100 nodes × 500 vnodes (ADR-0005 spec) should be good").isLessThan(0.15);
+    assertThat(cv)
+      .as("CV with 100 nodes × 500 vnodes (design decisions: topology spec) should be good")
+      .isLessThan(0.15);
   }
 
   private static Set<String> nodes(int count) {

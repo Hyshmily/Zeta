@@ -1,9 +1,8 @@
 package io.github.hyshmily.zeta.tests;
 
-import io.github.hyshmily.zeta.cache.codec.CacheCompressor;
-
 import static io.github.hyshmily.zeta.constants.ZetaConstants.Amqp.*;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 
@@ -11,15 +10,14 @@ import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import com.rabbitmq.client.Channel;
 import io.github.hyshmily.zeta.autoconfigure.ZetaProperties;
-import io.github.hyshmily.zeta.cache.cachesupport.BroadcastBuffer;
-import io.github.hyshmily.zeta.cache.cachesupport.EntryLifecycle;
-import io.github.hyshmily.zeta.cache.cachesupport.impl.EntryLifecycleImpl;
-import io.github.hyshmily.zeta.cache.loader.CacheLoader;
-import io.github.hyshmily.zeta.model.CacheEntry;
+import io.github.hyshmily.zeta.cache.BroadcastBuffer;
+import io.github.hyshmily.zeta.cache.cachesupport.lifecycle.EntryLifecycle;
+import io.github.hyshmily.zeta.cache.cachesupport.lifecycle.EntryLifecycleImpl;
+import io.github.hyshmily.zeta.cache.cachesupport.loader.CacheLoader;
+import io.github.hyshmily.zeta.cache.cachesupport.raw.CacheEntry;
+import io.github.hyshmily.zeta.cache.cachesupport.raw.EntryDraft;
+import io.github.hyshmily.zeta.model.DecisionStamp;
 import io.github.hyshmily.zeta.model.KeyState;
-import io.github.hyshmily.zeta.rule.RuleMatcher;
-import io.github.hyshmily.zeta.sharding.HealthView;
-import io.github.hyshmily.zeta.sharding.impl.HealthViewImpl;
 import io.github.hyshmily.zeta.sync.dispatcher.PerKeyOrderedDispatcher;
 import io.github.hyshmily.zeta.sync.local.CacheSyncListener;
 import io.github.hyshmily.zeta.sync.local.CacheSyncProperties;
@@ -27,23 +25,18 @@ import io.github.hyshmily.zeta.sync.local.CacheSyncPublisher;
 import io.github.hyshmily.zeta.sync.local.DefaultSyncDecisionHandler;
 import io.github.hyshmily.zeta.sync.local.SyncDecisionHandler;
 import io.github.hyshmily.zeta.sync.local.SyncMessage;
+import io.github.hyshmily.zeta.sync.local.SyncType;
 import io.github.hyshmily.zeta.sync.worker.DefaultWorkerDecisionHandler;
 import io.github.hyshmily.zeta.sync.worker.WorkerDecisionHandler;
+import io.github.hyshmily.zeta.sync.worker.WorkerDecisionType;
 import io.github.hyshmily.zeta.sync.worker.WorkerHeartbeatMessage;
-import io.github.hyshmily.zeta.sync.worker.WorkerHeartbeatVerifier;
 import io.github.hyshmily.zeta.sync.worker.WorkerListener;
 import io.github.hyshmily.zeta.sync.worker.WorkerListenerProperties;
 import io.github.hyshmily.zeta.sync.worker.WorkerMessage;
-import io.github.hyshmily.zeta.util.id.SnowflakeIdGenerator;
-import io.github.hyshmily.zeta.util.ratelimit.SreRateLimiter;
+import io.github.hyshmily.zeta.util.clock.StampClock;
 import java.nio.charset.StandardCharsets;
-import java.util.ArrayList;
-import java.util.Collections;
 import java.util.List;
-import java.util.Optional;
 import java.util.concurrent.*;
-
-import io.github.hyshmily.zeta.util.ZetaThreadFactory;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -54,7 +47,6 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.mockito.ArgumentCaptor;
 import org.springframework.amqp.AmqpException;
-import org.springframework.amqp.AmqpTimeoutException;
 import org.springframework.amqp.core.Message;
 import org.springframework.amqp.core.MessageProperties;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
@@ -65,14 +57,16 @@ class DistributedSyncTest {
   private ScheduledExecutorService scheduler;
   private Cache<String, CacheEntry> cache;
   private Channel channel;
-  private RuleMatcher ruleMatcher;
+  private StampClock stampClock;
 
   @BeforeEach
   void setUp() {
     scheduler = Executors.newSingleThreadScheduledExecutor();
     cache = Caffeine.newBuilder().maximumSize(10_000).build();
     channel = mock(Channel.class);
-    ruleMatcher = mock(RuleMatcher.class);
+    stampClock = mock(StampClock.class);
+    when(stampClock.nextStamp()).thenReturn(1L);
+    when(stampClock.nextStamps(org.mockito.ArgumentMatchers.anyInt())).thenReturn(1L);
   }
 
   @AfterEach
@@ -93,11 +87,10 @@ class DistributedSyncTest {
     assertThat(phase2.await(10, TimeUnit.SECONDS)).isTrue();
   }
 
-  private static Message syncMessage(String key, String type, long version, boolean degraded) {
+  private static Message syncMessage(String key, String type, long version) {
     MessageProperties props = new MessageProperties();
     props.setHeader(HEADER_TYPE, type);
     props.setHeader(HEADER_VERSION, version);
-    props.setHeader(HEADER_IS_VERSION_DEGRADED, degraded);
     return new Message(key.getBytes(StandardCharsets.UTF_8), props);
   }
 
@@ -116,60 +109,63 @@ class DistributedSyncTest {
 
   private static CacheEntry entry(
     long dataVersion,
-    boolean degraded,
     long decisionVersion,
     String decisionNodeId,
     long decisionEpoch,
     KeyState keyState
   ) {
-    return CacheEntry.builder()
+    return EntryDraft.blank(null)
       .value("v")
-      .dataVersion(dataVersion)
-      .isVersionDegraded(degraded)
-      .decisionVersion(decisionVersion)
-      .decisionNodeId(decisionNodeId)
-      .decisionEpoch(decisionEpoch)
-      .hardTtlMs(300_000)
-      .hardExpireAtMs(Long.MAX_VALUE)
-      .softTtlMs(30_000)
-      .softExpireAtMs(System.currentTimeMillis() + 30_000)
+      .version(dataVersion)
+      .decision(DecisionStamp.hot(decisionVersion, decisionNodeId, decisionEpoch))
+      .ttl(300_000, 30_000, 300_000, 30_000)
+      .expiryAt(Long.MAX_VALUE, System.currentTimeMillis() + 30_000)
       .keyState(keyState)
-      .normalHardTtlMs(300_000)
-      .normalSoftTtlMs(30_000)
       .build();
   }
 
   private static CacheEntry hotEntry(String nodeId, long dv, long epoch) {
-    return entry(5, false, dv, nodeId, epoch, KeyState.HOT);
+    return entry(5, dv, nodeId, epoch, KeyState.HOT);
+  }
+
+  private static PerKeyOrderedDispatcher<Runnable> runnableDispatcher(
+    ScheduledExecutorService executor,
+    String name,
+    int maxQueuePerKey,
+    int maxTasksPerCycle,
+    long maxGlobalPendingUnits,
+    long jitterMs
+  ) {
+    return new PerKeyOrderedDispatcher<>(
+      executor,
+      name,
+      batch -> batch.forEach(Runnable::run),
+      maxQueuePerKey,
+      maxTasksPerCycle,
+      maxGlobalPendingUnits,
+      jitterMs
+    );
   }
 
   private SyncDecisionHandler syncHandler(CacheLoader loader) {
     ZetaProperties ttlConfig = new ZetaProperties();
-    EntryLifecycle expire = new EntryLifecycleImpl(cache, ttlConfig, CacheCompressor.NONE, null);
-    return new DefaultSyncDecisionHandler(cache, loader, expire, ruleMatcher, List.of(), null);
+    EntryLifecycle expire = new EntryLifecycleImpl(cache, ttlConfig, null);
+    return new DefaultSyncDecisionHandler(cache, loader, expire, List.of(), null, null);
   }
 
   private CacheSyncListener createListener(CacheLoader loader) {
     CacheSyncProperties props = new CacheSyncProperties();
     props.setWarmupJitterMs(0);
-    CacheSyncListener l = new CacheSyncListener(props, scheduler, syncHandler(loader), null);
-    l.init();
+    CacheSyncListener l = new CacheSyncListener(props, scheduler, syncHandler(loader), null, null);
     return l;
   }
 
-  private WorkerDecisionHandler workerHandler(CacheLoader loader, SreRateLimiter limiter) {
-    ZetaProperties ttlConfig = new ZetaProperties();
-    EntryLifecycle expire = new EntryLifecycleImpl(cache, ttlConfig, CacheCompressor.NONE, null);
-    return new DefaultWorkerDecisionHandler(cache, loader, expire, limiter, null, List.of());
-  }
-
-  private WorkerListener createWorkerListener(CacheLoader loader, SreRateLimiter limiter) {
+  private WorkerListener createWorkerListener(CacheLoader loader) {
     WorkerListenerProperties props = new WorkerListenerProperties();
     props.setBroadcastJitterMs(0);
-    props.getSre().setEnabled(limiter != null);
-    WorkerListener l = new WorkerListener(props, scheduler, workerHandler(loader, limiter), null);
-    l.init();
-    return l;
+    EntryLifecycle expire = new EntryLifecycleImpl(cache, new ZetaProperties(), null);
+    WorkerDecisionHandler handler = new DefaultWorkerDecisionHandler(cache, loader, expire, stampClock, List.of());
+    return new WorkerListener(props, scheduler, handler, null);
   }
 
   // ═══════════════════════════════════════════════════════════════
@@ -185,96 +181,31 @@ class DistributedSyncTest {
     void broadcastRefresh_setsCorrectHeaders() {
       RabbitTemplate rt = mock(RabbitTemplate.class);
       CacheSyncProperties props = new CacheSyncProperties();
-      CacheSyncPublisher pub = new CacheSyncPublisher(rt, props, mock(SnowflakeIdGenerator.class), null);
-      pub.init();
+      CacheSyncPublisher pub = new CacheSyncPublisher(rt, props, null);
 
-      pub.broadcastRefresh("myKey", 42L, false);
+      pub.broadcastRefresh("myKey", 42L);
 
       ArgumentCaptor<Message> captor = ArgumentCaptor.forClass(Message.class);
       verify(rt).send(eq(props.getExchangeName()), eq(""), captor.capture());
       Message sent = captor.getValue();
       assertThat(new String(sent.getBody(), StandardCharsets.UTF_8)).isEqualTo("myKey");
-      assertThat((String) sent.getMessageProperties().getHeader(HEADER_TYPE)).isEqualTo(SyncMessage.TYPE_REFRESH);
+      assertThat((String) sent.getMessageProperties().getHeader(HEADER_TYPE)).isEqualTo(SyncType.REFRESH.code());
       assertThat(((Number) sent.getMessageProperties().getHeader(HEADER_VERSION)).longValue()).isEqualTo(42L);
-      assertThat((Boolean) sent.getMessageProperties().getHeader(HEADER_IS_VERSION_DEGRADED)).isFalse();
     }
 
     @Test
     @DisplayName("broadcastLocalInvalidate sets correct headers and body")
     void broadcastLocalInvalidate_setsCorrectHeaders() {
       RabbitTemplate rt = mock(RabbitTemplate.class);
-      CacheSyncPublisher pub = new CacheSyncPublisher(rt, new CacheSyncProperties(), mock(SnowflakeIdGenerator.class), null);
-      pub.init();
+      CacheSyncPublisher pub = new CacheSyncPublisher(rt, new CacheSyncProperties(), null);
 
-      pub.broadcastLocalInvalidate("del-key", 7L, true);
+      pub.broadcastLocalInvalidate("del-key", 7L);
 
       ArgumentCaptor<Message> captor = ArgumentCaptor.forClass(Message.class);
       verify(rt).send(anyString(), eq(""), captor.capture());
       Message sent = captor.getValue();
-      assertThat((String) sent.getMessageProperties().getHeader(HEADER_TYPE)).isEqualTo(SyncMessage.TYPE_INVALIDATE);
+      assertThat((String) sent.getMessageProperties().getHeader(HEADER_TYPE)).isEqualTo(SyncType.INVALIDATE.code());
       assertThat(((Number) sent.getMessageProperties().getHeader(HEADER_VERSION)).longValue()).isEqualTo(7L);
-      assertThat((Boolean) sent.getMessageProperties().getHeader(HEADER_IS_VERSION_DEGRADED)).isTrue();
-    }
-
-    @Test
-    @DisplayName("broadcastLocalInvalidateAll sends JSON array body")
-    void broadcastLocalInvalidateAll_sendsJsonBody() {
-      RabbitTemplate rt = mock(RabbitTemplate.class);
-      CacheSyncPublisher pub = new CacheSyncPublisher(rt, new CacheSyncProperties(), mock(SnowflakeIdGenerator.class), null);
-      pub.init();
-
-      pub.broadcastLocalInvalidateAll(List.of("k1", "k2"));
-
-      ArgumentCaptor<Message> captor = ArgumentCaptor.forClass(Message.class);
-      verify(rt).send(anyString(), eq(""), captor.capture());
-      Message sent = captor.getValue();
-      assertThat(new String(sent.getBody(), StandardCharsets.UTF_8)).isEqualTo("[\"k1\",\"k2\"]");
-      assertThat((String) sent.getMessageProperties().getHeader(HEADER_TYPE)).isEqualTo(
-        SyncMessage.TYPE_INVALIDATE_ALL
-      );
-    }
-
-    @Test
-    @DisplayName("broadcastAllLocalRules sends rules JSON and version header")
-    void broadcastAllLocalRules_setsRulesVersionHeader() {
-      RabbitTemplate rt = mock(RabbitTemplate.class);
-      CacheSyncPublisher pub = new CacheSyncPublisher(rt, new CacheSyncProperties(), mock(SnowflakeIdGenerator.class), null);
-      pub.init();
-
-      pub.broadcastAllLocalRules("{\"v\":2}", 99L);
-
-      ArgumentCaptor<Message> captor = ArgumentCaptor.forClass(Message.class);
-      verify(rt).send(anyString(), eq(""), captor.capture());
-      Message sent = captor.getValue();
-      assertThat(new String(sent.getBody(), StandardCharsets.UTF_8)).isEqualTo("{\"v\":2}");
-      assertThat((String) sent.getMessageProperties().getHeader(HEADER_TYPE)).isEqualTo(SyncMessage.TYPE_RULES_SYNC);
-      assertThat(((Number) sent.getMessageProperties().getHeader(HEADER_RULES_VERSION)).longValue()).isEqualTo(99L);
-    }
-
-    @Test
-    @DisplayName("dedup composite key differs between degraded and normal")
-    void dedupSeparatesDegradedAndNormal() {
-      RabbitTemplate rt = mock(RabbitTemplate.class);
-      CacheSyncPublisher pub = new CacheSyncPublisher(rt, new CacheSyncProperties(), mock(SnowflakeIdGenerator.class), null);
-      pub.init();
-
-      pub.broadcastRefresh("k", 1L, false);
-      pub.broadcastRefresh("k", Long.MIN_VALUE, true);
-
-      verify(rt, times(2)).send(anyString(), anyString(), any());
-    }
-
-    @Test
-    @DisplayName("dedup blocks same degraded version re-send")
-    void dedupBlocksDegradedResend() {
-      RabbitTemplate rt = mock(RabbitTemplate.class);
-      CacheSyncPublisher pub = new CacheSyncPublisher(rt, new CacheSyncProperties(), mock(SnowflakeIdGenerator.class), null);
-      pub.init();
-
-      pub.broadcastRefresh("k", 5L, true);
-      pub.broadcastRefresh("k", 3L, true);
-
-      verify(rt, times(1)).send(anyString(), anyString(), any());
     }
 
     @Test
@@ -282,21 +213,20 @@ class DistributedSyncTest {
     void publisher_handlesAmqpException() {
       RabbitTemplate rt = mock(RabbitTemplate.class);
       doThrow(new AmqpException("Broker down")).when(rt).send(anyString(), anyString(), any());
-      CacheSyncPublisher pub = new CacheSyncPublisher(rt, new CacheSyncProperties(), mock(SnowflakeIdGenerator.class), null);
-      pub.init();
+      CacheSyncPublisher pub = new CacheSyncPublisher(rt, new CacheSyncProperties(), null);
 
-      pub.broadcastRefresh("k", 1L, false);
+      pub.broadcastRefresh("k", 1L);
 
       verify(rt).send(anyString(), anyString(), any());
     }
   }
 
   // ═══════════════════════════════════════════════════════════════
-  // 2. CacheSyncListener — all 4 version comparison cases
+  // 2. CacheSyncListener — single-space version comparison
   // ═══════════════════════════════════════════════════════════════
 
   @Nested
-  @DisplayName("CacheSyncListener version comparison matrix")
+  @DisplayName("CacheSyncListener version comparison (single stamp space)")
   class ListenerVersionMatrixTests {
 
     private CacheSyncListener listener;
@@ -306,94 +236,75 @@ class DistributedSyncTest {
       listener = createListener(k -> "fresh");
     }
 
-    // Case 1: Both normal — skip if existing >= incoming
     @Test
-    @DisplayName("Case 1: both normal, existing version higher — skip")
-    void bothNormal_existingHigher_skip() throws Exception {
-      cache.put("k", entry(10, false, 0, null, 0, KeyState.NORMAL));
-      listener.handleSyncMessage(channel, syncMessage("k", SyncMessage.TYPE_REFRESH, 5L, false));
+    @DisplayName("existing stamp higher — skip")
+    void existingHigher_skip() throws Exception {
+      cache.put("k", entry(10, 0, null, 0, KeyState.NORMAL));
+      listener.handleSyncMessage(channel, syncMessage("k", SyncType.REFRESH.code(), 5L));
       awaitScheduler();
       CacheEntry ce = (CacheEntry) cache.getIfPresent("k");
       assertThat(ce.getDataVersion()).isEqualTo(10);
     }
 
     @Test
-    @DisplayName("Case 1: both normal, incoming version higher — accept")
-    void bothNormal_incomingHigher_accept() throws Exception {
-      cache.put("k", entry(10, false, 0, null, 0, KeyState.NORMAL));
-      listener.handleSyncMessage(channel, syncMessage("k", SyncMessage.TYPE_REFRESH, 15L, false));
+    @DisplayName("incoming stamp higher — accept")
+    void incomingHigher_accept() throws Exception {
+      cache.put("k", entry(10, 0, null, 0, KeyState.NORMAL));
+      listener.handleSyncMessage(channel, syncMessage("k", SyncType.REFRESH.code(), 15L));
       awaitScheduler();
       CacheEntry ce = (CacheEntry) cache.getIfPresent("k");
       assertThat(ce.getDataVersion()).isEqualTo(15L);
     }
 
-    // Case 2: Existing normal, incoming degraded — always skip
     @Test
-    @DisplayName("Case 2: existing normal, incoming degraded — always skip")
-    void existingNormal_incomingDegraded_skip() throws Exception {
-      cache.put("k", entry(10, false, 0, null, 0, KeyState.NORMAL));
-      listener.handleSyncMessage(channel, syncMessage("k", SyncMessage.TYPE_REFRESH, 999L, true));
+    @DisplayName("unknown resident stamp (0) accepts any real incoming stamp")
+    void unknownResident_acceptsAnyRealStamp() throws Exception {
+      cache.put("k", entry(0, 0, null, 0, KeyState.NORMAL));
+      listener.handleSyncMessage(channel, syncMessage("k", SyncType.REFRESH.code(), 15L));
       awaitScheduler();
       CacheEntry ce = (CacheEntry) cache.getIfPresent("k");
-      assertThat(ce.getDataVersion()).isEqualTo(10);
+      assertThat(ce.getDataVersion()).isEqualTo(15L);
     }
 
-    // Case 3: Both degraded — skip if existing >= incoming
     @Test
-    @DisplayName("Case 3: both degraded, existing version higher — skip")
-    void bothDegraded_existingHigher_skip() throws Exception {
-      cache.put("k", entry(-10, true, 0, null, 0, KeyState.NORMAL));
-      listener.handleSyncMessage(channel, syncMessage("k", SyncMessage.TYPE_REFRESH, -15L, true));
+    @DisplayName("equal stamp applies for REFRESH")
+    void equalStamp_refreshApplies() throws Exception {
+      cache.put("k", entry(10, 0, null, 0, KeyState.NORMAL));
+      listener.handleSyncMessage(channel, syncMessage("k", SyncType.REFRESH.code(), 10L));
       awaitScheduler();
-      CacheEntry ce = (CacheEntry) cache.getIfPresent("k");
-      assertThat(ce.getDataVersion()).isEqualTo(-10);
+      assertThat(((CacheEntry) cache.getIfPresent("k")).getDataVersion()).isEqualTo(10L);
     }
 
     @Test
-    @DisplayName("Case 3: both degraded, incoming version higher — accept")
-    void bothDegraded_incomingHigher_accept() throws Exception {
-      cache.put("k", entry(-5, true, 0, null, 0, KeyState.NORMAL));
-      listener.handleSyncMessage(channel, syncMessage("k", SyncMessage.TYPE_REFRESH, -1L, true));
-      awaitScheduler();
-      CacheEntry ce = (CacheEntry) cache.getIfPresent("k");
-      assertThat(ce.getDataVersion()).isEqualTo(-1L);
-    }
-
-    // Case 4: Existing degraded, incoming normal — never skip
-    @Test
-    @DisplayName("Case 4: existing degraded, incoming normal — always accept")
-    void existingDegraded_incomingNormal_accept() throws Exception {
-      cache.put("k", entry(-100, true, 0, null, 0, KeyState.NORMAL));
-      listener.handleSyncMessage(channel, syncMessage("k", SyncMessage.TYPE_REFRESH, 1L, false));
-      awaitScheduler();
-      CacheEntry ce = (CacheEntry) cache.getIfPresent("k");
-      assertThat(ce.getDataVersion()).isEqualTo(1L);
-      assertThat(ce.isVersionDegraded()).isFalse();
-    }
-
-    // INVALIDATE with version 0 unconditional
-    @Test
-    @DisplayName("INVALIDATE with version 0 is unconditional even with higher existing")
-    void invalidateVersion0_unconditional() throws Exception {
-      cache.put("k", entry(50, false, 0, null, 0, KeyState.NORMAL));
-      listener.handleSyncMessage(channel, syncMessage("k", SyncMessage.TYPE_INVALIDATE, 0L, false));
-      awaitScheduler();
-      assertThat(cache.getIfPresent("k")).isNull();
-    }
-
-    // INVALIDATE degraded on normal — should skip
-    @Test
-    @DisplayName("INVALIDATE degraded incoming on normal entry — skip")
-    void invalidateDegradedOnNormal_skip() throws Exception {
-      cache.put("k", entry(50, false, 0, null, 0, KeyState.NORMAL));
-      listener.handleSyncMessage(channel, syncMessage("k", SyncMessage.TYPE_INVALIDATE, 10L, true));
+    @DisplayName("INVALIDATE with version 0 is skipped")
+    void invalidateVersion0_skipped() throws Exception {
+      cache.put("k", entry(50, 0, null, 0, KeyState.NORMAL));
+      listener.handleSyncMessage(channel, syncMessage("k", SyncType.INVALIDATE.code(), 0L));
       awaitScheduler();
       assertThat(cache.getIfPresent("k")).isNotNull();
+    }
+
+    @Test
+    @DisplayName("stale INVALIDATE is skipped")
+    void staleInvalidate_skip() throws Exception {
+      cache.put("k", entry(50, 0, null, 0, KeyState.NORMAL));
+      listener.handleSyncMessage(channel, syncMessage("k", SyncType.INVALIDATE.code(), 10L));
+      awaitScheduler();
+      assertThat(cache.getIfPresent("k")).isNotNull();
+    }
+
+    @Test
+    @DisplayName("newer INVALIDATE removes the entry")
+    void newerInvalidate_removes() throws Exception {
+      cache.put("k", entry(10, 0, null, 0, KeyState.NORMAL));
+      listener.handleSyncMessage(channel, syncMessage("k", SyncType.INVALIDATE.code(), 50L));
+      awaitScheduler();
+      assertThat(cache.getIfPresent("k")).isNull();
     }
   }
 
   // ═══════════════════════════════════════════════════════════════
-  // 2b. Duplicate and delayed REFRESH delivery (ADR-0066 receiver guard)
+  // 2b. Duplicate and delayed REFRESH delivery (design decisions: version comparison receiver guard)
   // ═══════════════════════════════════════════════════════════════
 
   @Nested
@@ -408,12 +319,12 @@ class DistributedSyncTest {
         loads.incrementAndGet();
         return "fresh";
       });
-      cache.put("k", entry(5, false, 0, null, 0, KeyState.NORMAL));
+      cache.put("k", entry(5, 0, null, 0, KeyState.NORMAL));
 
-      l.handleSyncMessage(channel, syncMessage("k", SyncMessage.TYPE_REFRESH, 5L, false));
+      l.handleSyncMessage(channel, syncMessage("k", SyncType.REFRESH.code(), 5L));
       awaitScheduler();
 
-      // Equal applies (ADR-0066 strict-newer guard): the authoritative value
+      // Equal applies (design decisions: version comparison strict-newer guard): the authoritative value
       // is re-fetched and stamped. A plain >= skip would leave loads at 0
       // and pin the pre-existing value until TTL.
       assertThat(loads.get()).isEqualTo(1);
@@ -428,11 +339,11 @@ class DistributedSyncTest {
         loads.incrementAndGet();
         return "fresh";
       });
-      cache.put("k", entry(0, false, 0, null, 0, KeyState.NORMAL));
+      cache.put("k", entry(0, 0, null, 0, KeyState.NORMAL));
 
-      l.handleSyncMessage(channel, syncMessage("k", SyncMessage.TYPE_REFRESH, 5L, false));
+      l.handleSyncMessage(channel, syncMessage("k", SyncType.REFRESH.code(), 5L));
       awaitScheduler();
-      l.handleSyncMessage(channel, syncMessage("k", SyncMessage.TYPE_REFRESH, 5L, false));
+      l.handleSyncMessage(channel, syncMessage("k", SyncType.REFRESH.code(), 5L));
       awaitScheduler();
 
       assertThat(loads.get()).isEqualTo(2);
@@ -447,11 +358,11 @@ class DistributedSyncTest {
         loads.incrementAndGet();
         return "fresh";
       });
-      cache.put("k", entry(0, false, 0, null, 0, KeyState.NORMAL));
+      cache.put("k", entry(0, 0, null, 0, KeyState.NORMAL));
 
-      l.handleSyncMessage(channel, syncMessage("k", SyncMessage.TYPE_REFRESH, 5L, false));
+      l.handleSyncMessage(channel, syncMessage("k", SyncType.REFRESH.code(), 5L));
       awaitScheduler();
-      l.handleSyncMessage(channel, syncMessage("k", SyncMessage.TYPE_REFRESH, 3L, false));
+      l.handleSyncMessage(channel, syncMessage("k", SyncType.REFRESH.code(), 3L));
       awaitScheduler();
 
       // Strictly-newer skip fires before the authoritative load: no second
@@ -473,28 +384,22 @@ class DistributedSyncTest {
     @DisplayName("SyncMessage.from parses all fields correctly")
     void from_parsesAllFields() {
       MessageProperties props = new MessageProperties();
-      props.setHeader(HEADER_TYPE, SyncMessage.TYPE_INVALIDATE);
+      props.setHeader(HEADER_TYPE, SyncType.INVALIDATE.code());
       props.setHeader(HEADER_VERSION, 7L);
-      props.setHeader(HEADER_IS_VERSION_DEGRADED, true);
-      props.setHeader(HEADER_RULES_VERSION, 3L);
       Message msg = new Message("myKey".getBytes(StandardCharsets.UTF_8), props);
 
-      SyncMessage sm = SyncMessage.from(msg);
-      assertThat(sm).isNotNull();
-      assertThat(sm.cacheKey()).isEqualTo("myKey");
-      assertThat(sm.type()).isEqualTo(SyncMessage.TYPE_INVALIDATE);
-      assertThat(sm.version()).isEqualTo(7L);
-      assertThat(sm.isVersionDegraded()).isTrue();
-      assertThat(sm.rulesVersion()).isEqualTo(3L);
+      SyncMessage syncMessage = SyncMessage.from(msg);
+      assertThat(syncMessage).isNotNull();
+      assertThat(syncMessage.cacheKey()).isEqualTo("myKey");
+      assertThat(syncMessage.type()).isEqualTo(io.github.hyshmily.zeta.sync.local.SyncType.INVALIDATE);
+      assertThat(syncMessage.version()).isEqualTo(7L);
     }
 
     @Test
     @DisplayName("SyncMessage constant values are correct")
     void constants_areCorrect() {
-      assertThat(SyncMessage.TYPE_INVALIDATE).isEqualTo("INVALIDATE");
-      assertThat(SyncMessage.TYPE_REFRESH).isEqualTo("REFRESH");
-      assertThat(SyncMessage.TYPE_INVALIDATE_ALL).isEqualTo("INVALIDATE_ALL");
-      assertThat(SyncMessage.TYPE_RULES_SYNC).isEqualTo("RULES_SYNC");
+      assertThat(SyncType.INVALIDATE.code()).isEqualTo("INVALIDATE");
+      assertThat(SyncType.REFRESH.code()).isEqualTo("REFRESH");
     }
 
     @Test
@@ -504,20 +409,19 @@ class DistributedSyncTest {
     }
 
     @Test
-    @DisplayName("SyncMessage.from handles missing headers with defaults")
-    void from_missingHeaders_usesDefaults() {
-      Message msg = new Message("k".getBytes(StandardCharsets.UTF_8), new MessageProperties());
-      SyncMessage sm = SyncMessage.from(msg);
-      assertThat(sm.version()).isZero();
-      assertThat(sm.isVersionDegraded()).isFalse();
-      assertThat(sm.rulesVersion()).isZero();
+    @DisplayName("SyncMessage.from drops a message without a positive version")
+    void from_missingVersionHeader_dropsTheMessage() {
+      MessageProperties props = new MessageProperties();
+      props.setHeader(HEADER_TYPE, SyncType.INVALIDATE.code());
+      Message msg = new Message("k".getBytes(StandardCharsets.UTF_8), props);
+      assertThat(SyncMessage.from(msg)).isNull();
     }
 
     @Test
     @DisplayName("SyncMessage.from with Integer version header parses correctly")
     void from_integerVersion_parses() {
       MessageProperties props = new MessageProperties();
-      props.setHeader(HEADER_TYPE, SyncMessage.TYPE_REFRESH);
+      props.setHeader(HEADER_TYPE, SyncType.REFRESH.code());
       props.setHeader(HEADER_VERSION, 42);
       Message msg = new Message("k".getBytes(StandardCharsets.UTF_8), props);
       assertThat(SyncMessage.from(msg).version()).isEqualTo(42L);
@@ -526,9 +430,9 @@ class DistributedSyncTest {
     @Test
     @DisplayName("SyncMessage record equality works")
     void record_equality() {
-      SyncMessage a = new SyncMessage(0L, "k", "T", 1, false, 0);
-      SyncMessage b = new SyncMessage(0L, "k", "T", 1, false, 0);
-      SyncMessage c = new SyncMessage(0L, "k", "T", 2, false, 0);
+      SyncMessage a = new SyncMessage(0L, "k", io.github.hyshmily.zeta.sync.local.SyncType.INVALIDATE, 1);
+      SyncMessage b = new SyncMessage(0L, "k", io.github.hyshmily.zeta.sync.local.SyncType.INVALIDATE, 1);
+      SyncMessage c = new SyncMessage(0L, "k", io.github.hyshmily.zeta.sync.local.SyncType.INVALIDATE, 2);
       assertThat(a).isEqualTo(b);
       assertThat(a).isNotEqualTo(c);
       assertThat(a.hashCode()).isEqualTo(b.hashCode());
@@ -546,10 +450,10 @@ class DistributedSyncTest {
     @Test
     @DisplayName("HOT promotes existing entry to KeyState.HOT")
     void hot_promotesEntry() throws Exception {
-      cache.put("k", entry(1, false, 0, null, 0, KeyState.NORMAL));
-      WorkerListener wl = createWorkerListener(k -> "fresh", null);
+      cache.put("k", entry(1, 0, null, 0, KeyState.NORMAL));
+      WorkerListener wl = createWorkerListener(k -> "fresh");
 
-      wl.handleWorkerMessage(channel, workerMessage("k", WorkerMessage.TYPE_HOT, 1L, "w1", 1));
+      wl.handleWorkerMessage(channel, workerMessage("k", WorkerDecisionType.HOT.code(), 1L, "w1", 1));
       awaitScheduler();
 
       CacheEntry ce = (CacheEntry) cache.getIfPresent("k");
@@ -562,9 +466,9 @@ class DistributedSyncTest {
     @DisplayName("COOL downgrades existing HOT entry")
     void cool_downgradesEntry() throws Exception {
       cache.put("k", hotEntry("w1", 1, 1));
-      WorkerListener wl = createWorkerListener(k -> "fresh", null);
+      WorkerListener wl = createWorkerListener(k -> "fresh");
 
-      wl.handleWorkerMessage(channel, workerMessage("k", WorkerMessage.TYPE_COOL, 2L, "w1", 1));
+      wl.handleWorkerMessage(channel, workerMessage("k", WorkerDecisionType.COOL.code(), 2L, "w1", 1));
       awaitScheduler();
 
       CacheEntry ce = (CacheEntry) cache.getIfPresent("k");
@@ -575,8 +479,8 @@ class DistributedSyncTest {
     @Test
     @DisplayName("COOL on non-existent entry is no-op")
     void cool_onMissingEntry_noop() throws Exception {
-      WorkerListener wl = createWorkerListener(k -> null, null);
-      wl.handleWorkerMessage(channel, workerMessage("missing", WorkerMessage.TYPE_COOL, 1L, "w1", 1));
+      WorkerListener wl = createWorkerListener(k -> null);
+      wl.handleWorkerMessage(channel, workerMessage("missing", WorkerDecisionType.COOL.code(), 1L, "w1", 1));
       awaitScheduler();
       assertThat(cache.getIfPresent("missing")).isNull();
     }
@@ -585,9 +489,9 @@ class DistributedSyncTest {
     @DisplayName("HOT with stale decision version is skipped")
     void hot_staleDecisionVersion_skip() throws Exception {
       cache.put("k", hotEntry("w1", 5, 1));
-      WorkerListener wl = createWorkerListener(k -> "fresh", null);
+      WorkerListener wl = createWorkerListener(k -> "fresh");
 
-      wl.handleWorkerMessage(channel, workerMessage("k", WorkerMessage.TYPE_HOT, 3L, "w1", 1));
+      wl.handleWorkerMessage(channel, workerMessage("k", WorkerDecisionType.HOT.code(), 3L, "w1", 1));
       awaitScheduler();
 
       CacheEntry ce = (CacheEntry) cache.getIfPresent("k");
@@ -598,9 +502,9 @@ class DistributedSyncTest {
     @DisplayName("COOL with stale decision version is skipped")
     void cool_staleDecisionVersion_skip() throws Exception {
       cache.put("k", hotEntry("w1", 5, 1));
-      WorkerListener wl = createWorkerListener(k -> "fresh", null);
+      WorkerListener wl = createWorkerListener(k -> "fresh");
 
-      wl.handleWorkerMessage(channel, workerMessage("k", WorkerMessage.TYPE_COOL, 3L, "w1", 1));
+      wl.handleWorkerMessage(channel, workerMessage("k", WorkerDecisionType.COOL.code(), 3L, "w1", 1));
       awaitScheduler();
 
       CacheEntry ce = (CacheEntry) cache.getIfPresent("k");
@@ -609,31 +513,27 @@ class DistributedSyncTest {
     }
 
     @Test
-    @DisplayName("HOT with null Redis value and no degraded entry aborts")
-    void hot_nullRedisNoDegraded_aborts() throws Exception {
-      WorkerListener wl = createWorkerListener(k -> null, null);
-      wl.handleWorkerMessage(channel, workerMessage("missing", WorkerMessage.TYPE_HOT, 1L, "w1", 1));
+    @DisplayName("HOT with no source value and no existing entry aborts")
+    void hot_noSourceValueAndNoEntry_aborts() throws Exception {
+      WorkerListener wl = createWorkerListener(k -> null);
+      wl.handleWorkerMessage(channel, workerMessage("missing", WorkerDecisionType.HOT.code(), 1L, "w1", 1));
       awaitScheduler();
       assertThat(cache.getIfPresent("missing")).isNull();
     }
 
     @Test
-    @DisplayName("HOT with Redis exception falls back to degraded entry")
-    void hot_redisExceptionFallsBackToDegraded() throws Exception {
-      cache.put("k", entry(-5, true, 0, null, 0, KeyState.NORMAL));
-      WorkerListener wl = createWorkerListener(
-        k -> {
-          throw new RuntimeException("Redis down");
-        },
-        null
-      );
+    @DisplayName("HOT with a source exception falls back to the existing entry")
+    void hot_sourceExceptionFallsBackToExistingEntry() throws Exception {
+      cache.put("k", entry(5, 0, null, 0, KeyState.NORMAL));
+      WorkerListener wl = createWorkerListener(k -> {
+        throw new RuntimeException("Redis down");
+      });
 
-      wl.handleWorkerMessage(channel, workerMessage("k", WorkerMessage.TYPE_HOT, 1L, "w1", 1));
+      wl.handleWorkerMessage(channel, workerMessage("k", WorkerDecisionType.HOT.code(), 1L, "w1", 1));
       awaitScheduler();
 
       CacheEntry ce = (CacheEntry) cache.getIfPresent("k");
       assertThat(ce.getKeyState()).isEqualTo(KeyState.HOT);
-      assertThat(ce.isVersionDegraded()).isTrue();
     }
   }
 
@@ -649,9 +549,8 @@ class DistributedSyncTest {
     @DisplayName("WorkerMessage.from parses all fields")
     void from_parsesAllFields() {
       MessageProperties props = new MessageProperties();
-      props.setHeader(HEADER_TYPE, WorkerMessage.TYPE_HOT);
+      props.setHeader(HEADER_TYPE, WorkerDecisionType.HOT.code());
       props.setHeader(HEADER_VERSION, 10L);
-      props.setHeader(HEADER_TIMESTAMP, 12345L);
       props.setHeader(HEADER_NODE_ID, "worker-A");
       props.setHeader(HEADER_EPOCH, 3L);
       Message msg = new Message("cacheKey".getBytes(StandardCharsets.UTF_8), props);
@@ -659,11 +558,10 @@ class DistributedSyncTest {
       WorkerMessage wm = WorkerMessage.from(msg);
       assertThat(wm).isNotNull();
       assertThat(wm.cacheKey()).isEqualTo("cacheKey");
-      assertThat(wm.type()).isEqualTo(WorkerMessage.TYPE_HOT);
-      assertThat(wm.decisionVersion()).isEqualTo(10L);
-      assertThat(wm.timestamp()).isEqualTo(12345L);
-      assertThat(wm.nodeId()).isEqualTo("worker-A");
-      assertThat(wm.epoch()).isEqualTo(3L);
+      assertThat(wm.type()).isEqualTo(WorkerDecisionType.HOT);
+      assertThat(wm.stamp().decisionVersion()).isEqualTo(10L);
+      assertThat(wm.stamp().decisionNodeId()).isEqualTo("worker-A");
+      assertThat(wm.stamp().decisionEpoch()).isEqualTo(3L);
     }
 
     @Test
@@ -673,31 +571,32 @@ class DistributedSyncTest {
     }
 
     @Test
-    @DisplayName("WorkerMessage.from defaults for missing fields")
-    void from_missingFields_usesDefaults() {
+    @DisplayName("WorkerMessage.from defaults for missing optional fields")
+    void from_missingOptionalFields_usesDefaults() {
       MessageProperties props = new MessageProperties();
-      props.setHeader(HEADER_TYPE, WorkerMessage.TYPE_COOL);
+      props.setHeader(HEADER_TYPE, WorkerDecisionType.COOL.code());
+      props.setHeader(HEADER_VERSION, 9L);
       Message msg = new Message("k".getBytes(StandardCharsets.UTF_8), props);
       WorkerMessage wm = WorkerMessage.from(msg);
-      assertThat(wm.decisionVersion()).isZero();
-      assertThat(wm.timestamp()).isZero();
-      assertThat(wm.nodeId()).isNull();
-      assertThat(wm.epoch()).isZero();
+      assertThat(wm).isNotNull();
+      assertThat(wm.stamp().decisionVersion()).isEqualTo(9L);
+      assertThat(wm.stamp().decisionNodeId()).isNull();
+      assertThat(wm.stamp().decisionEpoch()).isZero();
     }
 
     @Test
     @DisplayName("WorkerMessage constant values are correct")
     void constants_areCorrect() {
-      assertThat(WorkerMessage.TYPE_HOT).isEqualTo("HOT");
-      assertThat(WorkerMessage.TYPE_COOL).isEqualTo("COOL");
+      assertThat(WorkerDecisionType.HOT.code()).isEqualTo("HOT");
+      assertThat(WorkerDecisionType.COOL.code()).isEqualTo("COOL");
     }
 
     @Test
     @DisplayName("WorkerMessage record equality works")
     void record_equality() {
-      WorkerMessage a = new WorkerMessage(0L, "k", "HOT", 1, 0, "w1", 1);
-      WorkerMessage b = new WorkerMessage(0L, "k", "HOT", 1, 0, "w1", 1);
-      WorkerMessage c = new WorkerMessage(0L, "k", "HOT", 2, 0, "w1", 1);
+      WorkerMessage a = new WorkerMessage(0L, "k", WorkerDecisionType.HOT, DecisionStamp.hot(1, "w1", 1));
+      WorkerMessage b = new WorkerMessage(0L, "k", WorkerDecisionType.HOT, DecisionStamp.hot(1, "w1", 1));
+      WorkerMessage c = new WorkerMessage(0L, "k", WorkerDecisionType.HOT, DecisionStamp.hot(2, "w1", 1));
       assertThat(a).isEqualTo(b);
       assertThat(a).isNotEqualTo(c);
     }
@@ -714,29 +613,27 @@ class DistributedSyncTest {
     @Test
     @DisplayName("toMessage sets all headers correctly")
     void toMessage_setsAllHeaders() {
-      WorkerHeartbeatMessage hb = new WorkerHeartbeatMessage(0L, "w-42", 5L, 0.75, true, 3, 10, 2, 9999L);
+      WorkerHeartbeatMessage hb = new WorkerHeartbeatMessage(0L, "w-42", 5L, true, null);
       Message msg = hb.toMessage();
       MessageProperties h = msg.getMessageProperties();
       Object type = h.getHeader(HEADER_TYPE);
       assertThat(type).isEqualTo(WorkerHeartbeatMessage.TYPE);
       assertThat((Object) h.getHeader(HEADER_NODE_ID)).isEqualTo("w-42");
       assertThat((Object) h.getHeader(HEADER_HEARTBEAT_EPOCH)).isEqualTo(5L);
-      assertThat((Object) h.getHeader(HEADER_HEARTBEAT_LOAD)).isEqualTo(0.75);
       assertThat((Object) h.getHeader(HEADER_HEARTBEAT_READY)).isEqualTo(true);
-      assertThat((Object) h.getHeader(HEADER_HEARTBEAT_CONFIG_CONFIRM)).isEqualTo(3);
     }
 
     @Test
     @DisplayName("toMessage body contains workerId")
     void toMessage_bodyIsWorkerId() {
-      WorkerHeartbeatMessage hb = new WorkerHeartbeatMessage(0L, "w-x", 1L, 0.0, false, 0, 0, 0, 0L);
+      WorkerHeartbeatMessage hb = new WorkerHeartbeatMessage(0L, "w-x", 1L, false, null);
       assertThat(new String(hb.toMessage().getBody(), StandardCharsets.UTF_8)).isEqualTo("w-x");
     }
 
     @Test
     @DisplayName("from round-trips correctly")
     void from_roundTrips() {
-      WorkerHeartbeatMessage original = new WorkerHeartbeatMessage(0L, "w-7", 3L, 0.5, true, 5, 8, 1, 7777L);
+      WorkerHeartbeatMessage original = new WorkerHeartbeatMessage(0L, "w-7", 3L, true, null);
       WorkerHeartbeatMessage restored = WorkerHeartbeatMessage.from(original.toMessage());
       assertThat(restored).isEqualTo(original);
     }
@@ -759,95 +656,23 @@ class DistributedSyncTest {
     }
 
     @Test
-    @DisplayName("from with wrong header types defaults safely")
-    void from_wrongHeaderTypes_defaultsSafely() {
+    @DisplayName("from defaults wrong numeric header types without losing a valid worker id")
+    void from_wrongNumericHeaderTypes_defaultsSafely() {
       MessageProperties props = new MessageProperties();
       props.setHeader(HEADER_TYPE, WorkerHeartbeatMessage.TYPE);
-      props.setHeader(HEADER_NODE_ID, 123);
+      props.setHeader(HEADER_NODE_ID, "w1");
       props.setHeader(HEADER_HEARTBEAT_EPOCH, "bad");
       props.setHeader(HEADER_HEARTBEAT_READY, "bad");
       Message msg = new Message("body".getBytes(StandardCharsets.UTF_8), props);
       WorkerHeartbeatMessage hb = WorkerHeartbeatMessage.from(msg);
-      assertThat(hb.workerId()).isEmpty();
+      assertThat(hb.workerId()).isEqualTo("w1");
       assertThat(hb.epoch()).isZero();
       assertThat(hb.readyToServe()).isFalse();
     }
   }
 
   // ═══════════════════════════════════════════════════════════════
-  // 7. WorkerHeartbeatVerifier — timeout and dead worker
-  // ═══════════════════════════════════════════════════════════════
-
-  @Nested
-  @DisplayName("WorkerHeartbeatVerifier timeout and dead worker detection")
-  class HeartbeatVerifierTests {
-
-    private RabbitTemplate rt;
-    private HealthView healthView;
-    private WorkerHeartbeatVerifier verifier;
-
-    @BeforeEach
-    void init() {
-      rt = mock(RabbitTemplate.class);
-      healthView = spy(new HealthViewImpl(500_000, 99));
-      healthView.onHeartbeat(hb("w1", true));
-      healthView.onHeartbeat(hb("w2", false));
-      healthView.onHeartbeat(hb("w3", false));
-      verifier = new WorkerHeartbeatVerifier(
-        rt,
-        healthView,
-        "test-app",
-        new WorkerHeartbeatVerifier.VerifierConfig(100_000, 500, 60_000),
-        Executors.newSingleThreadScheduledExecutor(new ZetaThreadFactory("zeta-hb-verifier-test"))
-      );
-    }
-
-    private static WorkerHeartbeatMessage hb(String workerId, boolean ready) {
-      return new WorkerHeartbeatMessage(0L, workerId, 1, 0.0, ready, 0, 0, 0, 0);
-    }
-
-    @Test
-    @DisplayName("sendPingAndWaitPong returns true when pong received")
-    void ping_returnsTrueOnPong() {
-      when(rt.sendAndReceive(anyString(), anyString(), any())).thenReturn(
-        new Message(new byte[0], new MessageProperties())
-      );
-      assertThat(verifier.sendPingAndWaitPong("w2")).isTrue();
-    }
-
-    @Test
-    @DisplayName("sendPingAndWaitPong returns false on timeout")
-    void ping_returnsFalseOnTimeout() {
-      when(rt.sendAndReceive(anyString(), anyString(), any())).thenThrow(new AmqpTimeoutException("timeout"));
-      assertThat(verifier.sendPingAndWaitPong("w2")).isFalse();
-    }
-
-    @Test
-    @DisplayName("sendPingAndWaitPong returns false on null pong")
-    void ping_returnsFalseOnNullPong() {
-      when(rt.sendAndReceive(anyString(), anyString(), any())).thenReturn(null);
-      assertThat(verifier.sendPingAndWaitPong("w2")).isFalse();
-    }
-
-    @Test
-    @DisplayName("sendPingAndWaitPong sends to correct queue with headers")
-    void ping_sendsToCorrectQueue() {
-      when(rt.sendAndReceive(anyString(), anyString(), any())).thenReturn(
-        new Message(new byte[0], new MessageProperties())
-      );
-
-      verifier.sendPingAndWaitPong("w2");
-
-      ArgumentCaptor<Message> captor = ArgumentCaptor.forClass(Message.class);
-      verify(rt).sendAndReceive(eq(""), eq("zeta.verify.ping.w2"), captor.capture());
-      Message sent = captor.getValue();
-      assertThat((String) sent.getMessageProperties().getHeader(HEADER_VERIFY_TYPE)).isEqualTo(HEADER_VERIFY_PING);
-      assertThat(sent.getMessageProperties().getReplyTo()).isEqualTo("amq.rabbitmq.reply-to");
-    }
-  }
-
-  // ═══════════════════════════════════════════════════════════════
-  // 8. PerKeyOrderedDispatcher — ordering guarantees
+  // 7. PerKeyOrderedDispatcher — ordering guarantees
   // ═══════════════════════════════════════════════════════════════
 
   @Nested
@@ -857,23 +682,45 @@ class DistributedSyncTest {
     @Test
     @DisplayName("tasks for same key execute in FIFO order")
     void sameKey_fifoOrder() throws Exception {
-      PerKeyOrderedDispatcher d = new PerKeyOrderedDispatcher(scheduler, "test", PerKeyOrderedDispatcher.DEFAULT_MAX_QUEUE_PER_KEY, PerKeyOrderedDispatcher.DEFAULT_MAX_TASKS_PER_CYCLE, PerKeyOrderedDispatcher.DEFAULT_MAX_GLOBAL_PENDING_UNITS, 0);
+      PerKeyOrderedDispatcher<Runnable> d = runnableDispatcher(
+        scheduler,
+        "test",
+        PerKeyOrderedDispatcher.DEFAULT_MAX_QUEUE_PER_KEY,
+        PerKeyOrderedDispatcher.DEFAULT_MAX_TASKS_PER_CYCLE,
+        PerKeyOrderedDispatcher.DEFAULT_MAX_GLOBAL_PENDING_UNITS,
+        0
+      );
       try {
         AtomicInteger seq = new AtomicInteger(0);
         CountDownLatch latch = new CountDownLatch(3);
 
-        d.submit("k", () -> {
-          assertThat(seq.getAndIncrement()).isEqualTo(0);
-          latch.countDown();
-        });
-        d.submit("k", () -> {
-          assertThat(seq.getAndIncrement()).isEqualTo(1);
-          latch.countDown();
-        });
-        d.submit("k", () -> {
-          assertThat(seq.getAndIncrement()).isEqualTo(2);
-          latch.countDown();
-        });
+        d.submit(
+          "k",
+          () -> {
+            assertThat(seq.getAndIncrement()).isEqualTo(0);
+            latch.countDown();
+          },
+          1,
+          true
+        );
+        d.submit(
+          "k",
+          () -> {
+            assertThat(seq.getAndIncrement()).isEqualTo(1);
+            latch.countDown();
+          },
+          1,
+          true
+        );
+        d.submit(
+          "k",
+          () -> {
+            assertThat(seq.getAndIncrement()).isEqualTo(2);
+            latch.countDown();
+          },
+          1,
+          true
+        );
 
         assertThat(latch.await(5, TimeUnit.SECONDS)).isTrue();
       } finally {
@@ -886,24 +733,36 @@ class DistributedSyncTest {
     void differentKeys_noBlocking() throws Exception {
       // Use a multi-threaded executor so that tasks for different keys can run concurrently
       ScheduledExecutorService multiScheduler = Executors.newScheduledThreadPool(4);
-      PerKeyOrderedDispatcher d = new PerKeyOrderedDispatcher(multiScheduler, "test", PerKeyOrderedDispatcher.DEFAULT_MAX_QUEUE_PER_KEY, PerKeyOrderedDispatcher.DEFAULT_MAX_TASKS_PER_CYCLE, PerKeyOrderedDispatcher.DEFAULT_MAX_GLOBAL_PENDING_UNITS, 0);
+      PerKeyOrderedDispatcher<Runnable> d = runnableDispatcher(
+        multiScheduler,
+        "test",
+        PerKeyOrderedDispatcher.DEFAULT_MAX_QUEUE_PER_KEY,
+        PerKeyOrderedDispatcher.DEFAULT_MAX_TASKS_PER_CYCLE,
+        PerKeyOrderedDispatcher.DEFAULT_MAX_GLOBAL_PENDING_UNITS,
+        0
+      );
       try {
         CountDownLatch task1Block = new CountDownLatch(1);
         CountDownLatch task1Running = new CountDownLatch(1);
         CountDownLatch task2Done = new CountDownLatch(1);
 
-        d.submit("k1", () -> {
-          task1Running.countDown();
-          try {
-            assertThat(task1Block.await(10, TimeUnit.SECONDS)).isTrue();
-          } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-          }
-        });
+        d.submit(
+          "k1",
+          () -> {
+            task1Running.countDown();
+            try {
+              assertThat(task1Block.await(10, TimeUnit.SECONDS)).isTrue();
+            } catch (InterruptedException e) {
+              Thread.currentThread().interrupt();
+            }
+          },
+          1,
+          true
+        );
 
         assertThat(task1Running.await(5, TimeUnit.SECONDS)).isTrue();
 
-        d.submit("k2", task2Done::countDown);
+        d.submit("k2", task2Done::countDown, 1, true);
         assertThat(task2Done.await(5, TimeUnit.SECONDS)).isTrue();
 
         task1Block.countDown();
@@ -914,56 +773,20 @@ class DistributedSyncTest {
     }
 
     @Test
-    @DisplayName("delayed submission preserves per-key FIFO ordering")
-    void delayedSubmission_preservesOrder() throws Exception {
-      PerKeyOrderedDispatcher d = new PerKeyOrderedDispatcher(scheduler, "test", PerKeyOrderedDispatcher.DEFAULT_MAX_QUEUE_PER_KEY, PerKeyOrderedDispatcher.DEFAULT_MAX_TASKS_PER_CYCLE, PerKeyOrderedDispatcher.DEFAULT_MAX_GLOBAL_PENDING_UNITS, 0);
-      try {
-        List<Integer> executionOrder = Collections.synchronizedList(new ArrayList<>());
-        CountDownLatch latch = new CountDownLatch(3);
-
-        // Submit with increasing delays: tasks execute in order of delay expiry (shortest first),
-        // but per-key FIFO ensures no concurrency within the same key.
-        // With delays 0, 10, 50 the execution order matches submit order
-        d.submit(
-          "k",
-          () -> {
-            executionOrder.add(1);
-            latch.countDown();
-          },
-          0
-        );
-        d.submit(
-          "k",
-          () -> {
-            executionOrder.add(2);
-            latch.countDown();
-          },
-          10
-        );
-        d.submit(
-          "k",
-          () -> {
-            executionOrder.add(3);
-            latch.countDown();
-          },
-          50
-        );
-
-        assertThat(latch.await(5, TimeUnit.SECONDS)).isTrue();
-        assertThat(executionOrder).containsExactly(1, 2, 3);
-      } finally {
-        d.close();
-      }
-    }
-
-    @Test
     @DisplayName("closed dispatcher drops tasks")
     void closed_dropsTasks() throws Exception {
-      PerKeyOrderedDispatcher d = new PerKeyOrderedDispatcher(scheduler, "test", PerKeyOrderedDispatcher.DEFAULT_MAX_QUEUE_PER_KEY, PerKeyOrderedDispatcher.DEFAULT_MAX_TASKS_PER_CYCLE, PerKeyOrderedDispatcher.DEFAULT_MAX_GLOBAL_PENDING_UNITS, 0);
+      PerKeyOrderedDispatcher<Runnable> d = runnableDispatcher(
+        scheduler,
+        "test",
+        PerKeyOrderedDispatcher.DEFAULT_MAX_QUEUE_PER_KEY,
+        PerKeyOrderedDispatcher.DEFAULT_MAX_TASKS_PER_CYCLE,
+        PerKeyOrderedDispatcher.DEFAULT_MAX_GLOBAL_PENDING_UNITS,
+        0
+      );
       d.close();
 
       CountDownLatch latch = new CountDownLatch(1);
-      d.submit("k", latch::countDown);
+      d.submit("k", latch::countDown, 1, true);
 
       assertThat(latch.await(500, TimeUnit.MILLISECONDS)).isFalse();
     }
@@ -971,27 +794,39 @@ class DistributedSyncTest {
     @Test
     @DisplayName("full queue silently rejects overflow tasks")
     void fullQueue_rejectsOverflow() throws Exception {
-      PerKeyOrderedDispatcher d = new PerKeyOrderedDispatcher(scheduler, "test", 1, PerKeyOrderedDispatcher.DEFAULT_MAX_TASKS_PER_CYCLE, PerKeyOrderedDispatcher.DEFAULT_MAX_GLOBAL_PENDING_UNITS, 0);
+      PerKeyOrderedDispatcher<Runnable> d = runnableDispatcher(
+        scheduler,
+        "test",
+        1,
+        PerKeyOrderedDispatcher.DEFAULT_MAX_TASKS_PER_CYCLE,
+        PerKeyOrderedDispatcher.DEFAULT_MAX_GLOBAL_PENDING_UNITS,
+        0
+      );
       try {
         CountDownLatch block = new CountDownLatch(1);
         CountDownLatch started = new CountDownLatch(1);
 
-        d.submit("k", () -> {
-          started.countDown();
-          try {
-            assertThat(block.await(10, TimeUnit.SECONDS)).isTrue();
-          } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-          }
-        });
+        d.submit(
+          "k",
+          () -> {
+            started.countDown();
+            try {
+              assertThat(block.await(10, TimeUnit.SECONDS)).isTrue();
+            } catch (InterruptedException e) {
+              Thread.currentThread().interrupt();
+            }
+          },
+          1,
+          true
+        );
 
         assertThat(started.await(5, TimeUnit.SECONDS)).isTrue();
 
         CountDownLatch queued = new CountDownLatch(1);
         CountDownLatch rejected = new CountDownLatch(1);
 
-        d.submit("k", queued::countDown);
-        d.submit("k", rejected::countDown);
+        d.submit("k", queued::countDown, 1, true);
+        d.submit("k", rejected::countDown, 1, true);
 
         block.countDown();
 
@@ -1000,65 +835,6 @@ class DistributedSyncTest {
       } finally {
         d.close();
       }
-    }
-  }
-
-  // ═══════════════════════════════════════════════════════════════
-  // 9. Degraded version handling — both skip/accept paths
-  // ═══════════════════════════════════════════════════════════════
-
-  @Nested
-  @DisplayName("Degraded version handling in sync")
-  class DegradedVersionTests {
-
-    @Test
-    @DisplayName("REFRESH: both normal, equal version — skip")
-    void refresh_bothNormalEqual_skip() throws Exception {
-      CacheSyncListener l = createListener(k -> "v");
-      cache.put("k", entry(5, false, 0, null, 0, KeyState.NORMAL));
-      l.handleSyncMessage(channel, syncMessage("k", SyncMessage.TYPE_REFRESH, 5L, false));
-      awaitScheduler();
-      assertThat(((CacheEntry) cache.getIfPresent("k")).getDataVersion()).isEqualTo(5L);
-    }
-
-    @Test
-    @DisplayName("REFRESH: both degraded, equal version — skip")
-    void refresh_bothDegradedEqual_skip() throws Exception {
-      CacheSyncListener l = createListener(k -> "v");
-      cache.put("k", entry(-3, true, 0, null, 0, KeyState.NORMAL));
-      l.handleSyncMessage(channel, syncMessage("k", SyncMessage.TYPE_REFRESH, -3L, true));
-      awaitScheduler();
-      assertThat(((CacheEntry) cache.getIfPresent("k")).getDataVersion()).isEqualTo(-3L);
-    }
-
-    @Test
-    @DisplayName("REFRESH: existing degraded, incoming degraded higher — accept")
-    void refresh_bothDegradedHigher_accept() throws Exception {
-      CacheSyncListener l = createListener(k -> "v");
-      cache.put("k", entry(-3, true, 0, null, 0, KeyState.NORMAL));
-      l.handleSyncMessage(channel, syncMessage("k", SyncMessage.TYPE_REFRESH, -1L, true));
-      awaitScheduler();
-      assertThat(((CacheEntry) cache.getIfPresent("k")).getDataVersion()).isEqualTo(-1L);
-    }
-
-    @Test
-    @DisplayName("INVALIDATE: existing degraded, incoming normal — accept")
-    void invalidate_existingDegradedIncomingNormal_accept() throws Exception {
-      CacheSyncListener l = createListener(k -> null);
-      cache.put("k", entry(-3, true, 0, null, 0, KeyState.NORMAL));
-      l.handleSyncMessage(channel, syncMessage("k", SyncMessage.TYPE_INVALIDATE, 1L, false));
-      awaitScheduler();
-      assertThat(cache.getIfPresent("k")).isNull();
-    }
-
-    @Test
-    @DisplayName("INVALIDATE: existing normal, incoming degraded version 0 — skip")
-    void invalidate_existingNormalIncomingDegradedV0_skip() throws Exception {
-      CacheSyncListener l = createListener(k -> null);
-      cache.put("k", entry(5, false, 0, null, 0, KeyState.NORMAL));
-      l.handleSyncMessage(channel, syncMessage("k", SyncMessage.TYPE_INVALIDATE, 0L, true));
-      awaitScheduler();
-      assertThat(cache.getIfPresent("k")).isNotNull();
     }
   }
 
@@ -1074,7 +850,7 @@ class DistributedSyncTest {
     @DisplayName("same key: concurrent REFRESH messages preserve last-writer-wins")
     void sameKey_concurrentRefresh() throws Exception {
       CacheSyncListener l = createListener(k -> "fresh");
-      cache.put("k", entry(0, false, 0, null, 0, KeyState.NORMAL));
+      cache.put("k", entry(0, 0, null, 0, KeyState.NORMAL));
       int threadCount = 10;
       ExecutorService pool = Executors.newFixedThreadPool(threadCount);
       CountDownLatch startGate = new CountDownLatch(1);
@@ -1085,7 +861,7 @@ class DistributedSyncTest {
           try {
             startGate.await();
             // We bypass the channel mock for concurrent test
-            l.handleSyncMessage(channel, syncMessage("k", SyncMessage.TYPE_REFRESH, v, false));
+            l.handleSyncMessage(channel, syncMessage("k", SyncType.REFRESH.code(), v));
           } catch (Exception e) {
             throw new RuntimeException(e);
           }
@@ -1113,12 +889,12 @@ class DistributedSyncTest {
 
       for (int i = 0; i < keyCount; i++) {
         String key = "ck-" + i;
-        cache.put(key, entry(0, false, 0, null, 0, KeyState.NORMAL));
+        cache.put(key, entry(0, 0, null, 0, KeyState.NORMAL));
         int version = i + 1;
         pool.submit(() -> {
           try {
             startGate.await();
-            l.handleSyncMessage(channel, syncMessage(key, SyncMessage.TYPE_REFRESH, version, false));
+            l.handleSyncMessage(channel, syncMessage(key, SyncType.REFRESH.code(), version));
           } catch (Exception e) {
             throw new RuntimeException(e);
           } finally {
@@ -1143,10 +919,10 @@ class DistributedSyncTest {
     @DisplayName("mixed INVALIDATE and REFRESH for same key — invalidate wins if newer")
     void invalidateAndRefresh_sameKey() throws Exception {
       CacheSyncListener l = createListener(k -> "fresh");
-      cache.put("k", entry(10, false, 0, null, 0, KeyState.NORMAL));
+      cache.put("k", entry(10, 0, null, 0, KeyState.NORMAL));
 
       // INVALIDATE at version 15
-      l.handleSyncMessage(channel, syncMessage("k", SyncMessage.TYPE_INVALIDATE, 15L, false));
+      l.handleSyncMessage(channel, syncMessage("k", SyncType.INVALIDATE.code(), 15L));
       awaitScheduler();
 
       assertThat(cache.getIfPresent("k")).isNull();
@@ -1164,11 +940,11 @@ class DistributedSyncTest {
     @Test
     @DisplayName("two HOT decisions for same key — higher version wins")
     void twoHotDecisions_higherVersionWins() throws Exception {
-      cache.put("k", entry(1, false, 0, null, 0, KeyState.NORMAL));
-      WorkerListener wl = createWorkerListener(k -> "fresh", null);
+      cache.put("k", entry(1, 0, null, 0, KeyState.NORMAL));
+      WorkerListener wl = createWorkerListener(k -> "fresh");
 
-      wl.handleWorkerMessage(channel, workerMessage("k", WorkerMessage.TYPE_HOT, 5L, "w1", 1));
-      wl.handleWorkerMessage(channel, workerMessage("k", WorkerMessage.TYPE_HOT, 3L, "w1", 1));
+      wl.handleWorkerMessage(channel, workerMessage("k", WorkerDecisionType.HOT.code(), 5L, "w1", 1));
+      wl.handleWorkerMessage(channel, workerMessage("k", WorkerDecisionType.HOT.code(), 3L, "w1", 1));
       awaitScheduler();
 
       CacheEntry ce = (CacheEntry) cache.getIfPresent("k");
@@ -1178,11 +954,11 @@ class DistributedSyncTest {
     @Test
     @DisplayName("HOT then COOL from different workers — last-writer-wins")
     void hotThenCool_differentWorkers() throws Exception {
-      cache.put("k", entry(1, false, 0, null, 0, KeyState.NORMAL));
-      WorkerListener wl = createWorkerListener(k -> "fresh", null);
+      cache.put("k", entry(1, 0, null, 0, KeyState.NORMAL));
+      WorkerListener wl = createWorkerListener(k -> "fresh");
 
-      wl.handleWorkerMessage(channel, workerMessage("k", WorkerMessage.TYPE_HOT, 10L, "w1", 1));
-      wl.handleWorkerMessage(channel, workerMessage("k", WorkerMessage.TYPE_COOL, 5L, "w2", 1));
+      wl.handleWorkerMessage(channel, workerMessage("k", WorkerDecisionType.HOT.code(), 10L, "w1", 1));
+      wl.handleWorkerMessage(channel, workerMessage("k", WorkerDecisionType.COOL.code(), 5L, "w2", 1));
       awaitScheduler();
 
       // w2 at same epoch, different nodeId → unconditionally accepted
@@ -1194,16 +970,16 @@ class DistributedSyncTest {
     @Test
     @DisplayName("HOT from restarted worker (higher epoch) overrides existing decision")
     void hot_afterWorkerRestart_overrides() throws Exception {
-      cache.put("k", entry(1, false, 0, null, 0, KeyState.NORMAL));
-      WorkerListener wl = createWorkerListener(k -> "fresh", null);
+      cache.put("k", entry(1, 0, null, 0, KeyState.NORMAL));
+      WorkerListener wl = createWorkerListener(k -> "fresh");
 
       // First HOT from w1 epoch 1
-      wl.handleWorkerMessage(channel, workerMessage("k", WorkerMessage.TYPE_HOT, 100L, "w1", 1));
+      wl.handleWorkerMessage(channel, workerMessage("k", WorkerDecisionType.HOT.code(), 100L, "w1", 1));
       awaitScheduler();
       assertThat(((CacheEntry) cache.getIfPresent("k")).getDecisionVersion()).isEqualTo(100L);
 
       // Worker restarts, same nodeId but epoch=2, lower dv
-      wl.handleWorkerMessage(channel, workerMessage("k", WorkerMessage.TYPE_HOT, 1L, "w1", 2));
+      wl.handleWorkerMessage(channel, workerMessage("k", WorkerDecisionType.HOT.code(), 1L, "w1", 2));
       awaitScheduler();
 
       CacheEntry ce = (CacheEntry) cache.getIfPresent("k");
@@ -1215,15 +991,15 @@ class DistributedSyncTest {
     @Test
     @DisplayName("stale message from lower epoch is rejected")
     void staleLowerEpoch_rejected() throws Exception {
-      cache.put("k", entry(1, false, 0, null, 0, KeyState.NORMAL));
-      WorkerListener wl = createWorkerListener(k -> "fresh", null);
+      cache.put("k", entry(1, 0, null, 0, KeyState.NORMAL));
+      WorkerListener wl = createWorkerListener(k -> "fresh");
 
-      wl.handleWorkerMessage(channel, workerMessage("k", WorkerMessage.TYPE_HOT, 5L, "w1", 2));
+      wl.handleWorkerMessage(channel, workerMessage("k", WorkerDecisionType.HOT.code(), 5L, "w1", 2));
       awaitScheduler();
       assertThat(((CacheEntry) cache.getIfPresent("k")).getDecisionVersion()).isEqualTo(5L);
 
       // Old epoch message arrives late
-      wl.handleWorkerMessage(channel, workerMessage("k", WorkerMessage.TYPE_HOT, 10L, "w1", 1));
+      wl.handleWorkerMessage(channel, workerMessage("k", WorkerDecisionType.HOT.code(), 10L, "w1", 1));
       awaitScheduler();
 
       CacheEntry ce = (CacheEntry) cache.getIfPresent("k");
@@ -1233,80 +1009,7 @@ class DistributedSyncTest {
   }
 
   // ═══════════════════════════════════════════════════════════════
-  // 13. Heartbeat timeout edge cases
-  // ═══════════════════════════════════════════════════════════════
-
-  @Nested
-  @DisplayName("Heartbeat timeout edge cases")
-  class HeartbeatTimeoutEdgeTests {
-
-    @Test
-    @DisplayName("backoff for attempt 1 is verifyInterval × 1")
-    void computeBackoff_attempt1() throws Exception {
-      WorkerHeartbeatVerifier v = new WorkerHeartbeatVerifier(
-        mock(RabbitTemplate.class),
-        spy(new HealthViewImpl(5000, 99)),
-        "app",
-        new WorkerHeartbeatVerifier.VerifierConfig(1000, 500, 60_000),
-        Executors.newSingleThreadScheduledExecutor(new ZetaThreadFactory("zeta-hb-verifier-test"))
-      );
-      long result = invokeComputeBackoff(v, 1);
-      assertThat(result).isEqualTo(1000L);
-    }
-
-    @Test
-    @DisplayName("backoff for attempt 2 is verifyInterval × 2")
-    void computeBackoff_attempt2() throws Exception {
-      WorkerHeartbeatVerifier v = new WorkerHeartbeatVerifier(
-        mock(RabbitTemplate.class),
-        spy(new HealthViewImpl(5000, 99)),
-        "app",
-        new WorkerHeartbeatVerifier.VerifierConfig(1000, 500, 60_000),
-        Executors.newSingleThreadScheduledExecutor(new ZetaThreadFactory("zeta-hb-verifier-test"))
-      );
-      long result = invokeComputeBackoff(v, 2);
-      assertThat(result).isEqualTo(2000L);
-    }
-
-    @Test
-    @DisplayName("backoff for attempt 4 uses dense-start-steep-extension formula")
-    void computeBackoff_attempt4() throws Exception {
-      WorkerHeartbeatVerifier v = new WorkerHeartbeatVerifier(
-        mock(RabbitTemplate.class),
-        spy(new HealthViewImpl(5000, 99)),
-        "app",
-        new WorkerHeartbeatVerifier.VerifierConfig(1000, 500, 60_000),
-        Executors.newSingleThreadScheduledExecutor(new ZetaThreadFactory("zeta-hb-verifier-test"))
-      );
-      // attempt 4: shift = 4+1 = 5, so 1000 * (1 << 5) = 32000
-      long result = invokeComputeBackoff(v, 4);
-      assertThat(result).isEqualTo(32000L);
-    }
-
-    @Test
-    @DisplayName("backoff capped at verifyMaxBackoffMs")
-    void computeBackoff_capped() throws Exception {
-      WorkerHeartbeatVerifier v = new WorkerHeartbeatVerifier(
-        mock(RabbitTemplate.class),
-        spy(new HealthViewImpl(5000, 99)),
-        "app",
-        new WorkerHeartbeatVerifier.VerifierConfig(1000, 500, 5000),
-        Executors.newSingleThreadScheduledExecutor(new ZetaThreadFactory("zeta-hb-verifier-test"))
-      );
-      // attempt 5: shift = 5+1 = 6, 1000 * (1 << 6) = 64000, capped to 5000
-      long result = invokeComputeBackoff(v, 5);
-      assertThat(result).isEqualTo(5000L);
-    }
-
-    private long invokeComputeBackoff(WorkerHeartbeatVerifier v, int attempt) throws Exception {
-      java.lang.reflect.Method m = WorkerHeartbeatVerifier.class.getDeclaredMethod("computeBackoffMs", int.class);
-      m.setAccessible(true);
-      return (long) m.invoke(v, attempt);
-    }
-  }
-
-  // ═══════════════════════════════════════════════════════════════
-  // 14. Listener with missing cache entry
+  // 13. Listener with missing cache entry
   // ═══════════════════════════════════════════════════════════════
 
   @Nested
@@ -1317,7 +1020,7 @@ class DistributedSyncTest {
     @DisplayName("REFRESH on missing key creates new entry from Redis loader")
     void refreshOnMissingKey_createsEntry() throws Exception {
       CacheSyncListener l = createListener(k -> "brand-new");
-      l.handleSyncMessage(channel, syncMessage("missing", SyncMessage.TYPE_REFRESH, 1L, false));
+      l.handleSyncMessage(channel, syncMessage("missing", SyncType.REFRESH.code(), 1L));
       awaitScheduler();
 
       CacheEntry ce = (CacheEntry) cache.getIfPresent("missing");
@@ -1331,7 +1034,7 @@ class DistributedSyncTest {
     @DisplayName("REFRESH on missing key with null Redis value — no entry created")
     void refreshOnMissingKey_nullRedis_noEntry() throws Exception {
       CacheSyncListener l = createListener(k -> null);
-      l.handleSyncMessage(channel, syncMessage("missing", SyncMessage.TYPE_REFRESH, 1L, false));
+      l.handleSyncMessage(channel, syncMessage("missing", SyncType.REFRESH.code(), 1L));
       awaitScheduler();
       assertThat(cache.getIfPresent("missing")).isNull();
     }
@@ -1340,7 +1043,7 @@ class DistributedSyncTest {
     @DisplayName("INVALIDATE on missing key is no-op")
     void invalidateOnMissingKey_noop() throws Exception {
       CacheSyncListener l = createListener(k -> null);
-      l.handleSyncMessage(channel, syncMessage("missing", SyncMessage.TYPE_INVALIDATE, 1L, false));
+      l.handleSyncMessage(channel, syncMessage("missing", SyncType.INVALIDATE.code(), 1L));
       awaitScheduler();
       assertThat(cache.getIfPresent("missing")).isNull();
     }
@@ -1348,8 +1051,8 @@ class DistributedSyncTest {
     @Test
     @DisplayName("COOL on missing key is no-op")
     void coolOnMissingKey_noop() throws Exception {
-      WorkerListener wl = createWorkerListener(k -> null, null);
-      wl.handleWorkerMessage(channel, workerMessage("missing", WorkerMessage.TYPE_COOL, 1L, "w1", 1));
+      WorkerListener wl = createWorkerListener(k -> null);
+      wl.handleWorkerMessage(channel, workerMessage("missing", WorkerDecisionType.COOL.code(), 1L, "w1", 1));
       awaitScheduler();
       assertThat(cache.getIfPresent("missing")).isNull();
     }
@@ -1367,23 +1070,45 @@ class DistributedSyncTest {
     @Test
     @DisplayName("three sequential tasks for same key execute in order")
     void threeTasks_sameKey_inOrder() throws Exception {
-      PerKeyOrderedDispatcher d = new PerKeyOrderedDispatcher(scheduler, "test", PerKeyOrderedDispatcher.DEFAULT_MAX_QUEUE_PER_KEY, PerKeyOrderedDispatcher.DEFAULT_MAX_TASKS_PER_CYCLE, PerKeyOrderedDispatcher.DEFAULT_MAX_GLOBAL_PENDING_UNITS, 0);
+      PerKeyOrderedDispatcher<Runnable> d = runnableDispatcher(
+        scheduler,
+        "test",
+        PerKeyOrderedDispatcher.DEFAULT_MAX_QUEUE_PER_KEY,
+        PerKeyOrderedDispatcher.DEFAULT_MAX_TASKS_PER_CYCLE,
+        PerKeyOrderedDispatcher.DEFAULT_MAX_GLOBAL_PENDING_UNITS,
+        0
+      );
       try {
         List<Integer> results = new CopyOnWriteArrayList<>();
         CountDownLatch latch = new CountDownLatch(3);
 
-        d.submit("order-key", () -> {
-          results.add(1);
-          latch.countDown();
-        });
-        d.submit("order-key", () -> {
-          results.add(2);
-          latch.countDown();
-        });
-        d.submit("order-key", () -> {
-          results.add(3);
-          latch.countDown();
-        });
+        d.submit(
+          "order-key",
+          () -> {
+            results.add(1);
+            latch.countDown();
+          },
+          1,
+          true
+        );
+        d.submit(
+          "order-key",
+          () -> {
+            results.add(2);
+            latch.countDown();
+          },
+          1,
+          true
+        );
+        d.submit(
+          "order-key",
+          () -> {
+            results.add(3);
+            latch.countDown();
+          },
+          1,
+          true
+        );
 
         assertThat(latch.await(5, TimeUnit.SECONDS)).isTrue();
         assertThat(results).containsExactly(1, 2, 3);
@@ -1395,30 +1120,47 @@ class DistributedSyncTest {
     @Test
     @DisplayName("no interleaving: same key tasks don't overlap")
     void sameKey_tasksDontOverlap() throws Exception {
-      PerKeyOrderedDispatcher d = new PerKeyOrderedDispatcher(scheduler, "test", PerKeyOrderedDispatcher.DEFAULT_MAX_QUEUE_PER_KEY, PerKeyOrderedDispatcher.DEFAULT_MAX_TASKS_PER_CYCLE, PerKeyOrderedDispatcher.DEFAULT_MAX_GLOBAL_PENDING_UNITS, 0);
+      PerKeyOrderedDispatcher<Runnable> d = runnableDispatcher(
+        scheduler,
+        "test",
+        PerKeyOrderedDispatcher.DEFAULT_MAX_QUEUE_PER_KEY,
+        PerKeyOrderedDispatcher.DEFAULT_MAX_TASKS_PER_CYCLE,
+        PerKeyOrderedDispatcher.DEFAULT_MAX_GLOBAL_PENDING_UNITS,
+        0
+      );
       try {
         CountDownLatch task1Running = new CountDownLatch(1);
         CountDownLatch task1Done = new CountDownLatch(1);
         AtomicInteger concurrentCount = new AtomicInteger(0);
         CountDownLatch task2Ran = new CountDownLatch(1);
 
-        d.submit("no-overlap", () -> {
-          task1Running.countDown();
-          concurrentCount.incrementAndGet();
-          try {
-            Thread.sleep(300);
-          } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-          }
-          concurrentCount.decrementAndGet();
-          task1Done.countDown();
-        });
+        d.submit(
+          "no-overlap",
+          () -> {
+            task1Running.countDown();
+            concurrentCount.incrementAndGet();
+            try {
+              Thread.sleep(300);
+            } catch (InterruptedException e) {
+              Thread.currentThread().interrupt();
+            }
+            concurrentCount.decrementAndGet();
+            task1Done.countDown();
+          },
+          1,
+          true
+        );
 
-        d.submit("no-overlap", () -> {
-          // This should only run after task1 completes
-          assertThat(concurrentCount.get()).isZero();
-          task2Ran.countDown();
-        });
+        d.submit(
+          "no-overlap",
+          () -> {
+            // This should only run after task1 completes
+            assertThat(concurrentCount.get()).isZero();
+            task2Ran.countDown();
+          },
+          1,
+          true
+        );
 
         assertThat(task1Done.await(5, TimeUnit.SECONDS)).isTrue();
         assertThat(task2Ran.await(5, TimeUnit.SECONDS)).isTrue();
@@ -1439,14 +1181,14 @@ class DistributedSyncTest {
     @Test
     @DisplayName("two workers same epoch — different nodeId — last-writer-wins")
     void twoWorkers_sameEpoch_differentNode() throws Exception {
-      cache.put("k", entry(1, false, 0, null, 0, KeyState.NORMAL));
-      WorkerListener wl = createWorkerListener(k -> "fresh", null);
+      cache.put("k", entry(1, 0, null, 0, KeyState.NORMAL));
+      WorkerListener wl = createWorkerListener(k -> "fresh");
 
-      wl.handleWorkerMessage(channel, workerMessage("k", WorkerMessage.TYPE_HOT, 10L, "w1", 1));
+      wl.handleWorkerMessage(channel, workerMessage("k", WorkerDecisionType.HOT.code(), 10L, "w1", 1));
       awaitScheduler();
       assertThat(((CacheEntry) cache.getIfPresent("k")).getDecisionNodeId()).isEqualTo("w1");
 
-      wl.handleWorkerMessage(channel, workerMessage("k", WorkerMessage.TYPE_HOT, 5L, "w2", 1));
+      wl.handleWorkerMessage(channel, workerMessage("k", WorkerDecisionType.HOT.code(), 5L, "w2", 1));
       awaitScheduler();
 
       // Different nodeId, same epoch → unconditional accept
@@ -1458,18 +1200,18 @@ class DistributedSyncTest {
     @Test
     @DisplayName("first worker wins when own epoch is higher")
     void higherEpoch_overridesLower() throws Exception {
-      cache.put("k", entry(1, false, 0, null, 0, KeyState.NORMAL));
-      WorkerListener wl = createWorkerListener(k -> "fresh", null);
+      cache.put("k", entry(1, 0, null, 0, KeyState.NORMAL));
+      WorkerListener wl = createWorkerListener(k -> "fresh");
 
-      wl.handleWorkerMessage(channel, workerMessage("k", WorkerMessage.TYPE_HOT, 50L, "w1", 2));
+      wl.handleWorkerMessage(channel, workerMessage("k", WorkerDecisionType.HOT.code(), 50L, "w1", 2));
       awaitScheduler();
       assertThat(((CacheEntry) cache.getIfPresent("k")).getDecisionEpoch()).isEqualTo(2L);
 
       // Late message from a lower epoch of the SAME Worker. Epoch is a
       // node-local incarnation counter, so this is the only regime in which the
       // comparison is meaningful — cross-Worker messages never reach it
-      // (ADR-0085).
-      wl.handleWorkerMessage(channel, workerMessage("k", WorkerMessage.TYPE_HOT, 99L, "w1", 1));
+      // (design decisions: version comparison).
+      wl.handleWorkerMessage(channel, workerMessage("k", WorkerDecisionType.HOT.code(), 99L, "w1", 1));
       awaitScheduler();
 
       CacheEntry ce = (CacheEntry) cache.getIfPresent("k");
@@ -1478,20 +1220,18 @@ class DistributedSyncTest {
     }
 
     @Test
-    @DisplayName("cross-Worker message applies on arrival even at a lower epoch (ADR-0085)")
+    @DisplayName("cross-Worker message applies on arrival even at a lower epoch (design decisions: version comparison)")
     void crossWorkerLowerEpoch_appliesOnArrival() throws Exception {
-      cache.put("k", entry(1, false, 0, null, 0, KeyState.NORMAL));
-      WorkerListener wl = createWorkerListener(k -> "fresh", null);
+      cache.put("k", entry(1, 0, null, 0, KeyState.NORMAL));
+      WorkerListener wl = createWorkerListener(k -> "fresh");
 
-      wl.handleWorkerMessage(channel, workerMessage("k", WorkerMessage.TYPE_HOT, 50L, "w1", 2));
+      wl.handleWorkerMessage(channel, workerMessage("k", WorkerDecisionType.HOT.code(), 50L, "w1", 2));
       awaitScheduler();
       assertThat(((CacheEntry) cache.getIfPresent("k")).getDecisionNodeId()).isEqualTo("w1");
 
       // Different Worker, lower epoch: neither epoch nor decisionVersion is
       // comparable across Workers, so arrival order (last-writer-wins) decides.
-      // Comparing epochs here used to mute every surviving Worker after a
-      // rolling restart until the entry expired.
-      wl.handleWorkerMessage(channel, workerMessage("k", WorkerMessage.TYPE_HOT, 99L, "w2", 1));
+      wl.handleWorkerMessage(channel, workerMessage("k", WorkerDecisionType.HOT.code(), 99L, "w2", 1));
       awaitScheduler();
 
       CacheEntry ce = (CacheEntry) cache.getIfPresent("k");
@@ -1506,36 +1246,33 @@ class DistributedSyncTest {
   // ═══════════════════════════════════════════════════════════════
 
   @Nested
-  @DisplayName("Graceful degradation chain")
+  @DisplayName("Source-outage fallback chain")
   class GracefulDegradationTests {
 
     @Test
-    @DisplayName("workers dead -> degraded entry accepted -> workers recover -> normal overwrites")
+    @DisplayName("source down -> existing entry promoted -> source recovers -> fresh value wins")
     void degradationChain() throws Exception {
-      WorkerListener wl = createWorkerListener(
-        k -> {
-          throw new RuntimeException("Redis down");
-        },
-        null
-      );
+      WorkerListener wl = createWorkerListener(k -> {
+        throw new RuntimeException("source down");
+      });
 
-      // Phase 1: Worker dead, Redis unavailable, degraded entry exists
-      cache.put("k", entry(-5, true, 0, null, 0, KeyState.NORMAL));
+      // The seeded version must respect the stamp clock's monotonicity (the
+      // stub allocates 1, 2, ...): a seeded version ABOVE the clock would make
+      // every later load read as outranked by the resident.
+      cache.put("k", entry(1, 0, null, 0, KeyState.NORMAL));
 
-      // HOT promotion uses Redis which fails, falls back to degraded value
-      wl.handleWorkerMessage(channel, workerMessage("k", WorkerMessage.TYPE_HOT, 1L, "w1", 1));
+      // HOT promotion falls back to the existing entry value.
+      wl.handleWorkerMessage(channel, workerMessage("k", WorkerDecisionType.HOT.code(), 1L, "w1", 1));
       awaitScheduler();
 
       CacheEntry ce = (CacheEntry) cache.getIfPresent("k");
-      assertThat(ce.isVersionDegraded()).isTrue();
+      assertThat(ce.getDataVersion()).isEqualTo(1L);
       assertThat(ce.getKeyState()).isEqualTo(KeyState.HOT);
 
-      // Phase 2: Worker recovers, Redis back online with fresh data
-      // Note: isVersionDegraded stays true because replaceEntryValue preserves the existing degraded flag;
-      // only a subsequent write path or a non-degraded Redis INCR version resets it
-      WorkerListener wlRecovered = createWorkerListener(k -> "fresh-data", null);
+      // Source recovers: a newer Worker incarnation promotes fresh data.
+      WorkerListener wlRecovered = createWorkerListener(k -> "fresh-data");
 
-      wlRecovered.handleWorkerMessage(channel, workerMessage("k", WorkerMessage.TYPE_HOT, 2L, "w1", 2));
+      wlRecovered.handleWorkerMessage(channel, workerMessage("k", WorkerDecisionType.HOT.code(), 2L, "w1", 2));
       awaitScheduler();
 
       CacheEntry ce2 = (CacheEntry) cache.getIfPresent("k");
@@ -1545,18 +1282,18 @@ class DistributedSyncTest {
     }
 
     @Test
-    @DisplayName("COOL after graceful degradation preserves degraded value")
+    @DisplayName("COOL preserves the value and stamp")
     void coolAfterDegradation_preservesValue() throws Exception {
-      cache.put("k", entry(-5, true, 1, "w1", 1, KeyState.HOT));
-      WorkerListener wl = createWorkerListener(k -> "fresh", null);
+      cache.put("k", entry(5, 1, "w1", 1, KeyState.HOT));
+      WorkerListener wl = createWorkerListener(k -> "fresh");
 
-      wl.handleWorkerMessage(channel, workerMessage("k", WorkerMessage.TYPE_COOL, 2L, "w1", 1));
+      wl.handleWorkerMessage(channel, workerMessage("k", WorkerDecisionType.COOL.code(), 2L, "w1", 1));
       awaitScheduler();
 
       CacheEntry ce = (CacheEntry) cache.getIfPresent("k");
       assertThat(ce.getKeyState()).isEqualTo(KeyState.COOL);
-      // Degraded entry preserved
-      assertThat(ce.isVersionDegraded()).isTrue();
+      assertThat(ce.getDataVersion()).isEqualTo(5L);
+      assertThat(ce.getValue()).isEqualTo("v");
     }
   }
 
@@ -1572,9 +1309,9 @@ class DistributedSyncTest {
     @DisplayName("WorkerListener rejects stale HOT with same nodeId")
     void hot_staleSameNode_rejected() throws Exception {
       cache.put("k", hotEntry("w1", 10, 1));
-      WorkerListener wl = createWorkerListener(k -> "fresh", null);
+      WorkerListener wl = createWorkerListener(k -> "fresh");
 
-      wl.handleWorkerMessage(channel, workerMessage("k", WorkerMessage.TYPE_HOT, 5L, "w1", 1));
+      wl.handleWorkerMessage(channel, workerMessage("k", WorkerDecisionType.HOT.code(), 5L, "w1", 1));
       awaitScheduler();
 
       assertThat(((CacheEntry) cache.getIfPresent("k")).getDecisionVersion()).isEqualTo(10L);
@@ -1584,9 +1321,9 @@ class DistributedSyncTest {
     @DisplayName("WorkerListener rejects stale COOL with same nodeId")
     void cool_staleSameNode_rejected() throws Exception {
       cache.put("k", hotEntry("w1", 10, 1));
-      WorkerListener wl = createWorkerListener(k -> "fresh", null);
+      WorkerListener wl = createWorkerListener(k -> "fresh");
 
-      wl.handleWorkerMessage(channel, workerMessage("k", WorkerMessage.TYPE_COOL, 5L, "w1", 1));
+      wl.handleWorkerMessage(channel, workerMessage("k", WorkerDecisionType.COOL.code(), 5L, "w1", 1));
       awaitScheduler();
 
       assertThat(((CacheEntry) cache.getIfPresent("k")).getDecisionVersion()).isEqualTo(10L);
@@ -1597,9 +1334,9 @@ class DistributedSyncTest {
     @DisplayName("WorkerListener accepts equal version HOT (no-op but idempotent)")
     void hot_equalVersion_idempotent() throws Exception {
       cache.put("k", hotEntry("w1", 5, 1));
-      WorkerListener wl = createWorkerListener(k -> "fresh", null);
+      WorkerListener wl = createWorkerListener(k -> "fresh");
 
-      wl.handleWorkerMessage(channel, workerMessage("k", WorkerMessage.TYPE_HOT, 5L, "w1", 1));
+      wl.handleWorkerMessage(channel, workerMessage("k", WorkerDecisionType.HOT.code(), 5L, "w1", 1));
       awaitScheduler();
 
       assertThat(((CacheEntry) cache.getIfPresent("k")).getDecisionVersion()).isEqualTo(5L);
@@ -1626,18 +1363,16 @@ class DistributedSyncTest {
     @DisplayName("SyncMessage with blank key for non-batch type returns null")
     void blankKey_nonBatch_returnsNull() {
       MessageProperties props = new MessageProperties();
-      props.setHeader(HEADER_TYPE, SyncMessage.TYPE_INVALIDATE);
+      props.setHeader(HEADER_TYPE, SyncType.INVALIDATE.code());
       Message msg = new Message("   ".getBytes(StandardCharsets.UTF_8), props);
       assertThat(SyncMessage.from(msg)).isNull();
     }
 
     @Test
-    @DisplayName("SyncMessage with null type header produces null type field")
+    @DisplayName("SyncMessage with null type header is dropped at parse time")
     void nullType_header() {
       Message msg = new Message("k".getBytes(StandardCharsets.UTF_8), new MessageProperties());
-      SyncMessage sm = SyncMessage.from(msg);
-      assertThat(sm).isNotNull();
-      assertThat(sm.type()).isNull();
+      assertThat(SyncMessage.from(msg)).isNull();
     }
 
     @Test
@@ -1658,20 +1393,22 @@ class DistributedSyncTest {
     @Test
     @DisplayName("WorkerListener handles null type gracefully")
     void workerListener_nullType_acks() throws Exception {
-      WorkerListener wl = createWorkerListener(k -> "v", null);
+      WorkerListener wl = createWorkerListener(k -> "v");
       Message msg = new Message("k".getBytes(StandardCharsets.UTF_8), new MessageProperties());
       wl.handleWorkerMessage(channel, msg);
       verify(channel).basicAck(anyLong(), eq(false));
     }
 
     @Test
-    @DisplayName("CacheSyncListener nacks on processing error")
-    void listener_nacksOnError() throws Exception {
+    @DisplayName("CacheSyncListener propagates an ack failure without a second nack")
+    void listener_ackFailure_propagatesWithoutNack() throws Exception {
       doThrow(new RuntimeException("forced error")).when(channel).basicAck(anyLong(), eq(false));
       CacheSyncListener l = createListener(k -> "v");
-      Message msg = syncMessage("k", SyncMessage.TYPE_INVALIDATE, 1L, false);
-      l.handleSyncMessage(channel, msg);
-      verify(channel).basicNack(anyLong(), eq(false), eq(false));
+      Message msg = syncMessage("k", SyncType.INVALIDATE.code(), 1L);
+      assertThatThrownBy(() -> l.handleSyncMessage(channel, msg))
+        .isInstanceOf(RuntimeException.class)
+        .hasMessageContaining("forced error");
+      verify(channel, never()).basicNack(anyLong(), eq(false), eq(false));
     }
   }
 
@@ -1687,33 +1424,15 @@ class DistributedSyncTest {
     @DisplayName("record defers then flush sends all pending")
     void recordThenFlush_sendsAll() {
       CacheSyncPublisher pub = mock(CacheSyncPublisher.class);
-      BroadcastBuffer buf = new BroadcastBuffer(scheduler, Optional.of(pub), 5000, Math.max(5000, 2_000), null);
+      BroadcastBuffer buf = new BroadcastBuffer(scheduler, pub, 5000, Math.max(5000, 2_000), null);
 
-      buf.record("k1", 1L, false);
-      buf.record("k2", 2L, true);
-
-      buf.flush();
-
-      verify(pub).broadcastRefresh("k1", 1L, false);
-      verify(pub).broadcastRefresh("k2", 2L, true);
-    }
-
-    @Test
-    @DisplayName("normal-wins across the degraded boundary: a degraded record never displaces a pending normal one")
-    void normalWinsAcrossDegradedBoundary() {
-      CacheSyncPublisher pub = mock(CacheSyncPublisher.class);
-      BroadcastBuffer buf = new BroadcastBuffer(scheduler, Optional.of(pub), 5000, Math.max(5000, 2_000), null);
-
-      buf.record("k", 1L, false);
-      buf.record("k", 5L, true);
+      buf.record("k1", 1L, null, null);
+      buf.record("k2", 2L, null, null);
 
       buf.flush();
 
-      // The degraded REFRESH would be skipped by every normal-holding peer
-      // (case 2 of the sync matrix), so sending it would silently drop the
-      // normal update — the pending normal record is kept instead.
-      verify(pub).broadcastRefresh("k", 1L, false);
-      verifyNoMoreInteractions(pub);
+      verify(pub).broadcastRefresh("k1", 1L);
+      verify(pub).broadcastRefresh("k2", 2L);
     }
 
     @Test
@@ -1726,20 +1445,20 @@ class DistributedSyncTest {
         return null;
       })
         .when(pub)
-        .broadcastRefresh("auto", 1L, false);
+        .broadcastRefresh("auto", 1L);
 
-      BroadcastBuffer buf = new BroadcastBuffer(scheduler, Optional.of(pub), 100, Math.max(100, 2_000), null);
-      buf.record("auto", 1L, false);
+      BroadcastBuffer buf = new BroadcastBuffer(scheduler, pub, 100, Math.max(100, 2_000), null);
+      buf.record("auto", 1L, null, null);
 
       assertThat(latch.await(5, TimeUnit.SECONDS)).isTrue();
-      verify(pub).broadcastRefresh("auto", 1L, false);
+      verify(pub).broadcastRefresh("auto", 1L);
     }
 
     @Test
     @DisplayName("flush with no records does nothing")
     void flush_noRecords_noop() {
       CacheSyncPublisher pub = mock(CacheSyncPublisher.class);
-      BroadcastBuffer buf = new BroadcastBuffer(scheduler, Optional.of(pub), 5000, Math.max(5000, 2_000), null);
+      BroadcastBuffer buf = new BroadcastBuffer(scheduler, pub, 5000, Math.max(5000, 2_000), null);
       buf.flush();
       verifyNoInteractions(pub);
     }
@@ -1748,23 +1467,23 @@ class DistributedSyncTest {
     @DisplayName("publisher exception during flush is caught, remaining keys processed")
     void flush_publisherException_continues() {
       CacheSyncPublisher pub = mock(CacheSyncPublisher.class);
-      doThrow(new RuntimeException("pub fail")).when(pub).broadcastRefresh("bad", 1L, false);
+      doThrow(new RuntimeException("pub fail")).when(pub).broadcastRefresh("bad", 1L);
 
-      BroadcastBuffer buf = new BroadcastBuffer(scheduler, Optional.of(pub), 5000, Math.max(5000, 2_000), null);
-      buf.record("bad", 1L, false);
-      buf.record("good", 2L, false);
+      BroadcastBuffer buf = new BroadcastBuffer(scheduler, pub, 5000, Math.max(5000, 2_000), null);
+      buf.record("bad", 1L, null, null);
+      buf.record("good", 2L, null, null);
 
       buf.flush();
 
-      verify(pub).broadcastRefresh("bad", 1L, false);
-      verify(pub).broadcastRefresh("good", 2L, false);
+      verify(pub).broadcastRefresh("bad", 1L);
+      verify(pub).broadcastRefresh("good", 2L);
     }
 
     @Test
     @DisplayName("concurrent record and flush is safe")
     void concurrent_recordAndFlush_safe() throws Exception {
       CacheSyncPublisher pub = mock(CacheSyncPublisher.class);
-      BroadcastBuffer buf = new BroadcastBuffer(scheduler, Optional.of(pub), 5000, Math.max(5000, 2_000), null);
+      BroadcastBuffer buf = new BroadcastBuffer(scheduler, pub, 5000, Math.max(5000, 2_000), null);
 
       ExecutorService pool = Executors.newFixedThreadPool(4);
       CountDownLatch startGate = new CountDownLatch(1);
@@ -1775,7 +1494,7 @@ class DistributedSyncTest {
         pool.submit(() -> {
           try {
             startGate.await();
-            buf.record("ck-" + idx, idx, false);
+            buf.record("ck-" + idx, idx, null, null);
           } catch (Exception e) {
             throw new RuntimeException(e);
           }
@@ -1788,67 +1507,16 @@ class DistributedSyncTest {
 
       buf.flush();
 
-      verify(pub, atLeast(records)).broadcastRefresh(anyString(), anyLong(), anyBoolean());
+      verify(pub, atLeast(records)).broadcastRefresh(anyString(), anyLong());
     }
 
     @Test
     @DisplayName("record with no publisher is safe")
     void record_noPublisher_safe() {
-      BroadcastBuffer buf = new BroadcastBuffer(scheduler, Optional.empty(), 500, 2_000, null);
-      buf.record("k", 1L, false);
+      BroadcastBuffer buf = new BroadcastBuffer(scheduler, null, 500, 2_000, null);
+      buf.record("k", 1L, null, null);
       buf.flush();
       // No exception
-    }
-  }
-
-  // ═══════════════════════════════════════════════════════════════
-  // SRE Rate Limiter integration with WorkerListener
-  // ═══════════════════════════════════════════════════════════════
-
-  @Nested
-  @DisplayName("SRE Rate Limiter integration")
-  class SreIntegrationTests {
-
-    @Test
-    @DisplayName("SRE throttled HOT skips promotion without calling onFailed")
-    void sreThrottled_skipsPromotion() throws Exception {
-      SreRateLimiter limiter = mock(SreRateLimiter.class);
-      when(limiter.tryAcquire()).thenReturn(false);
-      cache.put("k", entry(1, false, 0, null, 0, KeyState.NORMAL));
-
-      WorkerListener wl = createWorkerListener(k -> "fresh", limiter);
-      wl.handleWorkerMessage(channel, workerMessage("k", WorkerMessage.TYPE_HOT, 1L, "w1", 1));
-      awaitScheduler();
-
-      verify(limiter, never()).onFailed();
-      assertThat(((CacheEntry) cache.getIfPresent("k")).getKeyState()).isNotEqualTo(KeyState.HOT);
-    }
-
-    @Test
-    @DisplayName("SRE allowed HOT calls onSuccess")
-    void sreAllowed_callsOnSuccess() throws Exception {
-      SreRateLimiter limiter = mock(SreRateLimiter.class);
-      when(limiter.tryAcquire()).thenReturn(true);
-      cache.put("k", entry(1, false, 0, null, 0, KeyState.NORMAL));
-
-      WorkerListener wl = createWorkerListener(k -> "fresh", limiter);
-      wl.handleWorkerMessage(channel, workerMessage("k", WorkerMessage.TYPE_HOT, 1L, "w1", 1));
-      awaitScheduler();
-
-      verify(limiter).onSuccess();
-      assertThat(((CacheEntry) cache.getIfPresent("k")).getKeyState()).isEqualTo(KeyState.HOT);
-    }
-
-    @Test
-    @DisplayName("SRE null (disabled) does not interfere")
-    void sreNull_doesNotInterfere() throws Exception {
-      cache.put("k", entry(1, false, 0, null, 0, KeyState.NORMAL));
-      WorkerListener wl = createWorkerListener(k -> "fresh", null);
-
-      wl.handleWorkerMessage(channel, workerMessage("k", WorkerMessage.TYPE_HOT, 1L, "w1", 1));
-      awaitScheduler();
-
-      assertThat(((CacheEntry) cache.getIfPresent("k")).getKeyState()).isEqualTo(KeyState.HOT);
     }
   }
 }

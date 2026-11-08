@@ -15,11 +15,10 @@
  */
 package io.github.hyshmily.zeta.sync.local;
 
-import io.github.hyshmily.zeta.Internal;
-import io.github.hyshmily.zeta.model.CacheEntry;
+import io.github.hyshmily.zeta.cache.cachesupport.raw.CacheEntry;
 
 /**
- * Callback hook for cache-sync lifecycle events (REFRESH, INVALIDATE).
+ * Callback hook for cache-sync lifecycle events (REFRESH, INVALIDATE, PUT).
  *
  * <p>Implement this interface and expose it as a Spring {@code @Bean} to observe
  * cross-instance sync outcomes. Multiple hooks are supported and will be invoked
@@ -28,32 +27,37 @@ import io.github.hyshmily.zeta.model.CacheEntry;
  * <p>All methods are {@code default} no-ops — implement only the ones you need.
  * Exceptions thrown by a hook are caught and logged; they never propagate.
  */
-@Internal
 public interface SyncHook {
-
   /**
-   * Called after a key has been refreshed from the data store via a REFRESH sync message.
+   * Called after a peer value has been applied to L1 — a REFRESH reload or a
+   * value-carrying PUT (the same hook surface; {@code syncMessage.type()} distinguishes
+   * them).
    *
    * @param cacheKey the refreshed cache key
-   * @param sm       the sync message that triggered the refresh
+   * @param syncMessage       the sync message that triggered the refresh
    * @param entry    the updated {@link CacheEntry} (never null)
    */
-  default void afterRefresh(String cacheKey, SyncMessage sm, CacheEntry entry) {}
+  default void afterRefresh(String cacheKey, SyncMessage syncMessage, CacheEntry entry) {}
 
   /**
    * Called after a key has been removed from the local cache via an INVALIDATE sync message.
    *
    * @param cacheKey the invalidated cache key
-   * @param sm       the sync message that triggered the invalidation
+   * @param syncMessage       the sync message that triggered the invalidation
    */
-  default void afterInvalidate(String cacheKey, SyncMessage sm) {}
+  default void afterInvalidate(String cacheKey, SyncMessage syncMessage) {}
 
   /**
-   * Called when a REFRESH sync message was skipped because the local version
-   * is already up to date or the value was not found.
+   * Called when a REFRESH or PUT sync message produced no effect: the local entry already
+   * held a strictly newer dataVersion, the value was not found, the value could not be read,
+   * the apply was rejected by the invalidation watermark, or a higher-version message in the
+   * same dispatch batch covered it before it could apply.
+   *
+   * <p>Every REFRESH/PUT therefore receives exactly one terminal callback: this one, or
+   * {@link #afterRefresh}.
    *
    * @param cacheKey the cache key whose refresh was skipped
-   * @param sm       the sync message that would have triggered the refresh
+   * @param syncMessage       the sync message that would have triggered the refresh
    */
-  default void onRefreshSkipped(String cacheKey, SyncMessage sm) {}
+  default void onRefreshSkipped(String cacheKey, SyncMessage syncMessage) {}
 }

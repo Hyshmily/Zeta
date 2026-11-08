@@ -15,112 +15,28 @@
  */
 package io.github.hyshmily.zeta.sharding;
 
-import io.github.hyshmily.zeta.Internal;
-import io.github.hyshmily.zeta.util.FastMath;
-import io.github.hyshmily.zeta.util.LogThrottle;
-import java.util.*;
-import java.util.concurrent.atomic.AtomicLong;
-import java.util.concurrent.atomic.AtomicReference;
+import io.github.hyshmily.zeta.util.Internal;
+import java.util.Set;
 import java.util.function.Predicate;
-import lombok.RequiredArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
 
 /**
- * Consistent hash ring backed by sorted arrays for O(log n + k) lookups.
+ * Consistent hash ring for Worker shard routing, maintained by the App from
+ * the cluster-wide {@link HealthView}: the ring rebuilds itself from the
+ * alive-Worker set via {@link #rebuildIfPossible(HealthView)} and routes
+ * keys with the health view as the liveness source.
  *
- * <p>Each physical node is replicated across the ring with {@code virtualNodeCount}
- * virtual nodes, all mapped to the same physical {@code nodeId}.  The entire ring
- * is rebuilt atomically via {@link #rebuild(Set)} — no partial mutations, safe for
- * lock-free reads on the hot path.
+ * <p>Each physical node is replicated across the ring with a fixed number of
+ * virtual nodes, all mapped to the same physical {@code nodeId}. The entire
+ * ring is replaced atomically via {@link #rebuild(Set)} — no partial mutations,
+ * so {@link #locateNode} stays lock-free on the hot path
+ * (design decisions: topology).
  *
- * <p>Compared to the previous {@link TreeMap}-based implementation, this version
- * uses sorted {@code int[]} and {@code String[]} arrays to provide:
- * <ul>
- *   <li>O(log n) binary search to find the starting point</li>
- *   <li>O(1) sequential scan for each probe (no tree successor traversal)</li>
- *   <li>Improved CPU cache locality and reduced GC pressure</li>
- * </ul>
+ * <p>Routing follows the classic consistent-hash contract: a key maps to the
+ * first live node at or after its hash on the ring (wrapping around), so
+ * adding or removing a node only re-routes the keys of the changed span.
  */
 @Internal
-@RequiredArgsConstructor
-@Slf4j
-public class ConsistentHashRing {
-
-  /**
-   * Immutable snapshot of the ring at a point in time.
-   * <p>
-   * {@code equals}, {@code hashCode}, and {@code toString} are overridden
-   * to consider the content of the arrays rather than their references.
-   */
-  private record RingState(
-    /* Sorted hash values of all virtual nodes. */
-    int[] hashRing,
-    /* Physical node IDs aligned with {@code hashRing}. */
-    String[] nodeRing,
-    /* The set of live physical node IDs (for quick size/lookup). */
-    Set<String> liveNodes
-  ) {
-    @Override
-    public boolean equals(Object o) {
-      if (this == o) {
-        return true;
-      }
-      if (!(o instanceof RingState that)) {
-        return false;
-      }
-      return (
-        Arrays.equals(hashRing, that.hashRing) &&
-        Arrays.equals(nodeRing, that.nodeRing) &&
-        liveNodes.equals(that.liveNodes)
-      );
-    }
-
-    @Override
-    public int hashCode() {
-      int result = Arrays.hashCode(hashRing);
-      result = 31 * result + Arrays.hashCode(nodeRing);
-      result = 31 * result + liveNodes.hashCode();
-      return result;
-    }
-
-    @Override
-    @SuppressWarnings("all")
-    public String toString() {
-      return (
-        "RingState{" +
-        "hashRing=" +
-        Arrays.toString(hashRing) +
-        ", nodeRing=" +
-        Arrays.toString(nodeRing) +
-        ", liveNodes=" +
-        liveNodes +
-        '}'
-      );
-    }
-  }
-
-  /** Number of virtual copies created per physical node on the ring. */
-  private final int virtualNodeCount;
-
-  /** Current immutable ring snapshot, thread-safe via {@link AtomicReference}. */
-  private final AtomicReference<RingState> currentState = new AtomicReference<>(
-    new RingState(new int[0], new String[0], Collections.emptySet())
-  );
-
-  /**
-   * Rate-limiter for the probe-exhaustion WARN: one per window (repo standard: never WARN
-   * on the hot path). {@link #locateNode} runs on every routed key, so the per-key
-   * detail is DEBUG-only and the WARN aggregates the suppressed count without the key.
-   * Admission is strict — {@link LogThrottle}
-   * claims the window with a compare-and-set, so exactly one caller per window logs.
-   * The atomicity and the monotonic clock are provided by {@link LogThrottle}, which
-   * seeds the first window as already open so the first exhaustion always logs.
-   */
-  private final LogThrottle probeExhaustionLogThrottle = LogThrottle.perDefaultWindow();
-
-  /** Keys discarded due to probe exhaustion since the last WARN. */
-  private final AtomicLong suppressedProbeExhaustions = new AtomicLong();
-
+public interface ConsistentHashRing {
   /**
    * Atomically replace the ring with one built from the given live nodes.
    * Each node is replicated {@code virtualNodeCount} times on the ring.
@@ -128,29 +44,7 @@ public class ConsistentHashRing {
    * @param liveNodes the set of physical node IDs to place on the ring;
    *                  must not be {@code null}
    */
-  public void rebuild(Set<String> liveNodes) {
-    // 1. Collect all virtual nodes in a TreeMap for temporary sorting.
-    TreeMap<Integer, String> sortedVirtualNodes = new TreeMap<>();
-    for (String nodeId : liveNodes) {
-      for (int i = 0; i < virtualNodeCount; i++) {
-        sortedVirtualNodes.put(hash(nodeId + ":" + i), nodeId);
-      }
-    }
-
-    // 2. Convert to sorted arrays for fast lock-free access.
-    int size = sortedVirtualNodes.size();
-    int[] hashes = new int[size];
-    String[] nodes = new String[size];
-    int idx = 0;
-    for (Map.Entry<Integer, String> entry : sortedVirtualNodes.entrySet()) {
-      hashes[idx] = entry.getKey();
-      nodes[idx] = entry.getValue();
-      idx++;
-    }
-
-    // 3. Publish new snapshot atomically.
-    currentState.set(new RingState(hashes, nodes, Set.copyOf(liveNodes)));
-  }
+  void rebuild(Set<String> liveNodes);
 
   /**
    * Return the physical node responsible for the given business key, skipping nodes
@@ -164,113 +58,61 @@ public class ConsistentHashRing {
    *                must not be {@code null}
    * @return the physical node ID, or {@code null} if the ring is empty or all nodes are dead
    */
-  public String locateNode(String key, Predicate<String> isAlive) {
-    RingState state = currentState.get();
-    int[] hashes = state.hashRing;
-    String[] nodes = state.nodeRing;
-    int len = hashes.length;
+  String locateNode(String key, Predicate<String> isAlive);
 
-    if (len == 0) {
-      return null;
-    }
+  /**
+   * Routes {@code key} on the current ring snapshot with <b>no</b> liveness predicate:
+   * every physical node on a published ring was alive in the set the last rebuild was
+   * built from.
+   *
+   * <p>This is the reporter's fast path: the caller has just reconciled the ring, so
+   * re-probing every node through the alive set would only repeat a tautology. A node
+   * that dies after the rebuild still receives the batch, and the consumer discards it
+   * through the incarnation check — the same bounded staleness the alive-set predicate
+   * already has.
+   *
+   * @param key the business key to route; must not be {@code null}
+   * @return the physical node ID, or {@code null} when the ring is empty
+   */
+  String locateNode(String key);
 
-    int hashKey = hash(key);
-    // Find the first index where hashes[i] >= hashKey (insertion point).
-    int startIdx = Arrays.binarySearch(hashes, hashKey);
-    if (startIdx < 0) {
-      startIdx = ~startIdx;
-      // Wraparound to the beginning of the ring.
-      if (startIdx == len) {
-        startIdx = 0;
-      }
-    }
-
-    int idx = startIdx;
-    do {
-      String physicalNode = nodes[idx];
-      if (isAlive.test(physicalNode)) {
-        return physicalNode;
-      }
-      if (++idx >= len) idx = 0; // circular advancement
-    } while (idx != startIdx);
-
-    // A full cycle found no alive node. The former fixed cap of 512 probes
-    // aborted long before that on large rings — 100 workers x 500 vnodes is
-    // 50 000 slots, so 512 probes covered ~1% and a rolling restart (where the
-    // alive set and the ring nodes are momentarily disjoint) discarded every
-    // routed key even though some ring nodes were alive. The do-while above
-    // already terminates after exactly one full cycle, so no counter is needed:
-    // completing the cycle IS the proof that no alive node exists.
-    //
-    // Hot path (every routed key): the per-key detail is DEBUG-only; the WARN is
-    // aggregated and rate-limited to one per window, never once per key.
-    log.debug(
-      "Completed a full ring cycle ({} slots) for key '{}' without finding an alive node, " +
-        "all ring nodes appear dead or the ring is stale. Discarding this key.",
-      len,
-      key
-    );
-    reportProbeExhaustion();
-    return null;
+  /**
+   * {@link #locateNode(String, Predicate)} with the cluster health view as the
+   * liveness source: one method reference, no alive-set materialisation.
+   *
+   * <p>Implementations override this form to sample the monotonic clock once per
+   * walk instead of once per probed node.
+   *
+   * @param key        the business key to route; must not be {@code null}
+   * @param healthView the cluster-wide Worker health view; must not be {@code null}
+   * @return the physical node ID, or {@code null} if the ring is empty or all nodes are dead
+   */
+  default String locateNode(String key, HealthView healthView) {
+    return locateNode(key, healthView::isAlive);
   }
 
   /**
-   * Aggregates probe exhaustion into a rate-limited WARN — one per
-   * {@link LogThrottle#DEFAULT_WINDOW_MS} window, without the key, with the number of
-   * discarded routings suppressed since the previous WARN. A rolling restart (all alive-set
-   * snapshots disjoint from the ring nodes) previously logged one full WARN per routed key,
-   * which violated the hot-path logging rule and flooded the log with unbounded key
-   * cardinality.
+   * Rebuild the ring from the alive-Worker set of the given health view when it
+   * differs from the current node set; a no-op (and no log) when unchanged.
+   *
+   * @param healthView the current cluster health view; must not be {@code null}
+   * @return the alive Worker set this reconciliation is based on — equal to the
+   *         ring's node set immediately after the call; routing reads that same
+   *         snapshot through {@link #locateNode(String)}
    */
-  private void reportProbeExhaustion() {
-    long discarded = suppressedProbeExhaustions.incrementAndGet();
-    if (!probeExhaustionLogThrottle.tryAcquire()) {
-      return;
-    }
-    suppressedProbeExhaustions.addAndGet(-discarded);
-    log.warn(
-      "Exhausted a full ring cycle in the consistent hash ring: every ring node failed the " +
-        "liveness predicate (rolling restart?) or the ring is stale. Discarded {} key routing(s) " +
-        "in the last window.",
-      discarded
-    );
-  }
+  Set<String> rebuildIfPossible(HealthView healthView);
 
   /**
    * Return the set of live physical node IDs.
    *
    * @return an unmodifiable set of node IDs (never {@code null})
    */
-  public Set<String> getNodes() {
-    return currentState.get().liveNodes;
-  }
+  Set<String> getNodes();
 
   /**
-   * Return whether the ring contains no virtual nodes (i.e. no live nodes).
+   * Return the number of virtual copies created per physical node on the ring.
    *
-   * @return {@code true} if the ring is empty
+   * @return the virtual node count (positive)
    */
-  public boolean isEmpty() {
-    return currentState.get().hashRing.length == 0;
-  }
-
-  /**
-   * Return the number of live physical nodes in the ring.
-   *
-   * @return the node count (zero if no live nodes)
-   */
-  public int nodeCount() {
-    return currentState.get().liveNodes.size();
-  }
-
-  /**
-   * Compute a 32-bit Murmur3 hash for the given string using Guava's
-   * {@code murmur3_32_fixed()} implementation.
-   *
-   * @param key the string to hash; must not be {@code null}
-   * @return the hash value (may be negative)
-   */
-  private static int hash(String key) {
-    return FastMath.murmur3_32FixedUtf8(key);
-  }
+  int getVirtualNodeCount();
 }

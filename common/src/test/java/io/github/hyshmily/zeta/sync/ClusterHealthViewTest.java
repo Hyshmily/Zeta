@@ -17,10 +17,10 @@ package io.github.hyshmily.zeta.sync;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-import io.github.hyshmily.zeta.util.TimeSource;
 import io.github.hyshmily.zeta.sharding.HealthView;
-import io.github.hyshmily.zeta.sharding.impl.HealthViewImpl;
+import io.github.hyshmily.zeta.sharding.HealthViewImpl;
 import io.github.hyshmily.zeta.sync.worker.WorkerHeartbeatMessage;
+import io.github.hyshmily.zeta.util.TimeSource;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -34,11 +34,11 @@ class ClusterHealthViewTest {
 
   @BeforeEach
   void setUp() {
-    view = new HealthViewImpl(5000, 2);
+    view = new HealthViewImpl(5000);
   }
 
   private static WorkerHeartbeatMessage hb(String workerId, long epoch, boolean ready) {
-    return new WorkerHeartbeatMessage(0L, workerId, epoch, 0.0, ready, 0, 0, 0, 0);
+    return new WorkerHeartbeatMessage(0L, workerId, epoch, ready, null);
   }
 
   // ── onHeartbeat ──
@@ -88,65 +88,6 @@ class ClusterHealthViewTest {
     assertThat(view.getLastAnyHeartbeatTime()).isGreaterThanOrEqualTo(t1);
   }
 
-  @Test
-  void shouldResetStaleOnHeartbeat() {
-    view.onHeartbeat(hb("w1", 1, true));
-    view.markVerificationFailed("w1");
-    view.markVerificationFailed("w1");
-    assertThat(view.getAliveWorkerIds()).doesNotContain("w1");
-    view.onHeartbeat(hb("w1", 1, true));
-    assertThat(view.getAliveWorkerIds()).contains("w1");
-  }
-
-  /**
-   * A heartbeat is stronger liveness evidence than probe failures: the same-epoch
-   * heartbeat clears the verification failure count, so strikes never accumulate
-   * across a recovered partition episode.
-   */
-  @Test
-  void shouldResetVerifyFailuresOnHeartbeat() {
-    view.onHeartbeat(hb("w1", 1, true));
-    view.markVerificationFailed("w1");
-    view.markVerificationFailed("w1");
-    assertThat(view.getVerifyFailures("w1")).isEqualTo(2);
-    view.onHeartbeat(hb("w1", 1, true));
-    assertThat(view.getVerifyFailures("w1")).isZero();
-    view.markVerificationFailed("w1");
-    assertThat(view.getAliveWorkerIds()).contains("w1");
-  }
-
-  // ── recordPong ──
-
-  @Test
-  void shouldResetVerifyFailuresOnPong() {
-    view.onHeartbeat(hb("w1", 1, true));
-    view.markVerificationFailed("w1");
-    view.recordPong("w1");
-    view.markVerificationFailed("w1");
-    assertThat(view.getAliveWorkerIds()).contains("w1");
-  }
-
-  @Test
-  void shouldIgnorePongForUnknownWorker() {
-    view.recordPong("unknown");
-  }
-
-  // ── markVerificationFailed ──
-
-  @Test
-  void shouldMarkWorkerStaleAfterThresholdFailures() {
-    view.onHeartbeat(hb("w1", 1, true));
-    view.markVerificationFailed("w1");
-    assertThat(view.getAliveWorkerIds()).contains("w1");
-    view.markVerificationFailed("w1");
-    assertThat(view.getAliveWorkerIds()).doesNotContain("w1");
-  }
-
-  @Test
-  void shouldIgnoreMarkVerificationFailedForUnknownWorker() {
-    view.markVerificationFailed("unknown");
-  }
-
   // ── isClusterHealthy ──
 
   @Test
@@ -162,44 +103,35 @@ class ClusterHealthViewTest {
   }
 
   /**
-   * Verifies the core ADR-0028 semantics: with 3 observed Workers, a single
+   * Verifies the core design decisions: heartbeat and health semantics: with 3 observed Workers, a single
    * surviving Worker is considered a healthy cluster (one third, minimum 1).
    */
   @Test
   void shouldReturnTrueWhenSingleWorkerOfThreeIsAlive() {
     view.onHeartbeat(hb("w1", 1, true));
-    view.onHeartbeat(hb("w2", 1, true));
-    view.onHeartbeat(hb("w3", 1, true));
-    view.markVerificationFailed("w2");
-    view.markVerificationFailed("w2");
-    view.markVerificationFailed("w3");
-    view.markVerificationFailed("w3");
+    view.onHeartbeat(hb("w2", 1, false));
+    view.onHeartbeat(hb("w3", 1, false));
     assertThat(view.getAliveWorkerIds()).containsExactly("w1");
     assertThat(view.isClusterHealthy()).isTrue();
   }
 
   @Test
   void shouldReturnFalseWhenNoObservedWorkerIsAlive() {
-    view.onHeartbeat(hb("w1", 1, true));
-    view.markVerificationFailed("w1");
-    view.markVerificationFailed("w1");
+    view.onHeartbeat(hb("w1", 1, false));
     assertThat(view.isClusterHealthy()).isFalse();
   }
 
   @Test
-  void shouldExcludeStaleWorkersFromHealthCheck() {
+  void shouldExcludeNotReadyWorkersFromHealthCheck() {
     view.onHeartbeat(hb("w1", 1, true));
     view.onHeartbeat(hb("w2", 1, true));
     view.onHeartbeat(hb("w3", 1, true));
-    view.markVerificationFailed("w1");
-    view.markVerificationFailed("w1");
+    view.onHeartbeat(hb("w1", 1, false));
     assertThat(view.isClusterHealthy()).isTrue();
-    view.markVerificationFailed("w2");
-    view.markVerificationFailed("w2");
+    view.onHeartbeat(hb("w2", 1, false));
     // 1 of 3 alive = one third (floor 1) → still healthy
     assertThat(view.isClusterHealthy()).isTrue();
-    view.markVerificationFailed("w3");
-    view.markVerificationFailed("w3");
+    view.onHeartbeat(hb("w3", 1, false));
     assertThat(view.isClusterHealthy()).isFalse();
   }
 
@@ -213,13 +145,11 @@ class ClusterHealthViewTest {
       view.onHeartbeat(hb("w" + i, 1, true));
     }
     for (int i = 4; i <= 7; i++) {
-      view.markVerificationFailed("w" + i);
-      view.markVerificationFailed("w" + i);
+      view.onHeartbeat(hb("w" + i, 1, false));
     }
     assertThat(view.getAliveWorkerIds()).hasSize(3);
     assertThat(view.isClusterHealthy()).isTrue();
-    view.markVerificationFailed("w3");
-    view.markVerificationFailed("w3");
+    view.onHeartbeat(hb("w3", 1, false));
     assertThat(view.getAliveWorkerIds()).hasSize(2);
     assertThat(view.isClusterHealthy()).isFalse();
   }
@@ -243,7 +173,7 @@ class ClusterHealthViewTest {
    */
   @Test
   void isClusterHealthy_withAliveWorkersObserved_shouldReturnTrue() {
-    HealthView empty = new HealthViewImpl(5000, 2);
+    HealthView empty = new HealthViewImpl(5000);
     empty.onHeartbeat(hb("w1", 1, true));
     empty.onHeartbeat(hb("w2", 1, true));
     assertThat(empty.isClusterHealthy()).isTrue();
@@ -254,7 +184,7 @@ class ClusterHealthViewTest {
    */
   @Test
   void isClusterHealthy_withNoObservedAliveWorkers_shouldReturnFalse() {
-    HealthView empty = new HealthViewImpl(5000, 2);
+    HealthView empty = new HealthViewImpl(5000);
     assertThat(empty.isClusterHealthy()).isFalse();
   }
 
@@ -266,7 +196,7 @@ class ClusterHealthViewTest {
    */
   @Test
   void isClusterHealthy_shouldRefreshCacheAfterTtl() throws InterruptedException {
-    HealthView fast = new HealthViewImpl(300, 2, 100);
+    HealthView fast = new HealthViewImpl(300, 100, false, 0);
     fast.onHeartbeat(hb("w1", 1, true));
     assertThat(fast.isClusterHealthy()).isTrue();
 
@@ -282,11 +212,27 @@ class ClusterHealthViewTest {
    */
   @Test
   void isClusterHealthy_mutationHook_shouldReflectChangeImmediately() {
-    HealthView fast = new HealthViewImpl(300_000, 2, 100_000);
+    HealthView fast = new HealthViewImpl(300_000, 100_000, false, 0);
     fast.onHeartbeat(hb("w1", 1, true));
     assertThat(fast.isClusterHealthy()).isTrue();
     // Same TTL window, but the removal hook invalidates the cache.
     fast.removeRecord("w1");
+    assertThat(fast.isClusterHealthy()).isFalse();
+  }
+
+  /**
+   * A same-epoch heartbeat that flips the Worker's readiness must invalidate the cached
+   * verdict inside the same TTL window; only a heartbeat that leaves liveness unchanged
+   * may keep the cached judgment.
+   */
+  @Test
+  void isClusterHealthy_heartbeatLivenessTransition_shouldInvalidateImmediately() {
+    HealthView fast = new HealthViewImpl(300_000, 100_000, false, 0);
+    fast.onHeartbeat(hb("w1", 1, true));
+    assertThat(fast.isClusterHealthy()).isTrue();
+
+    fast.onHeartbeat(hb("w1", 1, false));
+
     assertThat(fast.isClusterHealthy()).isFalse();
   }
 
@@ -296,9 +242,7 @@ class ClusterHealthViewTest {
   void shouldReturnOnlyAliveWorkers() {
     view.onHeartbeat(hb("w1", 1, true));
     view.onHeartbeat(hb("w2", 1, false));
-    view.onHeartbeat(hb("w3", 1, true));
-    view.markVerificationFailed("w3");
-    view.markVerificationFailed("w3");
+    view.onHeartbeat(hb("w3", 1, false));
     assertThat(view.getAliveWorkerIds()).containsExactly("w1");
   }
 
@@ -316,7 +260,7 @@ class ClusterHealthViewTest {
     assertThat(view.getAllWorkerIds()).isEmpty();
   }
 
-  // ── isAlive / epochOf (Decision-Validity accessors, ADR-0035) ──
+  // ── isAlive / epochOf (Decision-Validity accessors, design decisions: hot state) ──
 
   @Test
   void isAliveShouldReflectAliveSet() {
@@ -327,9 +271,7 @@ class ClusterHealthViewTest {
 
   @Test
   void isAliveShouldReturnFalseForDeadWorker() {
-    view.onHeartbeat(hb("w1", 1, true));
-    view.markVerificationFailed("w1");
-    view.markVerificationFailed("w1");
+    view.onHeartbeat(hb("w1", 1, false));
     assertThat(view.isAlive("w1")).isFalse();
   }
 
@@ -361,39 +303,36 @@ class ClusterHealthViewTest {
   // ── WorkerHealthRecord.isAlive ──
 
   @Test
-  void isAliveShouldReturnTrueWhenReadyAndNotStaleAndWithinTimeout() {
-    HealthViewImpl.WorkerHealthRecord r = new HealthViewImpl.WorkerHealthRecord();
-    r.readyToServe = true;
-    r.stale = false;
-    r.lastAliveEvidenceTime = TimeSource.monotonicMillis();
-    assertThat(r.isAlive(5000)).isTrue();
+  void isAliveShouldReturnTrueWhenReadyAndWithinTimeout() {
+    HealthViewImpl.WorkerHealthRecord r = new HealthViewImpl.WorkerHealthRecord(
+      "w1",
+      1L,
+      TimeSource.monotonicMillis(),
+      true
+    );
+    assertThat(r.isAlive(TimeSource.monotonicMillis(), 5000, 0L)).isTrue();
   }
 
   @Test
   void isAliveShouldReturnFalseWhenNotReady() {
-    HealthViewImpl.WorkerHealthRecord r = new HealthViewImpl.WorkerHealthRecord();
-    r.readyToServe = false;
-    r.stale = false;
-    r.lastAliveEvidenceTime = TimeSource.monotonicMillis();
-    assertThat(r.isAlive(5000)).isFalse();
-  }
-
-  @Test
-  void isAliveShouldReturnFalseWhenStale() {
-    HealthViewImpl.WorkerHealthRecord r = new HealthViewImpl.WorkerHealthRecord();
-    r.readyToServe = true;
-    r.stale = true;
-    r.lastAliveEvidenceTime = TimeSource.monotonicMillis();
-    assertThat(r.isAlive(5000)).isFalse();
+    HealthViewImpl.WorkerHealthRecord r = new HealthViewImpl.WorkerHealthRecord(
+      "w1",
+      1L,
+      TimeSource.monotonicMillis(),
+      false
+    );
+    assertThat(r.isAlive(TimeSource.monotonicMillis(), 5000, 0L)).isFalse();
   }
 
   @Test
   void isAliveShouldReturnFalseWhenTimedOut() {
-    HealthViewImpl.WorkerHealthRecord r = new HealthViewImpl.WorkerHealthRecord();
-    r.readyToServe = true;
-    r.stale = false;
-    r.lastAliveEvidenceTime = TimeSource.monotonicMillis() - 100;
-    assertThat(r.isAlive(50)).isFalse();
+    HealthViewImpl.WorkerHealthRecord r = new HealthViewImpl.WorkerHealthRecord(
+      "w1",
+      1L,
+      TimeSource.monotonicMillis() - 100,
+      true
+    );
+    assertThat(r.isAlive(TimeSource.monotonicMillis(), 50, 0L)).isFalse();
   }
 
   // ── Concurrent ──
@@ -446,11 +385,13 @@ class ClusterHealthViewTest {
    */
   @Test
   void isAlive_exactTimeoutBoundary_shouldReturnFalse() {
-    HealthViewImpl.WorkerHealthRecord r = new HealthViewImpl.WorkerHealthRecord();
-    r.readyToServe = true;
-    r.stale = false;
-    r.lastAliveEvidenceTime = TimeSource.monotonicMillis() - 5000;
-    assertThat(r.isAlive(5000)).isFalse();
+    HealthViewImpl.WorkerHealthRecord r = new HealthViewImpl.WorkerHealthRecord(
+      "w1",
+      1L,
+      TimeSource.monotonicMillis() - 5000,
+      true
+    );
+    assertThat(r.isAlive(TimeSource.monotonicMillis(), 5000, 0L)).isFalse();
   }
 
   @Test
@@ -463,22 +404,18 @@ class ClusterHealthViewTest {
   // ── Integration ──
 
   @Test
-  void shouldChainHeartbeatVerificationAndHealthCheck() {
+  void shouldChainHeartbeatReadinessAndHealthCheck() {
     view.onHeartbeat(hb("w1", 1, true));
     view.onHeartbeat(hb("w2", 1, true));
     view.onHeartbeat(hb("w3", 1, true));
     assertThat(view.isClusterHealthy()).isTrue();
-    view.markVerificationFailed("w1");
-    view.markVerificationFailed("w1");
+    view.onHeartbeat(hb("w1", 1, false));
     assertThat(view.isClusterHealthy()).isTrue();
-    view.markVerificationFailed("w2");
-    view.markVerificationFailed("w2");
+    view.onHeartbeat(hb("w2", 1, false));
     // 1 of 3 alive = one third (floor 1) → still healthy
     assertThat(view.isClusterHealthy()).isTrue();
-    view.markVerificationFailed("w3");
-    view.markVerificationFailed("w3");
+    view.onHeartbeat(hb("w3", 1, false));
     assertThat(view.isClusterHealthy()).isFalse();
-    view.recordPong("w1");
     view.onHeartbeat(hb("w1", 1, true));
     assertThat(view.getAliveWorkerIds()).contains("w1");
     assertThat(view.isClusterHealthy()).isTrue();

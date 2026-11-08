@@ -18,17 +18,16 @@ package io.github.hyshmily.zeta.tests;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import io.github.hyshmily.zeta.sharding.HealthView;
-import io.github.hyshmily.zeta.sharding.impl.HealthViewImpl;
+import io.github.hyshmily.zeta.sharding.HealthViewImpl;
 import io.github.hyshmily.zeta.sync.worker.WorkerHeartbeatMessage;
 import io.github.hyshmily.zeta.util.TimeSource;
-import io.github.hyshmily.zeta.util.window.RollingWindow;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
 /**
  * Regression tests for wall-clock jump resilience (I27): NTP steps and container
  * clock drift must not break delta computations. All delta-based components
- * (heartbeat timeouts, sliding windows) use {@link TimeSource#monotonicMillis()},
+ * (such as heartbeat timeouts) use {@link TimeSource#monotonicMillis()},
  * which ignores wall-clock jumps; absolute expiry timestamps still use the wall
  * clock by design.
  */
@@ -40,7 +39,7 @@ class TimeJumpTest {
   }
 
   private static WorkerHeartbeatMessage heartbeat(String workerId, long epoch) {
-    return new WorkerHeartbeatMessage(0L, workerId, epoch, 0.0, true, 0, 0, 0, 0);
+    return new WorkerHeartbeatMessage(0L, workerId, epoch, true, null);
   }
 
   // ── TimeSource semantics ──
@@ -79,7 +78,7 @@ class TimeJumpTest {
    */
   @Test
   void forwardWallJump_shouldNotKillAliveWorkers() {
-    HealthView view = new HealthViewImpl(5000, 2);
+    HealthView view = new HealthViewImpl(5000);
     view.onHeartbeat(heartbeat("w1", 1L));
 
     TimeSource.setTimeOffsetForTest(60_000, 0);
@@ -95,7 +94,7 @@ class TimeJumpTest {
    */
   @Test
   void backwardWallJump_shouldNotReviveDeadWorkers() {
-    HealthView view = new HealthViewImpl(5000, 2);
+    HealthView view = new HealthViewImpl(5000);
     view.onHeartbeat(heartbeat("w1", 1L));
 
     TimeSource.setTimeOffsetForTest(0, 10_000);
@@ -103,21 +102,5 @@ class TimeJumpTest {
 
     TimeSource.setTimeOffsetForTest(-60_000, 10_000);
     assertThat(view.getAliveWorkerIds()).doesNotContain("w1");
-  }
-
-  // ── Rolling window ──
-
-  /**
-   * Verifies that a +60s NTP forward jump does not rotate a RollingWindow:
-   * bucket rotation is driven by monotonic elapsed time, not the wall clock.
-   */
-  @Test
-  void forwardWallJump_shouldNotRotateRollingWindow() {
-    RollingWindow window = new RollingWindow(10, 1000);
-    window.add(100);
-
-    TimeSource.setTimeOffsetForTest(60_000, 0);
-
-    assertThat(window.sum()).isEqualTo(100);
   }
 }

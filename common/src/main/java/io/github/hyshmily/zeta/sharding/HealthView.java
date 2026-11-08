@@ -23,20 +23,18 @@ import java.util.Set;
  * {@link WorkerHeartbeatMessage} broadcasts from all Worker nodes.
  */
 public interface HealthView {
-  /** Get the timestamp of the last heartbeat from any Worker. */
+  /** Sentinel returned by {@link #epochOf} for Workers with no health record. */
+  long UNKNOWN_EPOCH = -1L;
+
+  /**
+   * Get the {@link io.github.hyshmily.zeta.util.TimeSource#monotonicMillis()
+   * monotonic} timestamp (milliseconds since boot, not wall-clock) of the last
+   * heartbeat received from any Worker; {@code 0} when none has arrived yet.
+   */
   long getLastAnyHeartbeatTime();
 
   /** Record a heartbeat from a Worker. */
   void onHeartbeat(WorkerHeartbeatMessage hb);
-
-  /** Record a pong response from a Worker. */
-  void recordPong(String workerId);
-
-  /** Mark a Worker as having failed verification. */
-  void markVerificationFailed(String workerId);
-
-  /** Get the verification failure count for a Worker. */
-  int getVerifyFailures(String workerId);
 
   /** Remove all records for a Worker. */
   void removeRecord(String workerId);
@@ -61,14 +59,29 @@ public interface HealthView {
   Set<String> getAllWorkerIds();
 
   /**
-   * Whether the given Worker is currently considered alive (ready, not stale,
-   * and within the heartbeat timeout) — the same liveness judgment the ring
+   * Whether the given Worker is currently considered alive (ready and inside its
+   * effective liveness window) — the same liveness judgment the ring
    * and report path use. Unknown Workers are never alive.
    *
    * @param workerId the Worker node ID
    * @return {@code true} if the Worker is alive
    */
   boolean isAlive(String workerId);
+
+  /**
+   * Timestamp-threading form of {@link #isAlive(String)}: judges the Worker against a
+   * caller-supplied {@link io.github.hyshmily.zeta.util.TimeSource#monotonicMillis()
+   * monotonic} instant. A walk over several Workers samples the clock once instead of
+   * once per probe. Implementations without a cheaper form delegate to
+   * {@link #isAlive(String)}.
+   *
+   * @param workerId the Worker node ID
+   * @param now      the monotonic instant to judge against
+   * @return {@code true} if the Worker is alive as of {@code now}
+   */
+  default boolean isAlive(String workerId, long now) {
+    return isAlive(workerId);
+  }
 
   /**
    * The current epoch (restart incarnation) of the given Worker, or
@@ -80,6 +93,23 @@ public interface HealthView {
    */
   long epochOf(String workerId);
 
-  /** Sentinel returned by {@link #epochOf} for Workers with no health record. */
-  long UNKNOWN_EPOCH = -1L;
+  /**
+   * Whether the given Worker is <b>the current incarnation</b> and alive:
+   * a health record exists, its epoch equals {@code epoch} (no restart since
+   * the stamp was issued), and the Worker passes the same liveness judgment
+   * as {@link #isAlive(String)}.
+   *
+   * <p>This is the fused Decision-Validity probe (design decisions: hot state) for the
+   * Worker-HOT read path: one map lookup answers "alive AND same
+   * incarnation" instead of the two lookups {@code isAlive(id) &&
+   * epochOf(id) == epoch} needs. Implementations must keep the two forms
+   * observationally equivalent.
+   *
+   * @param workerId the Worker node ID that issued the stamp (never {@code null})
+   * @param epoch    the epoch captured in the stamp
+   * @return {@code true} if the Worker is alive and has not restarted since
+   */
+  default boolean isCurrentIncarnation(String workerId, long epoch) {
+    return isAlive(workerId) && epochOf(workerId) == epoch;
+  }
 }

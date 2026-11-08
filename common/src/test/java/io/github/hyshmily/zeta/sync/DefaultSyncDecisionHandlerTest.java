@@ -15,8 +15,6 @@
  */
 package io.github.hyshmily.zeta.sync;
 
-import io.github.hyshmily.zeta.cache.codec.CacheCompressor;
-
 import static io.github.hyshmily.zeta.constants.ZetaConstants.Amqp.*;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
@@ -26,20 +24,20 @@ import static org.mockito.Mockito.*;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import io.github.hyshmily.zeta.autoconfigure.ZetaProperties;
-import io.github.hyshmily.zeta.cache.cachesupport.CircuitBreaker;
-import io.github.hyshmily.zeta.cache.cachesupport.SingleFlight;
-import io.github.hyshmily.zeta.cache.cachesupport.impl.EntryLifecycleImpl;
-import io.github.hyshmily.zeta.cache.cachesupport.impl.SingleFlightImpl;
-import io.github.hyshmily.zeta.cache.loader.CacheLoader;
-import io.github.hyshmily.zeta.model.CacheEntry;
+import io.github.hyshmily.zeta.cache.cachesupport.lifecycle.EntryLifecycleImpl;
+import io.github.hyshmily.zeta.cache.cachesupport.loader.CacheLoader;
+import io.github.hyshmily.zeta.cache.cachesupport.loader.singleflight.SingleFlight;
+import io.github.hyshmily.zeta.cache.cachesupport.raw.CacheEntry;
+import io.github.hyshmily.zeta.cache.cachesupport.raw.EntryDraft;
+import io.github.hyshmily.zeta.model.DecisionStamp;
 import io.github.hyshmily.zeta.model.KeyState;
-import io.github.hyshmily.zeta.rule.RuleMatcher;
+import io.github.hyshmily.zeta.sync.local.CacheSyncProperties;
+import io.github.hyshmily.zeta.sync.local.CacheSyncPublisher;
 import io.github.hyshmily.zeta.sync.local.DefaultSyncDecisionHandler;
-import io.github.hyshmily.zeta.sync.local.SyncDecisionHandler;
 import io.github.hyshmily.zeta.sync.local.SyncHook;
 import io.github.hyshmily.zeta.sync.local.SyncMessage;
+import io.github.hyshmily.zeta.sync.local.SyncType;
 import java.nio.charset.StandardCharsets;
-import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.BeforeEach;
@@ -47,572 +45,400 @@ import org.junit.jupiter.api.Test;
 import org.springframework.amqp.core.Message;
 import org.springframework.amqp.core.MessageProperties;
 
+/**
+ * Contract tests for {@link DefaultSyncDecisionHandler}: one granted batch in,
+ * the highest-version message applied under the version/tombstone guards, one
+ * terminal hook per message.
+ */
 class DefaultSyncDecisionHandlerTest {
 
   private Cache<String, CacheEntry> cache;
-  private DefaultSyncDecisionHandler handler;
-  private CacheLoader loader;
   private EntryLifecycleImpl entryLifecycle;
-  private RuleMatcher ruleMatcher;
+  private CacheSyncPublisher publisher;
+  private DefaultSyncDecisionHandler handler;
 
   @BeforeEach
   void setUp() {
     cache = Caffeine.newBuilder().maximumSize(100).build();
-    ZetaProperties ttlConfig = new ZetaProperties();
-    entryLifecycle = new EntryLifecycleImpl(cache, ttlConfig, CacheCompressor.NONE, null);
-    loader = k -> "refreshed";
-    ruleMatcher = mock(RuleMatcher.class);
-    handler = new DefaultSyncDecisionHandler(cache, loader, entryLifecycle, ruleMatcher, Collections.emptyList(), null);
+    entryLifecycle = new EntryLifecycleImpl(cache, new ZetaProperties(), null);
+    publisher = new CacheSyncPublisher(null, new CacheSyncProperties(), null);
+    handler = handler(k -> "refreshed", List.of());
   }
 
-  private static SyncMessage syncMessage(String key, String type, long version, boolean degraded) {
+  private DefaultSyncDecisionHandler handler(CacheLoader<String, Object> loader, List<SyncHook> hooks) {
+    return new DefaultSyncDecisionHandler(cache, loader, entryLifecycle, hooks, null, publisher);
+  }
+
+  private static SyncMessage msg(String key, String type, long version) {
     MessageProperties props = new MessageProperties();
     props.setHeader(HEADER_TYPE, type);
     props.setHeader(HEADER_VERSION, version);
-    props.setHeader(HEADER_IS_VERSION_DEGRADED, degraded);
     props.setHeader(HEADER_MESSAGE_ID, 1L);
     return SyncMessage.from(new Message(key.getBytes(StandardCharsets.UTF_8), props));
   }
 
-  private static CacheEntry entry(long dv, boolean degraded, KeyState state) {
-    return CacheEntry.builder()
+  private SyncMessage put(String key, Object value, long version) {
+    byte[] payload = publisher.serializePutPayload(value);
+    MessageProperties props = new MessageProperties();
+    props.setHeader(HEADER_TYPE, SyncType.PUT.code());
+    props.setHeader(HEADER_VERSION, version);
+    props.setHeader(HEADER_MESSAGE_ID, 1L);
+    props.setHeader(HEADER_CACHE_KEY, key);
+    return SyncMessage.from(new Message(payload, props));
+  }
+
+  private static CacheEntry entry(long dataVersion, KeyState state) {
+    return EntryDraft.blank(null)
       .value("v")
-      .dataVersion(dv)
-      .isVersionDegraded(degraded)
-      .decisionVersion(0)
-      .hardTtlMs(300_000)
-      .hardExpireAtMs(Long.MAX_VALUE)
-      .softTtlMs(30_000)
-      .softExpireAtMs(30_000)
+      .version(dataVersion)
+      .decision(DecisionStamp.hot(0, null, 0L))
+      .ttl(300_000, 30_000, 300_000, 30_000)
+      .expiryAt(Long.MAX_VALUE, 30_000)
       .keyState(state)
-      .normalHardTtlMs(300_000)
-      .normalSoftTtlMs(30_000)
       .build();
   }
 
   @Test
-  void handleRefresh_shouldInvokeAfterRefreshHook() {
-    cache.put("key1", entry(1, false, KeyState.NORMAL));
+  void refresh_reloadsAndFiresTheAppliedHook() {
+    cache.put("key1", entry(1, KeyState.NORMAL));
     SyncHook hook = mock(SyncHook.class);
-    handler = new DefaultSyncDecisionHandler(cache, loader, entryLifecycle, ruleMatcher, List.of(hook), null);
+    handler = handler(k -> "refreshed", List.of(hook));
 
-    handler.handleRefresh(syncMessage("key1", SyncMessage.TYPE_REFRESH, 2L, false));
+    handler.handleBatch(List.of(msg("key1", SyncType.REFRESH.code(), 2L)));
 
+    CacheEntry applied = cache.getIfPresent("key1");
+    assertThat(applied).isNotNull();
+    assertThat(applied.getValue()).isEqualTo("refreshed");
+    assertThat(applied.getDataVersion()).isEqualTo(2L);
     verify(hook).afterRefresh(eq("key1"), any(), any());
   }
 
-  /**
-   * Verifies the REFRESH value-channel fallback (C2/ADR-0031): when no value
-   * can be loaded from Redis (the default — nothing in Zeta writes the
-   * cache-key namespace), the refresh falls back to a local invalidation so
-   * the next read reloads through the type-safe application reader instead
-   * of keeping a stale entry.
-   */
   @Test
-  void handleRefresh_noValueInRedis_shouldFallBackToLocalInvalidation() {
-    cache.put("key1", entry(1, false, KeyState.NORMAL));
-    CacheLoader nullLoader = k -> null;
-    handler = new DefaultSyncDecisionHandler(cache, nullLoader, entryLifecycle, ruleMatcher, Collections.emptyList(), null);
+  void refresh_staleThanResident_skipsAndReports() {
+    cache.put("key1", entry(5, KeyState.NORMAL));
+    SyncHook hook = mock(SyncHook.class);
+    handler = handler(k -> "refreshed", List.of(hook));
 
-    handler.handleRefresh(syncMessage("key1", SyncMessage.TYPE_REFRESH, 2L, false));
+    handler.handleBatch(List.of(msg("key1", SyncType.REFRESH.code(), 3L)));
+
+    assertThat(cache.getIfPresent("key1").getValue()).isEqualTo("v");
+    verify(hook).onRefreshSkipped(eq("key1"), any());
+  }
+
+  @Test
+  void refresh_withoutValue_invalidatesLocally() {
+    cache.put("key1", entry(1, KeyState.NORMAL));
+    SyncHook hook = mock(SyncHook.class);
+    handler = handler(k -> null, List.of(hook));
+
+    handler.handleBatch(List.of(msg("key1", SyncType.REFRESH.code(), 2L)));
+
+    assertThat(cache.getIfPresent("key1")).isNull();
+    verify(hook).onRefreshSkipped(eq("key1"), any());
+  }
+
+  @Test
+  void refreshFailureAfterExplicitInvalidate_hardRemovesWorkerManagedEntry() {
+    cache.put("key1", entry(1, KeyState.HOT));
+    handler = handler(k -> null, List.of());
+
+    handler.handleBatch(
+      List.of(msg("key1", SyncType.INVALIDATE.code(), 10L), msg("key1", SyncType.REFRESH.code(), 11L))
+    );
+
+    // The covered INVALIDATE still condemns the value: the newer REFRESH's
+    // no-value fallback must not soft-expire the HOT entry and keep serving it.
+    assertThat(cache.getIfPresent("key1")).isNull();
+  }
+
+  @Test
+  void refreshFailureWithoutExplicitInvalidate_softExpiresWorkerManagedEntry() {
+    cache.put("key1", entry(1, KeyState.HOT));
+    handler = handler(k -> null, List.of());
+
+    handler.handleBatch(List.of(msg("key1", SyncType.REFRESH.code(), 2L)));
+
+    CacheEntry entry = cache.getIfPresent("key1");
+    assertThat(entry).isNotNull();
+    assertThat(entry.getSoftExpireAtMs()).isLessThan(System.currentTimeMillis());
+  }
+
+  @Test
+  void refresh_declinedByLoaderAdmission_invalidatesLocally() {
+    cache.put("key1", entry(1, KeyState.NORMAL));
+    SyncHook hook = mock(SyncHook.class);
+    handler = handler(decliningLoader(), List.of(hook));
+
+    handler.handleBatch(List.of(msg("key1", SyncType.REFRESH.code(), 2L)));
+
+    assertThat(cache.getIfPresent("key1")).isNull();
+    verify(hook).onRefreshSkipped(eq("key1"), any());
+  }
+
+  @Test
+  void refresh_batchKeepsOnlyTheHighestVersion() {
+    cache.put("key1", entry(1, KeyState.NORMAL));
+    AtomicInteger loads = new AtomicInteger();
+    handler = handler(
+      k -> {
+        loads.incrementAndGet();
+        return "v" + loads.get();
+      },
+      List.of()
+    );
+
+    handler.handleBatch(
+      List.of(
+        msg("key1", SyncType.REFRESH.code(), 2L),
+        msg("key1", SyncType.REFRESH.code(), 4L),
+        msg("key1", SyncType.REFRESH.code(), 3L)
+      )
+    );
+
+    assertThat(loads).hasValue(1);
+    assertThat(cache.getIfPresent("key1").getDataVersion()).isEqualTo(4L);
+  }
+
+  @Test
+  void put_absentKey_createsANormalEntry() {
+    handler.handleBatch(List.of(put("key1", "carried", 5L)));
+
+    CacheEntry applied = cache.getIfPresent("key1");
+    assertThat(applied).isNotNull();
+    assertThat(applied.getValue()).isEqualTo("carried");
+    assertThat(applied.getDataVersion()).isEqualTo(5L);
+    assertThat(applied.getKeyState()).isEqualTo(KeyState.NORMAL);
+  }
+
+  @Test
+  void put_staleVersion_neverRegresses() {
+    cache.put("key1", entry(7, KeyState.NORMAL));
+
+    handler.handleBatch(List.of(put("key1", "carried", 5L)));
+
+    assertThat(cache.getIfPresent("key1").getValue()).isEqualTo("v");
+    assertThat(cache.getIfPresent("key1").getDataVersion()).isEqualTo(7L);
+  }
+
+  /** A stale PUT is rejected before its payload is deserialized. */
+  @Test
+  void put_staleVersion_shouldNotDeserializeThePayload() {
+    cache.put("key1", entry(7, KeyState.NORMAL));
+    CacheSyncPublisher parser = mock(CacheSyncPublisher.class);
+    handler = new DefaultSyncDecisionHandler(cache, k -> "refreshed", entryLifecycle, List.of(), null, parser);
+
+    handler.handleBatch(List.of(put("key1", "carried", 5L)));
+
+    verifyNoInteractions(parser);
+    assertThat(cache.getIfPresent("key1").getValue()).isEqualTo("v");
+  }
+
+  @Test
+  void put_equalVersion_applies() {
+    cache.put("key1", entry(5, KeyState.NORMAL));
+
+    handler.handleBatch(List.of(put("key1", "carried", 5L)));
+
+    assertThat(cache.getIfPresent("key1").getValue()).isEqualTo("carried");
+  }
+
+  @Test
+  void put_afterInvalidate_doesNotRewarm() {
+    handler.handleBatch(List.of(msg("key1", SyncType.INVALIDATE.code(), 6L)));
+
+    handler.handleBatch(List.of(put("key1", "carried", 5L)));
 
     assertThat(cache.getIfPresent("key1")).isNull();
   }
 
   /**
-   * Verifies batch-tail amortization (ADR-0071): a REFRESH marked as non-final of its key's
-   * dispatch batch is skipped without the Redis load, the L1 write, or the value hook — the
-   * onRefreshSkipped hook fires instead so the "a REFRESH that was not applied" contract
-   * stays symmetric.
+   * An unreadable PUT degrades to a versioned eviction, but the message still has exactly
+   * one terminal hook: {@code onRefreshSkipped}, never {@code afterInvalidate}.
    */
   @Test
-  void handleRefresh_nonFinalOfBatch_shouldSkipLoadAndApply() {
-    cache.put("key1", entry(1, false, KeyState.NORMAL));
-    AtomicInteger loads = new AtomicInteger();
+  void put_unreadablePayload_firesOnlyTheSkippedHook() {
+    cache.put("key1", entry(1, KeyState.NORMAL));
     SyncHook hook = mock(SyncHook.class);
-    handler = new DefaultSyncDecisionHandler(cache, k -> {
-      loads.incrementAndGet();
-      return "refreshed";
-    }, entryLifecycle, ruleMatcher, List.of(hook), null);
+    CacheSyncPublisher unreadable = mock(CacheSyncPublisher.class);
+    when(unreadable.parsePutPayload(any())).thenReturn(null);
+    handler = new DefaultSyncDecisionHandler(cache, k -> "refreshed", entryLifecycle, List.of(hook), null, unreadable);
 
-    handler.handleRefresh(syncMessage("key1", SyncMessage.TYPE_REFRESH, 2L, false), false);
+    handler.handleBatch(List.of(put("key1", "carried", 2L)));
 
-    assertThat(loads.get()).isZero();
-    assertThat(cache.getIfPresent("key1")).isInstanceOf(CacheEntry.class);
-    assertThat(((CacheEntry) cache.getIfPresent("key1")).getDataVersion()).isEqualTo(1L);
+    assertThat(cache.getIfPresent("key1")).isNull();
     verify(hook).onRefreshSkipped(eq("key1"), any());
+    verify(hook, never()).afterInvalidate(any(), any());
     verify(hook, never()).afterRefresh(any(), any(), any());
   }
 
   /**
-   * Verifies that the batch-final REFRESH (endOfBatch=true) runs the full load-and-apply
-   * flow — the amortization must never strand the key on a stale value.
+   * A REFRESH whose load yields nothing removes the resident through the internal
+   * fallback, but the fallback is not a peer INVALIDATE: the message reports one terminal
+   * {@code onRefreshSkipped} and no {@code afterInvalidate}.
    */
   @Test
-  void handleRefresh_finalOfBatch_shouldLoadAndApply() {
-    cache.put("key1", entry(1, false, KeyState.NORMAL));
-    AtomicInteger loads = new AtomicInteger();
+  void refresh_emptyLoad_withResident_firesOnlyTheSkippedHook() {
+    cache.put("key1", entry(1, KeyState.NORMAL));
     SyncHook hook = mock(SyncHook.class);
-    handler = new DefaultSyncDecisionHandler(cache, k -> {
-      loads.incrementAndGet();
-      return "refreshed";
-    }, entryLifecycle, ruleMatcher, List.of(hook), null);
+    handler = handler(k -> null, List.of(hook));
 
-    handler.handleRefresh(syncMessage("key1", SyncMessage.TYPE_REFRESH, 2L, false), true);
+    handler.handleBatch(List.of(msg("key1", SyncType.REFRESH.code(), 2L)));
 
-    assertThat(loads.get()).isOne();
-    assertThat(cache.getIfPresent("key1")).isInstanceOf(CacheEntry.class);
-    assertThat(((CacheEntry) cache.getIfPresent("key1")).getDataVersion()).isEqualTo(2L);
-    verify(hook).afterRefresh(eq("key1"), any(), any());
-  }
-
-  /**
-   * Verifies that the single-argument {@code handleRefresh} entry point (used by custom
-   * implementations and kept for source compatibility) always runs the full flow — it is
-   * the {@code endOfBatch=true} path.
-   */
-  @Test
-  void handleRefresh_singleArgEntry_shouldBehaveAsEndOfBatch() {
-    cache.put("key1", entry(1, false, KeyState.NORMAL));
-    AtomicInteger loads = new AtomicInteger();
-    handler = new DefaultSyncDecisionHandler(cache, k -> {
-      loads.incrementAndGet();
-      return "refreshed";
-    }, entryLifecycle, ruleMatcher, Collections.emptyList(), null);
-
-    handler.handleRefresh(syncMessage("key1", SyncMessage.TYPE_REFRESH, 2L, false));
-
-    assertThat(loads.get()).isOne();
-    assertThat(((CacheEntry) cache.getIfPresent("key1")).getDataVersion()).isEqualTo(2L);
-  }
-
-  @Test
-  void handleRefresh_staleVersion_shouldInvokeOnRefreshSkipped() {
-    cache.put("key1", entry(5, false, KeyState.NORMAL));
-    SyncHook hook = mock(SyncHook.class);
-    handler = new DefaultSyncDecisionHandler(cache, loader, entryLifecycle, ruleMatcher, List.of(hook), null);
-
-    handler.handleRefresh(syncMessage("key1", SyncMessage.TYPE_REFRESH, 3L, false));
-
-    verify(hook).onRefreshSkipped(eq("key1"), any());
-  }
-
-  /**
-   * Verifies that a REFRESH rejected by the atomic second guard — here the invalidation
-   * watermark (refresh version below a recorded INVALIDATE version) — fires
-   * {@code onRefreshSkipped} and never {@code afterRefresh}. The old code read the
-   * compute's return value, which on a rejection IS the existing entry, and fired the
-   * success hook for a refresh that was not applied.
-   */
-  @Test
-  void handleRefresh_blockedByInvalidationWatermark_shouldInvokeOnRefreshSkipped() {
-    SyncHook hook = mock(SyncHook.class);
-    handler = new DefaultSyncDecisionHandler(cache, loader, entryLifecycle, ruleMatcher, List.of(hook), null);
-
-    // INVALIDATE with version 5 records the watermark (the entry is removed).
-    handler.handleLocalInvalidate(syncMessage("key1", SyncMessage.TYPE_INVALIDATE, 5L, false));
     assertThat(cache.getIfPresent("key1")).isNull();
-
-    // REFRESH below the watermark passes the entry-absent pre-check but must be
-    // rejected by the in-compute watermark guard. The invalidation watermark is
-    // handler-instance state (the handler is a production singleton), so the
-    // INVALIDATE and the REFRESH must run on the same instance for the guard to
-    // see the watermark.
-    handler.handleRefresh(syncMessage("key1", SyncMessage.TYPE_REFRESH, 3L, false));
-
     verify(hook).onRefreshSkipped(eq("key1"), any());
-    verify(hook, never()).afterRefresh(eq("key1"), any(), any());
+    verify(hook, never()).afterInvalidate(any(), any());
+  }
+
+  @Test
+  void invalidate_removesAndFiresTheHook() {
+    cache.put("key1", entry(1, KeyState.NORMAL));
+    SyncHook hook = mock(SyncHook.class);
+    handler = handler(k -> "refreshed", List.of(hook));
+
+    handler.handleBatch(List.of(msg("key1", SyncType.INVALIDATE.code(), 2L)));
+
     assertThat(cache.getIfPresent("key1")).isNull();
-  }
-
-  @Test
-  void handleRefresh_nullValue_shouldInvokeOnRefreshSkipped() {
-    cache.put("key1", entry(1, false, KeyState.NORMAL));
-    SyncHook hook = mock(SyncHook.class);
-    handler = new DefaultSyncDecisionHandler(cache, k -> null, entryLifecycle, ruleMatcher, List.of(hook), null);
-
-    handler.handleRefresh(syncMessage("key1", SyncMessage.TYPE_REFRESH, 2L, false));
-
-    verify(hook).onRefreshSkipped(eq("key1"), any());
-  }
-
-  @Test
-  void handleLocalInvalidate_shouldInvokeAfterInvalidateHook() {
-    cache.put("key1", entry(1, false, KeyState.NORMAL));
-    SyncHook hook = mock(SyncHook.class);
-    handler = new DefaultSyncDecisionHandler(cache, loader, entryLifecycle, ruleMatcher, List.of(hook), null);
-
-    handler.handleLocalInvalidate(syncMessage("key1", SyncMessage.TYPE_INVALIDATE, 2L, false));
-
     verify(hook).afterInvalidate(eq("key1"), any());
   }
 
-  /**
-   * Verifies that a version-less (unconditional) INVALIDATE still removes an
-   * ordinary NORMAL entry regardless of its data version.
-   */
   @Test
-  void handleLocalInvalidate_unconditional_shouldRemoveNormalEntry() {
-    cache.put("key1", entry(5, false, KeyState.NORMAL));
+  void invalidate_staleVersion_keepsTheNewerEntry() {
+    cache.put("key1", entry(7, KeyState.NORMAL));
 
-    handler.handleLocalInvalidate(syncMessage("key1", SyncMessage.TYPE_INVALIDATE, 0L, false));
+    handler.handleBatch(List.of(msg("key1", SyncType.INVALIDATE.code(), 3L)));
 
-    assertThat(cache.getIfPresent("key1")).isNull();
+    assertThat(cache.getIfPresent("key1")).isNotNull();
   }
 
   /**
-   * An <b>equal</b>-version INVALIDATE must land, not skip. ADR-0086 bumps the
-   * version before dropping L1, so a concurrent read can stamp a reloaded entry
-   * with the very version the INVALIDATE carries; the origin filter drops
-   * self-REFRESH but not self-INVALIDATE, so the message comes back to the
-   * originating instance. Under the plain {@code >=} matrix the equal version
-   * skipped and the instance that issued the invalidation kept serving its own
-   * pre-invalidation value for the whole hard TTL. Removal is idempotent, so
-   * applying an equal version has no downside — only the skip does.
+   * At the same version the INVALIDATE outranks the REFRESH, matching the publisher's
+   * {@code BroadcastClaim} rule; arrival order inside the batch must not flip the winner.
    */
   @Test
-  void handleLocalInvalidate_equalVersion_shouldRemoveEntry() {
-    cache.put("key1", entry(5, false, KeyState.NORMAL));
+  void sameVersionInvalidateOutranksRefreshInEitherOrder() {
+    cache.put("key1", entry(1, KeyState.NORMAL));
     SyncHook hook = mock(SyncHook.class);
-    handler = new DefaultSyncDecisionHandler(cache, loader, entryLifecycle, ruleMatcher, List.of(hook), null);
+    handler = handler(k -> "refreshed", List.of(hook));
 
-    handler.handleLocalInvalidate(syncMessage("key1", SyncMessage.TYPE_INVALIDATE, 5L, false));
+    handler.handleBatch(
+      List.of(
+        msg("key1", SyncType.INVALIDATE.code(), 5L),
+        msg("key1", SyncType.REFRESH.code(), 5L)
+      )
+    );
 
-    assertThat(cache.getIfPresent("key1"))
-      .as("an equal-version INVALIDATE is a removal — it must land")
-      .isNull();
+    assertThat(cache.getIfPresent("key1")).isNull();
     verify(hook).afterInvalidate(eq("key1"), any());
+    verify(hook, never()).afterRefresh(any(), any(), any());
   }
 
   /**
-   * Control: a strictly older INVALIDATE still skips — the equal-version change
-   * must not turn the guard into "always apply".
+   * A covered INVALIDATE whose value fallback evicts still owns an invalidation outcome: the
+   * removal must fire {@code afterInvalidate}, not only {@code onRefreshSkipped}.
    */
   @Test
-  void handleLocalInvalidate_olderVersion_shouldBeSkipped() {
-    cache.put("key1", entry(7, false, KeyState.NORMAL));
-
-    handler.handleLocalInvalidate(syncMessage("key1", SyncMessage.TYPE_INVALIDATE, 5L, false));
-
-    assertThat(((CacheEntry) cache.getIfPresent("key1")).getDataVersion()).isEqualTo(7L);
-  }
-
-  /**
-   * Verifies that a version-less (unconditional) INVALIDATE cannot clear a
-   * Worker-managed HOT entry — decision metadata and extended TTL survive.
-   */
-  @Test
-  void handleLocalInvalidate_unconditional_shouldPreserveHotEntry() {
-    cache.put("key1", entry(5, false, KeyState.HOT));
-
-    handler.handleLocalInvalidate(syncMessage("key1", SyncMessage.TYPE_INVALIDATE, 0L, false));
-
-    assertThat(cache.getIfPresent("key1")).isNotNull();
-    assertThat(((CacheEntry) cache.getIfPresent("key1")).getKeyState()).isEqualTo(KeyState.HOT);
-  }
-
-  /**
-   * Verifies that a version-less (unconditional) INVALIDATE cannot clear a
-   * Worker-managed COOL entry.
-   */
-  @Test
-  void handleLocalInvalidate_unconditional_shouldPreserveCoolEntry() {
-    cache.put("key1", entry(5, false, KeyState.COOL));
-
-    handler.handleLocalInvalidate(syncMessage("key1", SyncMessage.TYPE_INVALIDATE, 0L, false));
-
-    assertThat(cache.getIfPresent("key1")).isNotNull();
-    assertThat(((CacheEntry) cache.getIfPresent("key1")).getKeyState()).isEqualTo(KeyState.COOL);
-  }
-
-  /**
-   * Verifies that a preserved (rejected) unconditional INVALIDATE does not fire
-   * the after-invalidate hook — the entry was not actually removed, so a
-   * {@code Long.MAX_VALUE} watermark must not block later REFRESH messages.
-   */
-  @Test
-  void handleLocalInvalidate_unconditional_onWorkerManaged_shouldNotFireHook() {
-    cache.put("key1", entry(5, false, KeyState.HOT));
+  void coveredInvalidateFiresAfterAFallbackEviction() {
+    cache.put("key1", entry(1, KeyState.NORMAL));
     SyncHook hook = mock(SyncHook.class);
-    handler = new DefaultSyncDecisionHandler(cache, loader, entryLifecycle, ruleMatcher, List.of(hook), null);
+    handler = handler(k -> null, List.of(hook));
 
-    handler.handleLocalInvalidate(syncMessage("key1", SyncMessage.TYPE_INVALIDATE, 0L, false));
-
-    verify(hook, never()).afterInvalidate(eq("key1"), any());
-    assertThat(cache.getIfPresent("key1")).isNotNull();
-  }
-
-  /**
-   * Verifies that a preserved unconditional INVALIDATE does not record the
-   * invalidation watermark — a subsequent newer REFRESH must still apply.
-   */
-  @Test
-  void handleLocalInvalidate_unconditional_preserved_shouldNotBlockLaterRefresh() {
-    cache.put("key1", entry(5, false, KeyState.HOT));
-
-    handler.handleLocalInvalidate(syncMessage("key1", SyncMessage.TYPE_INVALIDATE, 0L, false));
-    handler.handleRefresh(syncMessage("key1", SyncMessage.TYPE_REFRESH, 6L, false));
-
-    CacheEntry entry = (CacheEntry) cache.getIfPresent("key1");
-    assertThat(entry).isNotNull();
-    assertThat(entry.getDataVersion()).isEqualTo(6L);
-    assertThat(entry.getKeyState()).isEqualTo(KeyState.HOT);
-  }
-
-  @Test
-  void handleRulesSync_shouldDelegateToRuleMatcher() {
-    handler.handleRulesSync(syncMessage("rules-payload", SyncMessage.TYPE_RULES_SYNC, 0L, false));
-
-    verify(ruleMatcher).syncRules("rules-payload", 0L);
-  }
-
-  /**
-   * ADR-0066: an <b>equal</b>-version REFRESH must apply, not skip. ADR-0033's
-   * probe-after-read can over-stamp an entry one write ahead of its data (v4 data
-   * under a v5 stamp); the write's own REFRESH(5) is the only thing that heals it.
-   * The plain sync matrix's {@code >=} equality skip would swallow the REFRESH and
-   * pin the stale value until the next write or TTL.
-   */
-  @Test
-  void handleRefresh_equalVersion_overstampedEntry_shouldApplyAndHeal() {
-    cache.put("key1", entry(5, false, KeyState.NORMAL));
-    CacheLoader freshLoader = k -> "fresh-v5";
-    handler = new DefaultSyncDecisionHandler(cache, freshLoader, entryLifecycle, ruleMatcher, Collections.emptyList(), null);
-
-    handler.handleRefresh(syncMessage("key1", SyncMessage.TYPE_REFRESH, 5L, false));
-
-    CacheEntry healed = (CacheEntry) cache.getIfPresent("key1");
-    assertThat(healed).isNotNull();
-    assertThat(healed.getDataVersion()).isEqualTo(5L);
-    assertThat(healed.getValue()).isEqualTo("fresh-v5");
-  }
-
-  /**
-   * ADR-0066: the no-value fallback invalidation must not wipe a strictly newer
-   * local write. A local putThrough landed v6 while a peer's REFRESH(5) was in
-   * flight — the fallback (and the fast-path guard) must leave the v6 entry alone.
-   */
-  @Test
-  void handleRefresh_fallback_strictlyNewerLocalWrite_shouldBePreserved() {
-    cache.put("key1", entry(6, false, KeyState.NORMAL));
-    CacheLoader nullLoader = k -> null;
-    handler = new DefaultSyncDecisionHandler(cache, nullLoader, entryLifecycle, ruleMatcher, Collections.emptyList(), null);
-
-    handler.handleRefresh(syncMessage("key1", SyncMessage.TYPE_REFRESH, 5L, false));
-
-    CacheEntry preserved = (CacheEntry) cache.getIfPresent("key1");
-    assertThat(preserved).isNotNull();
-    assertThat(preserved.getDataVersion()).isEqualTo(6L);
-  }
-
-  /**
-   * ADR-0066: the no-value fallback invalidation must not discard a Worker-managed
-   * entry's decision stamp — parity with the version-less INVALIDATE path. The
-   * entry expires at its hard TTL or the next Worker decision instead.
-   */
-  @Test
-  void handleRefresh_fallback_shouldPreserveWorkerManagedEntry() {
-    cache.put("key1", entry(1, false, KeyState.HOT));
-    CacheLoader nullLoader = k -> null;
-    handler = new DefaultSyncDecisionHandler(cache, nullLoader, entryLifecycle, ruleMatcher, Collections.emptyList(), null);
-
-    handler.handleRefresh(syncMessage("key1", SyncMessage.TYPE_REFRESH, 2L, false));
-
-    CacheEntry preserved = (CacheEntry) cache.getIfPresent("key1");
-    assertThat(preserved).isNotNull();
-    assertThat(preserved.getKeyState()).isEqualTo(KeyState.HOT);
-  }
-
-  /**
-   * ADR-0066: the batch INVALIDATE_ALL receiver (legacy wire format) must preserve
-   * Worker-managed HOT/COOL entries while removing ordinary ones — a version-less
-   * batch carries no ordering information and must not discard decision metadata.
-   */
-  @Test
-  void handleLocalInvalidateAll_shouldPreserveWorkerManagedEntries() {
-    cache.put("hot", entry(5, false, KeyState.HOT));
-    cache.put("cool", entry(5, false, KeyState.COOL));
-    cache.put("normal", entry(5, false, KeyState.NORMAL));
-
-    handler.handleLocalInvalidateAll(syncMessage("[\"hot\",\"cool\",\"normal\"]", SyncMessage.TYPE_INVALIDATE_ALL, 0L, false));
-
-    assertThat(cache.getIfPresent("hot")).isNotNull();
-    assertThat(((CacheEntry) cache.getIfPresent("hot")).getKeyState()).isEqualTo(KeyState.HOT);
-    assertThat(cache.getIfPresent("cool")).isNotNull();
-    assertThat(((CacheEntry) cache.getIfPresent("cool")).getKeyState()).isEqualTo(KeyState.COOL);
-    assertThat(cache.getIfPresent("normal")).isNull();
-  }
-
-  @Test
-  void multipleHooks_shouldAllBeInvoked() {
-    cache.put("key1", entry(1, false, KeyState.NORMAL));
-    SyncHook h1 = mock(SyncHook.class);
-    SyncHook h2 = mock(SyncHook.class);
-    handler = new DefaultSyncDecisionHandler(cache, loader, entryLifecycle, ruleMatcher, List.of(h1, h2), null);
-
-    handler.handleRefresh(syncMessage("key1", SyncMessage.TYPE_REFRESH, 2L, false));
-
-    verify(h1).afterRefresh(eq("key1"), any(), any());
-    verify(h2).afterRefresh(eq("key1"), any(), any());
-  }
-
-  @Test
-  void hookException_shouldNotBreakOtherHooks() {
-    cache.put("key1", entry(1, false, KeyState.NORMAL));
-    AtomicInteger count = new AtomicInteger(0);
-    SyncHook failingHook = new SyncHook() {
-      @Override public void afterRefresh(String k, SyncMessage sm, CacheEntry e) { throw new RuntimeException("fail"); }
-    };
-    SyncHook countingHook = new SyncHook() {
-      @Override public void afterRefresh(String k, SyncMessage sm, CacheEntry e) { count.incrementAndGet(); }
-    };
-    handler = new DefaultSyncDecisionHandler(cache, loader, entryLifecycle, ruleMatcher, List.of(failingHook, countingHook), null);
-
-    handler.handleRefresh(syncMessage("key1", SyncMessage.TYPE_REFRESH, 2L, false));
-
-    assertThat(count.get()).isEqualTo(1);
-  }
-
-  @Test
-  void customHandler_shouldReplaceDefaultBehavior() {
-    SyncDecisionHandler custom = new SyncDecisionHandler() {
-      @Override public void handleRefresh(SyncMessage sm) {
-        cache.put(sm.cacheKey(), valuedEntry("custom-refresh"));
-      }
-      @Override public void handleLocalInvalidate(SyncMessage sm) {
-        cache.put(sm.cacheKey(), valuedEntry("custom-invalidate"));
-      }
-      @Override public void handleLocalInvalidateAll(SyncMessage sm) {
-        cache.put("batch", valuedEntry("custom-batch"));
-      }
-      @Override public void handleRulesSync(SyncMessage sm) {
-        cache.put("rules", valuedEntry("custom-rules"));
-      }
-    };
-
-    custom.handleRefresh(syncMessage("k", SyncMessage.TYPE_REFRESH, 1L, false));
-    assertThat(cache.getIfPresent("k").getValue()).isEqualTo("custom-refresh");
-
-    custom.handleLocalInvalidate(syncMessage("k", SyncMessage.TYPE_INVALIDATE, 1L, false));
-    assertThat(cache.getIfPresent("k").getValue()).isEqualTo("custom-invalidate");
-
-    custom.handleLocalInvalidateAll(syncMessage("[]", SyncMessage.TYPE_INVALIDATE_ALL, 0L, false));
-    assertThat(cache.getIfPresent("batch").getValue()).isEqualTo("custom-batch");
-
-    custom.handleRulesSync(syncMessage("rules", SyncMessage.TYPE_RULES_SYNC, 0L, false));
-    assertThat(cache.getIfPresent("rules").getValue()).isEqualTo("custom-rules");
-  }
-
-  /** NORMAL entry carrying an identifiable value (F1: slots hold {@link CacheEntry} only). */
-  private static CacheEntry valuedEntry(String value) {
-    return CacheEntry.builder()
-      .value(value)
-      .dataVersion(1)
-      .isVersionDegraded(false)
-      .decisionVersion(0)
-      .hardTtlMs(300_000)
-      .hardExpireAtMs(Long.MAX_VALUE)
-      .softTtlMs(0)
-      .softExpireAtMs(0)
-      .keyState(KeyState.NORMAL)
-      .normalHardTtlMs(300_000)
-      .normalSoftTtlMs(0)
-      .build();
-  }
-
-  /**
-   * ADR-0067: an applied versioned INVALIDATE also drops the key's SingleFlight
-   * dedup entry, so a post-removal miss re-invokes the reader instead of
-   * replaying the completed pre-removal load result (which would re-cache the
-   * pre-invalidation value).
-   */
-  @Test
-  void handleLocalInvalidate_alsoInvalidatesDedupEntry() {
-    CircuitBreaker breaker = mock(CircuitBreaker.class);
-    when(breaker.isOpen()).thenReturn(false);
-    when(breaker.allowRequest()).thenReturn(true);
-    SingleFlight singleFlight = new SingleFlightImpl(1000, 5, 5, Runnable::run, breaker);
-    handler = new DefaultSyncDecisionHandler(cache, loader, entryLifecycle, ruleMatcher, Collections.emptyList(), singleFlight);
-
-    AtomicInteger loads = new AtomicInteger();
-    singleFlight.load("key1", () -> {
-      loads.incrementAndGet();
-      return "old";
-    });
-    cache.put("key1", entry(2, false, KeyState.NORMAL));
-
-    handler.handleLocalInvalidate(syncMessage("key1", SyncMessage.TYPE_INVALIDATE, 5L, false));
+    handler.handleBatch(
+      List.of(
+        msg("key1", SyncType.INVALIDATE.code(), 2L),
+        msg("key1", SyncType.REFRESH.code(), 3L)
+      )
+    );
 
     assertThat(cache.getIfPresent("key1")).isNull();
-    java.util.Optional<Object> next = singleFlight.load("key1", () -> {
-      loads.incrementAndGet();
-      return "fresh";
-    });
-    assertThat(next).contains("fresh");
-    assertThat(loads.get()).as("post-removal load must re-run the reader").isEqualTo(2);
+    verify(hook).afterInvalidate(eq("key1"), any());
+    verify(hook).onRefreshSkipped(eq("key1"), any());
   }
 
-  /**
-   * ADR-0067: the value-less REFRESH fallback removal also drops the dedup
-   * entry — same contract as the versioned INVALIDATE path.
-   */
   @Test
-  void handleRefresh_valuelessFallback_alsoInvalidatesDedupEntry() {
-    CircuitBreaker breaker = mock(CircuitBreaker.class);
-    when(breaker.isOpen()).thenReturn(false);
-    when(breaker.allowRequest()).thenReturn(true);
-    SingleFlight singleFlight = new SingleFlightImpl(1000, 5, 5, Runnable::run, breaker);
-    handler = new DefaultSyncDecisionHandler(cache, k -> null, entryLifecycle, ruleMatcher, Collections.emptyList(), singleFlight);
+  void clearAll_removesAtOrBelowTheStampOnly() {
+    cache.put("low", entry(3, KeyState.NORMAL));
+    cache.put("high", entry(12, KeyState.NORMAL));
 
-    AtomicInteger loads = new AtomicInteger();
-    singleFlight.load("key1", () -> {
-      loads.incrementAndGet();
-      return "old";
-    });
-    cache.put("key1", entry(2, false, KeyState.NORMAL));
+    handler.handleBatch(List.of(msg("clear", SyncType.INVALIDATE_ALL.code(), 9L)));
 
-    handler.handleRefresh(syncMessage("key1", SyncMessage.TYPE_REFRESH, 3L, false));
-
-    assertThat(cache.getIfPresent("key1")).isNull();
-    java.util.Optional<Object> next = singleFlight.load("key1", () -> {
-      loads.incrementAndGet();
-      return "fresh";
-    });
-    assertThat(next).contains("fresh");
-    assertThat(loads.get()).isEqualTo(2);
+    assertThat(cache.getIfPresent("low")).isNull();
+    assertThat(cache.getIfPresent("high")).isNotNull();
   }
 
-  /**
-   * ADR-0067: a REFRESH must not re-enable a disabled soft TTL — an entry with
-   * {@code softTtlMs=0} (the "no soft expire" convention) keeps
-   * {@code softExpireAtMs=0} after the refresh instead of silently gaining the
-   * configured default stale-while-revalidate window.
-   */
   @Test
-  void handleRefresh_preservesDisabledSoftTtl() {
-    cache.put(
-      "key1",
-      CacheEntry.builder()
-        .value("v")
-        .dataVersion(1)
-        .isVersionDegraded(false)
-        .decisionVersion(0)
-        .hardTtlMs(300_000)
-        .hardExpireAtMs(Long.MAX_VALUE)
-        .softTtlMs(0)
-        .softExpireAtMs(0)
-        .keyState(KeyState.NORMAL)
-        .normalHardTtlMs(300_000)
-        .normalSoftTtlMs(30_000)
-        .build());
+  void clearPrefix_removesOnlyTheNamespace() {
+    cache.put("users\u0000a", entry(1, KeyState.NORMAL));
+    cache.put("users\u0000b", entry(2, KeyState.NORMAL));
+    cache.put("orders\u0000a", entry(1, KeyState.NORMAL));
 
-    handler.handleRefresh(syncMessage("key1", SyncMessage.TYPE_REFRESH, 2L, false));
+    handler.handleBatch(List.of(msg("users\u0000", SyncType.INVALIDATE_PREFIX.code(), 5L)));
 
-    CacheEntry refreshed = (CacheEntry) cache.getIfPresent("key1");
-    assertThat(refreshed).isNotNull();
-    assertThat(refreshed.getDataVersion()).isEqualTo(2L);
-    assertThat(refreshed.getValue()).isEqualTo("refreshed");
-    assertThat(refreshed.getSoftTtlMs()).isEqualTo(0L);
-    assertThat(refreshed.getSoftExpireAtMs()).isEqualTo(0L);
+    assertThat(cache.getIfPresent("users\u0000a")).isNull();
+    assertThat(cache.getIfPresent("users\u0000b")).isNull();
+    assertThat(cache.getIfPresent("orders\u0000a")).isNotNull();
+  }
+
+  @Test
+  void remoteInvalidateDropsAColdKeysInFlightLoad() {
+    SingleFlight flight = mock(SingleFlight.class);
+    handler = new DefaultSyncDecisionHandler(cache, k -> "refreshed", entryLifecycle, List.of(), flight, publisher);
+
+    handler.handleBatch(List.of(msg("cold", SyncType.INVALIDATE.code(), 5L)));
+
+    verify(flight).invalidate("cold");
+  }
+
+  @Test
+  void remoteStaleInvalidateLeavesANewerResidentsFlightAlone() {
+    SingleFlight flight = mock(SingleFlight.class);
+    handler = new DefaultSyncDecisionHandler(cache, k -> "refreshed", entryLifecycle, List.of(), flight, publisher);
+    cache.put("key1", entry(7, KeyState.NORMAL));
+
+    handler.handleBatch(List.of(msg("key1", SyncType.INVALIDATE.code(), 3L)));
+
+    verify(flight, never()).invalidate("key1");
+  }
+
+  @Test
+  void remoteClearDropsTheMatchingDedupFlights() {
+    SingleFlight flight = mock(SingleFlight.class);
+    handler = new DefaultSyncDecisionHandler(cache, k -> "refreshed", entryLifecycle, List.of(), flight, publisher);
+
+    handler.handleBatch(
+      List.of(
+        msg("clear", SyncType.INVALIDATE_ALL.code(), 9L),
+        msg("users\u0000", SyncType.INVALIDATE_PREFIX.code(), 7L)
+      )
+    );
+
+    // The table-wide kill covers a prefix clear at a lower stamp: a second
+    // per-prefix walk would scan an already-emptied table.
+    verify(flight).invalidateAll();
+    verify(flight, never()).invalidatePrefix("users\u0000");
+  }
+
+  @Test
+  void remotePrefixClearDropsOnlyThatNamespacesFlights() {
+    SingleFlight flight = mock(SingleFlight.class);
+    handler = new DefaultSyncDecisionHandler(cache, k -> "refreshed", entryLifecycle, List.of(), flight, publisher);
+
+    handler.handleBatch(List.of(msg("users\u0000", SyncType.INVALIDATE_PREFIX.code(), 7L)));
+
+    verify(flight).invalidatePrefix("users\u0000");
+    verify(flight, never()).invalidateAll();
+  }
+
+  private static CacheLoader<String, Object> decliningLoader() {
+    return new CacheLoader<>() {
+      @Override
+      public Object load(String key) {
+        return "rejected";
+      }
+
+      @Override
+      public boolean isCacheable(Object candidate) {
+        return false;
+      }
+    };
   }
 }

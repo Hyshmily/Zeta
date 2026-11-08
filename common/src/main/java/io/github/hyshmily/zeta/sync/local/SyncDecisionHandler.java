@@ -15,73 +15,44 @@
  */
 package io.github.hyshmily.zeta.sync.local;
 
-import io.github.hyshmily.zeta.Internal;
+import java.util.List;
 
 /**
- * Strategy interface for processing cache-sync messages (REFRESH, INVALIDATE,
- * INVALIDATE_ALL, RULES_SYNC) from peer application instances.
+ * Strategy interface for processing cache-sync messages (REFRESH, INVALIDATE, PUT,
+ * clears) received from peer application instances.
  *
- * <p>Implement this interface and expose it as a Spring {@code @Bean} to fully
- * replace the default cache-sync processing logic. The default implementation
- * ({@link DefaultSyncDecisionHandler}) performs loader-backed value loading,
- * version-guarded invalidation, batch processing, and rule syncing.
+ * <p>Implement this interface and expose it as a Spring {@code @Bean} to replace the
+ * default cache-sync processing logic; {@code @ConditionalOnMissingBean} wires it.
  *
- * <p>Use {@code @ConditionalOnMissingBean(SyncDecisionHandler.class)} on your
- * custom bean to replace the default.
+ * <p><b>The batch is the unit of work.</b> The ordered dispatcher grants all queued
+ * messages of one cache key at once, so a handler receives them together and can reduce
+ * the batch before touching L1: only the highest-version message of a key changes the
+ * final state, and the messages it covers must not each pay a loader call, a payload
+ * deserialization or a cache-bin lock. A single message arrives as a batch of one.
  */
-@Internal
 public interface SyncDecisionHandler {
+  /**
+   * Applies one granted batch. All messages in the list share a dispatch key: the same
+   * cache key for a per-key batch, or the clear channel for a batch of clears (whose
+   * prefixes may differ).
+   *
+   * <p>Implementations apply at most one effective action per key — the batch has already
+   * been ordered by the dispatcher, so a lower-version message can be dropped rather than
+   * applied and overwritten. A REFRESH or PUT that produced no effect is reported through
+   * {@link SyncHook#onRefreshSkipped} by the default implementation; the contract here is
+   * only "the batch's final state is applied".
+   *
+   * @param batch the granted batch, in submission order (never empty)
+   */
+  void handleBatch(List<SyncMessage> batch);
 
   /**
-   * Process a REFRESH sync message from a peer instance.
+   * Applies one message outside a dispatcher batch (the drop fallback on the consumer
+   * thread, a direct call).
    *
-   * @param sm the sync message containing the key and version to refresh;
-   *           must not be null
+   * @param syncMessage the message to apply
    */
-  void handleRefresh(SyncMessage sm);
-
-  /**
-   * Process a REFRESH sync message with the ordered dispatcher's batch-end signal
-   * (ADR-0071, borrowed from LMAX Disruptor's {@code BatchEventProcessor}). The default
-   * implementation ignores the signal and delegates to {@link #handleRefresh(SyncMessage)},
-   * so existing custom implementations keep their exact behaviour.
-   *
-   * <p>The default {@link DefaultSyncDecisionHandler} uses it for I/O amortization: when
-   * further tasks for the same key follow in the current dispatch batch, a later REFRESH
-   * will reload the authoritative value anyway, so the non-final message is skipped without
-   * a Redis load.
-   *
-   * @param sm         the sync message containing the key and version to refresh;
-   *                   must not be null
-   * @param endOfBatch {@code true} if this message is the last task of its key's currently
-   *                   granted dispatch batch ({@code false} while further tasks of the same
-   *                   batch follow); best-effort — a message may be granted alone and always
-   *                   see {@code true} in that case
-   */
-  default void handleRefresh(SyncMessage sm, boolean endOfBatch) {
-    handleRefresh(sm);
+  default void handle(SyncMessage syncMessage) {
+    handleBatch(List.of(syncMessage));
   }
-
-  /**
-   * Process an INVALIDATE sync message from a peer instance.
-   *
-   * @param sm the sync message containing the key to invalidate; must not be null
-   */
-  void handleLocalInvalidate(SyncMessage sm);
-
-  /**
-   * Process an INVALIDATE_ALL sync message from a peer instance.
-   *
-   * @param sm the sync message containing the JSON-array of keys to invalidate;
-   *           must not be null
-   */
-  void handleLocalInvalidateAll(SyncMessage sm);
-
-  /**
-   * Process a RULES_SYNC sync message from a peer instance.
-   *
-   * @param sm the sync message containing the serialized rule-set JSON;
-   *           must not be null
-   */
-  void handleRulesSync(SyncMessage sm);
 }

@@ -15,20 +15,20 @@
  */
 package io.github.hyshmily.zeta.sync.worker;
 
-import io.github.hyshmily.zeta.Internal;
-
 /**
- * Reason why a Worker HOT decision was not applied to the local cache.
+ * Why a HOT Worker decision was not applied — the argument
+ * {@link WorkerDecisionHook#onHotSkipped} reports.
+ *
+ * <p>Top-level so a custom {@link WorkerDecisionHandler} can name a reason without
+ * depending on the default implementation.
  */
-@Internal
 public enum HotSkipReason {
-
-  /** The SRE adaptive rate limiter dropped the request (backpressure). */
-  SRE_THROTTLED,
-
-  /** A newer decision version is already present in the L1 cache. */
+  /** The resident entry already carries a decision that outranks or duplicates the incoming one. */
   VERSION_STALE,
 
-  /** Value not found in Redis and no degraded entry exists in L1. */
-  VALUE_NOT_FOUND
+  /**
+   * No usable value to promote: the loader returned nothing and no L1 entry is usable, or
+   * a tombstone refused the create.
+   */
+  VALUE_NOT_FOUND,
 }

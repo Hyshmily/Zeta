@@ -15,10 +15,14 @@
  */
 package io.github.hyshmily.zeta.sync.worker;
 
-import io.github.hyshmily.zeta.Internal;
 import io.github.hyshmily.zeta.constants.ZetaConstants;
+import io.github.hyshmily.zeta.sync.AmqpConsumerProperties;
 import io.github.hyshmily.zeta.sync.dispatcher.PerKeyOrderedDispatcher;
-import io.github.hyshmily.zeta.util.InstanceIdGenerator;
+import io.github.hyshmily.zeta.util.Internal;
+import io.github.hyshmily.zeta.util.NodeIdentity;
+import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.Positive;
+import jakarta.validation.constraints.PositiveOrZero;
 import lombok.Data;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.validation.annotation.Validated;
@@ -28,108 +32,71 @@ import org.springframework.validation.annotation.Validated;
  * decisions from the Worker cluster.
  *
  * <p>Binds to the {@code zeta.worker-listener} prefix in Spring configuration sources.
- * Each application instance creates an anonymous queue named
- * {@code zeta.worker:{instanceId}} bound to the configured FanoutExchange. The
- * exchange name must match the Worker-side {@code zeta.worker.messaging.send-exchange}
+ * Each application instance creates a durable queue named
+ * {@code {queuePrefix}:{instanceId}} bound to the configured direct exchange under the
+ * {@code send.<appName>} routing key. The
+ * exchange name must match the Worker-side {@code zeta.worker.messaging.broadcast-exchange}
  * property.
  *
- * <p>Includes an inner {@link Sre} configuration for adaptive rate limiting of HOT
- * promotions, providing backpressure when downstream resources (Redis, CPU) are saturated.
  *
  * @see WorkerListener
- * @see io.github.hyshmily.zeta.util.ratelimit.SreRateLimiter
  */
 @Data
 @Validated
 @ConfigurationProperties(prefix = "zeta.worker-listener")
 @Internal
-public class WorkerListenerProperties {
+public class WorkerListenerProperties implements AmqpConsumerProperties {
 
   /** Whether the Worker decision listener is enabled. Set to {@code true} when
    * a Worker cluster is deployed and the application should consume Worker decisions. */
   private boolean enabled = false;
 
-  /** FanoutExchange name for receiving Worker HOT/COOL decisions and heartbeats.
-   * Must match the {@code zeta.worker.messaging.send-exchange} on the Worker side. */
+  /** Decision exchange name for receiving Worker HOT/COOL decisions. Heartbeats travel on the
+   * separate control-plane heartbeat exchange ({@code zeta.heartbeat.exchange}, see design decisions: heartbeat and health).
+   * Must match the {@code zeta.worker.messaging.broadcast-exchange} on the Worker side. */
+  @NotBlank
   private String exchangeName = ZetaConstants.Exchange.BROADCAST;
 
   /** Prefix for the per-instance queue name, suffixed with the instance ID
-   * from {@link InstanceIdGenerator}. Final queue: {@code {queuePrefix}:{instanceId}}. */
+   * from {@link NodeIdentity}. Final queue: {@code {queuePrefix}:{instanceId}}. */
+  @NotBlank
   private String queuePrefix = "zeta.worker";
 
   /** Whether the RabbitMQ listener container starts automatically with the application context. */
   private boolean autoStartup = true;
 
-  /** Maximum random jitter (milliseconds) added before each Worker broadcast cache update.
-   * When non-zero, spreads Redis reads across a small time window to avoid thundering herds
-   * when the Worker broadcasts a decision to many app instances simultaneously.
-   * Default 0 — no jitter; the broadcast is applied immediately on reception. */
+  /** Maximum random start-jitter (milliseconds) applied to a cache key's first dispatcher
+   * cycle after a Worker broadcast. When non-zero, spreads cluster-loader reads across a small time
+   * window to avoid thundering herds when the Worker broadcasts a decision to many app
+   * instances simultaneously. The jitter is a dispatcher-level park, not a sleep inside the
+   * update task. Default 0 — no jitter; the mutation is submitted without a start-jitter
+   * park. */
+  @PositiveOrZero
   private int broadcastJitterMs = 0;
 
   /** Number of concurrent RabbitMQ consumers for the Worker decision queue.
-   * Higher values increase throughput under load at the cost of more Redis connections. */
+   * Higher values increase throughput under load at the cost of more broker connections. */
+  @Positive
   private int concurrentConsumers = 2;
 
-  /** Pool size for the scheduled executor that runs jittered Worker cache-update tasks.
-   * Should be at least as large as the number of concurrent consumers. */
+  /** Minimum pool size for the scheduled executor that runs jittered Worker cache-update
+   * tasks. The effective pool is {@code max(this, concurrentConsumers × 2)} so every consumer
+   * thread can run a delayed follow-up task without starving the others. */
+  @Positive
   private int schedulerPoolSize = 4;
 
   /** AMQP prefetch count per consumer. Controls how many unacknowledged messages
    * each consumer can hold at once. */
+  @Positive
   private int prefetchCount = 5;
 
   /**
    * Global cap (in weighted units) on tasks pending in the per-key Worker-decision
    * dispatcher ({@link PerKeyOrderedDispatcher}). Worker decisions carry small payloads
    * (weight 1 each). The budget is kept higher than the cache-sync budget because a
-   * dropped HOT/COOL decision has real cost — recovery relies on the periodic HOT
-   * rebroadcast (ADR-0024) and stale eviction, so this budget trades memory against
-   * decision loss.
+   * dropped HOT/COOL decision has real cost and nothing re-sends it, so this budget trades memory
+   * against decision loss.
    */
+  @Positive
   private int maxPendingUnits = 200_000;
-
-  /** Configuration for the SRE adaptive rate limiter on HOT decision processing.
-   * Provides backpressure when downstream resources are saturated. */
-  private Sre sre = new Sre();
-
-  /**
-   * SRE adaptive rate limiter settings for HOT decision processing.
-   *
-   * <p>Uses the Google SRE formula ({@code requests = K × accepts}) to
-   * probabilistically drop HOT promotions when the success rate falls below
-   * {@link #successThreshold}.  This provides backpressure when downstream
-   * resources (Redis, CPU) are saturated.
-   */
-  @Data
-  public static class Sre {
-
-    /** Whether the SRE rate limiter is enabled for HOT decision processing.
-     * When enabled, HOT promotions are probabilistically dropped when the
-     * success rate falls below {@link #successThreshold}. */
-    private boolean enabled = true;
-
-    /** Sliding window duration in milliseconds over which request outcomes are tracked. */
-    private long windowMs = 3000;
-
-    /** Number of time buckets within the sliding window for granular tracking. */
-    private int buckets = 10;
-
-    /** Minimum total samples (accepts + rejects) required before the rate limiter
-     * begins actively throttling. Prevents premature throttling during warm-up. */
-    private int minSamples = 20;
-
-    /** Success ratio threshold (0.0–1.0). The multiplier K is computed as
-     * {@code K = 1 / successThreshold}. When the observed success rate drops below
-     * this value, the limiter probabilistically drops requests. */
-    private double successThreshold = 0.6;
-  }
-
-  /**
-   * Returns the unique per-instance queue name for Worker decision listener.
-   *
-   * @return {@code {queuePrefix}:{instanceId}}
-   */
-  public String getQueueName() {
-    return queuePrefix + ":" + InstanceIdGenerator.get();
-  }
 }

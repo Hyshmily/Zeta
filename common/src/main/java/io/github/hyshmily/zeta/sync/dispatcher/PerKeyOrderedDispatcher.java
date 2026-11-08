@@ -15,694 +15,462 @@
  */
 package io.github.hyshmily.zeta.sync.dispatcher;
 
-import io.github.hyshmily.zeta.Internal;
 import io.github.hyshmily.zeta.exception.ZetaExceptionHandler;
-import io.github.hyshmily.zeta.util.LogThrottle;
+import io.github.hyshmily.zeta.util.Internal;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.*;
-import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.LongAdder;
+import java.util.function.Consumer;
 import lombok.extern.slf4j.Slf4j;
 
 /**
- * Per-key FIFO ordered dispatcher.
+ * Per-key FIFO dispatcher that hands each granted batch to one consumer.
  *
- * <p>Ensures that tasks for the same key are executed strictly in submission order
- * and never concurrently, while tasks for different keys can execute in parallel.
+ * <p>Tasks of the same key run strictly in submission order and never concurrently; tasks
+ * of different keys run in parallel. A key yields the pool after
+ * {@code maxTasksPerCycle} tasks, so a busy key cannot monopolise it.
  *
- * <p>Designed to be used as the inner layer of a two-layer dispatch pattern where
- * an outer delay handles cross-instance staggering and this dispatcher handles
- * same-instance ordering:
+ * <p><b>The batch is the unit of work.</b> The consumer receives the whole granted list,
+ * so work a later task of the same batch would repeat — a loader call per queued REFRESH,
+ * a table sweep per queued clear, an overwritten value applied per queued PUT — is done
+ * once, and there is no cross-task state to smuggle through a context object. The batch
+ * boundary is best effort: a task granted alone is a batch of one, and a submission racing
+ * the batch simply starts a follow-up cycle.
  *
- * <pre>{@code
- * scheduler.schedule(
- *     () -> dispatcher.submit(key, task),
- *     jitterMs,
- *     TimeUnit.MILLISECONDS
- * );
- * }</pre>
+ * <p><b>Atomic per-key queue.</b> Each key is at most one {@link KeyWorker} in the map.
+ * Submitting and draining both run through one atomic {@code compute}: the worker is
+ * created together with its first task (deciding atomically whether it must be started),
+ * and an idle worker removes itself. No worker can be left orphaned.
  *
- * <p><b>Batched consumption.</b> Tasks of the same key are consumed in batches of at most
- * {@code maxTasksPerCycle} per underlying-executor submission. A burst of same-key traffic
- * (e.g. a batch of broadcast messages) therefore occupies a single pool slot instead of one
- * submission per task. Once a key has consumed {@code maxTasksPerCycle} tasks in a row it
- * yields back to the executor so that other keys can progress — a busy key can never
- * monopolise the pool.
+ * <p><b>Backpressure.</b> Each key's queue is bounded by {@code maxQueuePerKey}; the total
+ * weight pending across all keys is bounded by {@code maxGlobalPendingUnits} (one unit ≈
+ * 1 KB of payload). Control-plane submissions — a COOL decision, a clear — are O(1) and
+ * skip the global budget: a value storm must not lock out the message that repairs the
+ * state it created.
  *
- * <p><b>Batch-end callback (Disruptor-style, ADR-0071).</b> A task submitted as a
- * {@link BatchAwareTask} receives {@code endOfBatch == true} on the last task of the granted
- * batch and {@code false} while further tasks of the same batch follow — the same hint LMAX
- * Disruptor's {@code BatchEventProcessor} gives its consumers. Expensive per-task work that a
- * later task in the same batch would repeat (a Redis load per queued REFRESH message, for
- * example) can then be amortized to the batch tail. The signal is best-effort: a task granted
- * alone always sees {@code true}, and a submission racing the batch simply starts a follow-up
- * cycle whose last task gets the signal again. Plain {@link Runnable} submissions keep the
- * zero-overhead path.
+ * <p><b>Start jitter.</b> A new worker's first cycle is parked on the executor's scheduler
+ * for a random delay instead of sleeping inside a pool thread, spreading same-instant
+ * loads (a broadcast fan-out) without shrinking throughput.
  *
- * <p><b>Atomic single-queue design.</b> Each key is represented by at most one {@link KeyWorker}
- * in the map. Submitting and consuming both go through a single atomic
- * {@link ConcurrentHashMap#compute(Object, java.util.function.BiFunction)} call: the worker is
- * created together with its first task (atomically deciding whether it must be started), and an
- * idle worker removes itself by returning {@code null}. Because the start decision is part of
- * the atomic insertion, there is no window in which a worker can be orphaned — eliminating the
- * running-flag re-verification and retry loop of earlier designs.
- *
- * <p><b>Backpressure:</b> Each key's queue is bounded by {@code maxQueuePerKey}.
- * When the limit is reached, excess submissions are silently counted as rejected
- * (exposed via Micrometer). In addition, the total weight of tasks pending
- * across <em>all</em> keys is bounded by {@code maxGlobalPendingUnits}: once the
- * budget is exhausted, new submissions are dropped without being enqueued
- * (ADR-0032). Submissions carry a weight — default 1 per task, larger for heavy
- * payloads (e.g. batch sync messages charge ~1 unit per KB of body). This caps
- * the dispatcher's aggregate memory under broadcast storms, where the number of
- * distinct keys is unbounded even though each key's queue is bounded.
- *
- * <p><b>Executor rejection recovery:</b> If the underlying executor rejects a task
- * via {@link RejectedExecutionException}, the tasks remain queued in their {@link KeyWorker}
- * (the batch is only granted while executing on the executor thread, so a rejected submission
- * never loses tasks), and a delayed retry re-drives the worker — self-healing without
- * depending on future submissions.
- *
- * <p><b>Start jitter (park, not sleep).</b> When a positive {@code jitterMs} is configured,
- * each newly created worker draws a random delay in {@code [0, jitterMs)} and its FIRST cycle
- * is parked on the executor's scheduler for that delay instead of occupying a pool thread with
- * a {@code Thread.sleep}. The park is one random draw per worker incarnation (per key burst),
- * not per task: same-key tasks submitted while the worker is parked enqueue behind it and run
- * after it. Per-key FIFO ordering is unaffected — ordering is fixed by the atomic submission
- * into the map, and the parked worker still holds the key exclusively (the {@code scheduled}
- * flag is set, so no second cycle can start). The point is throughput: a sleeping task holds a
- * scheduler thread for the whole jitter window, so the pool's ceiling was
- * {@code poolSize / (jitterMs + taskTime)}; a parked worker releases the thread and the ceiling
- * becomes {@code poolSize / taskTime}.
- *
- * <p>This class is thread-safe.
+ * <p>Thread-safe.
  */
 @Slf4j
 @Internal
-public class PerKeyOrderedDispatcher implements AutoCloseable {
+public class PerKeyOrderedDispatcher<T> implements AutoCloseable {
 
+  public static final int DEFAULT_MAX_GLOBAL_PENDING_UNITS = 50_000;
   public static final int DEFAULT_MAX_QUEUE_PER_KEY = 1024;
-
-  /**
-   * Maximum number of tasks a single key may consume before the worker yields back to the
-   * executor, giving other keys a chance to run. Trades throughput (larger batches, fewer pool
-   * submissions) against fairness (a busy key must eventually let other keys progress).
-   */
   public static final int DEFAULT_MAX_TASKS_PER_CYCLE = 64;
 
-  /**
-   * Default aggregate budget (in weighted units) of tasks pending across all keys. A unit
-   * approximates 1 KB of payload; see {@link #submitWithWeight(Object, Runnable, int)}.
-   */
-  public static final int DEFAULT_MAX_GLOBAL_PENDING_UNITS = 50_000;
-
-  /** Delay before re-driving a worker whose submission was rejected by the executor. */
-  private static final long REJECTION_RETRY_DELAY_MS = 200;
-
   private final ConcurrentHashMap<Object, KeyWorker> queues = new ConcurrentHashMap<>();
-  private final ScheduledExecutorService executor;
-  private final String name;
-  private final int maxQueuePerKey;
-  private final int maxTasksPerCycle;
-
   /**
-   * Aggregate budget (in weighted units) of tasks pending across all keys; when exceeded,
-   * new submissions are dropped (see {@link #submitWithWeight(Object, Runnable, int)}).
-   */
-  private final long maxGlobalPendingUnits;
-
-  /**
-   * Upper bound (ms) of the random start-jitter park applied to each newly created worker;
-   * {@code 0} disables the park entirely (the common case — both production listeners default
-   * to no jitter or delegate their own jitter property, which may itself be {@code 0}).
-   */
-  private final long jitterMs;
-
-  /**
-   * Total weight of tasks currently pending (enqueued or granted-but-not-yet-executed).
-   * A {@link LongAdder} because the gate below is a documented <em>soft</em> bound — the
-   * slightly stale {@code sum()} it reads is no worse than the check-then-act race already
-   * accepted — while the add-side contention of an {@link AtomicLong} is real under
-   * broadcast storms with several consumer threads.
+   * Aggregate weight pending across all keys. {@link LongAdder} rather than
+   * {@code AtomicLong}: every submit increments it, and a striped adder keeps concurrent
+   * submitters off one cache line. Reads are weak-consistent, which is acceptable for a
+   * soft budget (see {@link #submit}).
    */
   private final LongAdder globalPendingUnits = new LongAdder();
-
-  /** Number of tasks dropped by the global budget gate; used for throttled WARN logging. */
-  private final AtomicLong dropCounter = new AtomicLong();
-
-  /** Number of tasks rejected because the key's queue was full; used for throttled WARN logging. */
-  private final AtomicLong rejectedPerKeyCounter = new AtomicLong();
-
-  /**
-   * Rate-limits the global-budget-drop WARN to one per
-   * {@value LogThrottle#DEFAULT_WINDOW_MS}ms window (ADR-0037 one-per-window
-   * convention; the counter above keeps the real cumulative total for the log).
-   */
-  private final LogThrottle globalDropLogThrottle = LogThrottle.perDefaultWindow();
-
-  /** Rate-limits the per-key queue-full WARN to one per standard window (ADR-0037 convention). */
-  private final LogThrottle queueFullLogThrottle = LogThrottle.perDefaultWindow();
+  private final ScheduledExecutorService executor;
+  private final Consumer<List<T>> consumer;
+  private final long maxGlobalPendingUnits;
+  private final int maxTasksPerCycle;
+  private final int maxQueuePerKey;
+  private final long jitterMs;
+  private final String name;
 
   private volatile boolean closed = false;
 
   /**
-   * Creates a dispatcher. See the full constructor for parameter semantics;
-   * the defaults are {@link #DEFAULT_MAX_QUEUE_PER_KEY},
-   * {@link #DEFAULT_MAX_TASKS_PER_CYCLE} and
-   * {@link #DEFAULT_MAX_GLOBAL_PENDING_UNITS}; {@code jitterMs = 0}.
+   * @param executor              executor for the per-key cycles and the start-jitter park
+   * @param name                  dispatcher name used in log lines
+   * @param consumer              runs one granted batch to completion
+   * @param maxQueuePerKey        per-key pending-queue bound
+   * @param maxTasksPerCycle      tasks consumed per executor submission
+   * @param maxGlobalPendingUnits aggregate weighted-unit budget across all keys
+   * @param jitterMs              upper bound of the random first-cycle park; {@code <= 0} disables it
    */
   public PerKeyOrderedDispatcher(
     ScheduledExecutorService executor,
     String name,
+    Consumer<List<T>> consumer,
     int maxQueuePerKey,
     int maxTasksPerCycle,
     long maxGlobalPendingUnits,
     long jitterMs
   ) {
-    this.executor = executor;
     this.name = name;
+    this.executor = executor;
+    this.consumer = consumer;
     this.maxQueuePerKey = maxQueuePerKey;
+    this.jitterMs = Math.max(0, jitterMs);
     this.maxTasksPerCycle = maxTasksPerCycle;
     this.maxGlobalPendingUnits = maxGlobalPendingUnits;
-    this.jitterMs = Math.max(0, jitterMs);
   }
 
   /**
-   * Submit a task for a given key with an optional initial delay.
-   * <p>
-   * If delayMs > 0, the task is scheduled to be submitted after the delay,
-   * freeing the caller thread immediately. The per-key FIFO ordering is preserved:
-   * even if multiple delayed submissions for the same key are scheduled, they will
-   * be submitted (and thus executed) in the order their delays expire.
+   * Submit a task under its ordering key.
    *
-   * @param key     the routing key
-   * @param task    the task to execute
-   * @param delayMs the initial delay in milliseconds; 0 means immediate submission
+   * @param key    the routing key (same key ⇒ FIFO)
+   * @param task   the task to enqueue
+   * @param weight its weight in global pending units (clamped to ≥ 1)
+   * @param jitter {@code true} draws the start-jitter park when the key has no worker yet;
+   *               pass {@code false} for tasks that perform no I/O
+   * @return {@code true} when the task was enqueued
    */
-  public void submit(Object key, Runnable task, long delayMs) {
-    submitCore(key, task, 1, delayMs);
+  public boolean submit(Object key, T task, int weight, boolean jitter) {
+    return submit(key, task, weight, jitter, false);
   }
 
   /**
-   * Submit a task with an explicit weight for the global pending budget.
+   * Submit a control-plane task: same ordering and per-key bound, but exempt from the
+   * global memory budget (a clear or a COOL is O(1) and must survive a payload storm).
    *
-   * @param key     the routing key
-   * @param task    the task to execute
-   * @param weight  the task's weight in global pending units (clamped to ≥ 1);
-   *                charge ~1 unit per KB of payload so the budget tracks bytes,
-   *                not message count
-   * @param delayMs the initial delay in milliseconds; 0 means immediate submission
+   * @param key  the routing key
+   * @param task the control task
+   * @return {@code true} when the task was enqueued
    */
-  /**
-   * Submit a batch-aware task with an explicit weight for the global pending budget. Behaves
-   * exactly like {@link #submitWithWeight(Object, Runnable, int, long)} except that the task
-   * receives the {@code endOfBatch} hint of its key's granted batch — see
-   * {@link BatchAwareTask} (ADR-0071).
-   *
-   * @param key     the routing key
-   * @param task    the batch-aware task to execute
-   * @param weight  the task's weight in global pending units (clamped to ≥ 1)
-   * @param delayMs the initial delay in milliseconds; 0 means immediate submission
-   */
-  public void submitWithWeight(Object key, BatchAwareTask task, int weight, long delayMs) {
-    submitCore(key, task, weight, delayMs);
+  public boolean submitControl(Object key, T task) {
+    return submit(key, task, 1, false, true);
   }
 
-  /**
-   * Submit a batch-aware task with an explicit weight (immediate, no delay) — see
-   * {@link #submitWithWeight(Object, BatchAwareTask, int, long)}.
-   *
-   * @param key    the routing key
-   * @param task   the batch-aware task to execute
-   * @param weight the task's weight in global pending units (clamped to ≥ 1); charge
-   *               ~1 unit per KB of payload so the budget tracks bytes, not message count
-   */
-  public void submitWithWeight(Object key, BatchAwareTask task, int weight) {
-    submitCore(key, task, weight, 0);
-  }
-
-  @SuppressWarnings("all")
-  private void submitCore(Object key, Object task, int weight, long delayMs) {
-    if (delayMs <= 0) {
-      submitCore(key, task, weight);
-      return;
-    }
-
-    if (executor.isShutdown() || executor.isTerminated()) {
-      // The scheduled executor is already shut down or terminated — the delayed
-      // submission cannot be scheduled, so the task is dropped. This mirrors the
-      // other shutdown drop paths (close() clears the queues, delayed submissions
-      // still pending on the scheduler are dropped on arrival): the shutdown
-      // window is intentionally lossy, and lost messages are bounded by the next
-      // periodic broadcast / application write.
-      log.debug("[{}] Executor is shut down, dropping delayed task for key {}", name, key);
-      return;
-    }
-    // Use the executor's internal scheduler to delay the actual submission.
-    // Note: The executor must be a ScheduledExecutorService; we assume it is.
-    // The isShutdown pre-check above is best-effort only (TOCTOU): the executor
-    // may shut down between the check and this schedule() call, which throws
-    // RejectedExecutionException — catch it and drop the task so a shutdown
-    // race never propagates to the caller (consistent with the drop path above).
-    try {
-      executor.schedule(() -> submitCore(key, task, weight), delayMs, TimeUnit.MILLISECONDS);
-    } catch (RejectedExecutionException e) {
-      log.debug("[{}] Executor rejected delayed task for key {} (shutting down), dropping", name, key);
-    }
-  }
-
-  /**
-   * Submit a task for a given key. Tasks for the same key are executed
-   * in FIFO order. If the dispatcher is closed, the task is silently dropped.
-   * If the key's pending queue is full, the task is rejected (dropped without execution).
-   * <p>If the underlying executor rejects a task via {@link RejectedExecutionException},
-   * the task remains queued and a delayed retry re-drives the worker
-   * (self-healing, does not depend on future submissions).</p>
-   */
-  public void submit(Object key, Runnable task) {
-    submitWithWeight(key, task, 1);
-  }
-
-  /**
-   * Submit a task with an explicit weight for the global pending budget.
-   *
-   * <p><b>Global budget gate:</b> the total weight of tasks pending across all keys is
-   * bounded by {@code maxGlobalPendingUnits}. When the budget is exhausted, the task is
-   * dropped without being enqueued (a lost sync message — acceptable by design, see
-   * ADR-0032). The gate is a <em>soft</em> bound: the check-then-act race with concurrent
-   * submitters may overshoot by a bounded amount, and a single heavy task can push the
-   * budget past the cap.
-   *
-   * @param key    the routing key
-   * @param task   the task to execute
-   * @param weight the task's weight in global pending units (clamped to ≥ 1); charge
-   *               ~1 unit per KB of payload so the budget tracks bytes, not message count
-   */
-  @SuppressWarnings("all")
-  public void submitWithWeight(Object key, Runnable task, int weight) {
-    submitCore(key, task, weight);
-  }
-
-  /**
-   * Submit a task with an explicit weight and an optional initial delay.
-   *
-   * @param key     the routing key
-   * @param task    the task to execute
-   * @param weight  the task's weight in global pending units (clamped to ≥ 1)
-   * @param delayMs the initial delay in milliseconds; 0 means immediate submission
-   */
-  @SuppressWarnings("all")
-  public void submitWithWeight(Object key, Runnable task, int weight, long delayMs) {
-    submitCore(key, task, weight, delayMs);
-  }
-
-  /**
-   * Core submission path shared by the {@link Runnable} and {@link BatchAwareTask} entry
-   * points; {@code task} is either a {@link Runnable} (zero-overhead legacy path) or a
-   * {@link BatchAwareTask} (receives the batch-end hint in {@link PendingTask#execute}).
-   *
-   * <p><b>Global budget gate:</b> the total weight of tasks pending across all keys is
-   * bounded by {@code maxGlobalPendingUnits}. When the budget is exhausted, the task is
-   * dropped without being enqueued (a lost sync message — acceptable by design, see
-   * ADR-0032). The gate is a <em>soft</em> bound: the check-then-act race with concurrent
-   * submitters may overshoot by a bounded amount, and a single heavy task can push the
-   * budget past the cap.
-   */
-  @SuppressWarnings("all")
-  private void submitCore(Object key, Object task, int weight) {
+  private boolean submit(Object key, T task, int weight, boolean jitter, boolean control) {
     if (closed) {
-      return;
+      return false;
     }
 
-    if (weight < 1) {
-      weight = 1;
-    }
-    final int effectiveWeight = weight;
-
-    // Global budget gate: drop before enqueue so a dropped task never occupies the queue.
-    if (globalPendingUnits.sum() + effectiveWeight > maxGlobalPendingUnits) {
-      long drops = dropCounter.incrementAndGet();
-      if (globalDropLogThrottle.tryAcquire()) {
-        log.warn(
-          "[{}] Global pending units exceeded ({}), dropping task for key={}, totalDrops={}",
-          name,
-          maxGlobalPendingUnits,
-          key,
-          drops
-        );
-      }
-      return;
+    // Weight floors at 1: a zero/negative caller must not create a task that occupies a
+    // queue slot but consumes no global budget, which would let a misbehaving caller grow
+    // the queue without ever tripping the global backpressure check.
+    int effectiveWeight = Math.max(1, weight);
+    if (!control && globalPendingUnits.sum() + effectiveWeight > maxGlobalPendingUnits) {
+      log.debug("[{}] Global pending units exceeded ({}), dropping task for key={}", name, maxGlobalPendingUnits, key);
+      return false;
     }
 
-    // Single atomic compute: creates the worker together with its first task, or enqueues into
-    // the existing worker. The start decision is made atomically with the insertion, so there
-    // is no window in which the worker can be orphaned (a queue whose owner never re-runs it) —
-    // the running-flag re-verification and retry loop of earlier designs is not needed.
-    //
-    // The submit outcome is carried in a per-call holder read after compute returns. A previous
-    // revision carried it on the shared worker field (written inside the lambda, read after
-    // compute) — but that field is shared across submitters, so a second submitter's compute
-    // could overwrite the first submitter's outcome between its compute-return and its field
-    // read, silently skipping the global-budget charge for an enqueued task (budget drifts low).
-    // The holder costs one small array per submit on the sync/worker plane — never the read path.
-    final int[] outcome = new int[1];
+    // One atomic compute decides both "does this key already have a worker" and "is the
+    // task accepted", so a worker can never end up in the map without a task to grant.
+    // The bin lock also serializes firstTask/queue mutation: KeyWorker is not thread-safe
+    // and relies on this lock for every enqueue. The outcome travels in a one-element
+    // array because compute has no second return value: 0 = refused, 1 = created the
+    // worker, 2 = enqueued behind an existing one.
+    int[] outcome = new int[1];
     KeyWorker worker = queues.compute(key, (k, existing) -> {
-      if (existing == null) {
-        KeyWorker created = new KeyWorker(key, new PendingTask(task, effectiveWeight));
-        outcome[0] = OUTCOME_CREATED;
-        // Park jitter is drawn once per worker incarnation, inside the same atomic
-        // insertion that fixes the key's ordering — a ThreadLocalRandom draw is
-        // cheap enough for the bin lock.
-        if (jitterMs > 0) {
-          created.startDelayNanos = TimeUnit.MILLISECONDS.toNanos(ThreadLocalRandom.current().nextLong(jitterMs));
-        }
-        return created;
+      // A close() that raced the entry check must not leave a worker created after
+      // queues.clear(): re-read the flag under the bin lock.
+      if (closed) {
+        return existing;
       }
 
-      existing.lastSubmitOutcome = existing.enqueue(task, effectiveWeight, maxQueuePerKey)
-        ? OUTCOME_ENQUEUED
-        : OUTCOME_REJECTED;
-      outcome[0] = existing.lastSubmitOutcome;
+      if (existing == null) {
+        outcome[0] = 1;
+        // The first task is stored inline (task + positive weight): the common single-task
+        // burst allocates neither a PendingTask carrier nor a deque.
+        return new KeyWorker(key, task, effectiveWeight);
+      }
+
+      if (!existing.enqueue(task, effectiveWeight)) {
+        return existing;
+      }
+      outcome[0] = 2;
       return existing;
     });
 
-    if (outcome[0] != OUTCOME_REJECTED) {
-      globalPendingUnits.add(effectiveWeight);
-    } else {
-      // Rate-limited: one WARN per window (ADR-0037 one-per-window convention) —
-      // a burst of same-key submissions must not flood the log.
-      long rejected = rejectedPerKeyCounter.incrementAndGet();
-      if (queueFullLogThrottle.tryAcquire()) {
-        log.warn("[{}] Task queue full for key {}. Task rejected ({} total rejected).", name, key, rejected);
+    if (outcome[0] == 0) {
+      // A close() during the compute is shutdown, not backpressure; only a live dispatcher
+      // reports the per-key bound.
+      if (!closed) {
+        log.debug("[{}] Task queue full for key {}. Task rejected.", name, key);
       }
+      return false;
     }
 
-    // Grant the first executor submission exactly once per worker incarnation.
-    // The start decision is moved here via CAS: executeWorker must run outside of
-    // compute (the executor call may reject or block, and the map bin lock must not
-    // be held while invoking it). runCycle's continuation calls executeWorker
-    // directly and is not affected by this guard.
-    if (worker.scheduled.compareAndSet(false, true)) {
-      executeWorker(worker);
+    // close() may have cleared the map after admission. A worker this call created never
+    // started, so refusing it is accurate and the caller may take its local fallback. A task
+    // appended to an existing worker may already have been granted and executed, so the false
+    // return would make the caller replay it as an INVALIDATE and erase the value it just
+    // applied; shutdown is lossy, and this call reports acceptance.
+    if (closed) {
+      if (outcome[0] == 1) {
+        queues.remove(key, worker);
+        return false;
+      }
+      return true;
     }
+
+    // LongAdder mutation is not transactional: adjust the budget only after the compute
+    // has committed the decision.
+    globalPendingUnits.add(effectiveWeight);
+
+    // The creator of the worker grants the first cycle; every later cycle is re-driven by
+    // runCycle after it settles.
+    if (outcome[0] == 1) {
+      startWorker(worker, jitter);
+    }
+    return true;
   }
 
   /**
-   * Submits the worker to the underlying executor. The worker's next batch is only granted
-   * once it runs on an executor thread, so if this submission is rejected the tasks are still
-   * safely held by the worker — nothing is lost.
+   * Schedule a new worker's first cycle, applying the optional start-jitter park. The random
+   * delay is drawn here, outside the map's bin lock, so a submission never holds the bucket
+   * lock across the generator. A rejected park falls through to an immediate submission,
+   * whose own rejection path retires the worker.
    *
-   * <p>If the worker still carries an unparked start-jitter (drawn at creation), the first
-   * cycle is scheduled with that delay instead of running immediately — the jitter park
-   * releases the pool thread for the whole delay rather than sleeping inside it. The delay is
-   * consumed exactly once per worker incarnation: continuations and rejection retries observe
-   * {@code 0} and submit immediately. If the scheduler rejects the park (shutting down), the
-   * immediate-submission path below takes over with its own rejection retry.
-   *
-   * <p>If the executor rejects the submission, a delayed retry re-drives the same worker
-   * (self-healing, does not depend on future submissions).</p>
+   * @param worker the newly created worker
+   * @param jitter whether this submission opted into the start-jitter park
    */
-  private void executeWorker(KeyWorker worker) {
-    long parkNanos = worker.startDelayNanos;
-    if (parkNanos > 0) {
-      worker.startDelayNanos = 0;
-      try {
-        executor.schedule(() -> runCycle(worker), parkNanos, TimeUnit.NANOSECONDS);
-        return;
-      } catch (RejectedExecutionException e) {
-        // Shutting down — fall through to the immediate submission, whose own
-        // rejection retry keeps the worker self-healing or lets close() clean up.
+  private void startWorker(KeyWorker worker, boolean jitter) {
+    if (jitter && jitterMs > 0L) {
+      long delayMs = ThreadLocalRandom.current().nextLong(jitterMs);
+      if (delayMs > 0L) {
+        try {
+          executor.schedule(worker, delayMs, TimeUnit.MILLISECONDS);
+          return;
+        } catch (RejectedExecutionException ignored) {
+          // Fall through to immediate execution, whose rejection path retires the worker.
+        }
       }
     }
+    scheduleWorker(worker);
+  }
+
+  /** Submit the worker's next cycle; a rejection retires it and releases its budget. */
+  private void scheduleWorker(KeyWorker worker) {
     try {
-      executor.execute(() -> runCycle(worker));
+      executor.execute(worker);
     } catch (RejectedExecutionException e) {
-      // Self-healing retry: do not rely on future submissions to re-trigger.
-      try {
-        executor.schedule(
-          () -> {
-            if (!closed) {
-              executeWorker(worker);
-            }
-          },
-          REJECTION_RETRY_DELAY_MS,
-          TimeUnit.MILLISECONDS
-        );
-      } catch (RejectedExecutionException ignored) {
-        // Executor is shutting down; close() handles cleanup.
-      }
+      abandon(worker);
     }
   }
 
   /**
-   * Runs one batch of tasks for a worker on the executor thread: grant the batch atomically,
-   * execute every task (an exception in one task must not kill the batch), then submit the
-   * worker again for the next batch: a single pool slot per {@code maxTasksPerCycle} tasks.
-   * A worker whose grant left nothing queued was removed from the map by that (empty) grant,
-   * and the continuation cycle simply discovers its own absence and returns.
-   *
-   * <p>The <b>last</b> task of the granted batch is executed with {@code endOfBatch == true}
-   * (ADR-0071): the Disruptor {@code BatchEventProcessor} batching hint. All earlier tasks of
-   * the batch see {@code false}. The flag is derived from the grant's extent — a submission
-   * that lands behind the running batch simply becomes the tail of a later cycle.
+   * Remove a worker the executor will not run and discharge the weight its dropped tasks
+   * held — the last-resort cleanup when a shut-down executor rejects the re-drive.
    */
-  @SuppressWarnings("java:S1181")
-  // catching Throwable is deliberate: an Error in one task must not strand
-  // the remaining tasks of the key (the JDK would let it kill the worker thread)
+  private void abandon(KeyWorker worker) {
+    // The worker is retiring, so no other thread observes its grant field: reuse it to carry
+    // the released-units total out of the compute.
+    worker.grantedUnits = 0L;
+    queues.compute(worker.key, (k, current) -> {
+      if (current != worker) {
+        return current;
+      }
+
+      long units = worker.firstWeight;
+      if (worker.queue != null) {
+        for (PendingTask<T> pending : worker.queue) {
+          units += pending.weight;
+        }
+      }
+      worker.grantedUnits = units;
+      return null;
+    });
+    long released = worker.grantedUnits;
+    if (released > 0L) {
+      globalPendingUnits.add(-released);
+    }
+    log.warn(
+      "[{}] Executor refused every submission for key={}; dropped {} pending unit(s) so the key can be rescheduled",
+      name,
+      worker.key,
+      released
+    );
+  }
+
+  /**
+   * Grant one batch for the worker and hand it to the consumer, then either resubmit the
+   * worker for the next batch or retire it. A consumer failure is reported through the
+   * exception-handler chain and never kills the worker thread.
+   */
   private void runCycle(KeyWorker worker) {
+    // Fast-exit for a worker that was already removed (close() clears the map) — its
+    // granted tasks (none yet) and budget (already reset by close()) need no settlement.
     if (closed) {
       queues.remove(worker.key, worker);
       return;
     }
-    List<PendingTask> batch = grantBatch(worker);
-    if (batch.isEmpty()) {
-      // The worker was replaced or removed concurrently (e.g. close() cleared the map while
-      // the batch was being granted); nothing to run.
-      return;
+
+    List<T> tasks = grantBatch(worker);
+    if (tasks == null) {
+      return; // replaced or removed concurrently
     }
-    int lastIndex = batch.size() - 1;
-    for (int i = 0; i <= lastIndex; i++) {
-      PendingTask pending = batch.get(i);
+
+    // grantBatch published the batch weight on the worker under the bin lock; this thread
+    // reads it immediately after the compute returns, on the same thread that took the
+    // lock. Clearing it here keeps the field clear for the next grant.
+    long batchUnits = worker.grantedUnits;
+    worker.grantedUnits = 0L;
+    try {
+      // Second closed check: close() may have run between grantBatch and here. The
+      // granted tasks were taken out of the queue and must NOT run after close; the
+      // finally below still settles their weight so the counter does not drift.
       if (closed) {
-        // Dispatcher was closed mid-batch; remaining tasks must never run.
         queues.remove(worker.key, worker);
         return;
       }
-      try {
-        pending.execute(i == lastIndex);
-      } catch (Throwable t) {
-        // Route through the injectable exception-handler chain (WARN log by default) and keep
-        // consuming the batch — one failing task must not strand the remaining tasks of the key.
-        ZetaExceptionHandler.handleException("[" + name + "] Task execution failed for key " + worker.key, t);
-      }
-      // Discharge the budget unit for each executed task, keeping the counter paired with
-      // the actual number of pending tasks. After close() the counter was reset, so
-      // in-flight batches discharging here may drive it transiently negative — harmless,
-      // as no further submissions are accepted once closed.
-      globalPendingUnits.add(-pending.weight());
+
+      consumer.accept(tasks);
+    } catch (Throwable t) {
+      ZetaExceptionHandler.handleException("[" + name + "] Batch execution failed for key " + worker.key, t);
+    } finally {
+      // Settlement must run even when the consumer throws: a leaked batch weight
+      // permanently consumes global budget until the dispatcher is closed.
+      globalPendingUnits.add(-batchUnits);
     }
-    // Continuation: submit the next batch. The grant loop re-drives the worker:
-    // a cycle whose grant left queued work runs the next batch; a drained worker
-    // was removed from the map by that (empty) grant and the cycle simply ends —
-    // the one extra executor round-trip per drained worker is the price of keeping
-    // the worker in the map while its batch executes (see grantBatch).
-    executeWorker(worker);
+
+    // compute's return value answers "still has work": this worker means yes, anything
+    // else (a replaced worker, or null from the retirement) means no.
+    boolean pending =
+      queues.compute(worker.key, (k, current) -> {
+        if (current != worker) {
+          return current;
+        }
+
+        if (worker.firstTask != null || (worker.queue != null && !worker.queue.isEmpty())) {
+          return worker;
+        }
+        return null;
+      }) ==
+      worker;
+    if (pending) {
+      scheduleWorker(worker);
+    }
   }
 
   /**
-   * Atomically grants the next batch of tasks for the worker — up to {@code maxTasksPerCycle}
-   * of its first task plus queued tasks. The worker <b>stays in the map</b> while the granted
-   * batch executes: a submission racing the batch enqueues behind it, which keeps per-key FIFO
-   * ordering, the never-concurrent guarantee, and the {@code maxQueuePerKey} bound all
-   * observable for tasks submitted while an earlier batch is still running. The worker is
-   * removed from the map only when a grant finds nothing to run (the idle case), so a future
-   * submission creates a fresh worker instead of enqueueing into a dead one; if the map entry
-   * no longer belongs to this worker, the grant is skipped. Any submission racing this compute
-   * either enqueues into this worker before its removal (the task is picked up by the next
-   * grant or by this worker's continuation) or, after the removal, creates a fresh worker via
-   * the atomic insertion — no worker in the map is ever without tasks to grant.
+   * Atomically take up to {@code maxTasksPerCycle} tasks from the worker and unwrap them
+   * into the consumer's batch. The worker stays in the map while the batch runs, so a
+   * submission racing the batch enqueues behind it — which preserves FIFO order and the
+   * per-key bound; it is removed only when a grant finds nothing to run.
    *
-   * @param worker the worker to grant tasks from
-   * @return the granted batch; empty if the worker was idle (and removed), replaced or removed
-   *         concurrently
+   * <p>A single-task grant uses an immutable one-element list: the common burst needs no
+   * queue and no second list to unwrap into.
+   *
+   * @return the granted tasks, or {@code null} when the worker was idle (and removed) or
+   *         replaced
    */
-  private List<PendingTask> grantBatch(KeyWorker worker) {
-    List<PendingTask> batch = new ArrayList<>(maxTasksPerCycle);
-    queues.compute(worker.key, (k, v) -> {
-      // Only touch our own worker. If the entry was replaced or removed (e.g. by close()),
-      // leave the batch empty and do not disturb the current entry.
-      if (v != worker) {
-        return v;
-      }
-      PendingTask first = worker.firstTask;
-      worker.firstTask = null;
-      if (first == null && (worker.queue == null || worker.queue.isEmpty())) {
-        // Nothing left: the worker is idle and must be removed from the map so a
-        // future submission creates a fresh worker instead of enqueueing into a
-        // dead one. The batch stays empty and the running cycle returns.
-        return null;
-      }
+  private List<T> grantBatch(KeyWorker worker) {
+    boolean granted =
+      queues.compute(worker.key, (k, current) -> {
+        if (current != worker) {
+          return current;
+        }
 
-      if (first != null) {
-        batch.add(first);
-      }
-      while (worker.queue != null && !worker.queue.isEmpty() && batch.size() < maxTasksPerCycle) {
-        batch.add(worker.queue.poll());
-      }
-      // Keep the worker in the map for the duration of the batch: removing it here
-      // (at grant time) would orphan the running batch — submissions during execution
-      // would create a fresh worker whose cycle runs concurrently with this batch and
-      // bypasses the queue bound entirely (the fullQueue_rejectsOverflow regression).
-      return worker;
-    });
-    return batch;
+        T first = worker.firstTask;
+        int firstWeight = worker.firstWeight;
+        worker.firstTask = null;
+        worker.firstWeight = 0;
+        boolean queueEmpty = worker.queue == null || worker.queue.isEmpty();
+        if (first == null && queueEmpty) {
+          return null; // idle: remove so a later submission starts a fresh worker
+        }
+
+        if (first != null && queueEmpty) {
+          // Common case: exactly one task pending. Skip the ArrayList and the poll loop;
+          // List.of(first) is an immutable singleton with no defensive copy.
+          worker.grantedTasks = List.of(first);
+          worker.grantedUnits = firstWeight;
+          return worker;
+        }
+
+        int queueSize = worker.queue.size();
+        List<T> tasks = new ArrayList<>(Math.min(maxTasksPerCycle, queueSize + 1));
+        long units = 0L;
+        if (first != null) {
+          tasks.add(first);
+          units += firstWeight;
+        }
+
+        while (!worker.queue.isEmpty() && tasks.size() < maxTasksPerCycle) {
+          PendingTask<T> next = worker.queue.poll();
+          tasks.add(next.task);
+          units += next.weight;
+        }
+        // Publish the grant on the worker: runCycle reads it immediately after this
+        // compute returns, on the same thread that took the bin lock.
+        worker.grantedTasks = tasks;
+        worker.grantedUnits = units;
+        return worker;
+      }) ==
+      worker;
+    return granted ? worker.grantedTasks : null;
   }
 
+  /**
+   * Stop accepting submissions and drop every queued task. In-flight batches finish on
+   * their own thread; the loss is bounded by the next periodic broadcast or write.
+   */
   @Override
   public void close() {
     closed = true;
-    // Clearing the map makes every in-flight runCycle see an empty grant (or a per-task
-    // closed check) and self-remove; queued tasks are dropped without executing.
-    // Delayed submissions still pending on the shared scheduler are dropped on arrival
-    // (closed check in submitWithWeight) — the shutdown window is intentionally lossy;
-    // lost messages are bounded by the next periodic broadcast / application write.
+    // Clearing the map drops every queued task: no new worker can be created (closed is
+    // true) and any in-flight runCycle that reaches grantBatch finds current != worker
+    // (the map entry is gone) and returns null. globalPendingUnits is reset because the
+    // tasks that held the weight are gone with the map.
     queues.clear();
-    // The dropped tasks were charged to the budget; reset it. In-flight runCycle batches
-    // discharging after this point may drive it transiently negative — harmless,
-    // as no further submissions are accepted once closed.
     globalPendingUnits.reset();
   }
 
   /**
-   * Snapshot of the dispatcher's overload gate, backlog and drop counters (ADR-0072 D-1).
+   * One key's queue. The first task and its weight are stored inline, so the common
+   * single-task burst allocates neither a {@link PendingTask} carrier nor an
+   * {@link ArrayDeque}. {@code firstTask}/{@code firstWeight}/{@code queue} are only
+   * touched under the map's bin lock (inside {@code compute}) or during construction.
    *
-   * <p>Without this surface the three drop points — the global weighted budget
-   * ({@link #maxGlobalPendingUnits}), the per-key queue bound ({@link #maxQueuePerKey}) and the
-   * shutdown/close window — are observable only through their throttled WARN logs, i.e. only
-   * <em>after</em> the gate has closed. Exposing them lets a caller (Actuator endpoint, Micrometer
-   * gauge, health indicator) tell "no traffic" apart from "gate saturated", which is exactly the
-   * distinction LMAX Disruptor's {@code Sequencer#remainingCapacity()} and
-   * {@code ConsumerRepository#hasBacklog} make available to its operators.
-   *
-   * <p>Cost is one {@link LongAdder#sum()} (the same traversal the submission gate already pays),
-   * one {@link ConcurrentHashMap#size()} estimate and two counter reads — the method is intended
-   * for periodic scraping, not for the submission path.
-   *
-   * @return an instant-indicative snapshot of the dispatcher's gate state; never {@code null}
+   * <p>Runs its own cycle so a submission never allocates a {@code Runnable} wrapper.
    */
-  public DispatcherStats stats() {
-    return new DispatcherStats(
-      globalPendingUnits.sum(),
-      maxGlobalPendingUnits,
-      queues.size(),
-      dropCounter.get(),
-      rejectedPerKeyCounter.get()
-    );
-  }
-
-  /** Submit outcome constants written by the compute remapping into the local holder. */
-  private static final int OUTCOME_CREATED = 0;
-  private static final int OUTCOME_ENQUEUED = 1;
-  private static final int OUTCOME_REJECTED = -1;
-
-  /**
-   * Internal state of a single key. At most one worker exists per key in the map, and it is
-   * the map entry itself that encodes "running": while the worker is in the map, submissions
-   * enqueue into it; when it has consumed everything, it removes itself.
-   *
-   * <p>The first task is stored separately from the queue so that the common single-task case
-   * never allocates the {@link ArrayDeque} at all.
-   */
-  private static final class KeyWorker {
+  private final class KeyWorker implements Runnable {
 
     private static final int INITIAL_QUEUE_SIZE = 8;
 
     final Object key;
-    /**
-     * Set exactly once per worker incarnation, via CAS, by the submit path to
-     * grant the first executor submission. runCycle's continuation does not
-     * consult it. Reset implicitly when the worker is removed from the map and
-     * a fresh worker is created.
-     */
-    final AtomicBoolean scheduled = new AtomicBoolean(false);
-    /**
-     * Last submit outcome observed for this worker (best-effort debug aid only).
-     * The authoritative per-submit outcome is carried in the submitter's local holder —
-     * this shared field may be overwritten by a concurrent submitter and must never
-     * gate budget accounting.
-     */
-    int lastSubmitOutcome = OUTCOME_CREATED;
-    /**
-     * Start-jitter park (nanos) drawn at creation; consumed exactly once by the first
-     * {@code executeWorker} call, which schedules the first cycle with this delay instead of
-     * running it immediately (releasing the pool thread for the duration). Volatile because
-     * the consuming write and the continuation reads happen on executor threads, not on the
-     * submitting thread.
-     */
-    volatile long startDelayNanos;
-    /**
-     * First task, stored separately from the queue so that the common single-task case never
-     * allocates the {@link ArrayDeque} at all. Accessed only while holding the map bin lock
-     * (i.e. inside {@code queues.compute(...)}) or during construction (safe publication via
-     * the {@code ConcurrentHashMap}), so it deliberately needs no {@code volatile}.
-     */
-    PendingTask firstTask;
-    /**
-     * Queued tasks behind {@link #firstTask}. Only accessed while holding the map bin lock
-     * (i.e. inside {@code queues.compute(...)}), so no additional synchronization is needed.
-     */
-    ArrayDeque<PendingTask> queue;
 
-    KeyWorker(Object key, PendingTask firstTask) {
+    ArrayDeque<PendingTask<T>> queue;
+    /**
+     * The weight of the batch granted by the cycle currently running. Written under the bin
+     * lock by {@code grantBatch}, read once by {@code runCycle} on the same thread, and
+     * cleared before the next schedule; a retired worker reuses it to carry the units it
+     * discharges.
+     */
+    long grantedUnits;
+    /**
+     * Tasks granted by the cycle currently running, unwrapped from their
+     * {@link PendingTask} carriers. Written under the bin lock by {@code grantBatch}
+     * and read once by the same cycle; the worker is rescheduled only after the
+     * batch settles, so no other cycle can overwrite them meanwhile.
+     */
+    List<T> grantedTasks;
+    int firstWeight;
+    T firstTask;
+
+    KeyWorker(Object key, T firstTask, int firstWeight) {
       this.key = key;
       this.firstTask = firstTask;
+      this.firstWeight = firstWeight;
     }
 
-    /**
-     * Enqueues a task behind the current {@link #firstTask}. Must only be called while holding
-     * the map bin lock (inside {@code compute}). The capacity check counts only queued tasks —
-     * the task currently being executed (or waiting as {@code firstTask}) does not count
-     * against {@code maxSize}.
-     *
-     * @param task    the task to enqueue ({@link Runnable} or {@link BatchAwareTask})
-     * @param weight  the task's weight in global pending units
-     * @param maxSize maximum allowed queue size
-     * @return true if the task was enqueued, false if the queue is full
-     */
-    boolean enqueue(Object task, int weight, int maxSize) {
+    @Override
+    public void run() {
+      runCycle(this);
+    }
+
+    boolean enqueue(T task, int weight) {
       if (queue == null) {
         queue = new ArrayDeque<>(INITIAL_QUEUE_SIZE);
       }
-      if (queue.size() >= maxSize) {
+
+      // firstTask is pending until the first grant; counting only the deque would admit
+      // maxQueuePerKey + 1 tasks while the start-jitter park holds that first task back.
+      int pendingCount = queue.size() + (firstTask != null ? 1 : 0);
+      if (pendingCount >= maxQueuePerKey) {
         return false;
       }
-      queue.addLast(new PendingTask(task, weight));
+      queue.addLast(new PendingTask<>(task, weight));
       return true;
     }
   }
 
-  /**
-   * A submitted task together with its weight in global pending units. The weight is charged
-   * to {@link #globalPendingUnits} at submission and discharged when the task executes, so
-   * the budget tracks the aggregate memory held by pending tasks.
-   *
-   * <p>{@code task} is a {@link Runnable} (the common, zero-overhead submission path) or a
-   * {@link BatchAwareTask} (receives the {@code endOfBatch} hint at execution time — the flag
-   * is only known when the granted batch's extent is, i.e. inside {@code runCycle}). Stored
-   * as {@code Object} so a plain submission allocates exactly one {@code PendingTask} and no
-   * adapter; the {@code instanceof} in {@link #execute} is a predictably-taken branch on a
-   * final field.
-   */
-  private record PendingTask(Object task, int weight) {
-    void execute(boolean endOfBatch) {
-      if (task instanceof BatchAwareTask batchAware) {
-        batchAware.run(endOfBatch);
-      } else {
-        ((Runnable) task).run();
-      }
-    }
-  }
+  /** A queued task with its positive weight. */
+  private record PendingTask<T>(T task, int weight) {}
 }

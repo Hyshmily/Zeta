@@ -22,6 +22,7 @@ import ch.qos.logback.classic.Level;
 import ch.qos.logback.classic.LoggerContext;
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.AppenderBase;
+import io.github.hyshmily.zeta.sync.worker.WorkerHeartbeatMessage;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Set;
@@ -36,13 +37,13 @@ import org.slf4j.LoggerFactory;
 class ConsistentHashRingTest {
 
   /**
-   * Verifies that an empty ring routes all keys to null and reports isEmpty as true.
+   * Verifies that an empty ring routes all keys to null and holds no live nodes.
    */
   @Test
   void emptyRing_shouldRouteToNull() {
-    ConsistentHashRing ring = new ConsistentHashRing(1);
+    ConsistentHashRing ring = new ConsistentHashRingImpl(1);
     assertThat(ring.locateNode("any-key", s -> true)).isNull();
-    assertThat(ring.isEmpty()).isTrue();
+    assertThat(ring.getNodes()).isEmpty();
   }
 
   /**
@@ -50,11 +51,26 @@ class ConsistentHashRingTest {
    */
   @Test
   void singleNode_shouldRouteAllKeysToIt() {
-    ConsistentHashRing ring = new ConsistentHashRing(1);
+    ConsistentHashRing ring = new ConsistentHashRingImpl(1);
     ring.rebuild(Set.of("node-a"));
-    assertThat(ring.isEmpty()).isFalse();
+    assertThat(ring.getNodes()).containsExactly("node-a");
     for (int i = 0; i < 100; i++) {
       assertThat(ring.locateNode("key-" + i, s -> true)).isEqualTo("node-a");
+    }
+  }
+
+  /**
+   * The snapshot-only route is the predicate route with every ring node alive: the reporter
+   * relies on the ring's node set already being the last reconciled alive set.
+   */
+  @Test
+  void locateNode_withoutPredicate_shouldMatchTheAllAliveRoute() {
+    ConsistentHashRing ring = new ConsistentHashRingImpl(100);
+    ring.rebuild(Set.of("node-a", "node-b", "node-c"));
+
+    for (int i = 0; i < 100; i++) {
+      String key = "key-" + i;
+      assertThat(ring.locateNode(key)).isEqualTo(ring.locateNode(key, s -> true));
     }
   }
 
@@ -63,7 +79,7 @@ class ConsistentHashRingTest {
    */
   @Test
   void multiNode_shouldDistributeKeys() {
-    ConsistentHashRing ring = new ConsistentHashRing(100);
+    ConsistentHashRing ring = new ConsistentHashRingImpl(100);
     ring.rebuild(Set.of("node-a", "node-b", "node-c"));
 
     Map<String, Integer> distribution = new HashMap<>();
@@ -81,7 +97,7 @@ class ConsistentHashRingTest {
    */
   @Test
   void removeNode_shouldOnlyAffectKeysThatBelongedToIt() {
-    ConsistentHashRing ring = new ConsistentHashRing(100);
+    ConsistentHashRing ring = new ConsistentHashRingImpl(100);
     ring.rebuild(Set.of("node-a", "node-b", "node-c"));
 
     String[] testKeys = IntStream.range(0, 500)
@@ -116,7 +132,7 @@ class ConsistentHashRingTest {
    */
   @Test
   void addNode_shouldNotChangeExistingNodeAssignments() {
-    ConsistentHashRing ring = new ConsistentHashRing(100);
+    ConsistentHashRing ring = new ConsistentHashRingImpl(100);
     ring.rebuild(Set.of("node-a", "node-b"));
 
     String[] testKeys = IntStream.range(0, 500)
@@ -141,11 +157,31 @@ class ConsistentHashRingTest {
   }
 
   /**
+   * Two node IDs that collide in {@link String#hashCode()} must still own independent virtual
+   * sets; the ring seeds from a 64-bit hash of the full ID, not the 32-bit polynomial value.
+   */
+  @Test
+  void rebuild_placesBothNodesWhenStringHashCodesCollide() {
+    assertThat("Aa".hashCode()).isEqualTo("BB".hashCode());
+    ConsistentHashRing ring = new ConsistentHashRingImpl(500);
+    ring.rebuild(Set.of("Aa", "BB"));
+
+    Map<String, Integer> distribution = new HashMap<>();
+    for (int i = 0; i < 1_000; i++) {
+      String node = ring.locateNode("key-" + i, s -> true);
+      distribution.merge(node, 1, Integer::sum);
+    }
+
+    assertThat(distribution).containsOnlyKeys("Aa", "BB");
+    assertThat(distribution.values()).allMatch(count -> count > 0);
+  }
+
+  /**
    * Verifies that locateNode returns the same node consistently for the same key.
    */
   @Test
   void locateNode_shouldBeDeterministic() {
-    ConsistentHashRing ring = new ConsistentHashRing(100);
+    ConsistentHashRing ring = new ConsistentHashRingImpl(100);
     ring.rebuild(Set.of("node-a", "node-b"));
 
     String first = ring.locateNode("some-test-key", s -> true);
@@ -159,12 +195,12 @@ class ConsistentHashRingTest {
    */
   @Test
   void rebuild_emptySet_shouldClearRing() {
-    ConsistentHashRing ring = new ConsistentHashRing(10);
+    ConsistentHashRing ring = new ConsistentHashRingImpl(10);
     ring.rebuild(Set.of("node-a"));
-    assertThat(ring.isEmpty()).isFalse();
+    assertThat(ring.getNodes()).containsExactly("node-a");
 
     ring.rebuild(Set.of());
-    assertThat(ring.isEmpty()).isTrue();
+    assertThat(ring.getNodes()).isEmpty();
     assertThat(ring.locateNode("key", s -> true)).isNull();
   }
 
@@ -173,19 +209,19 @@ class ConsistentHashRingTest {
    */
   @Test
   void getNodes_shouldReturnLiveNodesForSharding() {
-    ConsistentHashRing ring = new ConsistentHashRing(10);
+    ConsistentHashRing ring = new ConsistentHashRingImpl(10);
     ring.rebuild(Set.of("node-a", "node-b", "node-c"));
     assertThat(ring.getNodes()).containsExactlyInAnyOrder("node-a", "node-b", "node-c");
   }
 
   /**
-   * Verifies that nodeCount returns the number of physical (not virtual) nodes.
+   * Verifies that getNodes returns the physical (not virtual) nodes placed by the rebuild.
    */
   @Test
-  void nodeCount_shouldReturnPhysicalNodeCount() {
-    ConsistentHashRing ring = new ConsistentHashRing(10);
+  void getNodes_shouldReturnPhysicalNodeCount() {
+    ConsistentHashRing ring = new ConsistentHashRingImpl(10);
     ring.rebuild(Set.of("a", "b", "c"));
-    assertThat(ring.nodeCount()).isEqualTo(3);
+    assertThat(ring.getNodes()).hasSize(3);
   }
 
   /**
@@ -193,7 +229,7 @@ class ConsistentHashRingTest {
    */
   @Test
   void rebuild_sameNodes_shouldNotAffectRouting() {
-    ConsistentHashRing ring = new ConsistentHashRing(100);
+    ConsistentHashRing ring = new ConsistentHashRingImpl(100);
     ring.rebuild(Set.of("a", "b"));
     String before = ring.locateNode("key", s -> true);
 
@@ -206,7 +242,7 @@ class ConsistentHashRingTest {
    */
   @Test
   void noDuplicateKeys_underConcurrentAccess() throws Exception {
-    ConsistentHashRing ring = new ConsistentHashRing(100);
+    ConsistentHashRing ring = new ConsistentHashRingImpl(100);
     ring.rebuild(Set.of("node-a", "node-b", "node-c"));
 
     java.util.concurrent.Executors.newFixedThreadPool(10).invokeAll(
@@ -219,30 +255,65 @@ class ConsistentHashRingTest {
     );
   }
 
+  /**
+   * The health-view overload must route exactly like the id-based predicate, and a Worker
+   * that dies after the last rebuild must be skipped by the slot probe (the ring still holds
+   * it until the next reconcile).
+   */
+  @Test
+  void locateNode_withHealthView_shouldMatchTheIdProbeAndSkipADeadNode() {
+    HealthViewImpl view = new HealthViewImpl(30_000);
+    view.onHeartbeat(heartbeat("node-a"));
+    view.onHeartbeat(heartbeat("node-b"));
+    view.onHeartbeat(heartbeat("node-c"));
+    ConsistentHashRing ring = new ConsistentHashRingImpl(100);
+    assertThat(ring.rebuildIfPossible(view)).containsExactlyInAnyOrder("node-a", "node-b", "node-c");
+
+    for (int i = 0; i < 500; i++) {
+      String key = "health-key-" + i;
+      assertThat(ring.locateNode(key, view)).isEqualTo(ring.locateNode(key, node -> view.isAlive(node)));
+    }
+
+    // node-b dies while the ring still contains it: both liveness sources must skip it.
+    view.onHeartbeat(new WorkerHeartbeatMessage(0L, "node-b", 1L, false, null));
+    for (int i = 0; i < 500; i++) {
+      String key = "health-key-" + i;
+      String routed = ring.locateNode(key, view);
+      assertThat(routed).isIn("node-a", "node-c");
+      assertThat(routed).isEqualTo(ring.locateNode(key, node -> view.isAlive(node)));
+    }
+  }
+
+  private static WorkerHeartbeatMessage heartbeat(String workerId) {
+    return new WorkerHeartbeatMessage(0L, workerId, 1L, true, null);
+  }
+
   @Test
   void allNodesDead_shouldReturnNull() {
-    ConsistentHashRing ring = new ConsistentHashRing(10);
+    ConsistentHashRing ring = new ConsistentHashRingImpl(10);
     ring.rebuild(Set.of("node-a", "node-b"));
     assertThat(ring.locateNode("any-key", s -> false)).isNull();
   }
 
   @Test
   void locateNode_withNullKey_shouldThrowNullPointer() {
-    ConsistentHashRing ring = new ConsistentHashRing(10);
+    ConsistentHashRing ring = new ConsistentHashRingImpl(10);
     ring.rebuild(Set.of("node-a"));
     assertThatNullPointerException().isThrownBy(() -> ring.locateNode(null, s -> true));
   }
 
   @Test
   void locateNode_withNullPredicate_shouldThrowNullPointer() {
-    ConsistentHashRing ring = new ConsistentHashRing(10);
+    ConsistentHashRing ring = new ConsistentHashRingImpl(10);
     ring.rebuild(Set.of("node-a"));
-    assertThatNullPointerException().isThrownBy(() -> ring.locateNode("key", null));
+    assertThatNullPointerException().isThrownBy(() ->
+      ring.locateNode("key", (java.util.function.Predicate<String>) null)
+    );
   }
 
   @Test
   void singleVirtualNode_shouldStillRouteConsistently() {
-    ConsistentHashRing ring = new ConsistentHashRing(1);
+    ConsistentHashRing ring = new ConsistentHashRingImpl(1);
     ring.rebuild(Set.of("node-a"));
     for (int i = 0; i < 100; i++) {
       assertThat(ring.locateNode("key-" + i, s -> true)).isEqualTo("node-a");
@@ -251,19 +322,19 @@ class ConsistentHashRingTest {
 
   @Test
   void getNodes_onEmptyRing_shouldBeEmpty() {
-    ConsistentHashRing ring = new ConsistentHashRing(10);
+    ConsistentHashRing ring = new ConsistentHashRingImpl(10);
     assertThat(ring.getNodes()).isEmpty();
   }
 
   @Test
   void rebuild_withNull_shouldThrowNullPointer() {
-    ConsistentHashRing ring = new ConsistentHashRing(10);
+    ConsistentHashRing ring = new ConsistentHashRingImpl(10);
     assertThatNullPointerException().isThrownBy(() -> ring.rebuild(null));
   }
 
   @Test
   void largeRing_shouldRouteAllKeys() {
-    ConsistentHashRing ring = new ConsistentHashRing(50);
+    ConsistentHashRing ring = new ConsistentHashRingImpl(50);
     Set<String> nodes = IntStream.range(0, 100)
       .mapToObj(i -> "node-" + i)
       .collect(java.util.stream.Collectors.toSet());
@@ -274,27 +345,26 @@ class ConsistentHashRingTest {
   }
 
   @Test
-  void nodeCount_withNoNodes_shouldReturnZero() {
-    ConsistentHashRing ring = new ConsistentHashRing(10);
-    assertThat(ring.nodeCount()).isZero();
+  void locateNode_withoutNodes_shouldReturnNull() {
+    ConsistentHashRing ring = new ConsistentHashRingImpl(10);
+    assertThat(ring.getNodes()).isEmpty();
+    assertThat(ring.locateNode("key")).isNull();
   }
 
   /**
    * Verifies the probe-exhaustion logging contract: {@code locateNode} runs on every
-   * routed key (hot path), so exhausting all probes for many keys must produce a single
-   * rate-limited WARN per window — without the key, with a suppressed count — while the
-   * per-key detail stays at DEBUG.
+   * routed key (hot path), so exhaustion is reported per key at DEBUG and never at WARN.
    */
   @Test
-  void probeExhaustion_warnIsRateLimitedAndNeverPerKey() {
-    // More vnodes than MAX_PROBES (512): the probe walk must hit the exhaustion
-    // gate BEFORE it wraps back to the start vnode, or the WARN path is unreachable.
-    ConsistentHashRing ring = new ConsistentHashRing(1000);
+  void probeExhaustion_logsPerKeyAtDebugOnly() {
+    // A large ring makes the exhaustion path reachable for every key: the probe
+    // walk completes exactly one full cycle before reporting exhaustion.
+    ConsistentHashRing ring = new ConsistentHashRingImpl(1000);
     ring.rebuild(Set.of("node-a"));
 
     CollectingAppender appender = new CollectingAppender();
     LoggerContext context = (LoggerContext) LoggerFactory.getILoggerFactory();
-    ch.qos.logback.classic.Logger logbackLogger = context.getLogger(ConsistentHashRing.class);
+    ch.qos.logback.classic.Logger logbackLogger = context.getLogger(ConsistentHashRingImpl.class);
     // The DEBUG assertion below requires DEBUG to actually be emitted — pin the
     // level for the duration of the test (the effective level may be INFO).
     Level originalLevel = logbackLogger.getLevel();
@@ -306,17 +376,13 @@ class ConsistentHashRingTest {
         assertThat(ring.locateNode("dead-key-" + i, s -> false)).isNull();
       }
 
-      // One WARN per 10s window (never one per key), and it must not leak the key.
-      assertThat(appender.events)
-        .filteredOn(e -> e.getLevel() == Level.WARN)
-        .hasSize(1)
-        .allSatisfy(e -> assertThat(e.getFormattedMessage()).doesNotContain("dead-key"));
+      assertThat(appender.events).filteredOn(e -> e.getLevel() == Level.WARN).isEmpty();
 
-      // The per-key detail is DEBUG.
       assertThat(appender.events)
         .filteredOn(e -> e.getLevel() == Level.DEBUG)
         .extracting(ILoggingEvent::getFormattedMessage)
-        .anySatisfy(msg -> assertThat(msg).contains("dead-key-0"));
+        .anySatisfy(msg -> assertThat(msg).contains("dead-key-0"))
+        .anySatisfy(msg -> assertThat(msg).contains("dead-key-19"));
     } finally {
       logbackLogger.detachAppender(appender);
       if (originalLevel != null) {
@@ -325,7 +391,7 @@ class ConsistentHashRingTest {
     }
   }
 
-  /** Minimal logback capture appender (same pattern as {@code VersionControllerTest}). */
+  /** Minimal logback capture appender. */
   private static class CollectingAppender extends AppenderBase<ILoggingEvent> {
 
     final java.util.List<ILoggingEvent> events = new java.util.ArrayList<>();

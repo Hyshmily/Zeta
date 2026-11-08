@@ -15,11 +15,11 @@
  */
 package io.github.hyshmily.zeta.sync;
 
-import io.github.hyshmily.zeta.cache.codec.CacheCompressor;
-
 import static io.github.hyshmily.zeta.constants.ZetaConstants.Amqp.*;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.*;
 
@@ -27,24 +27,29 @@ import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import com.rabbitmq.client.Channel;
 import io.github.hyshmily.zeta.autoconfigure.ZetaProperties;
-import io.github.hyshmily.zeta.cache.cachesupport.impl.EntryLifecycleImpl;
-import io.github.hyshmily.zeta.cache.loader.CacheLoader;
-import io.github.hyshmily.zeta.model.CacheEntry;
+import io.github.hyshmily.zeta.cache.cachesupport.lifecycle.EntryLifecycleImpl;
+import io.github.hyshmily.zeta.cache.cachesupport.loader.CacheLoader;
+import io.github.hyshmily.zeta.cache.cachesupport.raw.CacheEntry;
+import io.github.hyshmily.zeta.cache.cachesupport.raw.EntryDraft;
+import io.github.hyshmily.zeta.model.DecisionStamp;
 import io.github.hyshmily.zeta.model.KeyState;
 import io.github.hyshmily.zeta.sync.worker.DefaultWorkerDecisionHandler;
 import io.github.hyshmily.zeta.sync.worker.WorkerDecisionHandler;
+import io.github.hyshmily.zeta.sync.worker.WorkerDecisionType;
 import io.github.hyshmily.zeta.sync.worker.WorkerListener;
 import io.github.hyshmily.zeta.sync.worker.WorkerListenerProperties;
 import io.github.hyshmily.zeta.sync.worker.WorkerMessage;
 import io.github.hyshmily.zeta.util.TimeSource;
-import io.github.hyshmily.zeta.util.ratelimit.SreRateLimiter;
+import io.github.hyshmily.zeta.util.clock.StampClock;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.Collections;
+import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -62,6 +67,7 @@ class WorkerListenerTest {
   private Channel channel;
   private ScheduledExecutorService scheduler;
   private EntryLifecycleImpl entryLifecycle;
+  private StampClock stampClock;
 
   @BeforeEach
   void setUp() throws IOException {
@@ -70,23 +76,24 @@ class WorkerListenerTest {
     properties.setBroadcastJitterMs(0);
     scheduler = Executors.newSingleThreadScheduledExecutor();
     ZetaProperties ttlConfig = new ZetaProperties();
-    entryLifecycle = new EntryLifecycleImpl(cache, ttlConfig, CacheCompressor.NONE, null);
-    WorkerDecisionHandler handler = handler(k -> "refreshed", null);
+    entryLifecycle = new EntryLifecycleImpl(cache, ttlConfig, null);
+    stampClock = org.mockito.Mockito.mock(StampClock.class);
+    org.mockito.Mockito.when(stampClock.nextStamp()).thenReturn(1L);
+    org.mockito.Mockito.when(stampClock.nextStamps(org.mockito.ArgumentMatchers.anyInt())).thenReturn(1L);
+    WorkerDecisionHandler handler = handler(k -> "refreshed");
     listener = new WorkerListener(properties, scheduler, handler, null);
-    listener.init();
     channel = mock(Channel.class);
   }
 
   @AfterEach
   void resetClock() {
-    // Defensive: clear any leaked TimeSource offset so a prior test class cannot skew this
-    // listener's absolute-expiry arithmetic. The real failure here was the wrong-executor wait
-    // in awaitWorkerTasks, but resetting the static clock hook is cheap insurance.
+    // Clear any leaked TimeSource offset so another test class cannot skew this listener's
+    // absolute-expiry arithmetic.
     TimeSource.setTimeOffsetForTest(0, 0);
   }
 
-  private WorkerDecisionHandler handler(CacheLoader loader, SreRateLimiter limiter) {
-    return new DefaultWorkerDecisionHandler(cache, loader, entryLifecycle, limiter, null, Collections.emptyList());
+  private WorkerDecisionHandler handler(CacheLoader loader) {
+    return new DefaultWorkerDecisionHandler(cache, loader, entryLifecycle, stampClock, Collections.emptyList());
   }
 
   private void awaitWorkerTasks() throws InterruptedException {
@@ -113,7 +120,7 @@ class WorkerListenerTest {
    */
   @Test
   void handleWorkerMessage_hot_shouldAckAndPromote() throws IOException, InterruptedException {
-    listener.handleWorkerMessage(channel, workerMessage("key1", WorkerMessage.TYPE_HOT, 1L));
+    listener.handleWorkerMessage(channel, workerMessage("key1", WorkerDecisionType.HOT.code(), 1L));
     verify(channel).basicAck(anyLong(), anyBoolean());
     awaitWorkerTasks();
     assertThat(cache.getIfPresent("key1")).satisfies(o -> {
@@ -131,7 +138,7 @@ class WorkerListenerTest {
   @Test
   void handleWorkerMessage_cool_shouldAckAndDowngrade() throws IOException, InterruptedException {
     cache.put("key1", hotEntry());
-    listener.handleWorkerMessage(channel, workerMessage("key1", WorkerMessage.TYPE_COOL, 2L));
+    listener.handleWorkerMessage(channel, workerMessage("key1", WorkerDecisionType.COOL.code(), 2L));
     verify(channel).basicAck(anyLong(), anyBoolean());
     awaitWorkerTasks();
     assertThat(cache.getIfPresent("key1")).satisfies(o -> {
@@ -143,16 +150,115 @@ class WorkerListenerTest {
   }
 
   /**
-   * Verifies that a NACK is sent when an error occurs during worker message processing.
+   * Consecutive COOL messages for one key are handed to the handler as one run; HOT stays
+   * one call per message because it creates entries and runs the cluster loader.
    */
   @Test
-  void handleWorkerMessage_shouldNackOnError() throws IOException {
+  void dispatchBatch_shouldHandAConsecutiveCoolRunToTheHandlerAsOneBatch() throws Exception {
+    WorkerDecisionHandler batchHandler = mock(WorkerDecisionHandler.class);
+    CountDownLatch batchSeen = new CountDownLatch(1);
+    AtomicReference<List<WorkerMessage>> captured = new AtomicReference<>();
+    doAnswer(invocation -> {
+      captured.set(invocation.getArgument(0));
+      batchSeen.countDown();
+      return null;
+    })
+      .when(batchHandler)
+      .handleCoolBatch(anyList());
+
+    WorkerListenerProperties properties = new WorkerListenerProperties();
+    properties.setBroadcastJitterMs(0);
+    WorkerListener batchListener = new WorkerListener(properties, scheduler, batchHandler, null);
+
+    // Keep the single scheduler thread busy so both submissions land in the same key worker
+    // before its first cycle grants; this makes the run deterministic instead of timing-based.
+    CountDownLatch release = new CountDownLatch(1);
+    scheduler.execute(() -> {
+      try {
+        release.await();
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+      }
+    });
+    batchListener.handleWorkerMessage(channel, workerMessage("key1", WorkerDecisionType.COOL.code(), 2L));
+    batchListener.handleWorkerMessage(channel, workerMessage("key1", WorkerDecisionType.COOL.code(), 3L));
+    release.countDown();
+
+    assertThat(batchSeen.await(5, TimeUnit.SECONDS)).isTrue();
+    assertThat(captured.get())
+      .hasSize(2)
+      .allSatisfy(msg -> assertThat(msg.type()).isEqualTo(WorkerDecisionType.COOL));
+    verify(batchHandler).handleCoolBatch(anyList());
+    verify(batchHandler, never()).handleCool(any());
+  }
+
+  /**
+   * A COOL run followed by a HOT must still deliver the HOT after the folded run; the
+   * listener must advance past the run instead of dropping the tail of the batch.
+   */
+  @Test
+  void dispatchBatch_shouldContinueWithHotAfterAFoldedCoolRun() throws Exception {
+    WorkerDecisionHandler batchHandler = mock(WorkerDecisionHandler.class);
+    CountDownLatch bothCalls = new CountDownLatch(2);
+    AtomicReference<List<WorkerMessage>> capturedCool = new AtomicReference<>();
+    doAnswer(invocation -> {
+      capturedCool.set(invocation.getArgument(0));
+      bothCalls.countDown();
+      return null;
+    })
+      .when(batchHandler)
+      .handleCoolBatch(anyList());
+    doAnswer(invocation -> {
+      bothCalls.countDown();
+      return null;
+    })
+      .when(batchHandler)
+      .handleHot(any());
+
+    WorkerListenerProperties properties = new WorkerListenerProperties();
+    properties.setBroadcastJitterMs(0);
+    WorkerListener batchListener = new WorkerListener(properties, scheduler, batchHandler, null);
+
+    CountDownLatch release = new CountDownLatch(1);
+    scheduler.execute(() -> {
+      try {
+        release.await();
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+      }
+    });
+    Message cool1Wire = workerMessage("key1", WorkerDecisionType.COOL.code(), 2L);
+    Message cool2Wire = workerMessage("key1", WorkerDecisionType.COOL.code(), 3L);
+    Message hotWire = workerMessage("key1", WorkerDecisionType.HOT.code(), 4L);
+    WorkerMessage cool1 = WorkerMessage.from(cool1Wire);
+    WorkerMessage cool2 = WorkerMessage.from(cool2Wire);
+    WorkerMessage hot = WorkerMessage.from(hotWire);
+    batchListener.handleWorkerMessage(channel, cool1Wire);
+    batchListener.handleWorkerMessage(channel, cool2Wire);
+    batchListener.handleWorkerMessage(channel, hotWire);
+    release.countDown();
+
+    assertThat(bothCalls.await(5, TimeUnit.SECONDS)).isTrue();
+    assertThat(capturedCool.get()).containsExactly(cool1, cool2);
+    verify(batchHandler).handleHot(hot);
+    verify(batchHandler, never()).handleCool(any());
+  }
+
+  /**
+   * An ACK failure is not a processing failure: the decision WAS handled, the
+   * channel is broken. The exception propagates to the container and no NACK is
+   * sent on the same already-closed channel.
+   */
+  @Test
+  void handleWorkerMessage_ackFailure_shouldPropagateWithoutNack() throws IOException {
     MessageProperties props = new MessageProperties();
     props.setHeader(HEADER_TYPE, "HOT");
     Message msg = new Message("key1".getBytes(StandardCharsets.UTF_8), props);
     doThrow(new RuntimeException("forced error")).when(channel).basicAck(anyLong(), anyBoolean());
-    listener.handleWorkerMessage(channel, msg);
-    verify(channel).basicNack(anyLong(), anyBoolean(), anyBoolean());
+    assertThatThrownBy(() -> listener.handleWorkerMessage(channel, msg))
+      .isInstanceOf(RuntimeException.class)
+      .hasMessageContaining("forced error");
+    verify(channel, never()).basicNack(anyLong(), anyBoolean(), anyBoolean());
   }
 
   private static Message workerMessage(String key, String type, long version) {
@@ -163,101 +269,63 @@ class WorkerListenerTest {
   }
 
   /**
-   * Verifies that a HOT decision with SRE rate limiter rejecting is skipped.
+   * Same shape as {@link #workerMessage}, but the type header carries a fresh String
+   * instance instead of the compile-time constant — what Spring AMQP hands the
+   * listener for a message that came off the wire.
    */
-  @Test
-  void handleWorkerMessage_hot_withSreThrottling_shouldSkip() throws IOException, InterruptedException {
-    SreRateLimiter limiter = mock(SreRateLimiter.class);
-    when(limiter.tryAcquire()).thenReturn(false);
-    WorkerListenerProperties props = new WorkerListenerProperties();
-    props.setBroadcastJitterMs(0);
-    ScheduledExecutorService sched = Executors.newSingleThreadScheduledExecutor();
-    WorkerDecisionHandler h = handler(k -> "v", limiter);
-    WorkerListener throttled = new WorkerListener(props, sched, h, null);
-    throttled.init();
-
-    cache.put("key1", hotEntry());
-    throttled.handleWorkerMessage(channel, workerMessage("key1", WorkerMessage.TYPE_HOT, 2L));
-    verify(channel).basicAck(anyLong(), anyBoolean());
-    {
-      CountDownLatch phase1 = new CountDownLatch(1);
-      CountDownLatch phase2 = new CountDownLatch(1);
-      sched.execute(() -> phase1.countDown());
-      assertThat(phase1.await(5, TimeUnit.SECONDS)).isTrue();
-      sched.execute(() -> phase2.countDown());
-      assertThat(phase2.await(5, TimeUnit.SECONDS)).isTrue();
-      sched.shutdown();
-    }
-    verify(limiter, never()).onFailed();
-    assertThat(((CacheEntry) cache.getIfPresent("key1")).getDecisionVersion()).isEqualTo(1);
+  private static Message workerMessageOffWire(String key, String type, long version) {
+    return workerMessage(key, new String(type.toCharArray()), version);
   }
 
   /**
-   * Verifies that a HOT decision with null Redis value and no degraded entry returns without promoting.
+   * Verifies that a HOT decision with no source value and no existing entry returns without promoting.
    */
   @Test
-  void handleWorkerMessage_hot_withNullRedisValueNoDegradedEntry_shouldReturn() throws IOException {
+  void handleWorkerMessage_hot_withNoSourceValueAndNoEntry_shouldReturn() throws IOException {
     WorkerListenerProperties props = new WorkerListenerProperties();
     props.setBroadcastJitterMs(0);
     ScheduledExecutorService sched = Executors.newSingleThreadScheduledExecutor();
-    WorkerDecisionHandler h = handler(k -> null, null);
+    WorkerDecisionHandler h = handler(k -> null);
     WorkerListener nullLoader = new WorkerListener(props, sched, h, null);
-    nullLoader.init();
 
-    nullLoader.handleWorkerMessage(channel, workerMessage("missing", WorkerMessage.TYPE_HOT, 1L));
+    nullLoader.handleWorkerMessage(channel, workerMessage("missing", WorkerDecisionType.HOT.code(), 1L));
     verify(channel).basicAck(anyLong(), anyBoolean());
     assertThat(cache.getIfPresent("missing")).isNull();
   }
 
   /**
-   * Verifies that a HOT decision with Redis exception and an existing degraded entry falls back to the degraded value.
+   * Verifies that a HOT decision with a source exception and an existing entry falls back to its value.
    */
   @Test
-  void handleWorkerMessage_hot_withRedisExceptionAndDegradedEntry_shouldUseDegraded()
+  void handleWorkerMessage_hot_withSourceExceptionAndExistingEntry_shouldUseIt()
     throws IOException, InterruptedException {
     cache.put(
       "key1",
-      CacheEntry.builder()
-        .value("degraded-val")
-        .dataVersion(-10)
-        .isVersionDegraded(true)
-        .decisionVersion(1)
-        .hardTtlMs(300_000)
-        .hardExpireAtMs(Long.MAX_VALUE)
-        .softTtlMs(30_000)
-        .softExpireAtMs(System.currentTimeMillis() + 30_000)
+      EntryDraft.blank(null)
+        .value("fallback-val")
+        .version(10)
+        .decision(DecisionStamp.hot(1, null, 0L))
+        .ttl(300_000, 30_000, 300_000, 30_000)
+        .expiryAt(Long.MAX_VALUE, System.currentTimeMillis() + 30_000)
         .keyState(KeyState.NORMAL)
-        .normalHardTtlMs(300_000)
-        .normalSoftTtlMs(30_000)
         .build()
     );
 
     WorkerListenerProperties props = new WorkerListenerProperties();
     props.setBroadcastJitterMs(0);
     ScheduledExecutorService sched = Executors.newSingleThreadScheduledExecutor();
-    WorkerDecisionHandler h = handler(
-      k -> {
-        throw new RuntimeException("Redis down");
-      },
-      null
-    );
+    WorkerDecisionHandler h = handler(k -> {
+      throw new RuntimeException("Redis down");
+    });
     WorkerListener failingLoader = new WorkerListener(props, sched, h, null);
-    failingLoader.init();
 
-    failingLoader.handleWorkerMessage(channel, workerMessage("key1", WorkerMessage.TYPE_HOT, 2L));
+    failingLoader.handleWorkerMessage(channel, workerMessage("key1", WorkerDecisionType.HOT.code(), 2L));
     verify(channel).basicAck(anyLong(), anyBoolean());
-    {
-      CountDownLatch phase1 = new CountDownLatch(1);
-      CountDownLatch phase2 = new CountDownLatch(1);
-      sched.execute(() -> phase1.countDown());
-      assertThat(phase1.await(5, TimeUnit.SECONDS)).isTrue();
-      sched.execute(() -> phase2.countDown());
-      assertThat(phase2.await(5, TimeUnit.SECONDS)).isTrue();
-      sched.shutdown();
-    }
+    awaitWorkerTasks(sched);
+    sched.shutdown();
     assertThat(cache.getIfPresent("key1")).satisfies(o -> {
       CacheEntry ce = (CacheEntry) o;
-      assertThat(ce.getValue()).isEqualTo("degraded-val");
+      assertThat(ce.getValue()).isEqualTo("fallback-val");
       assertThat(ce.getKeyState()).isEqualTo(KeyState.HOT);
     });
   }
@@ -268,7 +336,7 @@ class WorkerListenerTest {
   @Test
   void handleWorkerMessage_hot_withStaleDecisionVersion_shouldSkip() throws IOException, InterruptedException {
     cache.put("key1", hotEntry());
-    listener.handleWorkerMessage(channel, workerMessage("key1", WorkerMessage.TYPE_HOT, 1L));
+    listener.handleWorkerMessage(channel, workerMessage("key1", WorkerDecisionType.HOT.code(), 1L));
     verify(channel).basicAck(anyLong(), anyBoolean());
     awaitWorkerTasks();
     assertThat(((CacheEntry) cache.getIfPresent("key1")).getDecisionVersion()).isEqualTo(1);
@@ -279,7 +347,7 @@ class WorkerListenerTest {
    */
   @Test
   void handleWorkerMessage_cool_withNoExistingEntry_shouldBeNoOp() throws IOException, InterruptedException {
-    listener.handleWorkerMessage(channel, workerMessage("nonexistent", WorkerMessage.TYPE_COOL, 2L));
+    listener.handleWorkerMessage(channel, workerMessage("nonexistent", WorkerDecisionType.COOL.code(), 2L));
     verify(channel).basicAck(anyLong(), anyBoolean());
     awaitWorkerTasks();
     assertThat(cache.getIfPresent("nonexistent")).isNull();
@@ -291,34 +359,86 @@ class WorkerListenerTest {
   @Test
   void handleWorkerMessage_cool_withStaleDecisionVersion_shouldSkip() throws IOException, InterruptedException {
     cache.put("key1", hotEntry());
-    listener.handleWorkerMessage(channel, workerMessage("key1", WorkerMessage.TYPE_COOL, 0L));
+    listener.handleWorkerMessage(channel, workerMessage("key1", WorkerDecisionType.COOL.code(), 0L));
     verify(channel).basicAck(anyLong(), anyBoolean());
     awaitWorkerTasks();
     assertThat(((CacheEntry) cache.getIfPresent("key1")).getKeyState()).isEqualTo(KeyState.HOT);
   }
 
   /**
-   * Verifies that a COOL decision on a degraded entry is accepted and downgrades.
+   * Verifies the dispatch-rejection fallback: a COOL the ordered dispatcher
+   * refuses is applied instead of being lost — the entry still downgrades to COOL,
+   * and the rejection is counted. (Closing the dispatcher via
+   * {@link WorkerListener#destroy} makes every submit refused; the inline apply is
+   * synchronous, so no scheduler await is needed.)
+   *
+   * <p>The type header is a <em>fresh</em> String, not the {@code TYPE_COOL}
+   * constant: that is what a message deserialized off the wire carries (AMQP
+   * headers are never interned).
    */
   @Test
-  void handleWorkerMessage_cool_onDegradedEntry_shouldDowngrade() throws IOException, InterruptedException {
+  void handleWorkerMessage_cool_dispatchRejected_shouldApplyInline() throws IOException {
+    cache.put("key1", hotEntry());
+    listener.destroy();
+    listener.handleWorkerMessage(channel, workerMessageOffWire("key1", WorkerDecisionType.COOL.code(), 2L));
+    verify(channel).basicAck(anyLong(), anyBoolean());
+    assertThat(cache.getIfPresent("key1")).satisfies(o -> {
+      CacheEntry ce = (CacheEntry) o;
+      assertThat(ce.getKeyState()).isEqualTo(KeyState.COOL);
+      assertThat(ce.getDecisionVersion()).isEqualTo(2L);
+    });
+    assertThat(listener.coolDispatchRejections()).isEqualTo(1L);
+  }
+
+  /**
+   * A COOL is a control signal: it bypasses the global pending budget, so a
+   * PUT/REFRESH storm that exhausted the payload budget cannot lock the
+   * decision out. The per-key queue still orders it.
+   */
+  @Test
+  void handleWorkerMessage_cool_budgetExhausted_shouldBypassTheGlobalBudget() throws Exception {
+    WorkerListenerProperties props = new WorkerListenerProperties();
+    props.setBroadcastJitterMs(0);
+    props.setMaxPendingUnits(0);
+    ScheduledExecutorService sched = Executors.newScheduledThreadPool(2);
+    WorkerListener starving = new WorkerListener(props, sched, handler(k -> "v"), null);
+
+    cache.put("key1", hotEntry());
+    starving.handleWorkerMessage(channel, workerMessageOffWire("key1", WorkerDecisionType.COOL.code(), 2L));
+    verify(channel).basicAck(anyLong(), anyBoolean());
+
+    long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+    while (System.nanoTime() < deadline) {
+      CacheEntry current = (CacheEntry) cache.getIfPresent("key1");
+      if (current != null && current.getKeyState() == KeyState.COOL) {
+        break;
+      }
+      Thread.sleep(20);
+    }
+    assertThat(((CacheEntry) cache.getIfPresent("key1")).getKeyState())
+      .as("the control signal bypasses the exhausted payload budget")
+      .isEqualTo(KeyState.COOL);
+    assertThat(starving.coolDispatchRejections()).as("accepted, not refused").isZero();
+    sched.shutdownNow();
+  }
+
+  /**
+   * Verifies that a COOL decision on an existing entry is accepted and downgrades.
+   */
+  @Test
+  void handleWorkerMessage_cool_onExistingEntry_shouldDowngrade() throws IOException, InterruptedException {
     cache.put(
       "key1",
-      CacheEntry.builder()
+      EntryDraft.blank(null)
         .value("v")
-        .dataVersion(-1)
-        .isVersionDegraded(true)
-        .decisionVersion(0)
-        .hardTtlMs(300_000)
-        .hardExpireAtMs(Long.MAX_VALUE)
-        .softTtlMs(30_000)
-        .softExpireAtMs(System.currentTimeMillis() + 30_000)
+        .version(1)
+        .decision(DecisionStamp.hot(0, null, 0L))
+        .ttl(300_000, 30_000, 300_000, 30_000)
+        .expiryAt(Long.MAX_VALUE, System.currentTimeMillis() + 30_000)
         .keyState(KeyState.NORMAL)
-        .normalHardTtlMs(300_000)
-        .normalSoftTtlMs(30_000)
         .build()
     );
-    listener.handleWorkerMessage(channel, workerMessage("key1", WorkerMessage.TYPE_COOL, 1L));
+    listener.handleWorkerMessage(channel, workerMessage("key1", WorkerDecisionType.COOL.code(), 1L));
     verify(channel).basicAck(anyLong(), anyBoolean());
     awaitWorkerTasks();
     assertThat(cache.getIfPresent("key1")).satisfies(o -> {
@@ -360,40 +480,6 @@ class WorkerListenerTest {
     verify(channel).basicAck(anyLong(), anyBoolean());
   }
 
-  /**
-   * Verifies that a HOT decision on a normal entry promotes to HOT and calls SRE onSuccess.
-   */
-  @Test
-  void handleWorkerMessage_hot_withSreSuccess_shouldCallOnSuccess() throws IOException, InterruptedException {
-    SreRateLimiter limiter = mock(SreRateLimiter.class);
-    when(limiter.tryAcquire()).thenReturn(true);
-    WorkerListenerProperties props = new WorkerListenerProperties();
-    props.setBroadcastJitterMs(0);
-    ScheduledExecutorService sched = Executors.newSingleThreadScheduledExecutor();
-    WorkerDecisionHandler h = handler(k -> "fresh", limiter);
-    WorkerListener throttled = new WorkerListener(props, sched, h, null);
-    throttled.init();
-
-    cache.put("key1", entry(1, false, 0));
-    throttled.handleWorkerMessage(channel, workerMessage("key1", WorkerMessage.TYPE_HOT, 2L));
-    verify(channel).basicAck(anyLong(), anyBoolean());
-    {
-      CountDownLatch phase1 = new CountDownLatch(1);
-      CountDownLatch phase2 = new CountDownLatch(1);
-      sched.execute(() -> phase1.countDown());
-      assertThat(phase1.await(5, TimeUnit.SECONDS)).isTrue();
-      sched.execute(() -> phase2.countDown());
-      assertThat(phase2.await(5, TimeUnit.SECONDS)).isTrue();
-      sched.shutdown();
-    }
-    verify(limiter).onSuccess();
-    assertThat(cache.getIfPresent("key1")).satisfies(o -> {
-      CacheEntry ce = (CacheEntry) o;
-      assertThat(ce.getKeyState()).isEqualTo(KeyState.HOT);
-      assertThat(ce.getDecisionVersion()).isEqualTo(2L);
-    });
-  }
-
   // ── P0-2: decisionNodeId/decisionEpoch propagation ──
 
   /**
@@ -404,7 +490,7 @@ class WorkerListenerTest {
     cache.put("key1", normalEntry());
     listener.handleWorkerMessage(
       channel,
-      workerMessageWithNodeIdEpoch("key1", WorkerMessage.TYPE_HOT, 2L, "worker-A", 3L)
+      workerMessageWithNodeIdEpoch("key1", WorkerDecisionType.HOT.code(), 2L, "worker-A", 3L)
     );
     verify(channel).basicAck(anyLong(), anyBoolean());
     awaitWorkerTasks();
@@ -423,7 +509,7 @@ class WorkerListenerTest {
     cache.put("key1", hotEntry());
     listener.handleWorkerMessage(
       channel,
-      workerMessageWithNodeIdEpoch("key1", WorkerMessage.TYPE_COOL, 2L, "worker-B", 5L)
+      workerMessageWithNodeIdEpoch("key1", WorkerDecisionType.COOL.code(), 2L, "worker-B", 5L)
     );
     verify(channel).basicAck(anyLong(), anyBoolean());
     awaitWorkerTasks();
@@ -434,7 +520,7 @@ class WorkerListenerTest {
     });
   }
 
-  // ── ADR-0068: appName shared-broker isolation ──
+  // ── design decisions: sync messages: appName shared-broker isolation ──
 
   /**
    * Verifies that a decision carrying a foreign appName header is acknowledged but
@@ -445,10 +531,9 @@ class WorkerListenerTest {
     WorkerListenerProperties props = new WorkerListenerProperties();
     props.setBroadcastJitterMs(0);
     ScheduledExecutorService sched = Executors.newSingleThreadScheduledExecutor();
-    WorkerListener isolated = new WorkerListener(props, sched, handler(k -> "v", null), "appA");
-    isolated.init();
+    WorkerListener isolated = new WorkerListener(props, sched, handler(k -> "v"), "appA");
 
-    isolated.handleWorkerMessage(channel, workerMessageWithAppName("key1", WorkerMessage.TYPE_HOT, 2L, "appB"));
+    isolated.handleWorkerMessage(channel, workerMessageWithAppName("key1", WorkerDecisionType.HOT.code(), 2L, "appB"));
     verify(channel).basicAck(anyLong(), anyBoolean());
     awaitWorkerTasks(sched);
     assertThat(cache.getIfPresent("key1")).isNull();
@@ -464,10 +549,9 @@ class WorkerListenerTest {
     WorkerListenerProperties props = new WorkerListenerProperties();
     props.setBroadcastJitterMs(0);
     ScheduledExecutorService sched = Executors.newSingleThreadScheduledExecutor();
-    WorkerListener isolated = new WorkerListener(props, sched, handler(k -> "v", null), "appA");
-    isolated.init();
+    WorkerListener isolated = new WorkerListener(props, sched, handler(k -> "v"), "appA");
 
-    isolated.handleWorkerMessage(channel, workerMessageWithAppName("key1", WorkerMessage.TYPE_HOT, 2L, "appA"));
+    isolated.handleWorkerMessage(channel, workerMessageWithAppName("key1", WorkerDecisionType.HOT.code(), 2L, "appA"));
     verify(channel).basicAck(anyLong(), anyBoolean());
     awaitWorkerTasks(sched);
     assertThat(((CacheEntry) cache.getIfPresent("key1")).getKeyState()).isEqualTo(KeyState.HOT);
@@ -483,10 +567,9 @@ class WorkerListenerTest {
     WorkerListenerProperties props = new WorkerListenerProperties();
     props.setBroadcastJitterMs(0);
     ScheduledExecutorService sched = Executors.newSingleThreadScheduledExecutor();
-    WorkerListener isolated = new WorkerListener(props, sched, handler(k -> "v", null), "appA");
-    isolated.init();
+    WorkerListener isolated = new WorkerListener(props, sched, handler(k -> "v"), "appA");
 
-    isolated.handleWorkerMessage(channel, workerMessage("key1", WorkerMessage.TYPE_HOT, 2L));
+    isolated.handleWorkerMessage(channel, workerMessage("key1", WorkerDecisionType.HOT.code(), 2L));
     verify(channel).basicAck(anyLong(), anyBoolean());
     awaitWorkerTasks(sched);
     assertThat(((CacheEntry) cache.getIfPresent("key1")).getKeyState()).isEqualTo(KeyState.HOT);
@@ -505,23 +588,22 @@ class WorkerListenerTest {
    * A foreign-app drop is counted (not just DEBUG-logged): a misconfigured
    * app-name discards 100% of decisions while the process looks healthy, so
    * the mismatch needs a counter plus last-sender signal for the actuator
-   * endpoint. Matching-app and headerless messages never count.
+   * endpoint. Matching-app and headerless messages never add.
    */
   @Test
   void foreignAppDrops_shouldCountOnlyMismatches() throws IOException, InterruptedException {
     WorkerListenerProperties props = new WorkerListenerProperties();
     props.setBroadcastJitterMs(0);
     ScheduledExecutorService sched = Executors.newSingleThreadScheduledExecutor();
-    WorkerListener isolated = new WorkerListener(props, sched, handler(k -> "v", null), "appA");
-    isolated.init();
+    WorkerListener isolated = new WorkerListener(props, sched, handler(k -> "v"), "appA");
 
     assertThat(isolated.foreignAppDrops()).isZero();
     assertThat(isolated.lastForeignApp()).isNull();
 
-    isolated.handleWorkerMessage(channel, workerMessageWithAppName("k1", WorkerMessage.TYPE_HOT, 2L, "appB"));
-    isolated.handleWorkerMessage(channel, workerMessageWithAppName("k2", WorkerMessage.TYPE_COOL, 3L, "appB"));
-    isolated.handleWorkerMessage(channel, workerMessageWithAppName("k3", WorkerMessage.TYPE_HOT, 4L, "appA"));
-    isolated.handleWorkerMessage(channel, workerMessage("k4", WorkerMessage.TYPE_HOT, 5L));
+    isolated.handleWorkerMessage(channel, workerMessageWithAppName("k1", WorkerDecisionType.HOT.code(), 2L, "appB"));
+    isolated.handleWorkerMessage(channel, workerMessageWithAppName("k2", WorkerDecisionType.COOL.code(), 3L, "appB"));
+    isolated.handleWorkerMessage(channel, workerMessageWithAppName("k3", WorkerDecisionType.HOT.code(), 4L, "appA"));
+    isolated.handleWorkerMessage(channel, workerMessage("k4", WorkerDecisionType.HOT.code(), 5L));
     awaitWorkerTasks(sched);
 
     assertThat(isolated.foreignAppDrops()).isEqualTo(2);
@@ -545,50 +627,35 @@ class WorkerListenerTest {
   }
 
   private static CacheEntry hotEntry() {
-    return CacheEntry.builder()
+    return EntryDraft.blank(null)
       .value("v")
-      .dataVersion(5)
-      .isVersionDegraded(false)
-      .decisionVersion(1)
-      .hardTtlMs(3_600_000)
-      .hardExpireAtMs(Long.MAX_VALUE)
-      .softTtlMs(300_000)
-      .softExpireAtMs(System.currentTimeMillis() + 300_000)
+      .version(5)
+      .decision(DecisionStamp.hot(1, null, 0L))
+      .ttl(3_600_000, 300_000, 300_000, 30_000)
+      .expiryAt(Long.MAX_VALUE, System.currentTimeMillis() + 300_000)
       .keyState(KeyState.HOT)
-      .normalHardTtlMs(300_000)
-      .normalSoftTtlMs(30_000)
       .build();
   }
 
-  private static CacheEntry entry(long dataVersion, boolean degraded, long decisionVersion) {
-    return CacheEntry.builder()
+  private static CacheEntry entry(long dataVersion, long decisionVersion) {
+    return EntryDraft.blank(null)
       .value("v")
-      .dataVersion(dataVersion)
-      .isVersionDegraded(degraded)
-      .decisionVersion(decisionVersion)
-      .hardTtlMs(300_000)
-      .hardExpireAtMs(Long.MAX_VALUE)
-      .softTtlMs(30_000)
-      .softExpireAtMs(30_000)
+      .version(dataVersion)
+      .decision(DecisionStamp.hot(decisionVersion, null, 0L))
+      .ttl(300_000, 30_000, 300_000, 30_000)
+      .expiryAt(Long.MAX_VALUE, 30_000)
       .keyState(KeyState.NORMAL)
-      .normalHardTtlMs(300_000)
-      .normalSoftTtlMs(30_000)
       .build();
   }
 
   private static CacheEntry normalEntry() {
-    return CacheEntry.builder()
+    return EntryDraft.blank(null)
       .value("n")
-      .dataVersion(1)
-      .isVersionDegraded(false)
-      .decisionVersion(0)
-      .hardTtlMs(300_000)
-      .hardExpireAtMs(Long.MAX_VALUE)
-      .softTtlMs(30_000)
-      .softExpireAtMs(System.currentTimeMillis() + 30_000)
+      .version(1)
+      .decision(DecisionStamp.hot(0, null, 0L))
+      .ttl(300_000, 30_000, 300_000, 30_000)
+      .expiryAt(Long.MAX_VALUE, System.currentTimeMillis() + 30_000)
       .keyState(KeyState.NORMAL)
-      .normalHardTtlMs(300_000)
-      .normalSoftTtlMs(30_000)
       .build();
   }
 }

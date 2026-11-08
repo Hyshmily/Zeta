@@ -16,141 +16,118 @@
 package io.github.hyshmily.zeta.model;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import io.github.hyshmily.zeta.model.ZetaDecision.DecisionType;
 import org.junit.jupiter.api.Test;
 
 /**
- * Tests for {@link ZetaDecision} reportToWorker covering factory methods and decision type enum.
+ * Tests for {@link ZetaDecision} covering factory methods, the versioned shape and the decision
+ * type enum.
  */
 class ZetaDecisionTest {
 
-  /**
-   * Verifies that the hot factory method creates a decision with HOT type.
-   */
   @Test
   void hot_shouldCreateHotDecision() {
-    ZetaDecision decision = ZetaDecision.hot("key1", null);
+    ZetaDecision decision = ZetaDecision.hot("key1");
     assertThat(decision.type()).isEqualTo(DecisionType.HOT);
     assertThat(decision.cacheKey()).isEqualTo("key1");
+    assertThat(decision.decisionVersion()).isZero();
   }
 
-  /**
-   * Verifies that the cool factory method creates a decision with COOL type.
-   */
+  @Test
+  void hot_shouldCarryVersion() {
+    ZetaDecision decision = ZetaDecision.hot("key1", 42L);
+    assertThat(decision.decisionVersion()).isEqualTo(42L);
+  }
+
   @Test
   void cool_shouldCreateCoolDecision() {
-    ZetaDecision decision = ZetaDecision.cool("key1", null);
+    ZetaDecision decision = ZetaDecision.cool("key1");
     assertThat(decision.type()).isEqualTo(DecisionType.COOL);
+    assertThat(decision.decisionVersion()).isZero();
   }
 
-  /**
-   * Verifies that the none factory method creates a decision with NONE type.
-   */
   @Test
-  void none_shouldCreateNoneDecision() {
-    ZetaDecision decision = ZetaDecision.none("key1", null);
-    assertThat(decision.type()).isEqualTo(DecisionType.NONE);
+  void cool_shouldCarryVersion() {
+    assertThat(ZetaDecision.cool("key1", 7L).decisionVersion()).isEqualTo(7L);
   }
 
-  /**
-   * Verifies the DecisionType enum contains exactly HOT, COOL, and NONE in that order.
-   */
+  @Test
+  void none_shouldBeSharedAndCarryNoPayload() {
+    assertThat(ZetaDecision.NONE.type()).isEqualTo(DecisionType.NONE);
+    assertThat(ZetaDecision.NONE.cacheKey()).isEmpty();
+    assertThat(ZetaDecision.NONE.decisionVersion()).isZero();
+  }
+
   @Test
   void decisionType_shouldHaveExpectedValues() {
     assertThat(DecisionType.values()).containsExactly(DecisionType.HOT, DecisionType.COOL, DecisionType.NONE);
   }
 
   @Test
-  void hot_shouldAcceptNullKey() {
-    ZetaDecision decision = ZetaDecision.hot(null, null);
-    assertThat(decision.type()).isEqualTo(DecisionType.HOT);
-    assertThat(decision.cacheKey()).isNull();
+  void hot_shouldRejectNullKey() {
+    assertThatThrownBy(() -> ZetaDecision.hot(null)).isInstanceOf(NullPointerException.class);
   }
 
   @Test
-  void cool_shouldAcceptNullKey() {
-    ZetaDecision decision = ZetaDecision.cool(null, null);
-    assertThat(decision.type()).isEqualTo(DecisionType.COOL);
-    assertThat(decision.cacheKey()).isNull();
-  }
-
-  @Test
-  void none_shouldAcceptNullKey() {
-    ZetaDecision decision = ZetaDecision.none(null, null);
-    assertThat(decision.type()).isEqualTo(DecisionType.NONE);
-    assertThat(decision.cacheKey()).isNull();
+  void cool_shouldRejectNullKey() {
+    assertThatThrownBy(() -> ZetaDecision.cool(null)).isInstanceOf(NullPointerException.class);
   }
 
   @Test
   void hot_shouldAcceptEmptyKey() {
-    ZetaDecision decision = ZetaDecision.hot("", null);
+    ZetaDecision decision = ZetaDecision.hot("");
     assertThat(decision.type()).isEqualTo(DecisionType.HOT);
     assertThat(decision.cacheKey()).isEmpty();
   }
 
   @Test
-  void decisionWithNullCacheKey_shouldCreateCorrectly() {
-    ZetaDecision decision = new ZetaDecision(DecisionType.HOT, null, null);
-    assertThat(decision.type()).isEqualTo(DecisionType.HOT);
-    assertThat(decision.cacheKey()).isNull();
+  void decisionWithNullCacheKey_shouldBeRejected() {
+    assertThatThrownBy(() -> new ZetaDecision(DecisionType.HOT, null)).isInstanceOf(NullPointerException.class);
   }
 
   @Test
-  void decisionTypeHOT_shouldHaveCorrectName() {
+  void decisionWithNullType_shouldBeRejected() {
+    assertThatThrownBy(() -> new ZetaDecision(null, "key")).isInstanceOf(NullPointerException.class);
+  }
+
+  @Test
+  void decisionType_shouldHaveExpectedNames() {
     assertThat(DecisionType.HOT.name()).isEqualTo("HOT");
-  }
-
-  @Test
-  void decisionTypeCOOL_shouldHaveCorrectName() {
     assertThat(DecisionType.COOL.name()).isEqualTo("COOL");
-  }
-
-  @Test
-  void decisionTypeNONE_shouldHaveCorrectName() {
     assertThat(DecisionType.NONE.name()).isEqualTo("NONE");
   }
 
   @Test
-  void decisionTypeHOT_shouldHaveOrdinalZero() {
+  void decisionType_shouldKeepOrdinals() {
     assertThat(DecisionType.HOT.ordinal()).isZero();
-  }
-
-  @Test
-  void decisionTypeCOOL_shouldHaveOrdinalOne() {
     assertThat(DecisionType.COOL.ordinal()).isOne();
-  }
-
-  @Test
-  void decisionTypeNONE_shouldHaveOrdinalTwo() {
     assertThat(DecisionType.NONE.ordinal()).isEqualTo(2);
   }
 
   @Test
   void toString_shouldNotBeNull() {
-    ZetaDecision decision = ZetaDecision.hot("testKey", null);
-    assertThat(decision.toString()).isNotNull();
+    assertThat(ZetaDecision.hot("testKey").toString()).isNotNull();
   }
 
   @Test
   void veryLongKey_shouldBeAccepted() {
     String longKey = "k".repeat(10_000);
-    ZetaDecision decision = ZetaDecision.hot(longKey, null);
-    assertThat(decision.cacheKey()).isEqualTo(longKey);
+    assertThat(ZetaDecision.hot(longKey).cacheKey()).isEqualTo(longKey);
   }
 
   @Test
   void specialCharactersInKey_shouldBeAccepted() {
     String specials = "key:\n\t\r\u0000\u00E9\u4E2D\u6587";
-    ZetaDecision decision = ZetaDecision.hot(specials, null);
-    assertThat(decision.cacheKey()).isEqualTo(specials);
+    assertThat(ZetaDecision.hot(specials).cacheKey()).isEqualTo(specials);
   }
 
   @Test
   void equalsAndHashCode_shouldWorkForRecords() {
-    ZetaDecision a = ZetaDecision.hot("k", null);
-    ZetaDecision b = ZetaDecision.hot("k", null);
-    ZetaDecision c = ZetaDecision.cool("k", null);
+    ZetaDecision a = ZetaDecision.hot("k");
+    ZetaDecision b = ZetaDecision.hot("k");
+    ZetaDecision c = ZetaDecision.cool("k");
     assertThat(a).isEqualTo(b);
     assertThat(a).hasSameHashCodeAs(b);
     assertThat(a).isNotEqualTo(c);
@@ -158,12 +135,11 @@ class ZetaDecisionTest {
 
   @Test
   void record_shouldBeSerializableViaToString() {
-    ZetaDecision hot = ZetaDecision.hot("test", null);
-    ZetaDecision cool = ZetaDecision.cool("test", null);
-    ZetaDecision none = ZetaDecision.none("test", null);
+    ZetaDecision hot = ZetaDecision.hot("test");
+    ZetaDecision cool = ZetaDecision.cool("test");
     assertThat(hot.toString()).contains("HOT").contains("test");
     assertThat(cool.toString()).contains("COOL").contains("test");
-    assertThat(none.toString()).contains("NONE").contains("test");
+    assertThat(ZetaDecision.NONE.toString()).contains("NONE");
   }
 
   @Test

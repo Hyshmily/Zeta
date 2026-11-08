@@ -17,72 +17,51 @@ package io.github.hyshmily.zeta.sync.worker;
 
 import static io.github.hyshmily.zeta.constants.ZetaConstants.Amqp.*;
 
-import io.github.hyshmily.zeta.Internal;
+import io.github.hyshmily.zeta.util.Internal;
+import io.github.hyshmily.zeta.util.amqp.AmqpMessageReader;
 import java.nio.charset.StandardCharsets;
+import org.jspecify.annotations.Nullable;
 import org.springframework.amqp.core.Message;
 import org.springframework.amqp.core.MessageProperties;
 
 /**
- * Structured heartbeat message send periodically by the Worker to all
- * application instances for cluster health monitoring and gossip-based config
- * synchronization.
+ * Structured heartbeat message sent periodically by the Worker.
  *
- * <p>Broadcast on the dedicated {@code zeta.heartbeat.exchange} (Topic exchange).
- * Each App instance consumes all heartbeats from all Workers and updates its local
- * {@link io.github.hyshmily.zeta.sharding.HealthView} accordingly.
+ * <p>Broadcast on the dedicated heartbeat exchange (topic). Every App instance consumes each
+ * heartbeat and matches it against its own app name before recording it in the local
+ * {@link io.github.hyshmily.zeta.sharding.HealthView}.
  *
  * <p><b>Fields:</b>
  * <ul>
- *   <li>{@code epoch} — Monotonically increasing Worker restart counter. Handles
- *       the case where a Worker dies and its {@code AtomicLong} decision version
- *       resets, allowing App instances to detect restarts.</li>
- *   <li>{@code loadFactor} — Normalized scheduling hint (0.0–1.0) reflecting the
- *       Worker's current processing load.</li>
- *   <li>{@code readyToServe} — Cold-start guard; {@code false} during Worker
- *       initialization before the first full detection cycle completes.</li>
- *   <li>{@code configConfirmCount}, etc. — Gossip-based state machine configuration
- *       fields for decentralized config sync (see ADR-0003).</li>
+ *   <li>{@code epoch} — Worker restart counter. Handles the case where a Worker dies and its
+ *       in-memory version counters reset, letting App instances detect restarts.</li>
+ *   <li>{@code readyToServe} — cold-start guard; {@code false} before the grace period elapses
+ *       with an empty HOT set.</li>
  * </ul>
  *
- * <p>Serialization is header-based: the body carries only the {@code workerId} as
- * UTF-8 bytes; all structured fields are stored as AMQP message headers for efficient
- * routing and filtering.
+ * <p>Serialization is header-based: the body carries only the {@code workerId} as UTF-8 bytes.
  *
- * @param workerId           unique identifier for the originating Worker node
- * @param epoch              Worker restart counter; increases monotonically on each Worker start
- * @param loadFactor         normalized load factor (0.0–1.0) for scheduling hints
- * @param readyToServe       {@code false} during Worker cold-start initialization;
- *                           App instances should not rely on this Worker's decisions yet
- * @param configConfirmCount gossip: number of peers that have confirmed the current config
- * @param configCoolCount    gossip: cool-down period count in the state machine
- * @param configGraceCount   gossip: grace-period count in the state machine
- * @param configTimestamp    gossip: timestamp of the last config change
- *
- * @see io.github.hyshmily.zeta.sharding.HealthView
- * @see WorkerHeartbeatVerifier
+ * @param id           time-sortable message trace ID; {@code 0} when the header was
+ *                     missing or non-numeric
+ * @param workerId     unique identifier of the originating Worker node
+ * @param epoch        Worker restart counter
+ * @param readyToServe {@code false} during cold start
+ * @param appName      the sending application name, or {@code null} when the sender
+ *                     declares none
  */
 @Internal
 public record WorkerHeartbeatMessage(
   long id,
   String workerId,
   long epoch,
-  double loadFactor,
   boolean readyToServe,
-  int configConfirmCount,
-  int configCoolCount,
-  int configGraceCount,
-  long configTimestamp
+  @Nullable String appName
 ) {
   /** Message type discriminator for heartbeat messages ({@value}). */
   public static final String TYPE = "WORKER_HB";
 
   /**
-   * Converts this heartbeat message to an AMQP {@link Message} with all fields
-   * set as message headers.
-   *
-   * <p>The body carries the {@code workerId} as UTF-8 bytes. Headers include
-   * type discriminator ({@value #TYPE}), epoch, load factor, readiness flag,
-   * config gossip fields, and the originating node identifier &amp; timestamp.
+   * Converts this heartbeat to an AMQP {@link Message}.
    *
    * @return the constructed AMQP message
    */
@@ -91,51 +70,56 @@ public record WorkerHeartbeatMessage(
 
     props.setHeader(HEADER_TYPE, TYPE);
     props.setHeader(HEADER_HEARTBEAT_EPOCH, epoch);
-    props.setHeader(HEADER_HEARTBEAT_LOAD, loadFactor);
     props.setHeader(HEADER_HEARTBEAT_READY, readyToServe);
     props.setHeader(HEADER_NODE_ID, workerId);
-    props.setHeader(HEADER_HEARTBEAT_CONFIG_CONFIRM, configConfirmCount);
-    props.setHeader(HEADER_HEARTBEAT_CONFIG_COOL, configCoolCount);
-    props.setHeader(HEADER_HEARTBEAT_CONFIG_GRACE, configGraceCount);
-    props.setHeader(HEADER_HEARTBEAT_CONFIG_TIMESTAMP, configTimestamp);
     props.setHeader(HEADER_MESSAGE_ID, id);
+    if (appName != null && !appName.isBlank()) {
+      props.setHeader(HEADER_APP_NAME, appName);
+    }
 
     return new Message(workerId.getBytes(StandardCharsets.UTF_8), props);
   }
 
   /**
-   * Deserializes a {@link WorkerHeartbeatMessage} from an AMQP {@link Message}.
+   * Deserializes a heartbeat from an AMQP {@link Message}.
    *
-   * <p>All fields are extracted from message headers. Returns {@code null} if the
-   * message type header does not match {@value #TYPE} or if the message properties
-   * are null.
-   * <p>
-   * Missing or malformed header values are silently defaulted (0, 0.0, false, or
-   * empty string as appropriate) rather than causing a parse failure.
+   * <p>Missing or malformed headers are defaulted rather than failing the parse: a heartbeat is a
+   * liveness signal, and dropping one because a field is absent would make a healthy Worker look
+   * dead. The one exception is the Worker identity: a heartbeat without one cannot be recorded
+   * (an empty id would enter the health table and the hash ring), so the node-id header falls
+   * back to the body and a blank result drops the message.
    *
-   * @param msg the incoming AMQP message; may be null (returns null)
-   * @return the deserialized heartbeat, or {@code null} if the type is wrong or
-   *         properties are null
+   * @param msg the incoming message
+   * @return the heartbeat, or {@code null} when the type header does not match or the
+   *         Worker identity is missing
+   * @throws NullPointerException if {@code msg} is {@code null}
    */
   public static WorkerHeartbeatMessage from(Message msg) {
-    var h = msg.getMessageProperties();
-    if (h == null) {
+    var props = msg.getMessageProperties();
+    if (props == null) {
       return null;
     }
-    if (!TYPE.equals(h.getHeader(HEADER_TYPE))) {
+    if (!TYPE.equals(props.getHeader(HEADER_TYPE))) {
       return null;
     }
 
+    String workerId =
+      props.getHeader(HEADER_NODE_ID) instanceof String s && !s.isBlank() ? s : bodyWorkerId(msg.getBody());
+    if (workerId == null || workerId.isBlank()) {
+      return null;
+    }
+
+    String appName = AmqpMessageReader.readStringHeader(props, HEADER_APP_NAME);
     return new WorkerHeartbeatMessage(
-      h.getHeader(HEADER_MESSAGE_ID) instanceof Number n ? n.longValue() : 0,
-      h.getHeader(HEADER_NODE_ID) instanceof String s ? s : "",
-      h.getHeader(HEADER_HEARTBEAT_EPOCH) instanceof Number n ? n.longValue() : 0,
-      h.getHeader(HEADER_HEARTBEAT_LOAD) instanceof Number n ? n.doubleValue() : 0.0,
-      Boolean.TRUE.equals(h.getHeader(HEADER_HEARTBEAT_READY)),
-      h.getHeader(HEADER_HEARTBEAT_CONFIG_CONFIRM) instanceof Number n ? n.intValue() : 0,
-      h.getHeader(HEADER_HEARTBEAT_CONFIG_COOL) instanceof Number n ? n.intValue() : 0,
-      h.getHeader(HEADER_HEARTBEAT_CONFIG_GRACE) instanceof Number n ? n.intValue() : 0,
-      h.getHeader(HEADER_HEARTBEAT_CONFIG_TIMESTAMP) instanceof Number n ? n.longValue() : 0
+      AmqpMessageReader.readLongHeader(props, HEADER_MESSAGE_ID, 0L),
+      workerId,
+      AmqpMessageReader.readLongHeader(props, HEADER_HEARTBEAT_EPOCH, 0L),
+      Boolean.TRUE.equals(props.getHeader(HEADER_HEARTBEAT_READY)),
+      appName == null || appName.isBlank() ? null : appName
     );
+  }
+
+  private static String bodyWorkerId(byte[] body) {
+    return body == null || body.length == 0 ? null : new String(body, StandardCharsets.UTF_8);
   }
 }

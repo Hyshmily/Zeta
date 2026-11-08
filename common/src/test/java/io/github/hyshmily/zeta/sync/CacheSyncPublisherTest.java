@@ -16,6 +16,7 @@
 package io.github.hyshmily.zeta.sync;
 
 import static io.github.hyshmily.zeta.constants.ZetaConstants.Amqp.HEADER_APP_NAME;
+import static io.github.hyshmily.zeta.constants.ZetaConstants.Amqp.HEADER_ORIGIN_NODE_ID;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -23,7 +24,8 @@ import static org.mockito.Mockito.*;
 
 import io.github.hyshmily.zeta.sync.local.CacheSyncProperties;
 import io.github.hyshmily.zeta.sync.local.CacheSyncPublisher;
-import io.github.hyshmily.zeta.util.id.SnowflakeIdGenerator;
+import io.github.hyshmily.zeta.util.NodeIdentity;
+import io.github.hyshmily.zeta.util.clock.StampClock;
 import java.util.List;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -45,8 +47,7 @@ class CacheSyncPublisherTest {
   void setUp() {
     rabbitTemplate = mock(RabbitTemplate.class);
     properties = new CacheSyncProperties();
-    publisher = new CacheSyncPublisher(rabbitTemplate, properties, mock(SnowflakeIdGenerator.class), null);
-    publisher.init();
+    publisher = new CacheSyncPublisher(rabbitTemplate, properties, null);
   }
 
   /**
@@ -54,7 +55,7 @@ class CacheSyncPublisherTest {
    */
   @Test
   void broadcastRefresh_shouldSendMessage() {
-    publisher.broadcastRefresh("key1", 1L, false);
+    publisher.broadcastRefresh("key1", 1L);
     verify(rabbitTemplate).send(anyString(), anyString(), any());
   }
 
@@ -63,8 +64,22 @@ class CacheSyncPublisherTest {
    */
   @Test
   void broadcastLocalInvalidate_shouldSendMessage() {
-    publisher.broadcastLocalInvalidate("key1", 1L, false);
+    publisher.broadcastLocalInvalidate("key1", 1L);
     verify(rabbitTemplate).send(anyString(), anyString(), any());
+  }
+
+  /**
+   * The origin node id lets a receiver detect that a peer shares its 10-bit
+   * dataVersion identity — the configuration in which equal stamps are skipped
+   * in both directions and the peers never converge.
+   */
+  @Test
+  void broadcastRefresh_shouldStampOriginNodeIdHeader() {
+    publisher.broadcastRefresh("key1", 1L);
+
+    assertThat((Long) captureSentMessage().getMessageProperties().getHeader(HEADER_ORIGIN_NODE_ID)).isEqualTo(
+      NodeIdentity.getNodeId()
+    );
   }
 
   /**
@@ -72,96 +87,18 @@ class CacheSyncPublisherTest {
    */
   @Test
   void broadcastRefresh_shouldSkipForBlankKey() {
-    publisher.broadcastRefresh("", 1L, false);
+    publisher.broadcastRefresh("", 1L);
     verify(rabbitTemplate, never()).send(anyString(), anyString(), any());
   }
 
   /**
-   * Verifies that broadcastLocalInvalidate deduplicates sends so only one message is sent per key regardless of call count.
+   * Verifies that broadcastLocalInvalidate deduplicates sends so only one message is sent per key regardless of call add.
    */
   @Test
   void broadcastLocalInvalidate_shouldDeduplicate() {
-    publisher.broadcastLocalInvalidate("key1", 5L, false);
-    publisher.broadcastLocalInvalidate("key1", 3L, false);
-    publisher.broadcastLocalInvalidate("key1", 5L, false);
-    verify(rabbitTemplate).send(anyString(), anyString(), any());
-  }
-
-  /**
-   * Verifies that broadcastLocalInvalidateAll with null keys is a no-op.
-   */
-  @Test
-  void broadcastLocalInvalidateAll_withNullKeys_shouldBeNoOp() {
-    publisher.broadcastLocalInvalidateAll(null);
-    verify(rabbitTemplate, never()).send(anyString(), anyString(), any());
-  }
-
-  /**
-   * Verifies that broadcastLocalInvalidateAll with empty keys is a no-op.
-   */
-  @Test
-  void broadcastLocalInvalidateAll_withEmptyKeys_shouldBeNoOp() {
-    publisher.broadcastLocalInvalidateAll(List.of());
-    verify(rabbitTemplate, never()).send(anyString(), anyString(), any());
-  }
-
-  /**
-   * Verifies that broadcastLocalInvalidateAll sends a message for non-empty keys.
-   */
-  @Test
-  void broadcastLocalInvalidateAll_withKeys_shouldSendMessage() {
-    publisher.broadcastLocalInvalidateAll(List.of("k1", "k2"));
-    verify(rabbitTemplate).send(anyString(), anyString(), any());
-  }
-
-  /**
-   * Verifies that an identical invalidate-all payload is deduplicated within
-   * the 1s window (the dedup key is the exact JSON payload string).
-   */
-  @Test
-  void broadcastLocalInvalidateAll_identicalPayload_shouldDeduplicate() {
-    publisher.broadcastLocalInvalidateAll(List.of("k1", "k2"));
-    publisher.broadcastLocalInvalidateAll(List.of("k1", "k2"));
-    verify(rabbitTemplate, times(1)).send(anyString(), anyString(), any());
-  }
-
-  /**
-   * Verifies that two DISTINCT payloads of the same length are both sent: the
-   * dedup key is the full payload string, so equal-length batches can never
-   * collide and silently skip a batch invalidation (the old length+32-bit-hash
-   * key could).
-   */
-  @Test
-  void broadcastLocalInvalidateAll_distinctSameLengthPayloads_shouldBothSend() {
-    publisher.broadcastLocalInvalidateAll(List.of("k1", "k2")); // ["k1","k2"]
-    publisher.broadcastLocalInvalidateAll(List.of("k3", "k4")); // ["k3","k4"] — same length, different batch
-    verify(rabbitTemplate, times(2)).send(anyString(), anyString(), any());
-  }
-
-  /**
-   * Verifies that broadcastAllLocalRules with null JSON is a no-op.
-   */
-  @Test
-  void broadcastAllLocalRules_withNullJson_shouldBeNoOp() {
-    publisher.broadcastAllLocalRules(null, 1L);
-    verify(rabbitTemplate, never()).send(anyString(), anyString(), any());
-  }
-
-  /**
-   * Verifies that broadcastAllLocalRules with blank JSON is a no-op.
-   */
-  @Test
-  void broadcastAllLocalRules_withBlankJson_shouldBeNoOp() {
-    publisher.broadcastAllLocalRules("   ", 1L);
-    verify(rabbitTemplate, never()).send(anyString(), anyString(), any());
-  }
-
-  /**
-   * Verifies that broadcastAllLocalRules sends a message for valid JSON.
-   */
-  @Test
-  void broadcastAllLocalRules_withValidJson_shouldSendMessage() {
-    publisher.broadcastAllLocalRules("{\"rules\":[]}", 1L);
+    publisher.broadcastLocalInvalidate("key1", 5L);
+    publisher.broadcastLocalInvalidate("key1", 3L);
+    publisher.broadcastLocalInvalidate("key1", 5L);
     verify(rabbitTemplate).send(anyString(), anyString(), any());
   }
 
@@ -170,7 +107,7 @@ class CacheSyncPublisherTest {
    */
   @Test
   void broadcastRefresh_withNullKey_shouldSkip() {
-    publisher.broadcastRefresh(null, 1L, false);
+    publisher.broadcastRefresh(null, 1L);
     verify(rabbitTemplate, never()).send(anyString(), anyString(), any());
   }
 
@@ -179,69 +116,47 @@ class CacheSyncPublisherTest {
    */
   @Test
   void broadcastLocalInvalidate_newerVersion_shouldOverrideOld() {
-    publisher.broadcastLocalInvalidate("key1", 3L, false);
-    publisher.broadcastLocalInvalidate("key1", 5L, false);
+    publisher.broadcastLocalInvalidate("key1", 3L);
+    publisher.broadcastLocalInvalidate("key1", 5L);
     verify(rabbitTemplate, times(2)).send(anyString(), anyString(), any());
   }
 
   /**
-   * Verifies that a normal send does not dedup-block a subsequent degraded
-   * send for the same key+type (different compositeKey due to "D:" prefix).
+   * One key's INVALIDATE and REFRESH draw from the same dataVersion space: a slow
+   * REFRESH at an older version must be suppressed once the INVALIDATE claim exists,
+   * instead of shipping a cross-type stale broadcast.
    */
   @Test
-  void degradedAfterNormal_shouldNotBeDeduplicated() {
-    publisher.broadcastRefresh("deg-key", 5L, false);
-    publisher.broadcastRefresh("deg-key", Long.MIN_VALUE + 1, true);
-    verify(rabbitTemplate, times(2)).send(anyString(), anyString(), any());
-  }
+  void staleRefreshAfterInvalidate_shouldBeSuppressedByTheSameClaim() {
+    publisher.broadcastLocalInvalidate("key1", 10L);
+    publisher.broadcastRefresh("key1", 9L);
 
-  /**
-   * Verifies that a degraded send does not dedup-block a subsequent normal
-   * send for the same key+type (different compositeKey without "D:" prefix).
-   */
-  @Test
-  void normalAfterDegraded_shouldNotBeDeduplicated() {
-    publisher.broadcastRefresh("deg-key", Long.MIN_VALUE + 1, true);
-    publisher.broadcastRefresh("deg-key", 5L, false);
-    verify(rabbitTemplate, times(2)).send(anyString(), anyString(), any());
-  }
-
-  /**
-   * Verifies that two degraded broadcasts for the same key+type are correctly
-   * deduplicated when the second has a lower version (same "D:" compositeKey).
-   */
-  @Test
-  void degradedDuplicate_shouldBeDeduplicated() {
-    publisher.broadcastRefresh("deg-key", 3L, true);
-    publisher.broadcastRefresh("deg-key", 1L, true);
     verify(rabbitTemplate, times(1)).send(anyString(), anyString(), any());
   }
 
-  /**
-   * Verifies that getDedupCacheSize returns 0 before init.
-   */
   @Test
-  void getDedupCacheSize_beforeInit_shouldReturnZero() {
-    CacheSyncPublisher p = new CacheSyncPublisher(rabbitTemplate, properties, mock(SnowflakeIdGenerator.class), null);
-    assertThat(p.getDedupCacheSize()).isZero();
+  void newerRefreshAfterInvalidate_shouldStillSend() {
+    publisher.broadcastLocalInvalidate("key1", 10L);
+    publisher.broadcastRefresh("key1", 11L);
+
+    verify(rabbitTemplate, times(2)).send(anyString(), anyString(), any());
   }
 
-  /**
-   * Verifies that getDedupCacheSize returns a positive value after broadcasts.
-   */
   @Test
-  void getDedupCacheSize_afterBroadcast_shouldReturnPositive() {
-    publisher.broadcastRefresh("key1", 1L, false);
-    assertThat(publisher.getDedupCacheSize()).isPositive();
+  void equalVersionInvalidate_shouldOutrankARefreshClaim() {
+    publisher.broadcastRefresh("key1", 10L);
+    publisher.broadcastLocalInvalidate("key1", 10L);
+
+    verify(rabbitTemplate, times(2)).send(anyString(), anyString(), any());
   }
 
-  // ── Application stamping (ADR-0068 pattern on the sync plane) ──
+  // ── Application stamping (design decisions: sync messages pattern on the sync plane) ──
 
   @Test
   void broadcastRefresh_withAppName_shouldStampAppNameHeader() {
     CacheSyncPublisher stamped = stampedPublisher("appA");
 
-    stamped.broadcastRefresh("key1", 1L, false);
+    stamped.broadcastRefresh("key1", 1L);
 
     assertThat((String) captureSentMessage().getMessageProperties().getHeader(HEADER_APP_NAME)).isEqualTo("appA");
   }
@@ -250,48 +165,43 @@ class CacheSyncPublisherTest {
   void broadcastLocalInvalidate_withAppName_shouldStampAppNameHeader() {
     CacheSyncPublisher stamped = stampedPublisher("appA");
 
-    stamped.broadcastLocalInvalidate("key1", 1L, false);
-
-    assertThat((String) captureSentMessage().getMessageProperties().getHeader(HEADER_APP_NAME)).isEqualTo("appA");
-  }
-
-  @Test
-  void broadcastLocalInvalidateAll_withAppName_shouldStampAppNameHeader() {
-    CacheSyncPublisher stamped = stampedPublisher("appA");
-
-    stamped.broadcastLocalInvalidateAll(List.of("k1", "k2"));
-
-    // A foreign INVALIDATE_ALL is the most damaging message to receive: it flushes
-    // the receiver's whole L1, so this path must carry the application stamp.
-    assertThat((String) captureSentMessage().getMessageProperties().getHeader(HEADER_APP_NAME)).isEqualTo("appA");
-  }
-
-  @Test
-  void broadcastAllLocalRules_withAppName_shouldStampAppNameHeader() {
-    CacheSyncPublisher stamped = stampedPublisher("appA");
-
-    stamped.broadcastAllLocalRules("[{\"keyPattern\":\"a*\",\"threshold\":10}]", 7L);
+    stamped.broadcastLocalInvalidate("key1", 1L);
 
     assertThat((String) captureSentMessage().getMessageProperties().getHeader(HEADER_APP_NAME)).isEqualTo("appA");
   }
 
   @Test
   void withoutAppName_shouldOmitTheHeaderForBackwardCompatibility() {
-    // The setUp publisher is built with the 3-arg constructor, i.e. no application name.
-    publisher.broadcastRefresh("key1", 1L, false);
+    // The setUp publisher is built without an application name (null appName).
+    publisher.broadcastRefresh("key1", 1L);
 
     assertThat((String) captureSentMessage().getMessageProperties().getHeader(HEADER_APP_NAME)).isNull();
   }
 
+  /**
+   * Verifies the O(1) oversize short-circuit in {@code serializePutPayload}: a
+   * payload that provably cannot fit under put-max-bytes (byte[] length, or a
+   * String whose char add lower-bounds its UTF-8 wire form) degrades to a
+   * value-less REFRESH without paying the full Jackson pass. Payloads under
+   * the cap still serialize.
+   */
+  @Test
+  void serializePutPayload_oversizeSelfSizingValue_shouldShortCircuitToNull() {
+    properties.setPutMaxBytes(64);
+    // The PUT mapper snapshots the cap at construction, so a publisher must be
+    // built after the property change (there is no re-init seam).
+    CacheSyncPublisher smallCap = new CacheSyncPublisher(rabbitTemplate, properties, null);
+    assertThat(smallCap.serializePutPayload(new byte[65])).isNull();
+    assertThat(smallCap.serializePutPayload("a".repeat(65))).isNull();
+    // Small payloads survive the full pipeline: byte[] inflates 4/3× in base64
+    // and a String gains its quotes, so the under-cap samples stay well clear
+    // of the exact wire-length check.
+    assertThat(smallCap.serializePutPayload(new byte[10])).isNotNull();
+    assertThat(smallCap.serializePutPayload("a".repeat(10))).isNotNull();
+  }
+
   private CacheSyncPublisher stampedPublisher(String appName) {
-    CacheSyncPublisher stamped = new CacheSyncPublisher(
-      rabbitTemplate,
-      properties,
-      mock(SnowflakeIdGenerator.class),
-      appName
-    );
-    stamped.init();
-    return stamped;
+    return new CacheSyncPublisher(rabbitTemplate, properties, appName);
   }
 
   private Message captureSentMessage() {

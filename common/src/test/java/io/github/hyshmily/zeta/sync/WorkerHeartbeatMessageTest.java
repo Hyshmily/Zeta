@@ -30,38 +30,45 @@ class WorkerHeartbeatMessageTest {
 
   @Test
   void toMessage_shouldSetAllHeaders() {
-    WorkerHeartbeatMessage hb = new WorkerHeartbeatMessage(0L, "worker-1", 5L, 0.75, true, 3, 10, 2, 9999L);
+    WorkerHeartbeatMessage hb = new WorkerHeartbeatMessage(42L, "worker-1", 5L, true, null);
     Message msg = hb.toMessage();
     var h = msg.getMessageProperties();
     assertThat((String) h.getHeader(HEADER_TYPE)).isEqualTo(WorkerHeartbeatMessage.TYPE);
+    assertThat(((Number) h.getHeader(HEADER_MESSAGE_ID)).longValue()).isEqualTo(42L);
     assertThat(((Number) h.getHeader(HEADER_HEARTBEAT_EPOCH)).longValue()).isEqualTo(5L);
-    assertThat(((Number) h.getHeader(HEADER_HEARTBEAT_LOAD)).doubleValue()).isEqualTo(0.75);
     assertThat((Boolean) h.getHeader(HEADER_HEARTBEAT_READY)).isTrue();
     assertThat((String) h.getHeader(HEADER_NODE_ID)).isEqualTo("worker-1");
-    assertThat(((Number) h.getHeader(HEADER_HEARTBEAT_CONFIG_CONFIRM)).intValue()).isEqualTo(3);
-    assertThat(((Number) h.getHeader(HEADER_HEARTBEAT_CONFIG_COOL)).intValue()).isEqualTo(10);
-    assertThat(((Number) h.getHeader(HEADER_HEARTBEAT_CONFIG_GRACE)).intValue()).isEqualTo(2);
-    assertThat(((Number) h.getHeader(HEADER_HEARTBEAT_CONFIG_TIMESTAMP)).longValue()).isEqualTo(9999L);
   }
 
   @Test
   void toMessage_bodyShouldBeWorkerIdBytes() {
-    WorkerHeartbeatMessage hb = new WorkerHeartbeatMessage(0L, "worker-x", 1L, 0.0, false, 0, 0, 0, 0L);
+    WorkerHeartbeatMessage hb = new WorkerHeartbeatMessage(0L, "worker-x", 1L, false, null);
     Message msg = hb.toMessage();
     assertThat(new String(msg.getBody(), StandardCharsets.UTF_8)).isEqualTo("worker-x");
   }
 
   @Test
   void from_shouldRoundTrip() {
-    WorkerHeartbeatMessage original = new WorkerHeartbeatMessage(0L, "w-42", 7L, 0.5, true, 5, 8, 1, 7777L);
-    Message msg = original.toMessage();
-    WorkerHeartbeatMessage restored = WorkerHeartbeatMessage.from(msg);
-    assertThat(restored).isEqualTo(original);
+    WorkerHeartbeatMessage original = new WorkerHeartbeatMessage(7L, "w-42", 7L, true, null);
+    assertThat(WorkerHeartbeatMessage.from(original.toMessage())).isEqualTo(original);
   }
 
   @Test
-  void from_nullMessage_shouldThrow() {
-    org.junit.jupiter.api.Assertions.assertThrows(NullPointerException.class, () -> WorkerHeartbeatMessage.from(null));
+  void anAppNameHeaderIsStampedAndRoundTripped() {
+    WorkerHeartbeatMessage original = new WorkerHeartbeatMessage(7L, "w-42", 7L, true, "tenant-a");
+    Message message = original.toMessage();
+
+    assertThat((String) message.getMessageProperties().getHeader(HEADER_APP_NAME)).isEqualTo("tenant-a");
+    assertThat(WorkerHeartbeatMessage.from(message)).isEqualTo(original);
+  }
+
+  @Test
+  void anAppNameHeaderIsOptionalForOlderWorkers() {
+    WorkerHeartbeatMessage original = new WorkerHeartbeatMessage(7L, "w-42", 7L, true, null);
+    Message message = original.toMessage();
+
+    assertThat((Object) message.getMessageProperties().getHeader(HEADER_APP_NAME)).isNull();
+    assertThat((String) WorkerHeartbeatMessage.from(message).appName()).isNull();
   }
 
   @Test
@@ -74,7 +81,7 @@ class WorkerHeartbeatMessageTest {
   @Test
   void from_wrongType_shouldReturnNull() {
     MessageProperties props = new MessageProperties();
-    props.setHeader(HEADER_TYPE, "NOT_HB");
+    props.setHeader(HEADER_TYPE, "OTHER");
     Message msg = new Message("body".getBytes(StandardCharsets.UTF_8), props);
     assertThat(WorkerHeartbeatMessage.from(msg)).isNull();
   }
@@ -85,14 +92,19 @@ class WorkerHeartbeatMessageTest {
     props.setHeader(HEADER_TYPE, WorkerHeartbeatMessage.TYPE);
     Message msg = new Message("any".getBytes(StandardCharsets.UTF_8), props);
     WorkerHeartbeatMessage hb = WorkerHeartbeatMessage.from(msg);
-    assertThat(hb.workerId()).isEmpty();
+    assertThat(hb.id()).isZero();
+    assertThat(hb.workerId()).as("the body is the identity fallback").isEqualTo("any");
     assertThat(hb.epoch()).isZero();
-    assertThat(hb.loadFactor()).isZero();
     assertThat(hb.readyToServe()).isFalse();
-    assertThat(hb.configConfirmCount()).isZero();
-    assertThat(hb.configCoolCount()).isZero();
-    assertThat(hb.configGraceCount()).isZero();
-    assertThat(hb.configTimestamp()).isZero();
+  }
+
+  @Test
+  void from_blankWorkerIdAndBlankBody_shouldReturnNull() {
+    MessageProperties props = new MessageProperties();
+    props.setHeader(HEADER_TYPE, WorkerHeartbeatMessage.TYPE);
+    props.setHeader(HEADER_NODE_ID, "   ");
+    Message msg = new Message(new byte[0], props);
+    assertThat(WorkerHeartbeatMessage.from(msg)).isNull();
   }
 
   @Test
@@ -101,22 +113,12 @@ class WorkerHeartbeatMessageTest {
     props.setHeader(HEADER_TYPE, WorkerHeartbeatMessage.TYPE);
     props.setHeader(HEADER_NODE_ID, 123);
     props.setHeader(HEADER_HEARTBEAT_EPOCH, "not-a-number");
-    props.setHeader(HEADER_HEARTBEAT_LOAD, "bad");
     props.setHeader(HEADER_HEARTBEAT_READY, "not-boolean");
-    props.setHeader(HEADER_HEARTBEAT_CONFIG_CONFIRM, "bad");
-    props.setHeader(HEADER_HEARTBEAT_CONFIG_COOL, "bad");
-    props.setHeader(HEADER_HEARTBEAT_CONFIG_GRACE, "bad");
-    props.setHeader(HEADER_HEARTBEAT_CONFIG_TIMESTAMP, "bad");
     Message msg = new Message("body".getBytes(StandardCharsets.UTF_8), props);
     WorkerHeartbeatMessage hb = WorkerHeartbeatMessage.from(msg);
-    assertThat(hb.workerId()).isEmpty();
+    assertThat(hb.workerId()).as("a non-String header falls back to the body").isEqualTo("body");
     assertThat(hb.epoch()).isZero();
-    assertThat(hb.loadFactor()).isZero();
     assertThat(hb.readyToServe()).isFalse();
-    assertThat(hb.configConfirmCount()).isZero();
-    assertThat(hb.configCoolCount()).isZero();
-    assertThat(hb.configGraceCount()).isZero();
-    assertThat(hb.configTimestamp()).isZero();
   }
 
   @Test
@@ -126,14 +128,10 @@ class WorkerHeartbeatMessageTest {
 
   @Test
   void constructor_shouldSetAllFields() {
-    WorkerHeartbeatMessage hb = new WorkerHeartbeatMessage(0L, "w-1", 2L, 0.5, true, 6, 7, 8, 9L);
+    WorkerHeartbeatMessage hb = new WorkerHeartbeatMessage(3L, "w-1", 2L, true, null);
+    assertThat(hb.id()).isEqualTo(3L);
     assertThat(hb.workerId()).isEqualTo("w-1");
     assertThat(hb.epoch()).isEqualTo(2L);
-    assertThat(hb.loadFactor()).isEqualTo(0.5);
     assertThat(hb.readyToServe()).isTrue();
-    assertThat(hb.configConfirmCount()).isEqualTo(6);
-    assertThat(hb.configCoolCount()).isEqualTo(7);
-    assertThat(hb.configGraceCount()).isEqualTo(8);
-    assertThat(hb.configTimestamp()).isEqualTo(9L);
   }
 }

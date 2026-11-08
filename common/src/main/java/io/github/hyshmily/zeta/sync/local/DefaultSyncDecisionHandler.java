@@ -15,537 +15,455 @@
  */
 package io.github.hyshmily.zeta.sync.local;
 
-import static io.github.hyshmily.zeta.cache.cachesupport.CacheKeysPolicy.isWorkerManaged;
-
-import com.fasterxml.jackson.core.type.TypeReference;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.github.benmanes.caffeine.cache.Cache;
-import com.github.benmanes.caffeine.cache.Caffeine;
-import io.github.hyshmily.zeta.Internal;
-import io.github.hyshmily.zeta.cache.cachesupport.EntryLifecycle;
-import io.github.hyshmily.zeta.cache.cachesupport.SingleFlight;
-import io.github.hyshmily.zeta.cache.loader.CacheLoader;
-import io.github.hyshmily.zeta.model.CacheEntry;
-import io.github.hyshmily.zeta.model.KeyState;
-import io.github.hyshmily.zeta.rule.RuleMatcher;
-import io.github.hyshmily.zeta.util.LogThrottle;
+import io.github.hyshmily.zeta.cache.cachesupport.lifecycle.EntryLifecycle;
+import io.github.hyshmily.zeta.cache.cachesupport.lifecycle.TtlPolicy;
+import io.github.hyshmily.zeta.cache.cachesupport.loader.CacheLoader;
+import io.github.hyshmily.zeta.cache.cachesupport.loader.singleflight.SingleFlight;
+import io.github.hyshmily.zeta.cache.cachesupport.raw.CacheEntry;
+import io.github.hyshmily.zeta.cache.cachesupport.raw.EntryMutations;
+import io.github.hyshmily.zeta.cache.cachesupport.raw.EntryMutations.Applied;
+import io.github.hyshmily.zeta.sync.DecisionPlaneSupport;
+import io.github.hyshmily.zeta.util.TimeSource;
 import io.github.hyshmily.zeta.util.version.VersionGuard;
-import jakarta.annotation.Nullable;
-import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.Map;
+import java.util.function.Consumer;
 import lombok.extern.slf4j.Slf4j;
+import org.jspecify.annotations.Nullable;
 
 /**
- * Default implementation of {@link SyncDecisionHandler} that performs loader-backed
- * REFRESH, version-guarded INVALIDATE, batch INVALIDATE_ALL, and RULES_SYNC processing
- * with {@link SyncHook} dispatch.
+ * Default {@link SyncDecisionHandler}: loader-backed REFRESH, version-guarded INVALIDATE,
+ * value-carrying PUT and the clear family.
+ *
+ * <p><b>Batch reduction.</b> A granted batch holds every queued message of one cache key.
+ * Only its highest-version message can be observable, so the batch is reduced to that
+ * winner before anything is applied: a superseded PUT never pays its payload
+ * deserialization, a superseded REFRESH never runs the loader, and a superseded
+ * INVALIDATE never takes the bin lock. The winner's load-failure fallback still honours
+ * an explicit INVALIDATE from the same batch: it hard-removes instead of soft-expiring a
+ * Worker-managed entry, because the covered removal already condemned that value. A clear
+ * batch is reduced to one watermark record pass and one table sweep at each key's highest
+ * targeting stamp.
+ *
+ * <p>Every apply re-checks the version guard and the invalidation tombstones inside its
+ * atomic {@code compute}, so reduction is an optimization, never the only defence.
  */
 @Slf4j
-@Internal
 public class DefaultSyncDecisionHandler implements SyncDecisionHandler {
 
-  /** Shared Jackson {@link ObjectMapper} for deserializing batch-invalidation key lists from JSON. */
-  private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
+  @Nullable
+  private final CacheLoader<String, Object> clusterLoader;
 
-  /** Local Caffeine L1 cache — target of invalidation and refresh operations.
-   * Accessed atomically via {@code asMap().compute()} for thread-safe updates. */
   private final Cache<String, CacheEntry> caffeineCache;
 
-  /** Loads the authoritative value for a key: a registered prefix routes to the
-   * application's {@code CacheLoader}, an unregistered key falls back to the Redis
-   * value channel. Used during REFRESH to fetch the authoritative value before
-   * writing to L1. */
-  private final CacheLoader<Object> clusterLoader;
+  @Nullable
+  private final CacheSyncPublisher putPayloadParser;
 
-  /** Computes hard and soft expiry timestamps for refreshed entries. */
   private final EntryLifecycle entryLifecycle;
 
-  /** Hot-key rule matcher whose rule set is updated when a RULES_SYNC message arrives. */
-  private final RuleMatcher ruleMatcher;
-
-  /** Optional lifecycle hooks for cache-sync events. Never null. */
-  private final List<SyncHook> syncHooks;
-
-  /**
-   * Optional SingleFlight dedup collaborator (ADR-0067). When present, every
-   * applied entry removal (versioned INVALIDATE, value-less REFRESH fallback,
-   * legacy batch INVALIDATE_ALL) also drops the key's dedup entry, so a
-   * post-removal miss re-invokes the reader instead of replaying a completed
-   * pre-removal load result onto L1. {@code null} (legacy constructor) keeps
-   * the historical no-invalidation behavior.
-   */
   @Nullable
   private final SingleFlight singleFlight;
 
-  /**
-   * Tracks the highest INVALIDATE version per key, preventing stale REFRESH
-   * messages (from before the INVALIDATE) from recreating the entry.
-   */
-  private final Cache<String, Long> recentInvalidated = Caffeine.newBuilder()
-    .maximumSize(10_000)
-    .expireAfterWrite(10, TimeUnit.MINUTES)
-    .build();
+  private final List<SyncHook> syncHooks;
 
-  /**
-   * Creates a handler. {@code singleFlight} may be {@code null} when no dedup
-   * collaborator is wired.
-   */
+  private final TtlPolicy ttlPolicy;
+
   public DefaultSyncDecisionHandler(
     Cache<String, CacheEntry> caffeineCache,
-    CacheLoader<Object> clusterLoader,
+    @Nullable CacheLoader<String, Object> clusterLoader,
     EntryLifecycle entryLifecycle,
-    RuleMatcher ruleMatcher,
-    List<SyncHook> syncHooks,
-    @Nullable SingleFlight singleFlight
+    @Nullable List<SyncHook> syncHooks,
+    @Nullable SingleFlight singleFlight,
+    @Nullable CacheSyncPublisher putPayloadParser
   ) {
+    this.singleFlight = singleFlight;
     this.caffeineCache = caffeineCache;
     this.clusterLoader = clusterLoader;
     this.entryLifecycle = entryLifecycle;
-    this.ruleMatcher = ruleMatcher;
-    this.syncHooks = syncHooks != null ? syncHooks : Collections.emptyList();
-    this.singleFlight = singleFlight;
+    this.putPayloadParser = putPayloadParser;
+    this.ttlPolicy = entryLifecycle.ttlPolicy();
+    this.syncHooks = syncHooks != null ? syncHooks : List.of();
   }
 
-  /**
-   * Counts load failures and admits the full WARN once per
-   * {@value LogThrottle#DEFAULT_WINDOW_MS}ms window (ADR-0037): the
-   * window-opening WARN reports how many similar failures were suppressed
-   * since the previous WARN; callers inside the window log at DEBUG with the
-   * running tally. The admission decision, the tally and the monotonic clock
-   * live in {@link LogThrottle.Counting} — the shared log-throttling utility.
-   */
-  private final LogThrottle.Counting loadFailureThrottle = new LogThrottle.Counting();
-
-  /**
-   * Atomically removes the specified key from the local cache in response to
-   * an INVALIDATE sync message from a peer instance.
-   *
-   * <p><b>Version guard logic:</b>
-   * <ul>
-   *   <li><b>Unconditional path:</b> When {@code version == 0L && !isVersionDegraded}
-   *       (clean invalidation from {@code invalidateAllLocal}), the guard is bypassed
-   *       for ordinary entries. <em>Worker-managed entries</em> ({@link KeyState#HOT}
-   *       or {@link KeyState#COOL}) are preserved: a version-less INVALIDATE carries
-   *       no decision-version information, and clearing such an entry would discard
-   *       its decision metadata and extended TTL (ADR-0021 / ADR-0024 depend on them
-   *       surviving); it expires naturally or awaits the next Worker decision.</li>
-   *   <li><b>Guarded path:</b> Uses {@link VersionGuard#shouldSkipForRefresh} with the
-   *       4-case degraded comparison (equal version applies). An invalidation is
-   *       idempotent deletion: applying at equality is always safe, and it heals
-   *       the ADR-0033 probe-after-read over-stamp, where a racing read lands an
-   *       entry stamped with this message's own version (bump-first ordering,
-   *       ADR-0086) and the plain {@code >=} matrix would skip the delete and
-   *       pin the stale value for its whole TTL. Case 2 (existing normal,
-   *       incoming degraded) still prevents a stale degraded INVALIDATE from
-   *       wiping a healthy entry.</li>
-   * </ul>
-   *
-   * <p>Double-checked locking (DCL): a fast version guard before the atomic
-   * {@code compute} (first pass), and a second guard inside the {@code compute}
-   * body (second pass) to prevent a concurrent REFRESH from being wiped by a
-   * stale invalidate that arrived after the refresh. Invalidation watermark
-   * recording and {@link SyncHook} dispatch happen only when the entry was
-   * actually removed — a rejected (preserved) invalidate must not block later
-   * REFRESH messages via a {@code Long.MAX_VALUE} watermark.
-   *
-   * @param sm the sync message containing the key to invalidate; if the key
-   *           is null or invalid, the invalidation is silently skipped
-   */
   @Override
-  public void handleLocalInvalidate(SyncMessage sm) {
-    boolean unconditional = sm.version() == 0L && !sm.isVersionDegraded();
-
-    if (
-      !unconditional &&
-      VersionGuard.shouldSkipForRefresh(caffeineCache, sm.cacheKey(), sm.version(), sm.isVersionDegraded())
-    ) {
-      log.debug("Stale invalidate ignored: key={}, incomingVersion={}", sm.cacheKey(), sm.version());
+  public void handleBatch(List<SyncMessage> batch) {
+    SyncMessage first = batch.get(0);
+    if (first.type().isClear()) {
+      applyClearBatch(batch);
       return;
     }
 
-    AtomicBoolean removed = new AtomicBoolean(false);
-    caffeineCache
-      .asMap()
-      .compute(sm.cacheKey(), (key, existing) -> {
-        if (
-          !unconditional &&
-          existing != null &&
-          VersionGuard.shouldSkipForRefresh(existing, sm.version(), sm.isVersionDegraded())
-        ) {
-          return existing;
-        }
-        if (unconditional && isWorkerManaged(existing)) {
-          // Version-less INVALIDATE cannot be compared against the Worker
-          // decision version; preserving HOT/COOL keeps decision metadata and
-          // extended TTLs alive (see Javadoc above).
-          return existing;
-        }
-        // Record the invalidation watermark atomically with the removal:
-        // recording it outside the compute left a window in which a concurrent
-        // REFRESH could pass the {@code isInvalidation} guard and re-warm a key
-        // this message just invalidated. The merge is idempotent (Math::max),
-        // so a compute re-invocation is harmless.
-        recordInvalidation(key, sm.version());
-        removed.set(true);
-        return null;
-      });
-    if (removed.get()) {
-      log.debug("Invalidated by sync: {}", sm.cacheKey());
-      invalidateDedupEntry(sm.cacheKey());
-      fireAfterInvalidate(sm.cacheKey(), sm);
-    }
-  }
-
-  /**
-   * Removes the keys carried in a batch INVALIDATE_ALL message.
-   *
-   * <p><b>Legacy wire format (ADR-0066):</b> the in-tree producer is gone —
-   * {@code HotKeyCache.invalidate(Iterable, true)} now sends the same per-key
-   * versioned INVALIDATE messages as the single-key path, so a delayed batch can no
-   * longer bypass version ordering and blindly wipe entries a newer REFRESH just
-   * applied. This handler is kept for rolling upgrades against older peers that
-   * still broadcast the unversioned batch message.
-   *
-   * <p>Worker-managed entries ({@link KeyState#HOT} / {@link KeyState#COOL}) are
-   * preserved, mirroring the version-less INVALIDATE path: a version-less batch
-   * carries no ordering information, and removing such an entry would discard its
-   * decision metadata and extended TTLs (ADR-0021 / ADR-0024 depend on them
-   * surviving); it expires naturally or awaits the next Worker decision.
-   *
-   * <p>Deserialization failures (malformed JSON) are logged at ERROR level and
-   * do not propagate.
-   *
-   * @param sm the sync message whose {@code cacheKey} field contains the JSON-array
-   *           of keys to invalidate; must not be null
-   */
-  @Override
-  public void handleLocalInvalidateAll(SyncMessage sm) {
-    try {
-      List<String> keys = OBJECT_MAPPER.readValue(sm.cacheKey(), new TypeReference<>() {});
-      for (String key : keys) {
-        caffeineCache.asMap().compute(key, (k, existing) -> isWorkerManaged(existing) ? existing : null);
-        invalidateDedupEntry(key);
+    SyncMessage winner = null;
+    SyncMessage coveredInvalidate = null;
+    boolean allowSoftExpire = true;
+    for (SyncMessage msg : batch) {
+      // A newer REFRESH/PUT supersedes a covered INVALIDATE for the final value, but
+      // its load-failure fallback must not undo the covered hard removal: keeping a
+      // Worker-managed entry soft-expired there would serve data an explicit
+      // invalidation in the same batch already condemned.
+      allowSoftExpire &= msg.type() != SyncType.INVALIDATE;
+      if (winner == null) {
+        winner = msg;
+      } else if (outranks(msg, winner)) {
+        reportCovered(winner);
+        coveredInvalidate = rememberCovered(winner, coveredInvalidate);
+        winner = msg;
+      } else {
+        reportCovered(msg);
+        coveredInvalidate = rememberCovered(msg, coveredInvalidate);
       }
-      log.debug("Batch invalidated {} keys", keys.size());
-    } catch (Exception e) {
-      log.error("Failed to deserialize batch invalidate keys", e);
+    }
+    switch (winner.type()) {
+      case INVALIDATE -> invalidate(winner);
+      case REFRESH, PUT -> applyValueMessage(winner, allowSoftExpire, coveredInvalidate);
+      default -> {
+      }
     }
   }
 
   /**
-   * Merges the incoming rule set from a RULES_SYNC message into the local
-   * {@link RuleMatcher}, guarded by the message's {@code rulesVersion}.
-   * <p>
-   * Delegates to {@link RuleMatcher#syncRules}, which handles the actual
-   * merge logic and version conflict resolution.
-   *
-   * @param sm the sync message whose {@code cacheKey} field contains the
-   *           serialized rule-set JSON and whose {@code rulesVersion} field
-   *           carries the version for conflict resolution; must not be null
+   * Whether {@code candidate} replaces {@code current} as the batch winner. A higher version
+   * always wins; at the same version an INVALIDATE outranks a REFRESH/PUT, matching the
+   * publisher's {@code BroadcastClaim} dedup rule.
    */
-  @Override
-  public void handleRulesSync(SyncMessage sm) {
-    ruleMatcher.syncRules(sm.cacheKey(), sm.rulesVersion());
-  }
-
-  /**
-   * Refreshes a cache entry with the latest value from Redis in response to a
-   * REFRESH sync message from a peer instance.
-   *
-   * @param sm the sync message containing the key and version to refresh;
-   *           must not be null
-   */
-  @Override
-  public void handleRefresh(SyncMessage sm) {
-    handleRefresh(sm, true);
-  }
-
-  /**
-   * Refreshes a cache entry with the latest value from Redis in response to a
-   * REFRESH sync message from a peer instance, with the dispatcher's batch-end
-   * signal (ADR-0071, Disruptor {@code BatchEventProcessor} semantics).
-   *
-   * <p><b>Batch-tail amortization:</b> a burst of N same-key REFRESH messages queues N
-   * tasks on the ordered dispatcher's per-key worker; each would otherwise pay its own
-   * Redis load even though only the final applied state matters. When {@code endOfBatch}
-   * is {@code false} (further tasks of the same key's granted batch follow), this message
-   * is skipped without the Redis load, the L1 write, or the compression: a later REFRESH
-   * in the same batch reloads the authoritative value and produces the same final state
-   * with one load instead of N. {@code onRefreshSkipped} fires for the skipped message so
-   * the hook contract ("a REFRESH that was not applied") stays symmetric; the delta
-   * versus non-batched processing is that intermediate versions never become visible in
-   * L1 and their per-message {@code afterRefresh} hooks do not fire.
-   *
-   * <p>Skips only ever apply within one granted batch: a REFRESH granted alone (the common
-   * single-message case) always runs the full flow, and a REFRESH that is the last task of
-   * its batch always loads — the signal is best-effort and never strands a key on a stale
-   * value.
-   *
-   * <p><b>Refresh flow (batch-final message):</b>
-   * <ol>
-   *   <li><b>DCL check 1:</b> Fast-path version guard ({@link VersionGuard#shouldSkipForRefresh})
-   *       against the existing L1 entry. If a strictly newer dataVersion is already present,
-   *       the refresh is skipped (an <b>equal</b> version applies — ADR-0066).</li>
-   *   <li><b>Redis fetch:</b> Loads the authoritative value from Redis.</li>
-   *   <li><b>DCL check 2:</b> Second version guard inside the atomic {@code compute}
-   *       to prevent overwriting a newer version that arrived during the Redis fetch.</li>
-   *   <li><b>Write:</b> Replaces the value and dataVersion while preserving the existing
-   *       entry's metadata (hard/soft TTLs, normal TTLs, key state, decision version,
-   *       degradation flag). If no entry existed in L1 before the refresh, a fresh
-   *       {@link CacheEntry} is created with default metadata and {@code KeyState.NORMAL}.</li>
-   * </ol>
-   *
-   * <p>If the key is absent from L1 and Redis returns null (key does not exist),
-   * the refresh is aborted — there is nothing to cache.
-   *
-   * @param sm         the sync message containing the key and version to refresh;
-   *                   must not be null
-   * @param endOfBatch {@code true} if this is the last task of its key's currently granted
-   *                   dispatch batch; {@code false} while further tasks of the same batch
-   *                   follow
-   */
-  @Override
-  @SuppressWarnings("all")
-  public void handleRefresh(SyncMessage sm, boolean endOfBatch) {
-    String cacheKey = sm.cacheKey();
-    if (!endOfBatch) {
-      // Batch-tail amortization (ADR-0071): a later REFRESH in this same key-batch reloads
-      // the newest value from Redis anyway — applying this one would only add a redundant
-      // Redis load, an L1 write and a compression for an intermediate state nobody can
-      // observe across the batch (all tasks run back-to-back in one dispatch cycle).
-      log.debug("Refresh skipped (non-final of dispatch batch): key={}, incomingVersion={}", cacheKey, sm.version());
-      fireOnRefreshSkipped(cacheKey, sm);
-      return;
+  private static boolean outranks(SyncMessage candidate, SyncMessage current) {
+    if (candidate.version() != current.version()) {
+      return candidate.version() > current.version();
     }
-    // DCL first check – cheap, outside the compute lock. The REFRESH receiver uses
-    // the strict-newer guard (ADR-0066): an equal version applies, so a REFRESH is
-    // never swallowed by an entry that ADR-0033's probe-after-read over-stamped one
-    // write ahead of its data.
-    if (VersionGuard.shouldSkipForRefresh(caffeineCache, cacheKey, sm.version(), sm.isVersionDegraded())) {
-      log.debug("Stale refresh ignored: key={}, incomingVersion={}", cacheKey, sm.version());
-      fireOnRefreshSkipped(cacheKey, sm);
+    return candidate.type() == SyncType.INVALIDATE && current.type() != SyncType.INVALIDATE;
+  }
+
+  /**
+   * Tracks the highest-version INVALIDATE the batch covered, so a value fallback that has to
+   * evict still reports the invalidation hook the covered message owned.
+   */
+  private static @Nullable SyncMessage rememberCovered(SyncMessage covered, @Nullable SyncMessage previous) {
+    if (covered.type() != SyncType.INVALIDATE) {
+      return previous;
+    }
+    return previous == null || covered.version() > previous.version() ? covered : previous;
+  }
+
+  /**
+   * Reports a PUT/REFRESH of the batch that a newer message covered: it produced no
+   * effect, and the hook contract is one terminal callback per message. A covered
+   * INVALIDATE is dropped silently — a removal that never happened has no
+   * applied/skipped outcome to report.
+   */
+  private void reportCovered(SyncMessage covered) {
+    if (covered.type() == SyncType.REFRESH || covered.type() == SyncType.PUT) {
+      log.debug(
+        "Message covered by a newer message of the same batch: type={}, key={}, version={}",
+        covered.type(),
+        covered.cacheKey(),
+        covered.version()
+      );
+      fireOnRefreshSkipped(covered);
+    }
+  }
+
+  /**
+   * Applies one REFRESH or value-carrying PUT. Both share the same pipeline: an optional
+   * lock-free staleness pre-check, one value resolution (authoritative load or payload
+   * deserialization), a fallback to the versioned local invalidation when no cachable value
+   * exists, and the guarded write.
+   *
+   * @param message         the winning message of the batch
+   * @param allowSoftExpire {@code false} when the batch also carried an explicit INVALIDATE
+   * @param coveredInvalidate the highest covered INVALIDATE, or {@code null}
+   */
+  private void applyValueMessage(
+    SyncMessage message,
+    boolean allowSoftExpire,
+    @Nullable SyncMessage coveredInvalidate
+  ) {
+    String key = message.cacheKey();
+    long version = message.version();
+    boolean put = message.type() == SyncType.PUT;
+    // Without a cluster loader a REFRESH has no I/O to avoid: the fallback's compute applies
+    // the same version guard inside the bin lock, so the lock-free pre-check would only
+    // repeat it. A PUT always guards here: it must not pay deserialization for a pre-image
+    // that already lost to the resident entry or an invalidation tombstone.
+    if ((put || clusterLoader != null) && staleAgainstLocalState(key, version)) {
+      log.debug("Stale {} ignored: key={}, incomingVersion={}", message.type(), key, version);
+      fireOnRefreshSkipped(message);
       return;
     }
 
-    Object value = loadAuthoritative(sm);
+    Object value = put ? resolvePutValue(key, message) : loadAuthoritative(key);
     if (value == null) {
-      // No value channel exists by default: nothing in Zeta writes the
-      // cache-key namespace in Redis, so a REFRESH broadcast can never carry
-      // the payload. Fall back to a local invalidation so the next read
-      // reloads through the type-safe application reader instead of silently
-      // keeping a stale entry (ADR-0031). Local-only: no re-broadcast, so this
-      // cannot loop.
-      log.debug("Refresh loaded no value for key={}, falling back to local invalidation", cacheKey);
-      invalidateForValuelessRefresh(cacheKey, sm);
-      fireOnRefreshSkipped(cacheKey, sm);
+      log.debug("{} yielded no cachable value for key={}, falling back to local invalidation", message.type(), key);
+      boolean removed = evict(key, version, allowSoftExpire);
+      if (removed && coveredInvalidate != null) {
+        // The covered INVALIDATE's removal was carried out by this fallback; its hook
+        // contract must still observe the removal, not just the refresh skip.
+        fireAfterInvalidate(coveredInvalidate);
+      }
+      fireOnRefreshSkipped(message);
       return;
     }
 
-    // Compress BEFORE acquiring the Caffeine bin lock (write-side ADR-0030
-    // discipline, mirroring EntryLifecycleImpl.applyRefreshTask: compression
-    // cost is linear in the value size and must not stall same-bin
-    // reads/writes). The price is one wasted compression when the version
-    // guard or the invalidation watermark inside the compute discards the
-    // refresh.
-    Object wrappedValue = entryLifecycle.wrapValue(value);
-
-    boolean[] applied = new boolean[1];
-    CacheEntry computed = caffeineCache
-      .asMap()
-      .compute(cacheKey, (key, existing) -> {
-        // DCL second check – atomic with to write. Same strict-newer guard as the
-        // fast path (ADR-0066): an equal version applies and heals an over-stamped
-        // entry (ADR-0033 probe-after-read).
-        if (
-          existing != null &&
-          VersionGuard.shouldSkipForRefresh(existing, sm.version(), sm.isVersionDegraded())
-        ) {
-          return existing;
-        }
-        // Atomically check invalidation record to prevent stale refresh after invalidate
-        if (isInvalidation(key, sm.version())) {
-          log.debug("Refresh skipped due to recent invalidation: key={}", key);
-          return existing; // preserve whatever is currently in cache (may be null)
-        }
-
-        // Clear invalidation watermark before writing — the refresh is
-        // proceeding, so the high-water mark is no longer meaningful.
-        clearInvalidation(key);
-
-        applied[0] = true;
-        if (existing != null) {
-          // Refresh-in-place: fresh value + probed version, same TTL
-          // durations, expiry re-armed from those durations. The draft's
-          // to* semantics keep a disabled soft TTL (0) disabled — matching
-          // the guard below it (ADR-0067).
-          return entryLifecycle.editEntry(existing).value(wrappedValue).version(sm.version()).rearmExpiry().build();
-        }
-        long defaultHardTtlMs = entryLifecycle.ttlPolicy().getEffectiveHardTtlMs();
-        long defaultSoftTtlMs = entryLifecycle.ttlPolicy().getEffectiveSoftTtlMs();
-        return entryLifecycle
-          .newEntry()
-          .value(wrappedValue)
-          .version(sm.version())
-          .ttl(defaultHardTtlMs, defaultSoftTtlMs, defaultHardTtlMs, defaultSoftTtlMs)
-          .keyState(KeyState.NORMAL)
-          .build();
-      });
-    // The atomic second guard may have rejected the refresh (a newer dataVersion arrived
-    // during the Redis fetch, or the invalidation watermark blocked it) — neither the
-    // success hook nor the "refreshed" log may fire for a refresh that was not applied
-    // (matches DefaultWorkerDecisionHandler.handleHot; the old code read the compute's
-    // return value, which on a rejection IS the existing entry, and fired afterRefresh
-    // for it). The skip hook fires instead so consumers see the outcome symmetrically
-    // with the pre-check rejection above.
-    if (!applied[0]) {
-      fireOnRefreshSkipped(cacheKey, sm);
+    Applied applied = writePeerValue(key, version, value);
+    if (applied == null) {
+      fireOnRefreshSkipped(message);
       return;
     }
-    log.debug("Refreshed by sync: {}", cacheKey);
-    // Use the compute's own result instead of re-reading the cache: a
-    // concurrent INVALIDATE/eviction between the compute and a getIfPresent
-    // could otherwise deliver a stale or null entry to the hooks.
-    if (computed != null) {
-      fireAfterRefresh(cacheKey, sm, computed);
+
+    log.debug("Applied peer sync value: {}", key);
+    if (applied.current() != null) {
+      fireAfterRefresh(message, applied.current());
     }
   }
 
   /**
-   * Local invalidation fallback for a REFRESH whose value channel returned nothing
-   * (ADR-0031). Unlike a plain {@link Cache#invalidate(Object)}, the removal is
-   * guarded:
-   * <ul>
-   *   <li><b>Worker-managed entries preserved</b> — a peer's refresh fallback must
-   *       not discard a decision stamp and extended TTLs (parity with the
-   *       version-less INVALIDATE path); the entry expires at its hard TTL or the
-   *       next Worker decision.</li>
-   *   <li><b>Strictly newer local writes preserved</b> — a local {@code putThrough}
-   *       that landed while the REFRESH was in flight is not wiped by an older
-   *       peer's message. An <b>equal</b> version is removed: the ADR-0033
-   *       probe-after-read can over-stamp an entry one write ahead of its data, and
-   *       the write's own REFRESH must heal it via drop-and-reload (ADR-0066).</li>
-   * </ul>
+   * Resolves one PUT payload and applies the loader's admission rule exactly once.
+   * {@link #loadAuthoritative} already admits a REFRESH load, so this path checks only the
+   * deserialized payload.
    *
-   * <p>Removal records the invalidation watermark (so an older in-flight REFRESH
-   * cannot re-apply past this point) and fires {@link SyncHook#afterInvalidate} —
-   * the same observable contract as {@link #handleLocalInvalidate}.
-   *
-   * @param cacheKey the key to invalidate
-   * @param sm       the REFRESH message that triggered the fallback
+   * @return the admitted value, or {@code null} when the payload is unreadable or declined
    */
-  private void invalidateForValuelessRefresh(String cacheKey, SyncMessage sm) {
-    boolean[] removed = new boolean[1];
-    caffeineCache
-      .asMap()
-      .compute(cacheKey, (key, existing) -> {
-        if (existing != null) {
-          if (isWorkerManaged(existing)) {
-            return existing;
-          }
-          if (VersionGuard.shouldSkipForRefresh(existing, sm.version(), sm.isVersionDegraded())) {
-            return existing;
-          }
-        }
-        // Watermark recorded atomically with the removal (same race as
-        // {@link #handleLocalInvalidate}): a concurrent REFRESH must not slip
-        // past the {@code isInvalidation} guard in the gap between removal and
-        // recording. The merge is idempotent (Math::max), so a compute
-        // re-invocation is harmless.
-        recordInvalidation(key, sm.version());
-        removed[0] = true;
-        return null;
-      });
-    if (removed[0]) {
-      invalidateDedupEntry(cacheKey);
-      fireAfterInvalidate(cacheKey, sm);
-    }
-  }
-
-  /**
-   * Loads the authoritative value for the key carried in the sync message via the
-   * cluster loader: a registered prefix routes to the application's
-   * {@code CacheLoader}, an unregistered key falls back to the Redis value channel.
-   * <p>
-   * Any exception thrown by the {@code clusterLoader} (connection timeout, Redis
-   * outage, data-source error) is caught and reported via the rate-limited
-   * {@link #logLoadFailure}; the caller should handle a {@code null}
-   * return by aborting the refresh.
-   *
-   * @param sm the sync message containing the cache key to load; must not be null
-   * @return the authoritative value, or {@code null} if the key is absent in the
-   *         data source or the load failed with an exception
-   */
-  private Object loadAuthoritative(SyncMessage sm) {
-    try {
-      return clusterLoader.load(sm.cacheKey());
-    } catch (Exception e) {
-      logLoadFailure(sm.cacheKey(), e);
+  @Nullable
+  private Object resolvePutValue(String key, SyncMessage message) {
+    Object value = putPayloadParser == null ? null : putPayloadParser.parsePutPayload(message.payload());
+    if (value != null && clusterLoader != null && !clusterLoader.isCacheable(value)) {
+      log.debug("Peer value rejected by loader admission, falling back to local invalidation: key={}", key);
       return null;
     }
+    return value;
   }
 
   /**
-   * Reports a load failure, rate-limited to one full-stack WARN per
-   * {@value LogThrottle#DEFAULT_WINDOW_MS}ms window. With the data source down and
-   * consumers draining a broadcast backlog, a per-message WARN floods the log
-   * at message rate — within the window failures are counted and surfaced as a
-   * one-line DEBUG with the cumulative count instead.
+   * The guarded peer-value write. Inside the atomic compute: the refresh guard (only a
+   * strictly newer resident skips; an equal version applies), the invalidation tombstones,
+   * then a value+version rewrite that keeps the resident TTLs and Worker decision metadata
+   * — or a fresh NORMAL entry, because only a Worker decision may create a HOT one.
    *
-   * @param cacheKey the key whose load failed
-   * @param e        the load failure (stack shown on the window-opening WARN)
+   * @return the applied pre/post-images, or {@code null} when the guards refused the value
    */
-  private void logLoadFailure(String cacheKey, Exception e) {
-    LogThrottle.Counting.Attempt attempt = loadFailureThrottle.record();
-    if (!attempt.admitted()) {
-      log.debug("handleRefresh: load failed for key={} ({} failures in current window)", cacheKey, attempt.count());
+  @Nullable
+  private Applied writePeerValue(String key, long version, Object value) {
+    Applied applied = EntryMutations.apply(caffeineCache, key, existing -> {
+      CacheEntry resident = existing != null && !ttlPolicy.isLogicallyExpired(existing) ? existing : null;
+
+      if (resident != null && VersionGuard.shouldSkipForRefresh(resident, version)) {
+        return existing;
+      }
+
+      if (entryLifecycle.staleAgainstInvalidation(key, version)) {
+        log.debug("Apply skipped due to recent invalidation: key={}", key);
+        return existing;
+      }
+
+      long hardTtl = resident != null ? resident.getHardTtlMs() : ttlPolicy.effectiveHardTtlMs();
+      long softTtl = resident != null ? resident.getSoftTtlMs() : ttlPolicy.effectiveSoftTtlMs();
+      return entryLifecycle.writeValue(resident, value, version, hardTtl, softTtl, false);
+    });
+    if (applied != null) {
+      invalidateDedupEntry(key);
+    }
+    return applied;
+  }
+
+  /**
+   * Applies one explicit peer INVALIDATE: record the tombstone and remove the resident
+   * in the same compute, then report {@code afterInvalidate} only when an entry was
+   * actually removed.
+   */
+  private void invalidate(SyncMessage message) {
+    String key = message.cacheKey();
+    long version = message.version();
+    if (evict(key, version, false)) {
+      log.debug("Invalidated by sync: {}", key);
+      fireAfterInvalidate(message);
+    }
+  }
+
+  /** What one versioned eviction did to the resident entry. */
+  private enum EvictOutcome {
+    /** A newer resident outranked the eviction; nothing changed. */
+    SKIPPED,
+    /** The tombstone was recorded but no entry was removed (absent or soft-expired). */
+    TOMBSTONED,
+    /** The entry was removed from L1. */
+    REMOVED,
+  }
+
+  /**
+   * The shared versioned eviction. The tombstone is recorded in the same compute as the
+   * removal, so a concurrent refresh cannot slip between them and re-warm the key. The
+   * key's dedup flight is dropped whenever the tombstone is recorded — including an absent
+   * key — so a read that starts after the invalidation cannot join a pre-invalidation load;
+   * a version guard skip leaves the newer flight alone.
+   *
+   * <p>With {@code softExpireWorkerManaged}, a Worker-managed (HOT/COOL) entry survives:
+   * this node has no loader, so the entry keeps its decision stamp and TTL regime and only
+   * its soft window is closed — the next read reloads through the application reader.
+   *
+   * @return {@code true} only when a non-null entry was removed from L1
+   */
+  private boolean evict(String key, long version, boolean softExpireWorkerManaged) {
+    EvictOutcome[] result = { EvictOutcome.SKIPPED };
+    caffeineCache
+      .asMap()
+      .compute(key, (k, existing) -> {
+        if (existing != null && VersionGuard.shouldSkipForRefresh(existing, version)) {
+          return existing;
+        }
+        // Recorded even when absent: an in-flight load must not re-warm the key.
+        entryLifecycle.recordInvalidation(key, version);
+        if (existing == null) {
+          result[0] = EvictOutcome.TOMBSTONED;
+          return null;
+        }
+        if (softExpireWorkerManaged && existing.isWorkerManaged()) {
+          // One millisecond in the past, so a read in this same millisecond already sees
+          // the closed soft window.
+          result[0] = EvictOutcome.TOMBSTONED;
+          return entryLifecycle.editEntry(existing).softExpiryAt(TimeSource.currentTimeMillis() - 1L).build();
+        }
+        result[0] = EvictOutcome.REMOVED;
+        return null;
+      });
+    if (result[0] != EvictOutcome.SKIPPED) {
+      invalidateDedupEntry(key);
+    }
+    return result[0] == EvictOutcome.REMOVED;
+  }
+
+  /**
+   * Applies a batch of clears: record each watermark first (a concurrent apply that passes
+   * its per-key guard on an absent entry must already see it), then run <b>one</b> key-set
+   * pass removing each key at the highest stamp that targets it. A prefix clear at or below
+   * the batch's table-wide stamp is dropped: the table-wide stamp already removes every key
+   * that prefix clear could, so keeping it would only add a redundant watermark and a walk.
+   */
+  private void applyClearBatch(List<SyncMessage> batch) {
+    long fullStamp = 0L;
+    Map<String, Long> prefixStamps = new HashMap<>(2);
+    for (SyncMessage msg : batch) {
+      switch (msg.type()) {
+        case INVALIDATE_ALL -> fullStamp = Math.max(fullStamp, msg.version());
+        case INVALIDATE_PREFIX -> prefixStamps.merge(msg.cacheKey(), msg.version(), Math::max);
+        default -> {
+        }
+      }
+    }
+
+    if (fullStamp > 0L) {
+      // A table-wide clear at fullStamp already covers every prefix clear at or
+      // below it: stampFor returns fullStamp for those keys and the flight kill
+      // below is table-wide.
+      long fullClearStamp = fullStamp;
+      prefixStamps.values().removeIf(prefixStamp -> prefixStamp <= fullClearStamp);
+    }
+
+    if (fullStamp == 0L && prefixStamps.isEmpty()) {
       return;
     }
-    if (attempt.count() > 0) {
-      log.warn(
-        "handleRefresh: load failed for key={} ({} similar failures suppressed in the last {}ms)",
-        cacheKey,
-        attempt.count(),
-        LogThrottle.DEFAULT_WINDOW_MS,
-        e
-      );
+
+    recordWatermarks(fullStamp, prefixStamps);
+    killClearedFlights(fullStamp, prefixStamps);
+    int targeted = sweep(fullStamp, prefixStamps);
+    if (targeted > 0) {
+      log.debug("Clear applied: fullStamp={}, prefixes={}, targeted={}", fullStamp, prefixStamps.keySet(), targeted);
+    }
+  }
+
+  /** Records the batch's clear watermarks before the sweep touches a single entry. */
+  private void recordWatermarks(long fullStamp, Map<String, Long> prefixStamps) {
+    if (fullStamp > 0L) {
+      entryLifecycle.recordClear(fullStamp);
+    }
+    if (!prefixStamps.isEmpty()) {
+      entryLifecycle.recordPrefixClears(prefixStamps);
+    }
+  }
+
+  /**
+   * Kills pre-clear flights too: the watermark refuses their fills, but a read that starts
+   * after the clear must not join one and receive the pre-clear value. A table-wide kill
+   * already covers every prefix, so the per-prefix walk only runs without one.
+   */
+  private void killClearedFlights(long fullStamp, Map<String, Long> prefixStamps) {
+    if (singleFlight == null) {
+      return;
+    }
+    if (fullStamp > 0L) {
+      singleFlight.invalidateAll();
     } else {
-      log.warn("handleRefresh: load failed for key={}", cacheKey, e);
+      for (String prefix : prefixStamps.keySet()) {
+        singleFlight.invalidatePrefix(prefix);
+      }
     }
   }
 
   /**
-   * Record the highest INVALIDATE version for a key.
-   * Used to reject stale REFRESH messages that arrive after the INVALIDATE.
+   * Removes every resident a clear of the batch targets, each at the highest stamp that reaches
+   * it.
    *
-   * <p>A version-less (0) invalidation carries no ordering information, so it
-   * must NOT be recorded: the old {@code Long.MAX_VALUE} watermark made
-   * {@link #isInvalidation} reject every finite-version REFRESH for the full
-   * 10-minute {@code recentInvalidated} TTL, and because the watermark is
-   * only cleared when a refresh proceeds, the key could never be re-warmed by
-   * peers. A post-invalidation REFRESH loads the current value from Redis at
-   * execution time anyway, so blocking it buys nothing.
-   *
-   * @param key the invalidated cache key
-   * @param version the data version of the invalidation, or {@code 0} for a
-   *                version-less (clean) invalidation
+   * @return the number of keys the batch targeted
    */
-  private void recordInvalidation(String key, long version) {
-    if (version <= 0L) {
-      return;
+  private int sweep(long fullStamp, Map<String, Long> prefixStamps) {
+    int targeted = 0;
+    for (Map.Entry<String, CacheEntry> entry : caffeineCache.asMap().entrySet()) {
+      String key = entry.getKey();
+      long stamp = stampFor(key, fullStamp, prefixStamps);
+      if (stamp <= 0L) {
+        continue;
+      }
+      // Lock-free pre-filter on the value the entry set already carries: a resident
+      // stamped above the clear is preserved by the compute, so its bin lock is skipped.
+      CacheEntry resident = entry.getValue();
+      if (VersionGuard.shouldSkipForRefresh(resident, stamp)) {
+        continue;
+      }
+      targeted++;
+      // No per-key dedup kill here: the clear family already marked every pre-clear
+      // flight above (invalidateAll / invalidatePrefix), and the watermark recorded
+      // before the sweep refuses any pre-clear fill. A flight created after that kill
+      // belongs to a post-clear read and must survive; removing it here would only
+      // force a duplicate load for every key the sweep touches.
+      EntryMutations.mutate(caffeineCache, key, existing ->
+        existing == null || VersionGuard.shouldSkipForRefresh(existing, stamp) ? existing : null
+      );
     }
-    recentInvalidated.asMap().merge(key, version, Math::max);
+    return targeted;
+  }
+
+  /** The stamp a key must be removed at, or {@code 0} when no clear of the batch targets it. */
+  private static long stampFor(String key, long fullStamp, Map<String, Long> prefixStamps) {
+    long stamp = fullStamp;
+    for (Map.Entry<String, Long> entry : prefixStamps.entrySet()) {
+      if (entry.getValue() > stamp && key.startsWith(entry.getKey())) {
+        stamp = entry.getValue();
+      }
+    }
+    return stamp;
+  }
+
+  /** Whether the local entry or an applied tombstone already makes {@code version} obsolete. */
+  private boolean staleAgainstLocalState(String key, long version) {
+    CacheEntry resident = caffeineCache.asMap().get(key);
+    boolean residentOutranks =
+      resident != null &&
+      !ttlPolicy.isLogicallyExpired(resident) &&
+      VersionGuard.shouldSkipForRefresh(resident, version);
+    return residentOutranks || entryLifecycle.staleAgainstInvalidation(key, version);
   }
 
   /**
-   * Drop the key's SingleFlight dedup entry after an applied removal (ADR-0067):
-   * a completed load result from before the removal must not be replayed onto a
-   * post-removal miss. No-op when no dedup collaborator is wired (legacy
-   * constructor).
-   *
-   * @param key the removed cache key
+   * Loads the authoritative value through the optional cluster loader; a clean miss, a
+   * declined admission and a loader failure all answer {@code null} (design decisions:
+   * sync messages).
    */
+  @Nullable
+  private Object loadAuthoritative(String key) {
+    return DecisionPlaneSupport.loadAuthoritative(clusterLoader, key, log, "handleRefresh: load failed for key={}");
+  }
+
+  /** Drops the applied key's dedup entry: a pre-apply load result must not be replayed. */
   private void invalidateDedupEntry(String key) {
     if (singleFlight != null) {
       singleFlight.invalidate(key);
@@ -553,64 +471,38 @@ public class DefaultSyncDecisionHandler implements SyncDecisionHandler {
   }
 
   /**
-   * Check whether a refresh should be skipped because the key was
-   * invalidated at a version >= the refresh version.
+   * One owner of the hook-dispatch contract: a broken hook never breaks the decision
+   * apply. The empty check runs before the capturing callback is built.
+   *
+   * @param hookName the callback name (for the WARN line)
+   * @param key      the key the decision touched
+   * @param callback the hook callback to invoke for each registered hook
    */
-  private boolean isInvalidation(String key, long refreshVersion) {
-    Long highWater = recentInvalidated.getIfPresent(key);
-    return highWater != null && refreshVersion < highWater;
+  private void fireHooks(String hookName, String key, Consumer<SyncHook> callback) {
+    DecisionPlaneSupport.fireHooks(syncHooks, "SyncHook", hookName, key, callback, log);
   }
 
-  /**
-   * Remove the invalidation watermark after a successful refresh,
-   * allowing future refreshes for this key to proceed normally.
-   */
-  private void clearInvalidation(String key) {
-    recentInvalidated.invalidate(key);
-  }
-
-  /**
-   * Called after the entry has been refreshed from the data store following a REFRESH
-   * broadcast from a peer instance. The value and dataVersion have been updated while
-   * the existing TTLs, key state, and decision metadata are preserved.
-   */
-  public void fireAfterRefresh(String cacheKey, SyncMessage sm, CacheEntry entry) {
-    for (SyncHook hook : syncHooks) {
-      try {
-        hook.afterRefresh(cacheKey, sm, entry);
-      } catch (Exception e) {
-        log.warn("SyncHook.afterRefresh failed for key={}", cacheKey, e);
-      }
+  /** A peer value was applied to L1 (REFRESH reload or value-carrying PUT). */
+  private void fireAfterRefresh(SyncMessage msg, CacheEntry entry) {
+    if (syncHooks.isEmpty()) {
+      return;
     }
+    fireHooks("afterRefresh", msg.cacheKey(), hook -> hook.afterRefresh(msg.cacheKey(), msg, entry));
   }
 
-  /**
-   * Called after the entry has been removed from L1 in response to an INVALIDATE
-   * broadcast from a peer instance. The cache no longer contains this key.
-   */
-  public void fireAfterInvalidate(String cacheKey, SyncMessage sm) {
-    for (SyncHook hook : syncHooks) {
-      try {
-        hook.afterInvalidate(cacheKey, sm);
-      } catch (Exception e) {
-        log.warn("SyncHook.afterInvalidate failed for key={}", cacheKey, e);
-      }
+  /** The entry was removed from L1 in response to a peer INVALIDATE. */
+  private void fireAfterInvalidate(SyncMessage msg) {
+    if (syncHooks.isEmpty()) {
+      return;
     }
+    fireHooks("afterInvalidate", msg.cacheKey(), hook -> hook.afterInvalidate(msg.cacheKey(), msg));
   }
 
-  /**
-   * Called when the REFRESH message was not applied — either the local entry already
-   * had a newer dataVersion, the value was not found in the data store, or the key
-   * had been recently invalidated and the refresh was rejected by the invalidation
-   * watermark.
-   */
-  public void fireOnRefreshSkipped(String cacheKey, SyncMessage sm) {
-    for (SyncHook hook : syncHooks) {
-      try {
-        hook.onRefreshSkipped(cacheKey, sm);
-      } catch (Exception e) {
-        log.warn("SyncHook.onRefreshSkipped failed for key={}", cacheKey, e);
-      }
+  /** A message produced no effect (stale, covered by a newer message, or unloadable). */
+  private void fireOnRefreshSkipped(SyncMessage msg) {
+    if (syncHooks.isEmpty()) {
+      return;
     }
+    fireHooks("onRefreshSkipped", msg.cacheKey(), hook -> hook.onRefreshSkipped(msg.cacheKey(), msg));
   }
 }

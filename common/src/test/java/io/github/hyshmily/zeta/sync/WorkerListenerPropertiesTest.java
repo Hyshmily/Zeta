@@ -51,20 +51,6 @@ class WorkerListenerPropertiesTest {
   }
 
   /**
-   * Verifies SRE sub-properties have expected defaults.
-   */
-  @Test
-  void sreProperties_shouldHaveDefaults() {
-    WorkerListenerProperties props = new WorkerListenerProperties();
-    assertThat(props.getSre()).isNotNull();
-    assertThat(props.getSre().isEnabled()).isTrue();
-    assertThat(props.getSre().getWindowMs()).isEqualTo(3000);
-    assertThat(props.getSre().getBuckets()).isEqualTo(10);
-    assertThat(props.getSre().getMinSamples()).isEqualTo(20);
-    assertThat(props.getSre().getSuccessThreshold()).isEqualTo(0.6);
-  }
-
-  /**
    * Verifies all remaining default values.
    */
   @Test

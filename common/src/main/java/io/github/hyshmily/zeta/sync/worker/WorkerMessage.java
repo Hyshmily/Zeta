@@ -15,100 +15,109 @@
  */
 package io.github.hyshmily.zeta.sync.worker;
 
+import static io.github.hyshmily.zeta.cache.CacheKeysPolicy.invalidCacheKey;
 import static io.github.hyshmily.zeta.constants.ZetaConstants.Amqp.*;
 import static io.github.hyshmily.zeta.constants.ZetaConstants.Version.VERSION_DEFAULT;
 
-import io.github.hyshmily.zeta.Internal;
+import io.github.hyshmily.zeta.model.DecisionKind;
+import io.github.hyshmily.zeta.model.DecisionStamp;
 import io.github.hyshmily.zeta.sync.local.SyncMessage;
-import io.github.hyshmily.zeta.util.AmqpMessageReader;
-import io.github.hyshmily.zeta.util.version.VersionGuard;
+import io.github.hyshmily.zeta.util.amqp.AmqpMessageReader;
 import java.nio.charset.StandardCharsets;
-import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.Objects;
+import org.jspecify.annotations.Nullable;
 import org.springframework.amqp.core.Message;
+import org.springframework.amqp.core.MessageProperties;
 
 /**
  * Message from Worker to app instances carrying hot/cool decisions for a single cache key.
- * Travels via the {@code zeta.worker.exchange} FanoutExchange, ensuring every connected
- * app instance receives each decision exactly once (subject to at-most-once delivery).
+ * Travels via the {@code zeta.send.exchange} direct exchange under the routing key
+ * {@code send.<appName>}, so each decision reaches one bound queue per instance of this
+ * application, with at-most-once delivery.
  *
  * <p>Each {@code WorkerMessage} carries the Worker's monotonically increasing
- * {@code decisionVersion}, which enables receivers to apply idempotent ordering:
- * stale decisions (lower version than the local entry's {@code decisionVersion}) are
- * silently skipped. This version space is orthogonal to the application-level
- * {@code dataVersion} — see ADR-0008 (Dual Version Space).
+ * {@link DecisionStamp}: the {@code decisionVersion} lets receivers order decisions
+ * idempotently, while {@code nodeId} and {@code epoch} partition the version
+ * space per Worker incarnation. This version space is orthogonal to the application-level
+ * {@code dataVersion} (design decisions: version stamps).
  *
- * <p>Unlike {@link SyncMessage}, this message has no {@code isVersionDegraded} field.
- * The Worker simply skips send entirely if {@code Redis GET} fails during a HOT
- * decision, preventing degraded decision propagation.
+ * <p>Unlike {@link SyncMessage}, this message carries no data stamp: the Worker-path guard
+ * orders on the decision stamp only, and {@code dataVersion} is allocated independently by
+ * the receiving node's stamp clock (design decisions: version stamps).
  *
- * @param id              message trace identifier — Snowflake ID from the originating Worker;
- *                        time-sortable, globally unique across all Workers and app instances
- *                        (1b reserved + 41b timestamp + 10b workerId + 12b sequence);
- *                        0L if the header was missing or non-numeric
- * @param cacheKey        the affected cache key; must not be null
- * @param type            the decision type, one of {@link #TYPE_HOT} or {@link #TYPE_COOL}
- * @param decisionVersion the Worker-local decision version, monotonically increasing
- *                        {@link java.util.concurrent.atomic.AtomicLong}; used for idempotent
- *                        ordering on the receiver (higher version wins);
- *                        combined with {@code nodeId + epoch} for Worker-level version
- *                        partitioning — see {@link VersionGuard} and ADR-0010;
- *                        0L on deserialization failure
- * @param timestamp       reserved for future use; always {@code 0L} for HOT/COOL decisions
- * @param nodeId          the originating Worker's node identity string; used by receivers for
- *                        per-Worker version partitioning (see {@link VersionGuard});
- *                        {@code null} if the header was missing — ADR-0010
- * @param epoch           the originating Worker's restart generation counter, incremented on
- *                        every Worker restart via Redis INCR (with local file fallback);
- *                        receivers unconditionally accept decisions from a higher epoch,
- *                        overriding any version comparison — ADR-0010;
- *                        0L on deserialization failure
+ * @param id       message trace identifier — cached wall-clock value from the originating
+ *                 Worker; time-sortable but orders nothing and may coincide across messages
+ *                 in one millisecond; 0L if the header was missing or non-numeric
+ * @param cacheKey the affected cache key; must not be null
+ * @param type     the decision type; never {@code null}
+ * @param stamp    the Worker decision stamp (version, node id and epoch)
  */
-@Internal
-public record WorkerMessage(
-  long id,
-  String cacheKey,
-  String type,
-  long decisionVersion,
-  long timestamp,
-  String nodeId,
-  long epoch
-) {
-  /** Promotes a cache key to hot state — extended TTL, soft expiration enabled. */
-  public static final String TYPE_HOT = "HOT";
-
-  /** Downgrades a cache key to cool state — normal TTL, soft expiration disabled. */
-  public static final String TYPE_COOL = "COOL";
-
-  private static final AtomicBoolean WARNED_VERSION_TYPE = new AtomicBoolean(false);
-  private static final AtomicBoolean WARNED_EPOCH_TYPE = new AtomicBoolean(false);
-  private static final AtomicBoolean WARNED_ID_TYPE = new AtomicBoolean(false);
+public record WorkerMessage(long id, String cacheKey, WorkerDecisionType type, DecisionStamp stamp) {
+  /** The type and the lease kind are one contract, not two independently writable facts. */
+  public WorkerMessage {
+    Objects.requireNonNull(cacheKey, "cacheKey must not be null");
+    Objects.requireNonNull(type, "type must not be null");
+    Objects.requireNonNull(stamp, "stamp must not be null");
+    if ((type == WorkerDecisionType.HOT) != stamp.isHot()) {
+      throw new IllegalArgumentException("WorkerMessage type and DecisionStamp kind disagree");
+    }
+  }
 
   /**
    * Deserializes a {@code WorkerMessage} from an AMQP message body and headers.
-   * <p>
-   * The cache key is read from the message body (UTF-8 decoded). The type,
-   * decision version, timestamp, and node ID are read from message headers.
-   * Missing or non-numeric version headers default to {@code VERSION_DEFAULT} (0L).
-   * Missing or non-String node ID defaults to {@code null}.
+   *
+   * <p>The cache key is read from the message body (UTF-8 decoded). The type and the
+   * decision stamp fields are read from AMQP headers; missing or non-numeric numeric
+   * headers default to {@code 0L}.
    *
    * @param msg the incoming AMQP message; must not be null
-   * @return a parsed {@link WorkerMessage}, or {@code null} if the body is empty
+   * @return a parsed {@link WorkerMessage}, or {@code null} if the body is empty, the
+   *         cache key is invalid or the type header is unknown
    */
-  public static WorkerMessage from(Message msg) {
+  public static @Nullable WorkerMessage from(Message msg) {
+    return from(msg, WorkerDecisionType.parse(msg.getMessageProperties().getHeader(HEADER_TYPE)));
+  }
+
+  /**
+   * Deserializes a message whose type was already parsed at the listener boundary, so the
+   * header string is converted once per delivery.
+   *
+   * <p>This is the decision plane's validation boundary: a message that survives it is
+   * orderable. A non-positive {@code decisionVersion} is unorderable and is dropped here,
+   * before the body is decoded or the message enters the per-key dispatcher — the handler
+   * below assumes a positive stamp. A missing node id is accepted on arrival against a
+   * named node: epoch and version counters are node-local and not comparable across nodes.
+   *
+   * @param msg  the incoming AMQP message; must not be null
+   * @param type the parsed type; {@code null} for an unknown/missing header
+   * @return the decoded message, or {@code null} when the type is null, the decision
+   *         version is non-positive, or the body or cache key is invalid
+   */
+  public static @Nullable WorkerMessage from(Message msg, @Nullable WorkerDecisionType type) {
+    if (type == null) {
+      return null;
+    }
     byte[] body = msg.getBody();
     if (body == null || body.length == 0) {
       return null;
     }
 
+    MessageProperties props = msg.getMessageProperties();
+    // Header first: a non-positive version is unorderable, so decoding the body for it
+    // would only allocate a key that no guard could ever apply.
+    long decisionVersion = AmqpMessageReader.readLongHeader(props, HEADER_VERSION, VERSION_DEFAULT);
+    if (decisionVersion <= 0L) {
+      return null;
+    }
     String cacheKey = new String(body, StandardCharsets.UTF_8);
-    String type = msg.getMessageProperties().getHeader(HEADER_TYPE);
+    if (invalidCacheKey(cacheKey)) {
+      return null;
+    }
+    String nodeId = AmqpMessageReader.readStringHeader(props, HEADER_NODE_ID);
+    long epoch = AmqpMessageReader.readLongHeader(props, HEADER_EPOCH, 0L);
+    long id = AmqpMessageReader.readLongHeader(props, HEADER_MESSAGE_ID, 0L);
 
-    long decisionVersion = AmqpMessageReader.readLongHeader(msg, HEADER_VERSION, VERSION_DEFAULT, WARNED_VERSION_TYPE);
-    long timestamp = AmqpMessageReader.readLongHeader(msg, HEADER_TIMESTAMP, 0L, null);
-    String nodeId = msg.getMessageProperties().getHeader(HEADER_NODE_ID) instanceof String s ? s : null;
-    long epoch = AmqpMessageReader.readLongHeader(msg, HEADER_EPOCH, 0L, WARNED_EPOCH_TYPE);
-    long id = AmqpMessageReader.readLongHeader(msg, HEADER_MESSAGE_ID, 0L, WARNED_ID_TYPE);
-
-    return new WorkerMessage(id, cacheKey, type, decisionVersion, timestamp, nodeId, epoch);
+    DecisionKind kind = type == WorkerDecisionType.HOT ? DecisionKind.HOT : DecisionKind.COOL;
+    return new WorkerMessage(id, cacheKey, type, new DecisionStamp(decisionVersion, nodeId, epoch, kind));
   }
 }

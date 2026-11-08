@@ -15,46 +15,42 @@
  */
 package io.github.hyshmily.zeta.sync.worker;
 
-import static io.github.hyshmily.zeta.constants.ZetaConstants.Amqp.HEADER_APP_NAME;
-import static io.github.hyshmily.zeta.sync.worker.WorkerMessage.TYPE_COOL;
-import static io.github.hyshmily.zeta.sync.worker.WorkerMessage.TYPE_HOT;
+import static io.github.hyshmily.zeta.constants.ZetaConstants.Amqp.HEADER_TYPE;
 
 import com.rabbitmq.client.Channel;
-import io.github.hyshmily.zeta.Internal;
-import io.github.hyshmily.zeta.sync.AppIsolationFilter;
-import io.github.hyshmily.zeta.sync.dispatcher.DispatcherStats;
 import io.github.hyshmily.zeta.sync.dispatcher.PerKeyOrderedDispatcher;
 import io.github.hyshmily.zeta.sync.local.CacheSyncListener;
-import io.github.hyshmily.zeta.util.AmqpMessageReader;
-import io.github.hyshmily.zeta.util.LogThrottle;
-import jakarta.annotation.PostConstruct;
+import io.github.hyshmily.zeta.util.Internal;
+import io.github.hyshmily.zeta.util.amqp.AmqpConsume;
+import io.github.hyshmily.zeta.util.amqp.AmqpMessageReader;
+import io.github.hyshmily.zeta.util.amqp.AmqpMessageReader.AppIsolationFilter;
 import jakarta.annotation.PreDestroy;
 import java.io.IOException;
+import java.util.List;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.atomic.LongAdder;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.amqp.core.Message;
 
 /**
- * Listens for Worker hot/cool decisions via the {@code zeta.worker.exchange}
- * FanoutExchange and applies them to the local Caffeine L1 cache via
- * {@link WorkerDecisionHandler}.
+ * Listens for Worker hot/cool decisions via the {@code zeta.send.exchange} direct
+ * exchange (bound under {@code send.<appName>}) and applies them to the local Caffeine L1
+ * cache via {@link WorkerDecisionHandler}.
  *
  * <p>This is the consumer-side counterpart of the Worker's {@code WorkerBroadcaster}.
  * Incoming AMQP messages are deserialized into {@link WorkerMessage} records and
  * routed by decision type:
  * <ul>
- *   <li><b>HOT</b> ({@link WorkerMessage#TYPE_HOT}): Delegates to
+ *   <li><b>HOT</b> ({@link WorkerDecisionType#HOT}): Delegates to
  *       {@link WorkerDecisionHandler#handleHot}.</li>
- *   <li><b>COOL</b> ({@link WorkerMessage#TYPE_COOL}): Delegates to
- *       {@link WorkerDecisionHandler#handleCool}.</li>
+ *   <li><b>COOL</b> ({@link WorkerDecisionType#COOL}): Delegates a run of consecutive
+ *       COOLs to {@link WorkerDecisionHandler#handleCoolBatch}.</li>
  * </ul>
  *
- * <p><b>Ack-before-update pattern:</b> The AMQP message is acknowledged immediately after
- * parsing (see {@link #handleWorkerMessage}). The actual cache mutation is scheduled
- * asynchronously with a random jitter (see {@link WorkerListenerProperties#broadcastJitterMs}).
- * This decoupling provides at-most-once delivery semantics — if the application crashes
- * after ack but before the cache write, the decision is lost and will be re-driven by the
- * next Worker heartbeat cycle (see ADR-0004).
+ * <p>A decision is acknowledged once it is decoded and submitted; the ordered dispatcher
+ * applies it asynchronously. A COOL the dispatcher refuses at submit time is applied
+ * inline on the consumer thread (see {@link #onDispatchRejected}), while a refused HOT is
+ * dropped.
  *
  * @see WorkerMessage
  * @see WorkerDecisionHandler
@@ -64,43 +60,39 @@ import org.springframework.amqp.core.Message;
 @Internal
 public class WorkerListener {
 
-  /** Configuration for Worker exchange name, queue prefix, jitter settings, and rate limiter. */
-  private final WorkerListenerProperties properties;
+  /**
+   * Cumulative COOL decisions the per-key ordered dispatcher refused (per-key
+   * queue full or dispatcher closed). Each one is applied inline on the
+   * consumer thread (see {@link #onDispatchRejected}), so a growing add signals
+   * dispatcher saturation — degraded ordering, not data loss.
+   */
+  private final LongAdder coolDispatchRejections = new LongAdder();
 
-  /** Scheduler for running jitter-delayed cache update tasks, spreading Redis load.
-   * Supplied externally to allow shared-pool reuse across listeners. */
-  private final ScheduledExecutorService scheduler;
+  /**
+   * Per-key FIFO dispatcher for ordered cache mutation execution. Built in the
+   * constructor and {@code final}: the AMQP consumer threads must never be able
+   * to observe a null dispatcher.
+   */
+  private final PerKeyOrderedDispatcher<WorkerMessage> dispatcher;
 
-  /** Strategy that processes HOT and COOL decisions. */
+  /** Strategy that applies HOT and COOL decisions. */
   private final WorkerDecisionHandler decisionHandler;
 
   /**
-   * Shared-broker appName isolation (ADR-0068, see {@link AppIsolationFilter}):
+   * Shared-broker appName isolation (design decisions: sync messages, see {@link AppIsolationFilter}):
    * decisions carrying a foreign {@code appName} header are dropped before
    * dispatch. {@code null}/blank local appName disables the filter (all
-   * decisions processed); decisions <em>without</em> the header (pre-0068
-   * Workers) are always processed.
+   * decisions processed); decisions <em>without</em> the header are always processed.
    */
   private final AppIsolationFilter isolation;
 
   /**
-   * Rate-limits the unknown-message-type WARN to one line per
-   * {@link LogThrottle#DEFAULT_WINDOW_MS} window (ADR-0037 one-per-window
-   * convention). ADR-0024 has every Worker re-emit HOT per hot key on a
-   * rebroadcast interval, so an unthrottled WARN fired once per decision
-   * message — per interval, per instance.
-   */
-  private final LogThrottle.Counting unknownTypeLog = new LogThrottle.Counting();
-
-  /** Per-key FIFO dispatcher for ordered cache mutation execution. */
-  // volatile: written once from start() (container lifecycle thread), read from
-  // the AMQP consumer threads and Actuator threads — without it the consumer
-  // threads could observe the pre-initialisation null.
-  private volatile PerKeyOrderedDispatcher dispatcher;
-
-  /**
    * Creates a listener. {@code appName} may be {@code null}/blank to disable
-   * the foreign-app filter (pre-0068 behavior).
+   * the foreign-app filter (rolling-upgrade behavior).
+   *
+   * <p>Also builds the per-key ordered dispatcher that guarantees FIFO
+   * processing of Worker decisions per cache key and spreads cluster-loader load via a
+   * start-jitter park of {@code broadcastJitterMs} on each key's first cycle.
    */
   public WorkerListener(
     WorkerListenerProperties properties,
@@ -108,25 +100,12 @@ public class WorkerListener {
     WorkerDecisionHandler decisionHandler,
     String appName
   ) {
-    this.properties = properties;
-    this.scheduler = scheduler;
     this.decisionHandler = decisionHandler;
     this.isolation = new AppIsolationFilter(appName);
-  }
-
-  /**
-   * Initializes the per-key ordered dispatcher for cache-mutation ordering.
-   *
-   * <p>Called automatically by the Spring container after all dependencies are
-   * injected. Creates a {@link PerKeyOrderedDispatcher} that guarantees FIFO
-   * processing of Worker decisions per cache key and spreads Redis load via a
-   * start-jitter park of {@code broadcastJitterMs} on each key's first cycle.
-   */
-  @PostConstruct
-  public void init() {
-    this.dispatcher = new PerKeyOrderedDispatcher(
+    this.dispatcher = new PerKeyOrderedDispatcher<>(
       scheduler,
       "worker-listener",
+      this::dispatchBatch,
       PerKeyOrderedDispatcher.DEFAULT_MAX_QUEUE_PER_KEY,
       PerKeyOrderedDispatcher.DEFAULT_MAX_TASKS_PER_CYCLE,
       properties.getMaxPendingUnits(),
@@ -141,48 +120,23 @@ public class WorkerListener {
    * resources. Called automatically by the Spring container during
    * application shutdown.
    *
-   * <p>Queued Worker decisions (and jitter-delayed submissions still pending
-   * on the shared scheduler) are dropped without execution. COOL decisions
-   * are never replayed (ADR-0024) and a dropped HOT leaves the entry to
-   * expire at its hard TTL / be re-promoted by the next broadcast. The same
-   * applies to decisions the dispatcher drops at runtime (per-key queue full,
-   * global budget exhausted): a dropped HOT is re-driven by ADR-0024's
-   * periodic rebroadcast, but a dropped COOL is NOT re-driven — the entry
-   * stays HOT until its hard TTL expires (ADR-0035's orphan demotion covers
-   * only a dead Worker incarnation, not a saturated dispatcher). The shutdown
-   * window is intentionally lossy and self-healing for HOT; for COOL the
-   * staleness is bounded by the hot hard TTL.
+   * <p>Queued Worker decisions (and jitter-delayed submissions still pending on the
+   * shared scheduler) are dropped without execution: a queued COOL is never replayed and a
+   * dropped HOT leaves the entry at its normal TTL until the key changes phase again.
+   * Refusals caused by this close() reach {@link #onDispatchRejected} like any other
+   * submit refusal.
    */
   @PreDestroy
   public void destroy() {
-    if (dispatcher != null) {
-      dispatcher.close();
-    }
+    dispatcher.close();
   }
 
   /**
-   * Snapshot of the decision plane's ordered-dispatcher gate and backlog (ADR-0072 D-1).
-   *
-   * <p>The gate's capacity comes from
-   * {@code WorkerListenerProperties#getMaxPendingUnits()}; during a saturated dispatcher a dropped
-   * HOT is re-driven by the periodic rebroadcast (ADR-0024) whereas a dropped COOL is not (the
-   * entry stays HOT until its hard TTL), which is why this counter is the signal that tells the two
-   * budgets apart in production.
-   *
-   * @return the dispatcher snapshot, or {@code null} before {@link #init()} has run (the
-   *         {@code @PostConstruct} hook runs during context refresh, ahead of any scrape)
-   */
-  public DispatcherStats dispatcherStats() {
-    PerKeyOrderedDispatcher current = dispatcher;
-    return current == null ? null : current.stats();
-  }
-
-  /**
-   * Cumulative foreign-app decision drops (ADR-0068). Non-zero means this
+   * Cumulative foreign-app decision drops (design decisions: sync messages). Non-zero means this
    * instance is discarding another application's decisions — or, when paired
    * with missing prewarming, that the local {@code app-name} is misconfigured.
    *
-   * @return the total foreign-app drop count since startup
+   * @return the total foreign-app drop add since startup
    */
   public long foreignAppDrops() {
     return isolation.drops();
@@ -199,35 +153,30 @@ public class WorkerListener {
   }
 
   /**
-   * RabbitMQ message callback for incoming Worker decisions. Acknowledges the message
-   * immediately after parsing (ack-before-update), then schedules the actual cache
-   * mutation asynchronously with a random jitter to spread Redis load.
+   * RabbitMQ message callback for incoming Worker decisions. Decodes and submits the
+   * decision, then acknowledges the message; an accepted decision runs on the ordered
+   * dispatcher (with an optional start-jitter park for a HOT), while a refused COOL is
+   * applied inline before the ack.
    *
    * <p>If processing fails with an exception, the message is negatively acknowledged
-   * with {@code requeue=false} to prevent poison-message loops. The decision will be
-   * re-driven by the next Worker heartbeat cycle.
+   * with {@code requeue=false} to prevent poison-message loops. Neither decision type is
+   * re-driven — the Worker sends each one exactly once (design decisions: sync messages) — so a
+   * lost HOT leaves the entry at its normal TTL and a lost COOL stays bounded by the hot hard TTL.
    *
    * @param channel the AMQP channel used for ack/nack operations
    * @param msg     the raw AMQP message containing the Worker decision; must not be null
    * @throws IOException if the channel's basicAck or basicNack call fails
    */
   public void handleWorkerMessage(Channel channel, Message msg) throws IOException {
-    long tag = msg.getMessageProperties().getDeliveryTag();
-    try {
-      processWorker(msg);
-      channel.basicAck(tag, false); // ack before cache write
-    } catch (Exception e) {
-      log.error("Worker message processing failed: body={}", AmqpMessageReader.abbreviateBody(msg.getBody(), 256), e);
-      channel.basicNack(tag, false, false); // do not requeue
-    }
+    AmqpConsume.ackOrNack(channel, msg, log, "Worker message", () -> processWorker(msg));
   }
 
   /**
    * Decodes the raw AMQP message into a {@link WorkerMessage} and submits it to the
-   * ordered dispatcher. The dispatcher applies a random start-jitter park within
-   * {@link WorkerListenerProperties#getBroadcastJitterMs()} to the key's worker before
-   * its first cycle, spreading Redis reads across a small time window when the Worker
-   * broadcasts to many instances.
+   * ordered dispatcher. When enabled, the dispatcher applies a random start-jitter park
+   * within {@link WorkerListenerProperties#getBroadcastJitterMs()} to the key's worker
+   * before its first cycle, spreading cluster-loader reads across a small time window
+   * when the Worker broadcasts to many instances.
    *
    * <p>The jitter is a dispatcher-level park, NOT a sleep inside the task (a sleeping
    * task would hold a scheduler thread for the whole jitter window). Per-key FIFO
@@ -237,118 +186,128 @@ public class WorkerListener {
    * strict arrival order the only safe ordering).
    *
    * @param msg the raw AMQP message; may have null or empty body, in which case
-   *            the message is silently dropped
+   *            the message is dropped without scheduling a task
    */
   private void processWorker(Message msg) {
-    WorkerMessage wm = WorkerMessage.from(msg);
-    if (wm == null) {
-      log.debug("Received worker message with empty body");
+    // design decisions: sync messages shared-broker isolation (see AppIsolationFilter): the
+    // binding key already keeps a foreign app's decisions out of this queue, so this is the
+    // receiver-side boundary for a mis-bound queue rather than the delivery mechanism. Drop
+    // when the sender declared its appName and it differs from ours; a message without the
+    // header (older Worker, rolling upgrade) or a listener without a configured
+    // appName (unconfigured wiring) is always processed.
+    //
+    // Checked from the raw header BEFORE decoding: WorkerMessage.from allocates
+    // the body String and reads every decision header, and all of that is wasted
+    // work for a message we are about to throw away. On a shared broker with a
+    // misconfigured app-name that is 100% of the traffic.
+    if (isolation.dropIfForeign(msg, log, "worker decision")) {
       return;
     }
 
-    // ADR-0068 shared-broker isolation (see AppIsolationFilter): the fanout
-    // exchange ignores the routing key, so a foreign app's decisions land in
-    // this queue too. Drop when the sender declared its appName (0068+
-    // Workers) and it differs from ours; a message without the header
-    // (pre-0068 Worker, rolling upgrade) or a listener without a configured
-    // appName (legacy wiring) is always processed.
-    Object senderApp = msg.getMessageProperties().getHeader(HEADER_APP_NAME);
-    if (isolation.isForeign(senderApp)) {
-      // Counted, not just DEBUG: a misconfigured app-name drops 100% of
-      // decisions while the process looks healthy, so the mismatch needs a
-      // WARN (rate-limited) plus a counter/endpoint signal (ADR-0068).
-      long total = isolation.noteDrop(senderApp.toString());
-      if (isolation.tryLog()) {
-        log.warn(
-            "Dropped worker decision for foreign app: senderApp={}, localApp={} ({} total drops, further warnings suppressed for 10s; check zeta.app-name)",
-          senderApp,
-          isolation.appName(),
-          total
-        );
-      } else {
-        log.debug(
-          "Dropped worker decision for foreign app: senderApp={}, localApp={}, key={}, type={}",
-          senderApp,
-          isolation.appName(),
-          wm.cacheKey(),
-          wm.type()
-        );
+    Object typeHeader = msg.getMessageProperties().getHeader(HEADER_TYPE);
+    WorkerDecisionType type = WorkerDecisionType.parse(typeHeader);
+    if (type == null) {
+      // Validate before the dispatcher: an unknown type must not occupy a queue slot and
+      // a worker-thread grant only to be discarded.
+      AmqpMessageReader.logUnknownType(log, "worker decision", typeHeader, msg);
+      return;
+    }
+
+    WorkerMessage message = WorkerMessage.from(msg, type);
+    if (message == null) {
+      // Includes the unorderable (non-positive decision version) case, rejected at the
+      // parse boundary before any dispatcher admission.
+      log.debug("Received worker message with an empty body, an invalid key or a non-positive decision version");
+      return;
+    }
+    boolean accepted = type.isControl()
+      ? dispatcher.submitControl(message.cacheKey(), message)
+      : dispatcher.submit(message.cacheKey(), message, 1, type.needsJitter());
+    if (!accepted) {
+      onDispatchRejected(message);
+    }
+  }
+
+  /**
+   * Runs one granted batch: the queued decisions of one key, applied in arrival order.
+   * A run of consecutive COOL decisions is handed to the handler as one unit so it can
+   * coalesce the pure in-memory part; HOT decisions stay one per call (they create entries
+   * and run the cluster loader, so dropping one can change the final state). A failing
+   * decision is logged and does not strand the rest of the batch.
+   *
+   * @param batch the granted batch, in submission order
+   */
+  private void dispatchBatch(List<WorkerMessage> batch) {
+    int index = 0;
+    while (index < batch.size()) {
+      WorkerMessage message = batch.get(index);
+      if (message.type() == WorkerDecisionType.COOL) {
+        int end = index + 1;
+        while (end < batch.size() && batch.get(end).type() == WorkerDecisionType.COOL) {
+          end++;
+        }
+        try {
+          decisionHandler.handleCoolBatch(batch.subList(index, end));
+        } catch (Exception e) {
+          logDispatchFailure(message, e);
+        }
+        index = end;
+        continue;
       }
-      return;
-    }
-
-    Runnable task = () -> {
       try {
-        workerMessageRouter(wm);
+        decisionHandler.handleHot(message);
       } catch (Exception e) {
-        log.error(
-          "Error processing WorkerMessage: cacheKey={}, type={}, decisionVersion={}, nodeId={}, epoch={}",
-          wm.cacheKey(),
-          wm.type(),
-          wm.decisionVersion(),
-          wm.nodeId(),
-          wm.epoch(),
-          e
-        );
+        logDispatchFailure(message, e);
       }
-    };
-
-    dispatcher.submit(wm.cacheKey(), task);
-  }
-
-  /**
-   * Routes the deserialized {@link WorkerMessage} to the appropriate handler based
-   * on its type field. Delegates to {@link WorkerDecisionHandler#handleHot} for
-   * {@code TYPE_HOT} and {@link WorkerDecisionHandler#handleCool} for
-   * {@code TYPE_COOL}. Messages with a null or unknown type are logged and dropped.
-   *
-   * @param msg the deserialized Worker message to route; must not be null
-   */
-  private void workerMessageRouter(WorkerMessage msg) {
-    if (msg.type() == null) {
-      log.debug("Received worker message with null type, skipping");
-      return;
-    }
-    switch (msg.type()) {
-      case TYPE_HOT -> decisionHandler.handleHot(msg);
-      case TYPE_COOL -> decisionHandler.handleCool(msg);
-      default -> logUnknownType(msg);
+      index++;
     }
   }
 
+  private void logDispatchFailure(WorkerMessage message, Exception e) {
+    log.warn(
+      "Error processing WorkerMessage: cacheKey={}, type={}, decisionVersion={}, nodeId={}, epoch={}",
+      message.cacheKey(),
+      message.type(),
+      message.stamp().decisionVersion(),
+      message.stamp().decisionNodeId(),
+      message.stamp().decisionEpoch(),
+      e
+    );
+  }
+
   /**
-   * Report a Worker decision whose type this instance does not recognise.
+   * Cumulative COOL decisions the per-key ordered dispatcher refused; each was
+   * re-applied inline on the consumer thread. Monotonic; safe to read from any
+   * thread.
    *
-   * <p>Expected during a rolling upgrade against a newer Worker. The rate is
-   * worse than on the sync plane: ADR-0024 has every Worker re-emits HOT for
-   * every hot key on a rebroadcast interval (10s default), so an unrecognised
-   * type produced {@code hotKeys × workers} WARNs per interval, per instance,
-   * indefinitely. Rate-limited to one line per
-   * {@link LogThrottle#DEFAULT_WINDOW_MS} window per the ADR-0037 convention,
-   * with the occurrence count on the admitted line.
-   *
-   * @param msg the message with the unrecognised type
+   * @return the total dispatcher-refused COOL add since startup
    */
-  private void logUnknownType(WorkerMessage msg) {
-    LogThrottle.Counting.Attempt attempt = unknownTypeLog.record();
-    if (!attempt.admitted()) {
-      log.debug(
-        "Unknown worker message type: {}, cacheKey: {} ({} in current window)",
-        msg.type(),
-        msg.cacheKey(),
-        attempt.count()
-      );
+  public long coolDispatchRejections() {
+    return coolDispatchRejections.sum();
+  }
+
+  /**
+   * Fallback for a decision the ordered dispatcher refused at submit time
+   * (per-key queue full or dispatcher closed).
+   *
+   * <p>A COOL is applied inline ({@link WorkerDecisionHandler#handleCoolInline},
+   * a pure in-memory compute with no hooks): the Worker sends each decision
+   * once, and a dropped COOL pins the entry at its HOT TTL until hard expiry.
+   * A refused HOT stays a DEBUG drop — inlining it would run the cluster-loader
+   * load on the AMQP consumer thread.
+   *
+   * @param msg the decision whose dispatcher submission was refused
+   */
+  private void onDispatchRejected(WorkerMessage msg) {
+    if (msg.type() != WorkerDecisionType.COOL) {
+      log.debug("Worker decision dispatcher refused a HOT for key={} (dropped: nothing re-sends it)", msg.cacheKey());
       return;
     }
-    if (attempt.count() > 0) {
-      log.warn(
-        "Unknown worker message type: {}, cacheKey: {} ({} suppressed in the last window)",
-        msg.type(),
-        msg.cacheKey(),
-        attempt.count()
-      );
-    } else {
-      log.warn("Unknown worker message type: {}, cacheKey: {}", msg.type(), msg.cacheKey());
-    }
+
+    coolDispatchRejections.increment();
+    log.debug("Worker decision dispatcher refused a COOL for key={}; applying inline", msg.cacheKey());
+    // Applying a COOL is a local, bounded mutation; it is safe even while the
+    // listener is closing, and dropping it would pin the entry at its HOT TTL.
+    decisionHandler.handleCoolInline(msg);
   }
 }

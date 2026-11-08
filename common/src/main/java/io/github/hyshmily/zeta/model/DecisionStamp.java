@@ -15,22 +15,85 @@
  */
 package io.github.hyshmily.zeta.model;
 
-import jakarta.annotation.Nullable;
+import io.github.hyshmily.zeta.cache.cachesupport.raw.CacheEntry;
+import io.github.hyshmily.zeta.cache.cachesupport.raw.EntryDraft;
+import java.util.Objects;
+import org.jspecify.annotations.Nullable;
 
 /**
- * The Worker decision stamp carried by a {@link CacheEntry}. Only present when
+ * The Worker decision lease carried by a {@link CacheEntry}. Only present when
  * the entry has a Worker origin (HOT/COOL broadcasts); local entries carry no
  * decision metadata.
  *
- * <p>This is the single value type for decision metadata across the entry
- * pipeline: {@code EntryLifecycle.decisionOf} extracts it from a raw cache
- * value, {@link EntryDraft#decision(DecisionStamp)} applies it to a draft, and
- * the sync/worker handlers pass it between read and write sites. A {@code null}
- * stamp is equivalent to the all-zero local origin
- * ({@code decisionVersion = 0, decisionNodeId = null, decisionEpoch = 0}).
+ * <p>The stamp records the operation together with its causal identity: the
+ * version orders decisions of one Worker incarnation, the node id scopes the
+ * version space, the epoch detects a Worker restart, and {@link #kind()}
+ * distinguishes a HOT lease from a COOL lease. The effective {@code keyState}
+ * remains separate: a COOL lease can outlive its state while an entry is
+ * re-warmed normally, or while a degraded App locally promotes it.
  *
- * @param decisionVersion the Worker decision version
- * @param decisionNodeId  the Worker node ID that produced the decision
+ * <p>This is the single value type for decision metadata across the entry
+ * pipeline: {@code CacheEntry#decision()} exposes it from a raw cache value,
+ * {@link EntryDraft#decision(DecisionStamp)} applies it to a draft, and the
+ * worker decision handler and the background refresh carry it between read and
+ * write sites. A {@code null} stamp is the local origin.
+ *
+ * @param decisionVersion the causal decision version; {@code 0} when unallocated
+ * @param decisionNodeId  the Worker node ID that produced the decision, or
+ *                        {@code null} when the message carried none
  * @param decisionEpoch   the epoch (restart counter) of the decision Worker
+ * @param kind            the operation the lease establishes
  */
-public record DecisionStamp(long decisionVersion, @Nullable String decisionNodeId, long decisionEpoch) {}
+public record DecisionStamp(
+  long decisionVersion,
+  @Nullable String decisionNodeId,
+  long decisionEpoch,
+  DecisionKind kind
+) {
+  /** Rejects a null kind; the lease type is part of the wire contract. */
+  public DecisionStamp {
+    Objects.requireNonNull(kind, "kind must not be null");
+  }
+
+  /**
+   * Creates a HOT decision lease.
+   *
+   * @param decisionVersion the causal decision version
+   * @param decisionNodeId  the Worker node ID
+   * @param decisionEpoch   the Worker incarnation epoch
+   * @return a HOT stamp
+   */
+  public static DecisionStamp hot(long decisionVersion, @Nullable String decisionNodeId, long decisionEpoch) {
+    return new DecisionStamp(decisionVersion, decisionNodeId, decisionEpoch, DecisionKind.HOT);
+  }
+
+  /**
+   * Creates a COOL decision lease.
+   *
+   * @param decisionVersion the causal decision version
+   * @param decisionNodeId  the Worker node ID
+   * @param decisionEpoch   the Worker incarnation epoch
+   * @return a COOL stamp
+   */
+  public static DecisionStamp cool(long decisionVersion, @Nullable String decisionNodeId, long decisionEpoch) {
+    return new DecisionStamp(decisionVersion, decisionNodeId, decisionEpoch, DecisionKind.COOL);
+  }
+
+  /**
+   * Whether this lease is a HOT decision.
+   *
+   * @return {@code true} for a HOT lease
+   */
+  public boolean isHot() {
+    return kind == DecisionKind.HOT;
+  }
+
+  /**
+   * Whether this lease is a COOL decision.
+   *
+   * @return {@code true} for a COOL lease
+   */
+  public boolean isCool() {
+    return kind == DecisionKind.COOL;
+  }
+}
