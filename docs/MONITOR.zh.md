@@ -1,256 +1,426 @@
+[← 返回首页](../README.zh.md)
+
 # 监控
 
-Zeta 提供两种互补的监控机制。
+Zeta 提供两种互补的监控面：
 
----
+- **Actuator 端点**
+- **Micrometer 指标**
 
-## 1. Actuator 端点
+## 1. 暴露方式
 
-**前置条件：** classpath 中包含 `spring-boot-starter-actuator`。
+**前置条件。** 端点需要 `spring-boot-starter-actuator`；指标需要 `micrometer-core` 加具体注册表实现。没有 `MeterRegistry` 时 Worker 以无指标方式运行，而不是启动失败。
 
-Zeta 端点是 Actuator `@Endpoint` Bean（不是普通的 `@RestController`）——受 `management.endpoints.web.exposure.include` 控制，需在 include 列表中登记（例如 `management.endpoints.web.exposure.include=health,info,hotkey,hotkeyring`）。只要 classpath 中存在 `spring-boot-starter-actuator`（注册条件），即自动注册：
+这些端点是 Actuator `@Endpoint` Bean，不是 MVC Controller：它们受 `management.endpoints.web.exposure.include` 控制，并运行在管理平面（端口、暴露范围与角色都走 `management.*`）。端点 id 不能嵌套，因此所有路径都是扁平的。
 
-| 端点                                      | 路径                            |
-| ----------------------------------------- | ------------------------------- |
-| 应用诊断（`ZetaEndpoint`）                | `/actuator/hotkey`              |
-| 哈希环查询（`RingEndpoint`，见第 3 节）   | `/actuator/hotkeyring`          |
-| 状态机运行时配置（Worker，见第 4 节）     | `/actuator/hotkey-worker-state` |
-| FastLane 规则管理（Worker）               | `/actuator/hotkey-fastlane`     |
+```yaml
+# 应用进程
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,hotkey,hotkeyring
+  endpoint:
+    hotkey:
+      roles: ADMIN # 仅在存在 Spring Security 时生效
+    hotkeyring:
+      roles: ADMIN
 
-支持可选的 `?limit=N` 查询参数限制返回的应用端 TopK 条目数（默认 100）。
+# Worker 进程（默认只暴露 health）
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      group:
+        liveness:
+          include: livenessState,ping # 不含 RabbitMQ
+        readiness:
+          include: readinessState,rabbit
 
-```javascript
+# 仅按需开启：把上面的 include 改为 `health,hotkeyworker`，再添加：
+# management.endpoints.web.path-mapping.hotkeyworker: hotkey-worker
+# management.endpoint.hotkeyworker.roles: ADMIN
+```
+
+> `zeta-worker` 发行包（jar/镜像）默认只暴露 `health`。检测视图需要显式开启：将 `hotkeyworker` 加入 include、配置路径映射（使用 Spring Security 时再配置端点角色）。Boot 3.5 要求端点 id 为字母数字，因此 id 是 `hotkeyworker`，公开 URL 仍为 `/actuator/hotkey-worker`。应用侧始终需要自己配置 include。
+
+**Worker 的健康检查分为两个探针，按依赖切分。** liveness（`/actuator/health/liveness`）只包含
+`livenessState,ping`，刻意排除 RabbitMQ，因此 broker 断连不会重启 Worker——重启会丢掉它的内存窗口并抬高
+epoch。readiness（`/actuator/health/readiness`）额外包含 `rabbit` 指标：它为 `DOWN` 表示 Worker 无法消费
+上报、应被摘出服务，此时 liveness 仍为 `UP`。`zeta-worker` 镜像的 `HEALTHCHECK` 调用
+`/actuator/health/liveness`；编排器或负载均衡器应探测 `/actuator/health/readiness`。聚合的
+`/actuator/health` 不是容器探针。
+
+| 端点                      | 方法  | 服务方 | 创建条件                                                       | 回答的问题                             | CONFIG                                         |
+| ------------------------- | ----- | ------ | -------------------------------------------------------------- | -------------------------------------- | ---------------------------------------------- |
+| `/actuator/hotkey`        | `GET` | 应用   | classpath 中有 Actuator；每个区块均可选                        | 检测、缓存、上报、健康、同步的实时计数 | [§5](CONFIG.zh.md#5-上报节拍)                  |
+| `/actuator/hotkeyring`    | `GET` | 应用   | `zeta.local.consistent-hashing.enabled=true`（默认）+ Actuator | 哈希环拓扑与 key 路由                  | [§7](CONFIG.zh.md#7-worker-监听心跳与集群健康) |
+| `/actuator/hotkey-worker` | `GET` | Worker | Worker + Actuator + 显式开启 `hotkeyworker` 暴露               | 检测摘要、单 key 窗口状态与规则计数    | [§11](CONFIG.zh.md#11-检测窗口规则容量与冷却)  |
+
+## 2. 应用运行诊断：`/actuator/hotkey`
+
+当某个 key 意外变热/变冷、上报疑似丢失，或读取比预期更陈旧时，先调用这个端点。它把应用的检测、缓存、上报、刷新、版本与同步状态聚合在一个响应里。
+
+### 2.1 请求模板
+
+```bash
+APP=http://localhost:8080
+
+# 完整快照
+curl -s "$APP/actuator/hotkey" | jq
+
+# 限制 TopK 与 staleDebt 列表长度
+curl -s "$APP/actuator/hotkey?limit=20" | jq
+
+# 只投影告警或看板使用的信号
+curl -s "$APP/actuator/hotkey" \
+  | jq '{health: .worker.health,
+         heartbeatAgeMs: .worker.msSinceLastAnyHeartbeat,
+         hotKeys: [.local.topK[].key],
+         reportDepth: .local.reportQueueDepth,
+         reportDropped: .local.reportQueueFullCount}'
+```
+
+`limit` 限制 `topK` 与 `staleDebt`。默认 `100`；小于 `1` 的值按 `1` 处理，`staleDebt` 最多返回 100 条。
+
+### 2.2 响应结构
+
+示例展示所有平面都已接线的应用。组件缺失时，整个区块或单个字段会消失（见 §2.4）。
+
+```jsonc
 {
-  "instanceId": "a1b2c3d4",        // 实例唯一标识
-  "nodeId": "node-1",               // 集群内节点标识
+  "instanceId": "a1b2c3d4", // zeta.local.instance-id（或其派生回退值）
+  "jvmId": 7263819201938475, // JVM 进程级随机标识
   "local": {
-    // ── 应用端 TopK 检测 ──
-    "topK": [{ "key": "cache:shop:17", "count": 1523 }],  // 热 key 列表（按频率降序）
-    "topKCount": 1,                                        // 返回的 TopK 条目数（受 ?limit 限制）
-    "totalRequests": 158392,                               // 追踪的总请求数
-    "recentlyExpelled": ["cache:shop:5", "cache:shop:99"], // 最近被驱逐的 key
-
-    // ── HeavyKeeper 算法配置 ──
-    "topKCapacity": 100,            // 最大热 key 数（HeavyKeeper K）
-    "sketchWidth": 65536,           // Count-Min Sketch 宽度（配置 50000，自动向上对齐到 2 的幂）
-    "sketchDepth": 5,               // Count-Min Sketch 深度
-    "minCountThreshold": 10,        // 晋升为热 key 的最小计数
-    "expelledQueueSize": 2,         // 驱逐队列积压量
-    "expelledQueueRemaining": 9998, // 驱逐队列剩余容量
-
-    // ── L1 Caffeine 缓存 ──
-    "cacheSize": 87,                // L1 预估大小
-    "cacheMaxSize": 1000,           // L1 最大条目数
-
-    // ── SingleFlight 去重 ──
-    "inflightSize": 3,              // 进行中的去重请求数
-    "inflightMaxSize": 50000,       // 最大去重 key 数
-    "inflightTtlSec": 5,            // 去重条目 TTL（秒）
-    "inflightTimeoutSec": 3,        // 异步等待超时（秒）
-
-    // ── Reporter（应用→Worker） ──
-    "reportQueueDepth": 0,          // Reporter 分发器队列深度
-    "reportQueueCapacity": 10000,   // Reporter 分发器队列容量
-    "reportExpiredCount": 0,        // 累计过期批次
-    "reportQueueFullCount": 0,      // 累计丢弃批次（队列满）
-    "reportPendingKeys": 0,         // 计数缓存中缓冲的 key 数
-
-    // ── 规则 ──
-    "rules": [                      // 当前生效的黑/白名单规则
-      { "id": "...", "type": "BLOCK", "pattern": "secret:*", "createdAt": 1700000000000 }
-    ],
-
-    // ── TTL 配置 ──
-    "hardTtlMs": 300000,            // 有效硬 TTL——普通 key（毫秒）
-    "softTtlMs": 30000,             // 有效软 TTL——普通 key（毫秒）
-    "hotHardTtlMs": 3600000,        // 有效硬 TTL——热 key（毫秒）
-    "hotSoftTtlMs": 300000,         // 有效软 TTL——热 key（毫秒）
-    "refreshPoolAvailable": 100,    // 刷新信号量可用许可数
-    "refreshFailureLeased": 3,      // 累计获准续租的后台刷新失败数（ADR-0036）
-    "leaseStaleCapped": 1,          // 因 30 分钟陈旧上限被拒的续租累计数
-    "leaseSuppressedByClassifier": 0, // 被失败分类器拒绝的续租累计数
-    "staleDebt": {"k1": 95000},     // 当前被续租的 key（前 100）到陈旧毫秒数——"有界陈旧"的审计面
-
-    // ── 版本追踪 ──
-    "versionRedisEnabled": true,    // Redis 版本追踪是否启用
-    "versionDegradedCount": 0       // 使用降级节点本地版本的 key 数
+    "topK": [{ "key": "cache:shop:17", "add": 1523 }], // 本地 HeavyKeeper 排名
+    "totalRequests": 158392,
+    "cacheSize": 87, // L1 预估条目数
+    "inFlightSize": 3, // 正在执行的加载器数
+    "reportQueueDepth": 0,
+    "reportQueueFullCount": 0,
+    "reportPendingKeys": 0, // 访问计数器中缓冲的 key 数
+    "refreshPoolAvailable": 100,
+    "staleDebt": { "k1": 95000 }, // key -> 当前租约开始至今的毫秒数
+    "versionClockSkewMillis": 12,
   },
   "worker": {
-    // ── Worker 健康状态 ──
-    "health": "healthy",                  // 集群健康状态："healthy" 或 "unhealthy"
-    "msSinceLastAnyHeartbeat": 1234,      // 距最近一次任意 Worker 心跳的毫秒数（-1 = 尚未收到）
-    "trackedKeys": 42,                    // 状态机追踪的 key 数
-
-    // ── 决策面分发闸门（容量：zeta.worker-listener.max-pending-units）──
-    "dispatchPendingUnits": 0,            // 闸门当前记账的加权积压量
-    "dispatchRemainingUnits": 200000,     // 闸门剩余容量（耗尽后提交被丢弃）
-    "dispatchMaxPendingUnits": 200000,    // 配置的闸门容量
-    "dispatchActiveKeys": 0,              // 持有工作（运行中或排队中）的 key 数
-    "dispatchBacklogged": false,          // 是否仍有已提交的决策未处理完
-    "dispatchDropped": 0,                 // 全局闸门累计丢弃的提交数
-    "dispatchRejected": 0,                // 单 key 队列上限累计拒绝的提交数
-
-    // ── 共享 broker 的 appName 隔离（ADR-0068）──
-    "foreignAppDrops": 0,               // 因 appName 不匹配而累计丢弃的 HOT/COOL 决策数（出现外来 appName 说明另一应用以不同 zeta.app-name 共享了同一 broker）
-    "lastForeignApp": "appB"            // 最近一次外来发送方的 appName（仅在发生丢弃后出现）
+    "health": "healthy",
+    "msSinceLastAnyHeartbeat": 1234, // -1 = 从未收到心跳
+    "foreignAppDrops": 0,
+    "lastForeignApp": "appB",
+    "coolDispatchRejections": 0,
   },
   "sync": {
-    "dedupCacheSize": 20,                 // 广播去重缓存条目数
-    "foreignAppDrops": 0,                 // 因 appName 不匹配而累计丢弃的同步消息数
-    "lastForeignApp": "appB",             // 最近一次外来发送方的 appName（仅在发生丢弃后出现）
-
-    // ── 同步面分发闸门（容量：zeta.sync.max-pending-units）──
-    "dispatchPendingUnits": 0,            // 闸门当前记账的加权积压量
-    "dispatchRemainingUnits": 50000,      // 闸门剩余容量（耗尽后提交被丢弃）
-    "dispatchMaxPendingUnits": 50000,     // 配置的闸门容量
-    "dispatchActiveKeys": 0,              // 持有工作（运行中或排队中）的 key 数
-    "dispatchBacklogged": false,          // 是否仍有已提交的同步任务未处理完
-    "dispatchDropped": 0,                 // 全局闸门累计丢弃的提交数
-    "dispatchRejected": 0                 // 单 key 队列上限累计拒绝的提交数
-  }
+    "foreignAppDrops": 0,
+    "lastForeignApp": "appB",
+    "nodeIdCollisions": 0,
+  },
 }
 ```
 
-## 2. Micrometer 指标
+### 2.3 主题
 
-当 classpath 中存在 `io.micrometer:micrometer-core` 时，`ZetaMicrometerAutoConfiguration` 自动注册 MeterBinder Bean，暴露以下指标（下表中标注 ADR-0080 的 `zeta.worker.*` 检测面指标是例外——它们由 Worker 模块自行注册，见自定义指标表之后的说明）。
+**身份**
 
-### Caffeine L1 缓存指标（`zeta.l1.*`）
+| 字段         | 含义                                                                       | CONFIG                    |
+| ------------ | -------------------------------------------------------------------------- | ------------------------- |
+| `instanceId` | 用于队列命名与版本戳的实例标识；改变 `zeta.local.instance-id` 时随之改变。 | [§1](CONFIG.zh.md#1-部署) |
+| `jvmId`      | 进程级随机标识；每次重启都会变化。                                         | —                         |
 
-通过 `CaffeineCacheMetrics.monitor()` 提供的标准 Caffeine 缓存指标：
+**本地：检测、缓存与去重**
 
-| 指标                               | 类型    | 说明                                              |
-| ---------------------------------- | ------- | ------------------------------------------------- |
-| `zeta.l1.cache.gets`             | Counter | 缓存读取次数（标签 `result=hit` / `result=miss`） |
-| `zeta.l1.cache.puts`             | Counter | 缓存写入次数                                      |
-| `zeta.l1.cache.evictions`        | Counter | 缓存驱逐次数（标签 `cause=...`）                  |
-| `zeta.l1.cache.evictions.weight` | Counter | 驱逐条目权重                                      |
-| `zeta.l1.cache.hit.ratio`        | Gauge   | 当前命中率                                        |
-| `zeta.l1.cache.miss.ratio`       | Gauge   | 当前未命中率                                      |
-| `zeta.l1.cache.size`             | Gauge   | 缓存预估大小                                      |
-| `zeta.l1.cache.max`              | Gauge   | 缓存最大大小                                      |
+| 字段            | 含义                                                                              | CONFIG                                |
+| --------------- | --------------------------------------------------------------------------------- | ------------------------------------- |
+| `topK[]`        | 当前本地排名，按频率降序。每项为 `{ "key": ..., "add": ... }`，受 `?limit` 限制。 | [§2](CONFIG.zh.md#2-本地热点检测topk) |
+| `totalRequests` | 衰减调整后的跟踪访问量；流量回落时会下降，不是累计访问次数。                      | [§2](CONFIG.zh.md#2-本地热点检测topk) |
+| `cacheSize`     | 单张 L1 Caffeine 表的预估条目数。                                                 | [§3](CONFIG.zh.md#3-l1-缓存与-ttl)    |
+| `inFlightSize`  | 当前正在执行的加载器数——不是 SingleFlight 去重表的大小。                          | [§4](CONFIG.zh.md#4-加载并发与刷新)   |
 
-### 自定义 Zeta 业务指标
+**本地：上报**
 
-| 指标                                  | 类型  | 标签                 | 说明                             |
-| ------------------------------------- | ----- | -------------------- | -------------------------------- |
-| `zeta.topk.size`                    | Gauge | `type=local`         | TopK 当前排名数                  |
-| `zeta.topk.total`                   | Gauge | `type=local`         | TopK 追踪的总请求数              |
-| `zeta.expelled.queue.size`          | Gauge | —                    | 驱逐队列积压量                   |
-| `zeta.expelled.queue.remaining`     | Gauge | —                    | 驱逐队列剩余容量                 |
-| `zeta.singleflight.inflight`        | Gauge | —                    | SingleFlight 进行中的去重数      |
-| `zeta.reporter.queue.depth`         | Gauge | —                    | Reporter 队列积压量              |
-| `zeta.reporter.queue.dropped.total` | Gauge | —                    | 累计丢弃批次（队列满）           |
-| `zeta.reporter.queue.expired.total` | Gauge | —                    | 累计过期批次（下列两种原因之和） |
-| `zeta.reporter.queue.expired.dead.total` | Gauge | —               | 目标 Worker 已死亡的过期批次     |
-| `zeta.reporter.queue.expired.stale.total` | Gauge | —              | 在队列中等待超过 5 秒而过期的批次 |
-| `zeta.reporter.pending.keys`        | Gauge | —                    | Reporter 计数缓存中缓冲的 key 数 |
-| `zeta.reporter.bbr.passed`          | Gauge | —                    | Reporter BBR 通过次数             |
-| `zeta.reporter.bbr.dropped`         | Gauge | —                    | Reporter BBR 丢弃次数             |
-| `zeta.reporter.bbr.inflight`        | Gauge | —                    | Reporter BBR 进行中请求数         |
-| `zeta.reporter.bbr.maxinflight`     | Gauge | —                    | Reporter BBR 最大进行中请求数     |
-| `zeta.reporter.bbr.balanced`        | Gauge | —                    | Reporter BBR 阻尼基线（内核 `dirty_ratelimit` 对应物） |
-| `zeta.reporter.bbr.maxpass`         | Gauge | —                    | 滑窗单桶最大通过数（Little 估算输入；读时衰减） |
-| `zeta.reporter.bbr.minrt`           | Gauge | —                    | 滑窗最小平均 RT（毫秒，Little 估算输入；读时衰减）——观察发布链路排队污染的关键曲线 |
-| `zeta.reporter.bbr.yielded`         | Gauge | —                    | 累计下游让路步数（连续两个基线区间出现发布失败/过期丢弃时，基线每步 ×7/8） |
-| `zeta.reporter.feedloop.interval`   | Gauge | —                    | FeedLoop 基准上报间隔（毫秒）；shadow 模式下显示"将要应用"的轨迹（ADR-0078；仅 `report-interval-tuning` ≠ off 时注册） |
-| `zeta.reporter.feedloop.score`      | Gauge | —                    | FeedLoop 得分（bp）——两窗口平均批大小相对目标（10000 == 正中目标） |
-| `zeta.reporter.feedloop.batch`      | Gauge | —                    | FeedLoop 平均批大小（每次完成 flush 的键数） |
-| `zeta.stall.report_backpressure.delayed` | Gauge | —               | Reporter 队列深度（拥塞前兆，ADR-0076） |
-| `zeta.stall.report_backpressure.stopped.total` | Gauge | —      | 因队列满或过期而丢失的批次数      |
-| `zeta.stall.broadcast_storm.stopped.total` | Gauge | —           | 因 Broker 错误或发送线程池饱和而丢失的 PUT/刷新广播数 |
-| `zeta.stall.redis_degraded.stopped` | Gauge | —                    | 熔断器打开时为 1（加载快速失败）  |
-| `zeta.stall.redis_degraded.timeouts.total` | Gauge | —             | 因读取超时而解析为空的去重加载数  |
-| `zeta.stall.worker_partition.stopped` | Gauge | —                  | 无存活 Worker 分片时为 1（报告路由无目标） |
-| `zeta.rules.persist.failed` | Gauge | — | 已入内存但未到达 Redis/广播的规则变更数 |
-| `zeta.expire.refresh.available`     | Gauge | —                    | 刷新信号量可用许可数             |
-| `zeta.expire.refresh.failure.leased.total` | Gauge | —           | 获准续租的刷新失败累计数（ADR-0036） |
-| `zeta.expire.refresh.lease.stale.capped.total` | Gauge | —       | 因陈旧上限被拒的续租累计数 |
-| `zeta.expire.refresh.lease.suppressed.total` | Gauge | —        | 被失败分类器拒绝的续租累计数 |
-| `zeta.expire.refresh.lease.debt.keys` | Gauge | —                | 当前被续租的 key 数（staleDebt 大小） |
-| `zeta.version.degraded.total`       | Gauge | —                    | 累计版本回退次数                 |
-| `zeta.sync.dedup.size`              | Gauge | —                    | 广播去重缓存大小                 |
-| `zeta.sync.send.failed.total`       | Gauge | —                    | 同步面发布失败累计数（broker 错误）；INVALIDATE 从未离开本节点的唯一信号 |
-| `zeta.lock.acquired.total`          | Gauge | —                    | 分布式锁累计获取成功数           |
-| `zeta.lock.contended.total`         | Gauge | —                    | `tryLock` 返回 null 中对端持锁的累计数（正常竞争） |
-| `zeta.lock.error.total`             | Gauge | —                    | `tryLock` 返回 null 中由 provider 故障导致的累计数（Redis 宕机、中断、非法 key） |
-| `zeta.worker.alive`                 | Gauge | —                    | 任意 Worker 分片是否存活（0/1）  |
-| `zeta.worker.tracked.keys`          | Gauge | —                    | 状态机追踪的 key 数（仅统计曾经热过的 key） |
-| `zeta.worker.detector.keys`         | Gauge | —                    | Worker 检测器中持有活跃滑动窗口条目的 key 数（key 级内存的主要占用者） |
-| `zeta.worker.decisions.hot`         | Counter | —                  | 成功下发到集群的 HOT 决策数      |
-| `zeta.worker.decisions.cool`        | Counter | —                  | 成功下发到集群的 COOL 决策数     |
-| `zeta.worker.report.eval`           | Timer | —                    | Worker 逐 key 评估循环的单批耗时（仅用单调时钟，纳秒分辨率） |
-| `zeta.cpu.load`                     | Gauge | —                    | 当前 CPU 负载（0-1000 范围）     |
-| `zeta.dispatch.pending.units`       | Gauge | `plane`              | 按 key 分发器闸门已计入的积压    |
-| `zeta.dispatch.remaining.units`     | Gauge | `plane`              | 距开始丢弃还剩的闸门容量         |
-| `zeta.dispatch.active.keys`         | Gauge | `plane`              | 当前持有任务的分发器 key 数      |
-| `zeta.dispatch.backlogged`          | Gauge | `plane`              | 存在未执行任务时为 1             |
-| `zeta.dispatch.dropped.total`       | Gauge | `plane`              | 被预算闸门累计丢弃数             |
-| `zeta.dispatch.rejected.total`      | Gauge | `plane`              | 被单 key 队列上限拒绝数          |
+| 字段                   | 含义                                                                                         | CONFIG                        |
+| ---------------------- | -------------------------------------------------------------------------------------------- | ----------------------------- |
+| `reportQueueDepth`     | Reporter 分发队列中等待的批次数。持续上升说明 Reporter 正在落后。                            | [§6](CONFIG.zh.md#6-上报队列) |
+| `reportQueueFullCount` | 分发队列持续满超过 `queue-offer-timeout-ms` 后被丢弃，或 dispatcher 停机时撤回的累计批次数。 | [§6](CONFIG.zh.md#6-上报队列) |
+| `reportPendingKeys`    | 共享访问计数器中缓冲、等待下一轮 tide 的 key 数。                                            | [§5](CONFIG.zh.md#5-上报节拍) |
 
-`zeta.dispatch.*` 指标带 `plane=sync`（同步面）或 `plane=worker`（决策面）标签；当前部署模式下不存在的面不会注册任何指标。把 `pending.units` 与 `remaining.units` 一起看，才能区分"没有流量"与"闸门已饱和"——在这组指标出现之前，这两种情况在观测上无法区分，且只在提交已被丢弃之后才通过一条限流 WARN 体现。
+**本地：刷新与版本**
 
-`zeta.lock.*` 之所以存在，是因为 `tryLock` 把两种截然不同的结果压成同一个 `null` 返回："对端正持有锁"（正常竞争，高负载下预期可见）与"provider 故障"（Redis 宕机、线程中断、非法 key——真正的故障）。只有拆开才能分辨：应对 `zeta.lock.error.total` 告警，而 `zeta.lock.contended.total` 上升应视为容量信号而非故障。三者都是累计计数、以 gauge 暴露，因此速率要看抓取之间的差值而非原始值。
+| 字段                     | 含义                                                                                                                          | CONFIG                              |
+| ------------------------ | ----------------------------------------------------------------------------------------------------------------------------- | ----------------------------------- |
+| `refreshPoolAvailable`   | 后台刷新限流器的可用许可数。`0` 表示软过期刷新正在线程池中排队。                                                              | [§4](CONFIG.zh.md#4-加载并发与刷新) |
+| `staleDebt`              | 当前被租约持有的 key，按最旧优先（最多 100 条）：key → 当前租约开始至今的毫秒数。它是"有界陈旧"的审计面。                     | [§4](CONFIG.zh.md#4-加载并发与刷新) |
+| `versionClockSkewMillis` | 最新已知时间戳（本地 stamp clock 或观测到的对端时间戳，含被拒绝的离群值）领先本地物理时间的毫秒数。持续增长说明存在时钟漂移。 | [§1](CONFIG.zh.md#1-部署)           |
 
-### Worker 检测面指标（`zeta.worker.detector.keys`、`zeta.worker.decisions.*`、`zeta.worker.report.eval`）
+**Worker：集群健康与决策隔离**
 
-ADR-0080 引入的这四个检测面指标，是评判任何 Worker 检测架构改动的前置测量基线。它们由 **Worker 模块的 `WorkerAutoConfiguration`** 注册（而不是 `ZetaMicrometerAutoConfiguration`：这些指标读取的都是 worker 模块的类——`SlidingWindowDetector`、`WorkerBroadcaster`、`ReportConsumer`——而 common 的自动配置只能看到 common 模块的类型），且仅在存在 `MeterRegistry` Bean 时注册；没有注册表时 Worker 以无指标方式运行，而不是启动失败。
+| 字段                      | 含义                                                                                                                                                | CONFIG                                         |
+| ------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------- |
+| `health`                  | 心跳视图通过集群闸门时为 `healthy`，否则为 `unhealthy`。                                                                                            | [§7](CONFIG.zh.md#7-worker-监听心跳与集群健康) |
+| `msSinceLastAnyHeartbeat` | 距最近一次任意 Worker 心跳的毫秒数；`-1` 表示从未收到。                                                                                             | [§7](CONFIG.zh.md#7-worker-监听心跳与集群健康) |
+| `foreignAppDrops`         | 因 `appName` 头不匹配而累计丢弃的 HOT/COOL 决策数。                                                                                                 | [§7](CONFIG.zh.md#7-worker-监听心跳与集群健康) |
+| `lastForeignApp`          | 最近一次外来 `appName`；仅在发生丢弃后出现。                                                                                                        | [§7](CONFIG.zh.md#7-worker-监听心跳与集群健康) |
+| `coolDispatchRejections`  | 有序 dispatcher 在提交时拒收的 COOL 决策数（每 key 队列已满或已关闭）。每条都在消费线程上就地补执行；持续增长是 dispatcher 饱和信号，不是数据丢失。 | [§7](CONFIG.zh.md#7-worker-监听心跳与集群健康) |
 
-- **`zeta.worker.detector.keys`** 采集滑动窗口检测器的 per-key 窗口 map——真正占用 Worker 内存的结构（每个上报 key 约 678 B 中有约 418.5 B 来自它，ADR-0080 §3）。既有的 `zeta.worker.tracked.keys` 看不到它：该指标读取状态机，而状态机对从未热过的 key 提前返回、不物化任何状态，因此只统计曾经热过的 key。两个 gauge 之间的差值，正是检测器仍然为之付费的"从未热过"的 key 规模。
-- **`zeta.worker.decisions.hot` / `zeta.worker.decisions.cool`** **只统计成功下发**，计数点位于唯一的发送汇聚处（`WorkerBroadcaster.broadcastHot`/`broadcastCool`——状态机路径与空闲驱逐的 COOL 路径都经由它发布）。AMQP 发送失败时返回 `false`，调用方会回滚该 key 的状态机状态，决策随后由下一次评估或 ADR-0024 的周期性 HOT 重播补齐；若按"尝试次数"计数，同一个决策会被计两次。100 ms 的 per-key 去重抑制同样不计——它没有真正下发任何消息，被抑制的那个决策在发送时就已计入。
-- **`zeta.worker.report.eval`** 是 `Timer`，其样本为**单调时钟的纳秒差值**（`Timer.record(elapsed, NANOSECONDS)`），包住 `ReportConsumer.doOnReport` 的逐 key 评估循环，每个被处理的批次采样一次（每批一个样本，而不是每 key 一个）。Micrometer 随后按注册表的 base time unit 存储与导出该值——标准注册表默认是秒，因此 Prometheus 导出为 `_seconds` 后缀——但被测量的量是时钟差值，而不是时间戳。它**只用单调时钟**，刻意不是上报消息的跨主机墙钟年龄（`now - message.timestamp()`）——App 时钟偏移使其不可用，这也正是可选陈旧过滤器默认关闭的原因。因此它**按构造排除了 AMQP 排队等待时间**；循环之前的陈旧过滤与全局比值采样也不计入；默认的缓冲广播模式（ADR-0061）下决策发送在缓冲区的 drain 线程上执行，同样不计入，而旧的同步模式下其内联发送会计入样本。被判定为陈旧或被丢弃的空批次不会进入循环，因此不产生样本。
+**同步**
 
-## 3. 一致性哈希环管理
+| 字段               | 含义                                                                                                     | CONFIG                        |
+| ------------------ | -------------------------------------------------------------------------------------------------------- | ----------------------------- |
+| `foreignAppDrops`  | 因 `appName` 不匹配而累计丢弃的同步消息数。                                                              | [§8](CONFIG.zh.md#8-缓存同步) |
+| `lastForeignApp`   | 最近一次外来同步发送方；仅在发生丢弃后出现。                                                             | [§8](CONFIG.zh.md#8-缓存同步) |
+| `nodeIdCollisions` | 与本节点共享 `dataVersion` node id 的对端发来的同步消息数。持续增长说明应显式配置 `zeta.local.node-id`。 | [§8](CONFIG.zh.md#8-缓存同步) |
 
-当启用一致性哈希（`zeta.local.consistent-hashing.enabled=true`）且 classpath 中包含 `spring-boot-starter-actuator` 时，会在 `/actuator/hotkeyring` 注册一个标准 Actuator 端点（`RingEndpoint.java`，id `hotkeyring`），用于环查询。它运行在管理平面（端口、暴露范围与角色走标准 `management.*` 配置），而非应用端口。
+### 2.4 哪些部分会出现，哪些被刻意省略
 
-| 方法  | 路径                         | 说明                        |
-| ----- | ---------------------------- | --------------------------- |
-| `GET` | `/actuator/hotkeyring`       | 环拓扑和节点数量            |
-| `GET` | `/actuator/hotkeyring/{key}` | 查询指定 key 由哪个节点处理 |
+| 部分                                                                 | 出现条件                                                                            |
+| -------------------------------------------------------------------- | ----------------------------------------------------------------------------------- |
+| `local`                                                              | 至少存在一个应用端组件（纯 Worker 进程没有）                                        |
+| `local.topK`、`local.totalRequests`                                  | 存在应用端 TopK（`zeta.worker.enabled=false`）                                      |
+| `local.cacheSize` / `local.inFlightSize`                             | 存在 L1 缓存 / SingleFlight                                                         |
+| `local.reportQueueDepth`、`reportQueueFullCount`                     | Reporter 已接线（`zeta.report.enabled=true`、classpath 中有 RabbitMQ、非纯 Worker） |
+| `local.reportPendingKeys`                                            | 存在共享访问计数器（否则回退到 Reporter）                                           |
+| `local.refreshPoolAvailable`、`staleDebt`                            | 存在后台刷新器                                                                      |
+| `worker.health`、`worker.msSinceLastAnyHeartbeat`                    | 存在 `HealthView`（始终存在；在应用侧才有意义）                                     |
+| `worker.foreignAppDrops`、`lastForeignApp`、`coolDispatchRejections` | `zeta.worker-listener.enabled=true`                                                 |
+| `sync.*`                                                             | `zeta.sync.enabled=true`，且同步监听器或默认决策处理器已接线                        |
 
-## 4. Worker 状态机运行时配置
+## 3. 哈希环巡检：`/actuator/hotkeyring`
 
-当启用 Worker 模式（`zeta.worker.enabled=true`）且 classpath 中包含 `spring-boot-starter-actuator` 时，会在 `/actuator/hotkey-worker-state` 注册一个标准 Actuator 端点（`StateMachineEndpoint.java`，id `hotkey-worker-state`），用于运行时读取和更新状态机配置。它运行在管理平面：运行时配置变更不再位于应用端口。（端点 id 无法像原 `/actuator/hotkey/worker/state` MVC 路径那样嵌套；读取形态不变，写入改为类型化字段——见下。）
+哈希环决定一条上报由哪个 Worker 接收。当上报落到错误的 Worker、Worker 重启后路由不变，或怀疑 `min-alive-workers` 降级时，使用这个端点。
 
-| 方法   | 路径                            | 说明                                                                     |
-| ------ | ------------------------------- | ------------------------------------------------------------------------ |
-| `GET`  | `/actuator/hotkey-worker-state` | 返回当前 `confirmCount`、`coolCount`、`preCoolGraceCount`、`trackedKeys` |
-| `POST` | `/actuator/hotkey-worker-state` | 更新一个或多个参数（请求体：`{"confirmCount":5,"coolCount":15}`——类型化字段，缺失表示保持） |
+端点在返回前会用健康视图重建哈希环，因此在上一次上报 flush 之后死亡的 Worker 已经不在列表中；检查故障转移不需要制造额外流量。
 
-**读取当前状态：**
+**开关。** `zeta.local.consistent-hashing.enabled=true`（默认）会创建端点；它只控制巡检能力——即使关闭端点，上报路由仍始终使用哈希环（[CONFIG §7](CONFIG.zh.md#7-worker-监听心跳与集群健康)）。上报平面必须已接线，否则每次调用都返回 **503**，并在消息中说明原因。
+
+### 3.1 请求模板
 
 ```bash
-curl http://localhost:8080/actuator/hotkey-worker-state
+APP=http://localhost:8080
+
+# 1. 拓扑：当前有哪些 Worker 存活
+curl -s "$APP/actuator/hotkeyring" | jq
+
+# 2. 某个 key 由哪个 Worker 负责
+curl -s "$APP/actuator/hotkeyring/cache:shop:17" | jq
+
+# 3. 含 '/' 的 key 作为剩余路径段直接传入
+curl -s "$APP/actuator/hotkeyring/api/v1/product:42" | jq
 ```
 
-**响应示例：**
+响应示例：
 
 ```json
 {
-  "confirmCount": 1,
-  "coolCount": 10,
-  "preCoolGraceCount": 3,
-  "trackedKeys": 42
+  "nodes": ["worker-1", "worker-2", "worker-3"]
 }
 ```
-
-**更新参数：**
-
-变更通过心跳广播传播到对等 Worker。每次 POST 会递增内部的 `configTimestampCounter`——接收方 Worker 仅当时间戳严格更新于自身时才应用新值。
-
-```bash
-curl -X POST http://localhost:8080/actuator/hotkey-worker-state \
-  -H "Content-Type: application/json" \
-  -d '{"confirmCount":5,"coolCount":15}'
-```
-
-**响应示例：**
 
 ```json
 {
-  "status": "ok"
+  "key": "cache:shop:17",
+  "nodeId": "worker-2"
 }
 ```
 
-**校验规则：** 写入的参数组合必须满足与配置协商层对心跳 gossip 相同的不变量——`confirmCount >= 1`、`preCoolGraceCount >= 1` 且 `coolCount > preCoolGraceCount`（提供的字段覆盖，其余字段保持当前值）。违反不变量的写入会被拒绝并返回 `"status": "error"`，不做任何修改：本地接受但被 gossip 拒绝的配置会让该 Worker 永久偏离集群且无法自动收敛。不含任何可识别字段的写入是纯 no-op（不重写、不递增时间戳）。格式错误（非数字）输入到不了方法——actuator 框架在分发前以 400 拒绝。
+## 4. Worker 检测运行时：`/actuator/hotkey-worker`
+
+**前提。** Worker 模式（`zeta.worker.enabled=true`，需 classpath 上有 RabbitMQ）、引入 Actuator，
+并显式开启：发行包默认只暴露 `health`。将 `hotkeyworker` 加入 web exposure include 并设置
+`management.endpoints.web.path-mapping.hotkeyworker: hotkey-worker` 后才会发布该端点。只读：
+检测配置在启动时一次性校验，没有运行时写入口。
+
+### 4.1 汇总
+
+```bash
+WORKER=http://worker:8080
+curl -s "$WORKER/actuator/hotkey-worker" | jq
+```
+
+```json
+{
+  "detection": {
+    "window": "992ms/16",
+    "minHotCount": 100,
+    "rulesHash": "1f2a3b4c5d6e7f80"
+  },
+  "hot": { "active": 1234, "rejected": 12 },
+  "cooling": { "scheduled": 900 },
+  "rules": [
+    {
+      "id": "user-prefix",
+      "effectiveHotQps": 200,
+      "matches": 12034,
+      "promotions": 10,
+      "aborts": 2,
+      "cools": 8
+    }
+  ]
+}
+```
+
+| 字段                      | 回答的问题                                                                          |
+| ------------------------- | ----------------------------------------------------------------------------------- |
+| `detection.window`        | 实际生效的窗口，不是配置值                                                          |
+| `detection.rulesHash`     | 实际生效规则文本的指纹；两个 Worker 的 hash 不同即判定规则不同                      |
+| `detection.minHotCount`   | 默认规则与非 `exact` 规则的晋升下界；生效的 `exact` 规则按键索引并在此之前检查      |
+| `rules[].effectiveHotQps` | 实际生效的阈值，由窗口计数阈值与有效窗口反算；取整后可能与配置值相差 1              |
+| `rules[].matches`         | 窗口和达到该规则 `hotCount` 的上报次数；exact、prefix、regex 与默认规则统计同一个量 |
+| `hot.active`              | 当前持有 HOT 名额的 key 数；`active` 贴着名额上限且 `rejected` 上涨说明容量是瓶颈   |
+| `cooling.scheduled`       | 冷却轮中已挂载的检查数；应贴近热 Key 数，明显偏高说明冷却跟不上                     |
+
+### 4.2 单 key
+
+```bash
+curl -s "$WORKER/actuator/hotkey-worker?key=user:42" | jq
+```
+
+```json
+{
+  "key": "user:42",
+  "hot": true,
+  "rule": "user-prefix",
+  "windowSum": 230,
+  "promotedForMs": 720000,
+  "belowForMs": null,
+  "nextCheckInMs": 800,
+  "promotedVersion": 9182
+}
+```
+
+`promotedForMs` 在两种策略下都表示"已 HOT 多久"；`belowForMs` 只有 `COOL_FOR_LOW_QPS` 且当前低于冷却带时非空，
+`COOL_FOR_EXPIRE` 恒为 `null`。两个时间字段分开是刻意的——单一 `sinceMs` 会随策略悄悄变义。
+`nextCheckInMs` 是距已登记冷却检查的剩余时间；检查过期时为负数（已到 deadline 但尚未被 wheel 取走，或正在等待修复扫描），
+这是有用的"已逾期多久"读数，而不是错误。
+
+端点返回真实 key 名和流量，生产环境按 App 侧 `hotkey` 端点的同等口径做安全防护。
+
+## 5. Micrometer 指标
+
+指标按模块分两处注册：common 模块注册应用侧指标、L1 缓存 Binder 与决策监听计数；Worker 模块注册检测面指标。每个指标都以组件存在为条件，因此抓取结果里缺少某个指标，意味着对应平面不在该进程中。
+
+### 5.1 请求模板
+
+```bash
+APP=http://localhost:8080
+
+# 列出该进程上所有 zeta 指标
+curl -s "$APP/actuator/metrics" | jq -r '.names[] | select(startswith("zeta."))'
+
+# 读取单个指标
+curl -s "$APP/actuator/metrics/zeta.reporter.queue.depth" | jq '{name, measurements}'
+
+# 读取带标签的序列（Caffeine 指标使用 cache.* 命名空间）
+curl -s "$APP/actuator/metrics/cache.gets?tag=cache:zeta.l1&tag=result:hit" | jq '.measurements'
+
+# Prometheus 抓取（需要 micrometer-registry-prometheus）
+curl -s "$APP/actuator/prometheus" | grep -E '^(zeta_|cache_)'
+```
+
+Prometheus 会把点转为下划线，并为 Counter 追加 `_total`：`zeta.reporter.queue.depth` 变成 `zeta_reporter_queue_depth`，`zeta.worker.decisions.hot` 变成 `zeta_worker_decisions_hot_total`。
+
+### 5.2 L1 缓存（`cache.*`，标签 `cache=zeta.l1`）
+
+Caffeine 指标使用 Micrometer 标准的 `cache.*` 命名空间，并带标签 `cache=zeta.l1`；**不是** `zeta.l1.*` 前缀。L1 是普通 `Cache`，通过 SingleFlight 加载，因此仅 `LoadingCache` 才有的 `cache.load` 与 `cache.load.duration` 不会注册。
+
+| 指标                    | 类型            | 标签                                 | 含义                                                       |
+| ----------------------- | --------------- | ------------------------------------ | ---------------------------------------------------------- |
+| `cache.gets`            | FunctionCounter | `cache=zeta.l1`，`result=hit`/`miss` | 按结果统计的缓存读取                                       |
+| `cache.puts`            | FunctionCounter | `cache=zeta.l1`                      | 写入条目数                                                 |
+| `cache.evictions`       | FunctionCounter | `cache=zeta.l1`                      | 因容量、过期或引用回收而驱逐的条目数（显式失效不计入驱逐） |
+| `cache.eviction.weight` | FunctionCounter | `cache=zeta.l1`                      | 驱逐条目权重                                               |
+| `cache.size`            | Gauge           | `cache=zeta.l1`                      | 当前预估大小                                               |
+
+Zeta 的 L1 始终启用 `recordStats()`；自定义缓存 Bean 若未开启，则只会报告 `cache.size`。
+
+### 5.3 本地检测与去重
+
+| 指标                                        | 类型            | 标签         | 含义                                                   |
+| ------------------------------------------- | --------------- | ------------ | ------------------------------------------------------ |
+| `zeta.topk.size`                            | Gauge           | `type=local` | 当前本地 TopK 大小                                     |
+| `zeta.topk.total`                           | Gauge           | `type=local` | 本地 sketch 衰减后的追踪访问量（流量下降时会回落）     |
+| `zeta.expelled.queue.size`                  | Gauge           | —            | 被逐出 TopK 的 key 暂存队列积压                        |
+| `zeta.singleflight.inflight`                | Gauge           | —            | 正在执行的加载器数（不是去重表大小）                   |
+| `zeta.stall.source_degraded.stopped`        | Gauge           | —            | 熔断器打开时为 `1`（加载快速失败；读取可返回软过期值） |
+| `zeta.stall.source_degraded.timeouts.total` | FunctionCounter | —            | 触发单次加载读取超时的 leader 加载累计次数             |
+
+### 5.4 上报与 feed loop
+
+| 指标                                       | 类型            | 含义                                                                                                             |
+| ------------------------------------------ | --------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `zeta.reporter.queue.depth`                | Gauge           | Reporter 分发队列中等待的批次数                                                                                  |
+| `zeta.reporter.queue.dropped.total`        | FunctionCounter | 因队列满而丢弃，或 dispatcher 停机时撤回的累计批次数                                                             |
+| `zeta.reporter.queue.expired.dead.total`   | FunctionCounter | 目标 Worker 已死亡的过期批次数                                                                                   |
+| `zeta.reporter.queue.expired.stale.total`  | FunctionCounter | 在队列中等待超过 5 秒而过期的批次数                                                                              |
+| `zeta.reporter.pending.keys`               | Gauge           | 共享访问计数器中缓冲的 key 数                                                                                    |
+| `zeta.reporter.feedloop.interval`          | Gauge           | feed-loop 基准上报间隔（毫秒）；`shadow` 模式下这是"将要应用"的轨迹（仅 `report-interval-tuning != off` 时注册） |
+| `zeta.reporter.feedloop.score`             | Gauge           | feed-loop 得分（bp）——平滑到达率投影到测量窗口所用的间隔后相对目标（`10000` 表示正中目标）                       |
+| `zeta.reporter.feedloop.batch`             | Gauge           | 按产生该得分的间隔投影的每批 key 数                                                                              |
+| `zeta.stall.broadcast_storm.stopped.total` | FunctionCounter | 因 Broker 错误或发送线程池饱和而丢失的 PUT/刷新广播数                                                            |
+
+### 5.5 刷新、版本与同步
+
+| 指标                                       | 类型            | 含义                                                                                         |
+| ------------------------------------------ | --------------- | -------------------------------------------------------------------------------------------- |
+| `zeta.expire.refresh.available`            | Gauge           | 后台刷新限流器可用许可数                                                                     |
+| `zeta.expire.refresh.failure.leased.total` | FunctionCounter | 获准续租的刷新失败累计数（陈旧值仍可服务）                                                   |
+| `zeta.expire.refresh.lease.debt.keys`      | Gauge           | 当前被租约持有的 key 数（`staleDebt` 大小）                                                  |
+| `zeta.version.clock.skew`                  | Gauge           | 最新已知版本戳（本地戳时钟或被观测到的对端戳，含被拒收的越界值）领先本地物理时间的毫秒数     |
+| `zeta.sync.send.failed.total`              | FunctionCounter | 同步面发布失败累计数；INVALIDATE 从未离开本节点的唯一信号                                    |
+| `zeta.sync.nodeid.collision.total`         | FunctionCounter | 与本节点共享 `dataVersion` node id 的对端同步消息数；持续增长应显式配置 `zeta.local.node-id` |
+
+### 5.6 Worker 集群与决策面
+
+| 指标                                                  | 类型                        | 含义                                                                                                                                              |
+| ----------------------------------------------------- | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `zeta.worker.alive`                                   | Gauge                       | 心跳视图通过集群闸门时为 `1`；应在应用侧读取                                                                                                      |
+| `zeta.worker.detector.keys`                           | Gauge                       | 持有活跃滑动窗口条目的 key 数                                                                                                                     |
+| `zeta.worker.detector.capacity.evictions`             | FunctionCounter             | 本次采样真正移除、用于在 `max-tracked-keys` 上接纳新 key 的空闲窗口数（Prometheus `_total`）                                                      |
+| `zeta.worker.detector.capacity.rejections`            | FunctionCounter             | 在 `max-tracked-keys` 上被拒绝的新 key 数：硬余量已满，或完成采样未找到空闲窗口后开启的 50 ms 饱和窗口仍在生效（Prometheus `_total`）             |
+| `zeta.worker.hot.active`                              | Gauge                       | 当前持有 HOT 名额的 key 数                                                                                                                        |
+| `zeta.worker.hot.capacity`                            | Gauge                       | 名额容量（`detection.limits.max-active-hot-keys`）                                                                                                |
+| `zeta.worker.hot.rejected`                            | FunctionCounter             | 满员时被拒绝的晋升（读取注册表的 LongAdder）                                                                                                      |
+| `zeta.worker.hot.aborted`                             | Counter                     | HOT 未到达 broker 而被撤销的晋升（名额已归还）                                                                                                    |
+| `zeta.worker.decisions.hot` / `.cool`                 | Counter                     | 已交给 AMQP 客户端且未抛异常的决策；未启用 publisher confirm                                                                                      |
+| `zeta.worker.decisions.dropped`                       | Counter，tag `type`         | 未到达 broker 即丢失的决策（发送失败、队列饱和、drain 异常、停机）                                                                                |
+| `zeta.worker.decisions.elided`                        | Counter，tag `type`         | 无状态变化、在内存中省略的决策：100ms 同类型去抖、已接受版本的精确重放、集群已处于 COOL 状态时再次下发的 COOL，或被取代的 HOT 从未到达漏斗的 COOL |
+| `zeta.worker.decisions.superseded`                    | Counter，tag `type`         | 已有严格更新的版本排队或已被接受，或 registry 已不再持有该 HOT 的晋升，旧决策被淘汰                                                               |
+| `zeta.worker.decisions.expired`                       | Counter，tag `type`         | 本应下发但超过 `max-decision-age-ms` 的决策；被漏斗省略或取代的决策计入对应指标，不计入此处                                                       |
+| `zeta.worker.broadcast.hot.depth` / `.cool.depth`     | Gauge                       | 两条待发队列深度                                                                                                                                  |
+| `zeta.worker.cooling.scheduled`                       | Gauge                       | 冷却轮中当前挂载的检查数                                                                                                                          |
+| `zeta.worker.cooling.lateness`                        | Timer                       | 定时轮触发的到期检查被处理的迟到程度（不含修复扫描的宽限期）                                                                                      |
+| `zeta.worker.cooling.recheck`                         | Counter                     | LOW_QPS 复核发现窗口达到或高于冷却带的次数；EXPIRE 不会重新挂载，到期即冷却，不会计入这里                                                         |
+| `zeta.worker.cooling.reason`                          | Counter，tag `reason`       | 冷却触发原因：`low_qps` / `expire` / `sweep`                                                                                                      |
+| `zeta.worker.rule.matches` / `.promotions` / `.cools` | FunctionCounter，tag `rule` | 按规则的达标上报、晋升与冷却计数，读取规则的计数器字段                                                                                            |
+| `zeta.worker.reports.epoch.dropped`                   | Counter                     | 任期围栏丢弃的报告批次                                                                                                                            |
+| `zeta.worker.reports.stale.dropped`                   | Counter                     | 可选陈旧过滤丢弃的报告批次                                                                                                                        |
+| `zeta.worker.detection.disabled.dropped`              | Counter                     | detection 关闭时跳过的报告                                                                                                                        |
+| `zeta.worker.report.eval`                             | Timer                       | 每批上报的评估耗时（单调时钟，纳秒分辨率）                                                                                                        |
+
+规则计数器和三个 `cooling.reason` 序列按当前生效配置注册，而非懒加载：每条当前规则从第一次抓取起就以 0 出现；发布移除某条规则时，它的三个序列也一并移除。被移除规则的迟到冷却只丢弃，不会重建序列。
+
+决策监听器自身的计数器由 **common** 模块的 `ZetaMicrometerAutoConfiguration` 在存在
+`WorkerListener` Bean 时注册：
+
+| 指标                                            | 类型            | 含义                                       |
+| ----------------------------------------------- | --------------- | ------------------------------------------ |
+| `zeta.worker.decision.cool.rejected.total`      | FunctionCounter | App 有序分发器拒绝并就地重放的 COOL 决策数 |
+| `zeta.worker.decision.epoch.regress.skip.total` | FunctionCounter | 因同 nodeId 任期回退而跳过的决策数         |
+
+Worker 检测面指标由 **worker 模块的 `WorkerAutoConfiguration`** 注册，而不是
+`ZetaMicrometerAutoConfiguration`：其余每一行读取的都是 worker 模块类型（`SlidingWindowDetector`、
+`HotKeyRegistry`、`RuleResolver`、队列本身），common 自动配置看不到。`zeta.worker.alive` 是例外：
+它由 common 的 `ZetaMicrometerAutoConfiguration` 从 common 的 `HealthView` 注册，所以没有 worker
+模块的 App 也会出现。计数器随 meters bean 创建，gauge 在其依赖组件就绪后绑定一次。没有
+`MeterRegistry` Bean 时全部为空操作。
+
+指标恒等式（按决策类型分别成立）：`promotions == decisions.hot + dropped{type=hot} +
+elided{type=hot} + superseded{type=hot} + expired{type=hot}`，COOL 侧同理
+（`cools`/`decisions.cool`/`type=cool`）。每个进入投递的决策恰好落在一个桶里；因终态投递失败而
+未到达发送调用的 HOT 还会计入 `hot.aborted`，因为晋升被撤销；被更新 COOL 淘汰的 HOT 已由该次冷却
+转换移除并归还名额，因此只体现为 `cools`。在无并发变更的抓取点上，名额恒等式因此是
+`promotions == cools + hot.aborted + hot.active`。

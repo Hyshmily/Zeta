@@ -1,256 +1,461 @@
+[← Back to Home](../README.md)
+
 # Monitoring
 
-Zeta provides two complementary monitoring mechanisms.
+Zeta exposes two complementary surfaces:
 
----
+- **Actuator endpoints**
+- **Micrometer meters**
 
-## 1. Actuator Endpoint
+## 1. Exposure and Role Matrix
 
-**Prerequisite:** `spring-boot-starter-actuator` on classpath.
+**Prerequisites.** `spring-boot-starter-actuator` for the endpoints; `micrometer-core` plus a
+registry implementation for the meters. Without a `MeterRegistry` the Worker runs meter-less rather
+than failing startup.
 
-The Zeta endpoints are Actuator `@Endpoint` beans (not plain `@RestController`s) — they participate in `management.endpoints.web.exposure.include` and must be listed there (e.g. `management.endpoints.web.exposure.include=health,info,hotkey,hotkeyring`). They are auto-registered when `spring-boot-starter-actuator` is on the classpath (registration condition):
+The endpoints are Actuator `@Endpoint` beans, not MVC controllers: they participate in
+`management.endpoints.web.exposure.include` and run on the management plane (port, exposure and
+roles all follow `management.*`). Endpoint ids cannot nest, so every path is flat.
 
-| Endpoint                                  | Path                            |
-| ----------------------------------------- | ------------------------------- |
-| App diagnostics (`ZetaEndpoint`)          | `/actuator/hotkey`              |
-| Hash-ring inspection (`RingEndpoint`, §3) | `/actuator/hotkeyring`          |
-| State-machine runtime config (Worker, §4) | `/actuator/hotkey-worker-state` |
-| FastLane rule management (Worker)         | `/actuator/hotkey-fastlane`     |
+```yaml
+# App process
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,hotkey,hotkeyring
+  endpoint:
+    hotkey:
+      roles: ADMIN # enforced only when Spring Security is present
+    hotkeyring:
+      roles: ADMIN
 
-Supports an optional `?limit=N` query parameter to cap the number of app-side TopK entries returned (default 100).
+# Worker process (default exposure: health only)
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      group:
+        liveness:
+          include: livenessState,ping # no RabbitMQ
+        readiness:
+          include: readinessState,rabbit
 
-```javascript
+# Opt-in only: change the include above to `health,hotkeyworker`, then add:
+# management.endpoints.web.path-mapping.hotkeyworker: hotkey-worker
+# management.endpoint.hotkeyworker.roles: ADMIN
+```
+
+> The official `zeta-worker` distribution (jar/image) exposes only `health`. The detection view is opt-in: add `hotkeyworker` to the include and set the path mapping (and, with Spring Security, the endpoint role). Boot 3.5 requires an alphanumeric endpoint id, so the id is `hotkeyworker` while the public URL stays `/actuator/hotkey-worker`. Apps always configure their own include.
+
+**Worker health is two probes, split by dependency.** Liveness (`/actuator/health/liveness`)
+covers `livenessState,ping` and deliberately excludes RabbitMQ, so a broker outage cannot restart
+a Worker — a restart drops its in-memory windows and bumps its epoch. Readiness
+(`/actuator/health/readiness`) adds the `rabbit` indicator: `DOWN` there means the Worker cannot
+consume reports and should be taken out of service, while liveness stays `UP`. The shipped
+`zeta-worker` image's `HEALTHCHECK` calls `/actuator/health/liveness`; an orchestrator or load
+balancer should probe `/actuator/health/readiness`. The aggregate `/actuator/health` is not the
+container probe.
+
+| Endpoint                  | Methods | Served by | Created when                                                      | Answers                                                     | CONFIG                                                         |
+| ------------------------- | ------- | --------- | ----------------------------------------------------------------- | ----------------------------------------------------------- | -------------------------------------------------------------- |
+| `/actuator/hotkey`        | `GET`   | App       | Actuator on the classpath; every section is optional              | Live counters for detection, cache, reporting, health, sync | [§5](CONFIG.md#5-reporting-cadence)                            |
+| `/actuator/hotkeyring`    | `GET`   | App       | `zeta.local.consistent-hashing.enabled=true` (default) + Actuator | Ring topology and per-key routing                           | [§7](CONFIG.md#7-worker-listener-heartbeat-and-cluster-health) |
+| `/actuator/hotkey-worker` | `GET`   | Worker    | Worker + Actuator + explicit `hotkeyworker` exposure opt-in       | Detection summary, per-key window state and rule counters   | [§11](CONFIG.md#11-detection-window-rules-limits-cooling)      |
+
+## 2. App Runtime Diagnostics: `/actuator/hotkey`
+
+This is the first endpoint to call when a key is unexpectedly HOT/COOL, when reports seem lost, or
+when reads are staler than expected. It aggregates the App's detection, cache, reporter, refresh,
+version and sync state in one response.
+
+### 2.1 Request templates
+
+```bash
+APP=http://localhost:8080
+
+# Full snapshot
+curl -s "$APP/actuator/hotkey" | jq
+
+# Cap the TopK and staleDebt lists
+curl -s "$APP/actuator/hotkey?limit=20" | jq
+
+# Project only the signals used by an alert or dashboard
+curl -s "$APP/actuator/hotkey" \
+  | jq '{health: .worker.health,
+         heartbeatAgeMs: .worker.msSinceLastAnyHeartbeat,
+         hotKeys: [.local.topK[].key],
+         reportDepth: .local.reportQueueDepth,
+         reportDropped: .local.reportQueueFullCount}'
+```
+
+`limit` caps `topK` and `staleDebt`. The default is `100`; values below `1` are clamped to `1`, and
+`staleDebt` never returns more than 100 entries.
+
+### 2.2 Response shape
+
+The example shows an App with every plane wired. Sections and individual fields disappear when
+their component is absent (see §2.4).
+
+```jsonc
 {
-  "instanceId": "a1b2c3d4",        // Instance unique identifier
-  "nodeId": "node-1",               // Node identifier within cluster
+  "instanceId": "a1b2c3d4", // zeta.local.instance-id (or its derived fallback)
+  "jvmId": 7263819201938475, // random per-JVM process id
   "local": {
-    // ── App-side TopK detection ──
-    "topK": [{ "key": "cache:shop:17", "count": 1523 }],  // Hot keys list (descending by freq)
-    "topKCount": 1,                                        // Returned top-K entry count (capped by ?limit)
-    "totalRequests": 158392,                               // Total requests tracked
-    "recentlyExpelled": ["cache:shop:5", "cache:shop:99"], // Recently evicted keys
-
-    // ── HeavyKeeper algorithm config ──
-    "topKCapacity": 100,            // Max hot keys (HeavyKeeper K)
-    "sketchWidth": 65536,           // Count-Min Sketch width (configured 50000, auto-aligned up to a power of two)
-    "sketchDepth": 5,               // Count-Min Sketch depth
-    "minCountThreshold": 10,        // Minimum count for hot promotion
-    "expelledQueueSize": 2,         // Expelled queue backlog
-    "expelledQueueRemaining": 9998, // Expelled queue remaining capacity
-
-    // ── L1 Caffeine cache ──
-    "cacheSize": 87,                // Estimated current L1 size
-    "cacheMaxSize": 1000,           // L1 maximum entry count
-
-    // ── SingleFlight dedup ──
-    "inflightSize": 3,              // In-flight dedup requests
-    "inflightMaxSize": 50000,       // Max in-flight keys
-    "inflightTtlSec": 5,            // In-flight entry TTL (seconds)
-    "inflightTimeoutSec": 3,        // Async wait timeout (seconds)
-
-    // ── Reporter (app→Worker) ──
-    "reportQueueDepth": 0,          // Reporter dispatcher queue depth
-    "reportQueueCapacity": 10000,   // Reporter dispatcher queue capacity
-    "reportExpiredCount": 0,        // Cumulative expired batches (dead routing target OR stale >5s in queue)
-    "reportQueueFullCount": 0,      // Cumulative dropped batches (queue full)
-    "reportPendingKeys": 0,         // Keys buffered in counter cache
-
-    // ── Rules ──
-    "rules": [                      // Active blacklist/whitelist rule definitions
-      { "id": "...", "type": "BLOCK", "pattern": "secret:*", "createdAt": 1700000000000 }
-    ],
-
-    // ── TTL configuration ──
-    "hardTtlMs": 300000,            // Effective hard TTL — normal keys (ms)
-    "softTtlMs": 30000,             // Effective soft TTL — normal keys (ms)
-    "hotHardTtlMs": 3600000,        // Effective hard TTL — hot keys (ms)
-    "hotSoftTtlMs": 300000,         // Effective soft TTL — hot keys (ms)
-    "refreshPoolAvailable": 100,    // Available refresh limiter permits
-    "refreshFailureLeased": 3,      // Cumulative background-refresh failures granted a lease (ADR-0036)
-    "leaseStaleCapped": 1,          // Cumulative lease refusals by the 30-minute staleness cap
-    "leaseSuppressedByClassifier": 0, // Cumulative lease refusals by the failure classifier
-    "staleDebt": {"k1": 95000},     // Currently-leased keys (top 100) to staleness ms — the audit surface for "bounded staleness"
-
-    // ── Version tracking ──
-    "versionRedisEnabled": true,    // Redis-based version tracking active
-    "versionDegradedCount": 0       // Keys using degraded node-local version
+    "topK": [{ "key": "cache:shop:17", "add": 1523 }], // local HeavyKeeper ranking
+    "totalRequests": 158392,
+    "cacheSize": 87, // estimated L1 entries
+    "inFlightSize": 3, // loaders currently executing
+    "reportQueueDepth": 0,
+    "reportQueueFullCount": 0,
+    "reportPendingKeys": 0, // keys buffered in the access counter
+    "refreshPoolAvailable": 100,
+    "staleDebt": { "k1": 95000 }, // key -> ms since its lease episode began
+    "versionClockSkewMillis": 12,
   },
   "worker": {
-    // ── Worker health & state ──
-    "health": "healthy",                  // Cluster health: "healthy" or "unhealthy"
-    "msSinceLastAnyHeartbeat": 1234,      // ms since the last heartbeat from any Worker (-1 = none received yet)
-    "trackedKeys": 42,                    // Keys tracked by the state machine
-
-    // ── Decision-plane dispatcher gate (capacity: zeta.worker-listener.max-pending-units) ──
-    "dispatchPendingUnits": 0,            // Weighted backlog currently charged to the gate
-    "dispatchRemainingUnits": 200000,     // Gate capacity left before submissions are dropped
-    "dispatchMaxPendingUnits": 200000,    // Configured gate capacity
-    "dispatchActiveKeys": 0,              // Keys whose worker holds work (running or queued)
-    "dispatchBacklogged": false,          // Whether any submitted decision is still pending
-    "dispatchDropped": 0,                 // Cumulative submissions dropped by the global gate
-    "dispatchRejected": 0,                // Cumulative submissions rejected by the per-key queue bound
-
-    // ── Shared-broker appName isolation (ADR-0068) ──
-    "foreignAppDrops": 0,               // Cumulative HOT/COOL decisions dropped for appName mismatch (a foreign appName here means another application shares the broker with a different zeta.app-name)
-    "lastForeignApp": "appB"            // Most recent foreign sender appName (present only after a drop)
+    "health": "healthy",
+    "msSinceLastAnyHeartbeat": 1234, // -1 = no heartbeat ever received
+    "foreignAppDrops": 0,
+    "lastForeignApp": "appB",
+    "coolDispatchRejections": 0,
   },
   "sync": {
-    "dedupCacheSize": 20,                 // Broadcast dedup cache entry count
-    "foreignAppDrops": 0,                 // Cumulative sync messages dropped for appName mismatch
-    "lastForeignApp": "appB",             // Most recent foreign sender appName (present only after a drop)
-
-    // ── Sync-plane dispatcher gate (capacity: zeta.sync.max-pending-units) ──
-    "dispatchPendingUnits": 0,            // Weighted backlog currently charged to the gate
-    "dispatchRemainingUnits": 50000,      // Gate capacity left before submissions are dropped
-    "dispatchMaxPendingUnits": 50000,     // Configured gate capacity
-    "dispatchActiveKeys": 0,              // Keys whose worker holds work (running or queued)
-    "dispatchBacklogged": false,          // Whether any submitted sync task is still pending
-    "dispatchDropped": 0,                 // Cumulative submissions dropped by the global gate
-    "dispatchRejected": 0                 // Cumulative submissions rejected by the per-key queue bound
-  }
+    "foreignAppDrops": 0,
+    "lastForeignApp": "appB",
+    "nodeIdCollisions": 0,
+  },
 }
 ```
 
-## 2. Micrometer Metrics
+### 2.3 Topics
 
-When `io.micrometer:micrometer-core` is on the classpath, `ZetaMicrometerAutoConfiguration` automatically registers MeterBinder beans exposing the following metrics (the `zeta.worker.*` detection-plane meters marked ADR-0080 below are the exception — the Worker module registers those itself, see the note after the custom-metrics table).
+**Identity**
 
-### Caffeine L1 Cache Metrics (`zeta.l1.*`)
+| Field        | Meaning                                                                                                  | CONFIG                                |
+| ------------ | -------------------------------------------------------------------------------------------------------- | ------------------------------------- |
+| `instanceId` | Instance identity used in queue names and version stamps. Changes when `zeta.local.instance-id` changes. | [§1](CONFIG.md#1-deployment-identity) |
+| `jvmId`      | Random per-process identifier; changes on every restart.                                                 | —                                     |
 
-Standard Caffeine cache metrics via `CaffeineCacheMetrics.monitor()`:
+**Local: detection, cache and dedup**
 
-| Metric                             | Type    | Description                                                |
-| ---------------------------------- | ------- | ---------------------------------------------------------- |
-| `zeta.l1.cache.gets`             | Counter | Cache get operations (tagged `result=hit` / `result=miss`) |
-| `zeta.l1.cache.puts`             | Counter | Cache put operations                                       |
-| `zeta.l1.cache.evictions`        | Counter | Cache evictions (tagged `cause=...`)                       |
-| `zeta.l1.cache.evictions.weight` | Counter | Evicted entry weight                                       |
-| `zeta.l1.cache.hit.ratio`        | Gauge   | Current hit ratio                                          |
-| `zeta.l1.cache.miss.ratio`       | Gauge   | Current miss ratio                                         |
-| `zeta.l1.cache.size`             | Gauge   | Estimated current cache size                               |
-| `zeta.l1.cache.max`              | Gauge   | Maximum cache size                                         |
+| Field           | Meaning                                                                                                | CONFIG                                            |
+| --------------- | ------------------------------------------------------------------------------------------------------ | ------------------------------------------------- |
+| `topK[]`        | Current local ranking, descending. Each entry is `{ "key": ..., "add": ... }`; capped by `?limit`.     | [§2](CONFIG.md#2-local-hot-key-detection-topk)    |
+| `totalRequests` | Decay-adjusted tracked access volume; it moves down as traffic subsides and is not a cumulative count. | [§2](CONFIG.md#2-local-hot-key-detection-topk)    |
+| `cacheSize`     | Estimated entries in the single L1 Caffeine table.                                                     | [§3](CONFIG.md#3-l1-cache-and-ttl)                |
+| `inFlightSize`  | Loader suppliers currently executing — not the size of the SingleFlight dedup table.                   | [§4](CONFIG.md#4-loading-concurrency-and-refresh) |
 
-### Custom Zeta Business Metrics
+**Local: reporting**
 
-| Metric                                | Type  | Tags                 | Description                             |
-| ------------------------------------- | ----- | -------------------- | --------------------------------------- |
-| `zeta.topk.size`                    | Gauge | `type=local`         | TopK current ranking count              |
-| `zeta.topk.total`                   | Gauge | `type=local`         | TopK total requests tracked             |
-| `zeta.expelled.queue.size`          | Gauge | —                    | Expelled queue backlog                  |
-| `zeta.expelled.queue.remaining`     | Gauge | —                    | Expelled queue remaining capacity       |
-| `zeta.singleflight.inflight`        | Gauge | —                    | SingleFlight in-flight dedup count      |
-| `zeta.reporter.queue.depth`         | Gauge | —                    | Reporter queue backlog                  |
-| `zeta.reporter.queue.dropped.total` | Gauge | —                    | Cumulative dropped batches (queue full) |
-| `zeta.reporter.queue.expired.total` | Gauge | —                    | Cumulative expired batches (sum of the two causes below) |
-| `zeta.reporter.queue.expired.dead.total` | Gauge | —               | Expired batches whose target Worker was no longer alive |
-| `zeta.reporter.queue.expired.stale.total` | Gauge | —              | Expired batches that waited >5s in the queue (staleness) |
-| `zeta.reporter.pending.keys`        | Gauge | —                    | Keys buffered in reporter counter cache |
-| `zeta.reporter.bbr.passed`          | Gauge | —                    | Reporter BBR passed count              |
-| `zeta.reporter.bbr.dropped`         | Gauge | —                    | Reporter BBR dropped count             |
-| `zeta.reporter.bbr.inflight`        | Gauge | —                    | Reporter BBR in-flight count           |
-| `zeta.reporter.bbr.maxinflight`     | Gauge | —                    | Reporter BBR max in-flight count       |
-| `zeta.reporter.bbr.balanced`        | Gauge | —                    | Reporter BBR damped baseline (kernel `dirty_ratelimit` analog) |
-| `zeta.reporter.bbr.maxpass`         | Gauge | —                    | Sliding-window max pass per bucket (Little-Law estimate input; decay-on-read) |
-| `zeta.reporter.bbr.minrt`           | Gauge | —                    | Sliding-window min avg RT in ms (Little-Law estimate input; decay-on-read) — the curve to watch for publisher-path queue pollution |
-| `zeta.reporter.bbr.yielded`         | Gauge | —                    | Cumulative downstream-yield steps (two consecutive baseline intervals with publish-failure/staleness drops lower the baseline ×7/8 per step) |
-| `zeta.reporter.feedloop.interval`   | Gauge | —                    | Feed-loop base flush interval (ms); shadow mode shows the trajectory that *would* be applied (ADR-0078; registered only when `report-interval-tuning` != off) |
-| `zeta.reporter.feedloop.score`      | Gauge | —                    | Feed-loop score in bp — two-window-averaged batch size vs target (10000 == on target) |
-| `zeta.reporter.feedloop.batch`      | Gauge | —                    | Feed-loop averaged batch size (keys per completed flush) |
-| `zeta.stall.report_backpressure.delayed` | Gauge | —               | Reporter dispatcher queue depth (congestion building; ADR-0076) |
-| `zeta.stall.report_backpressure.stopped.total` | Gauge | —      | Batches lost to a full queue or staleness expiry |
-| `zeta.stall.broadcast_storm.stopped.total` | Gauge | —           | Put/refresh broadcasts lost to broker errors or a saturated send executor |
-| `zeta.stall.redis_degraded.stopped` | Gauge | —                    | 1 while the circuit breaker is open (loads fast-fail) |
-| `zeta.stall.redis_degraded.timeouts.total` | Gauge | —             | Cumulative dedup loads resolved empty by a reader timeout |
-| `zeta.stall.worker_partition.stopped` | Gauge | —                  | 1 while no Worker shard is alive (report routing has no target) |
-| `zeta.rules.persist.failed` | Gauge | — | Rule mutations that reached memory but never Redis/broadcast |
-| `zeta.expire.refresh.available`     | Gauge | —                    | Available refresh limiter permits       |
-| `zeta.expire.refresh.failure.leased.total` | Gauge | —           | Cumulative refresh failures granted a lease (ADR-0036) |
-| `zeta.expire.refresh.lease.stale.capped.total` | Gauge | —       | Cumulative lease refusals by the staleness cap |
-| `zeta.expire.refresh.lease.suppressed.total` | Gauge | —        | Cumulative lease refusals by the failure classifier |
-| `zeta.expire.refresh.lease.debt.keys` | Gauge | —                | Currently-leased keys (staleDebt size) |
-| `zeta.version.degraded.total`       | Gauge | —                    | Cumulative version fallback count       |
-| `zeta.sync.dedup.size`              | Gauge | —                    | Broadcast dedup cache size              |
-| `zeta.sync.send.failed.total`       | Gauge | —                    | Cumulative sync-plane publish failures (broker errors); the only signal for an INVALIDATE that never left the node |
-| `zeta.lock.acquired.total`          | Gauge | —                    | Cumulative distributed-lock acquisitions |
-| `zeta.lock.contended.total`         | Gauge | —                    | Cumulative `tryLock` nulls where a peer held the lock (normal contention) |
-| `zeta.lock.error.total`             | Gauge | —                    | Cumulative `tryLock` nulls caused by provider failures (Redis down, interrupts, invalid keys) |
-| `zeta.worker.alive`                 | Gauge | —                    | Whether any worker shard is alive (0/1) |
-| `zeta.worker.tracked.keys`          | Gauge | —                    | Keys tracked by state machine (only keys that have ever been hot) |
-| `zeta.worker.detector.keys`         | Gauge | —                    | Keys holding a live sliding-window entry in the Worker detector (the per-key memory driver) |
-| `zeta.worker.decisions.hot`         | Counter | —                  | HOT decisions successfully emitted to the cluster |
-| `zeta.worker.decisions.cool`        | Counter | —                  | COOL decisions successfully emitted to the cluster |
-| `zeta.worker.report.eval`           | Timer | —                    | Per-report-batch evaluation latency of the Worker's per-key loop (monotonic clock, ns resolution) |
-| `zeta.cpu.load`                     | Gauge | —                    | Current CPU load (0-1000 scale)         |
-| `zeta.dispatch.pending.units`       | Gauge | `plane`              | Weighted backlog on the per-key gate    |
-| `zeta.dispatch.remaining.units`     | Gauge | `plane`              | Gate capacity left before drops         |
-| `zeta.dispatch.active.keys`         | Gauge | `plane`              | Keys whose worker holds work            |
-| `zeta.dispatch.backlogged`          | Gauge | `plane`              | 1 while a submitted task is pending     |
-| `zeta.dispatch.dropped.total`       | Gauge | `plane`              | Cumulative drops by the budget gate     |
-| `zeta.dispatch.rejected.total`      | Gauge | `plane`              | Cumulative rejections by key bound      |
+| Field                  | Meaning                                                                                                                                      | CONFIG                              |
+| ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------- |
+| `reportQueueDepth`     | Batches waiting in the reporter dispatch queue. A rising depth means the reporter is falling behind.                                         | [§6](CONFIG.md#6-report-queue)      |
+| `reportQueueFullCount` | Cumulative batches dropped when the dispatch queue stayed full past `queue-offer-timeout-ms`, or withdrawn because the dispatcher shut down. | [§6](CONFIG.md#6-report-queue)      |
+| `reportPendingKeys`    | Keys currently buffered in the shared access counter, waiting for the next tide.                                                             | [§5](CONFIG.md#5-reporting-cadence) |
 
-The `zeta.dispatch.*` gauges carry `plane=sync` for the sync plane and `plane=worker` for the decision plane; a plane absent from the current deployment mode registers no gauges. Reading `pending.units` together with `remaining.units` is what distinguishes "no traffic" from "gate saturated" — before these gauges existed, both looked identical and only surfaced as a rate-limited WARN after submissions had already been dropped.
+**Local: refresh and version**
 
-The `zeta.lock.*` gauges exist because `tryLock` collapses two very different outcomes into the same `null` return: "a peer holds the lock" (normal contention, expected under load) and "the provider failed" (Redis down, an interrupt, an invalid key — a real incident). Only the split tells them apart, so alert on `zeta.lock.error.total` and treat a rising `zeta.lock.contended.total` as a capacity signal, not a fault. All three are cumulative counters exposed as gauges, so a scrape-level delta (not the raw value) is the rate.
+| Field                    | Meaning                                                                                                                                                                     | CONFIG                                            |
+| ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------- |
+| `refreshPoolAvailable`   | Available permits of the background-refresh limiter. `0` means soft-expiry refreshes are queued behind the pool.                                                            | [§4](CONFIG.md#4-loading-concurrency-and-refresh) |
+| `staleDebt`              | Currently leased keys, oldest first (max 100): key → milliseconds since the current lease episode began. This is the audit surface for bounded staleness.                   | [§4](CONFIG.md#4-loading-concurrency-and-refresh) |
+| `versionClockSkewMillis` | How far the newest known stamp (local stamp clock or an observed peer stamp, refused outliers included) leads local physical time. Persistent growth points at clock drift. | [§1](CONFIG.md#1-deployment-identity)             |
 
-### Worker Detection-Plane Metrics (`zeta.worker.detector.keys`, `zeta.worker.decisions.*`, `zeta.worker.report.eval`)
+**Worker: cluster health and decision isolation**
 
-The ADR-0080 detection-plane meters — one gauge, two emission counters and one timer — are the measurement baseline a Worker detection-architecture change is judged against. They are registered by the **Worker module's `WorkerAutoConfiguration`** (not by `ZetaMicrometerAutoConfiguration`: every one of them reads a worker-module class — `SlidingWindowDetector`, `WorkerBroadcaster`, `ReportConsumer` — while the common auto-configuration can only see common-module types), and only when a `MeterRegistry` bean is present; without one the Worker runs meter-less instead of failing startup.
+| Field                     | Meaning                                                                                                                                                                                                    | CONFIG                                                         |
+| ------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------- |
+| `health`                  | `healthy` when the heartbeat view passes the cluster gate; otherwise `unhealthy`.                                                                                                                          | [§7](CONFIG.md#7-worker-listener-heartbeat-and-cluster-health) |
+| `msSinceLastAnyHeartbeat` | Milliseconds since any Worker heartbeat; `-1` means none has ever arrived.                                                                                                                                 | [§7](CONFIG.md#7-worker-listener-heartbeat-and-cluster-health) |
+| `foreignAppDrops`         | Cumulative HOT/COOL decisions dropped because their `appName` header did not match.                                                                                                                        | [§7](CONFIG.md#7-worker-listener-heartbeat-and-cluster-health) |
+| `lastForeignApp`          | Most recent foreign `appName`; present only after a drop.                                                                                                                                                  | [§7](CONFIG.md#7-worker-listener-heartbeat-and-cluster-health) |
+| `coolDispatchRejections`  | COOL decisions the ordered dispatcher refused at submit time (per-key queue full, or closed). Each is applied inline on the consumer thread; a growing value signals dispatcher saturation, not data loss. | [§7](CONFIG.md#7-worker-listener-heartbeat-and-cluster-health) |
 
-- **`zeta.worker.detector.keys`** gauges the sliding-window detector's per-key window map — the structure that actually holds the Worker's memory (≈418.5 B of the ≈678 B retained per reported key, ADR-0080 §3). The pre-existing `zeta.worker.tracked.keys` gauge cannot see it: it reads the state machine, which returns early and materializes no state for a key that has never been hot, so it counts only ever-hot keys. The gap between the two gauges is the never-hot key mass the detector still pays for.
-- **`zeta.worker.decisions.hot` / `zeta.worker.decisions.cool`** count **successful emissions only**, incremented at the single send funnel (`WorkerBroadcaster.broadcastHot`/`broadcastCool` — the state-machine path and the idle-eviction COOL path both publish through it). A failed AMQP send returns `false`, the caller rolls the key's state machine back, and the decision is re-emitted by the next evaluation or by the periodic HOT rebroadcast (ADR-0024); counting attempts would therefore count one decision twice. The 100 ms per-key dedup elision is not counted either — it emits nothing, because the decision it suppresses was already counted when it was sent.
-- **`zeta.worker.report.eval`** is a `Timer` whose samples are **monotonic nanosecond deltas** (`Timer.record(elapsed, NANOSECONDS)`), taken around the per-key evaluation loop of `ReportConsumer.doOnReport` once per processed report batch (one sample per batch, not per key). Micrometer then stores and exports the value in the registry's base time unit — seconds by default for the standard registries, hence `_seconds` in a Prometheus export — but the measured quantity is a clock delta, not a timestamp. It uses the **monotonic clock only** and is deliberately *not* the report's cross-host wall-clock age (`now - message.timestamp()`), which is unusable under App clock skew — the same reason the optional staleness filter defaults to off. **AMQP queue wait is therefore excluded by construction**, as are the staleness filter and the global-ratio sampling that precede the loop; in the default buffered broadcast mode (ADR-0061) the decision sends run on the buffer's drain thread and are excluded too, while the legacy synchronous mode folds its in-line sends into the sample. Batches dropped as stale or empty never reach the loop and record no sample.
+**Sync**
 
-## 3. Consistent Hash Ring Management
+| Field              | Meaning                                                                                                                                               | CONFIG                       |
+| ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------- |
+| `foreignAppDrops`  | Cumulative sync messages dropped for an `appName` mismatch.                                                                                           | [§8](CONFIG.md#8-cache-sync) |
+| `lastForeignApp`   | Most recent foreign sync sender; present only after a drop.                                                                                           | [§8](CONFIG.md#8-cache-sync) |
+| `nodeIdCollisions` | Inbound sync messages from a peer sharing this node's `dataVersion` node id. A growing value means explicit `zeta.local.node-id` values are required. | [§8](CONFIG.md#8-cache-sync) |
 
-When consistent hashing is enabled (`zeta.local.consistent-hashing.enabled=true`) and `spring-boot-starter-actuator` is on the classpath, a standard Actuator endpoint (`RingEndpoint.java`, id `hotkeyring`, `@ReadOperation`s) is registered at `/actuator/hotkeyring` for ring inspection. It runs on the management plane (port, exposure, and roles via `management.*`), not the application port.
+### 2.4 Which parts appear, and what is deliberately omitted
 
-| Method | Path                         | Description                          |
-| ------ | ---------------------------- | ------------------------------------ |
-| `GET`  | `/actuator/hotkeyring`       | Ring topology and node count         |
-| `GET`  | `/actuator/hotkeyring/{key}` | Query which node handles a given key |
+| Part                                                                 | Appears when                                                                               |
+| -------------------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
+| `local`                                                              | At least one App-side component exists (absent on a Worker-only process)                   |
+| `local.topK`, `local.totalRequests`                                  | App-side TopK exists (`zeta.worker.enabled=false`)                                         |
+| `local.cacheSize` / `local.inFlightSize`                             | L1 cache / SingleFlight exists                                                             |
+| `local.reportQueueDepth`, `reportQueueFullCount`                     | Reporter is wired (`zeta.report.enabled=true`, RabbitMQ on the classpath, not Worker-only) |
+| `local.reportPendingKeys`                                            | Shared access counter exists (reporter fallback otherwise)                                 |
+| `local.refreshPoolAvailable`, `staleDebt`                            | Background refresher exists                                                                |
+| `worker.health`, `worker.msSinceLastAnyHeartbeat`                    | `HealthView` exists (always; meaningful on an App)                                         |
+| `worker.foreignAppDrops`, `lastForeignApp`, `coolDispatchRejections` | `zeta.worker-listener.enabled=true`                                                        |
+| `sync.*`                                                             | `zeta.sync.enabled=true` and the sync listener or default decision handler is wired        |
 
-## 4. Worker State Machine Runtime Configuration
+## 3. Ring Inspection: `/actuator/hotkeyring`
 
-When Worker mode is active (`zeta.worker.enabled=true`) and `spring-boot-starter-actuator` is on the classpath, a standard Actuator endpoint (`StateMachineEndpoint.java`, id `hotkey-worker-state`) is registered at `/actuator/hotkey-worker-state` for reading and updating the state-machine configuration at runtime. It runs on the management plane (port, exposure, and roles via `management.*`): the runtime config mutation no longer sits on the application port. (An endpoint id cannot nest like the former `/actuator/hotkey/worker/state` MVC path; the read shape is unchanged.)
+The ring decides which Worker receives a report. Use this endpoint when reports reach the wrong
+Worker, when a Worker restart does not change routing, or when `min-alive-workers` degradation is
+suspected.
 
-| Method | Path                             | Description                                                                    |
-| ------ | -------------------------------- | ------------------------------------------------------------------------------ |
-| `GET`  | `/actuator/hotkey-worker-state`  | Return current `confirmCount`, `coolCount`, `preCoolGraceCount`, `trackedKeys` |
-| `POST` | `/actuator/hotkey-worker-state`  | Update one or more parameters (body: `{"confirmCount":5,"coolCount":15}` — typed fields, absent means keep) |
+The endpoint reconciles the ring against the health view before returning, so a Worker that died
+since the last report flush is already absent; no synthetic traffic is needed to inspect failover.
 
-**Read current state:**
+**Gate.** `zeta.local.consistent-hashing.enabled=true` (default) creates the endpoint; it gates
+inspection only — report routing always uses the ring even when the endpoint is disabled
+([CONFIG §7](CONFIG.md#7-worker-listener-heartbeat-and-cluster-health)). The report plane must be
+wired; otherwise every call returns **503** with a message naming the cause.
+
+### 3.1 Request templates
 
 ```bash
-curl http://localhost:8080/actuator/hotkey-worker-state
+APP=http://localhost:8080
+
+# 1. Topology: which Workers are currently live
+curl -s "$APP/actuator/hotkeyring" | jq
+
+# 2. Which Worker owns a key
+curl -s "$APP/actuator/hotkeyring/cache:shop:17" | jq
+
+# 3. A key containing '/' is passed as remaining path segments
+curl -s "$APP/actuator/hotkeyring/api/v1/product:42" | jq
 ```
 
-**Example response:**
+Example responses:
 
 ```json
 {
-  "confirmCount": 1,
-  "coolCount": 10,
-  "preCoolGraceCount": 3,
-  "trackedKeys": 42
+  "nodes": ["worker-1", "worker-2", "worker-3"]
 }
 ```
-
-**Update parameters:**
-
-Changes are propagated to peer Workers via the heartbeat broadcast. Each POST increments an internal `configTimestampCounter` — receiving Workers apply the new values only if the timestamp is strictly newer than their own.
-
-```bash
-curl -X POST http://localhost:8080/actuator/hotkey-worker-state \
-  -H "Content-Type: application/json" \
-  -d '{"confirmCount":5,"coolCount":15}'
-```
-
-**Example response:**
 
 ```json
 {
-  "status": "ok"
+  "key": "cache:shop:17",
+  "nodeId": "worker-2"
 }
 ```
 
-**Validation:** the write-applied combination must satisfy the same invariant the config-negotiation layer enforces on heartbeat gossip — `confirmCount >= 1`, `preCoolGraceCount >= 1` and `coolCount > preCoolGraceCount` (provided fields override, the others keep their current values). A violating write is rejected with `"status": "error"` and nothing is applied: a locally-accepted but gossip-rejected config would leave this Worker permanently divergent with no reconciliation path. A write with no recognized fields is a pure no-op (no rewrite, no timestamp bump). Malformed (non-numeric) input never reaches the method — the actuator framework rejects it with a 400 before dispatch.
+## 4. Worker Detection Runtime: `/actuator/hotkey-worker`
+
+**Gate.** Worker mode (`zeta.worker.enabled=true`, which requires RabbitMQ on the classpath),
+Actuator on the classpath, and an explicit opt-in: the shipped Worker exposes only `health`.
+Add `hotkeyworker` to the web exposure include and set
+`management.endpoints.web.path-mapping.hotkeyworker: hotkey-worker` to publish the endpoint.
+Read-only: detection is configured once at startup and validated as a whole; there is no runtime
+write.
+
+### 4.1 Summary
+
+```bash
+WORKER=http://worker:8080
+curl -s "$WORKER/actuator/hotkey-worker" | jq
+```
+
+```json
+{
+  "detection": {
+    "window": "992ms/16",
+    "minHotCount": 100,
+    "rulesHash": "1f2a3b4c5d6e7f80"
+  },
+  "hot": { "active": 1234, "rejected": 12 },
+  "cooling": { "scheduled": 900 },
+  "rules": [
+    {
+      "id": "user-prefix",
+      "effectiveHotQps": 200,
+      "matches": 12034,
+      "promotions": 10,
+      "aborts": 2,
+      "cools": 8
+    }
+  ]
+}
+```
+
+| Field                     | Answers                                                                                                                                                    |
+| ------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `detection.window`        | The effective window actually in force, not the configured duration                                                                                        |
+| `detection.rulesHash`     | Fingerprint of the effective rule text; two Workers reporting different hashes judge the same traffic by different rules                                   |
+| `detection.minHotCount`   | The promotion floor over the default and non-`exact` rules; an effective `exact` rule is indexed and checked before it                                     |
+| `rules[].effectiveHotQps` | The threshold actually in force, reverse-converted from the window-count threshold and the effective window; rounding can differ from the configured value |
+| `rules[].matches`         | Reports whose window sum cleared this rule's `hotCount`; the counter is the same quantity for exact, prefix, regex and default rules                       |
+| `hot.active`              | Keys currently holding a HOT seat; `active` pinned at the seat cap with a rising `rejected` means the cap is binding                                       |
+| `cooling.scheduled`       | Checks currently linked in the cool-down wheels; it tracks the hot-key count, and a value far above it means entries are not being cooled                  |
+
+### 4.2 Single key
+
+```bash
+curl -s "$WORKER/actuator/hotkey-worker?key=user:42" | jq
+```
+
+```json
+{
+  "key": "user:42",
+  "hot": true,
+  "rule": "user-prefix",
+  "windowSum": 230,
+  "promotedForMs": 720000,
+  "belowForMs": null,
+  "nextCheckInMs": 800,
+  "promotedVersion": 9182
+}
+```
+
+`promotedForMs` is "hot for this long" under either policy. `belowForMs` exists only for
+`COOL_FOR_LOW_QPS` while the key is actually below the band; `EXPIRE` reports `null`. The two
+fields are separate on purpose — a single `sinceMs` would silently change meaning with the policy.
+`nextCheckInMs` is the remaining time to the registered cool-down check; it is negative while the
+check is overdue (between its deadline and the wheel hand-off, or while the repair sweep is
+pending), which is the useful "overdue by" reading rather than an error.
+
+Returns real key names and their traffic; protect the endpoint like the App's `hotkey` endpoint
+in production.
+
+## 5. Micrometer Metrics
+
+The meters are split across two registries by module: the common module registers the App-side
+meters, the L1 cache meter binder and the decision-listener counters; the Worker module registers
+the detection-plane meters. Every meter is conditional on its component, so a meter missing from
+the scrape means the corresponding plane is not present in that process.
+
+### 5.1 Request templates
+
+```bash
+APP=http://localhost:8080
+
+# List every zeta meter on this process
+curl -s "$APP/actuator/metrics" | jq -r '.names[] | select(startswith("zeta."))'
+
+# Read one meter
+curl -s "$APP/actuator/metrics/zeta.reporter.queue.depth" | jq '{name, measurements}'
+
+# Read one tagged series (Caffeine metrics use the cache.* namespace)
+curl -s "$APP/actuator/metrics/cache.gets?tag=cache:zeta.l1&tag=result:hit" | jq '.measurements'
+
+# Prometheus scrape (requires micrometer-registry-prometheus)
+curl -s "$APP/actuator/prometheus" | grep -E '^(zeta_|cache_)'
+```
+
+Prometheus converts dots to underscores and appends `_total` to counters: `zeta.reporter.queue.depth`
+becomes `zeta_reporter_queue_depth`, `zeta.worker.decisions.hot` becomes
+`zeta_worker_decisions_hot_total`.
+
+### 5.2 L1 cache (`cache.*`, tag `cache=zeta.l1`)
+
+Caffeine metrics use Micrometer's standard `cache.*` namespace, tagged `cache=zeta.l1`; they are
+**not** prefixed `zeta.l1.*`. The L1 is a plain `Cache` loaded through SingleFlight, so the
+`LoadingCache`-only `cache.load` and `cache.load.duration` meters are not registered.
+
+| Meter                   | Type            | Tags                                 | Meaning                                                                                            |
+| ----------------------- | --------------- | ------------------------------------ | -------------------------------------------------------------------------------------------------- |
+| `cache.gets`            | FunctionCounter | `cache=zeta.l1`, `result=hit`/`miss` | Cache lookups by result                                                                            |
+| `cache.puts`            | FunctionCounter | `cache=zeta.l1`                      | Entries written                                                                                    |
+| `cache.evictions`       | FunctionCounter | `cache=zeta.l1`                      | Entries evicted by size, expiry or reference collection (explicit invalidation is not an eviction) |
+| `cache.eviction.weight` | FunctionCounter | `cache=zeta.l1`                      | Evicted entry weight                                                                               |
+| `cache.size`            | Gauge           | `cache=zeta.l1`                      | Estimated current size                                                                             |
+
+`recordStats()` is always enabled on Zeta's L1; a custom cache bean that omits it will report only
+`cache.size`.
+
+### 5.3 Local detection and dedup
+
+| Meter                                       | Type            | Tags         | Meaning                                                                                      |
+| ------------------------------------------- | --------------- | ------------ | -------------------------------------------------------------------------------------------- |
+| `zeta.topk.size`                            | Gauge           | `type=local` | Current local TopK size                                                                      |
+| `zeta.topk.total`                           | Gauge           | `type=local` | Decay-adjusted tracked access volume (moves down as traffic subsides)                        |
+| `zeta.expelled.queue.size`                  | Gauge           | —            | Keys waiting in the expelled-key staging queue                                               |
+| `zeta.singleflight.inflight`                | Gauge           | —            | Loader suppliers currently executing (not the dedup table size)                              |
+| `zeta.stall.source_degraded.stopped`        | Gauge           | —            | `1` while the circuit breaker is open (loads fast-fail; reads may serve soft-expired values) |
+| `zeta.stall.source_degraded.timeouts.total` | FunctionCounter | —            | Cumulative leader loads that hit the per-load reader timeout                                 |
+
+### 5.4 Reporting and the feed loop
+
+| Meter                                      | Type            | Meaning                                                                                                                                                                  |
+| ------------------------------------------ | --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `zeta.reporter.queue.depth`                | Gauge           | Batches waiting in the reporter dispatch queue                                                                                                                           |
+| `zeta.reporter.queue.dropped.total`        | FunctionCounter | Cumulative batches dropped because the queue was full or withdrawn during dispatcher shutdown                                                                            |
+| `zeta.reporter.queue.expired.dead.total`   | FunctionCounter | Expired batches whose target Worker was no longer alive                                                                                                                  |
+| `zeta.reporter.queue.expired.stale.total`  | FunctionCounter | Expired batches that waited more than 5 s in the queue                                                                                                                   |
+| `zeta.reporter.pending.keys`               | Gauge           | Keys buffered in the shared access counter                                                                                                                               |
+| `zeta.reporter.feedloop.interval`          | Gauge           | Feed-loop base flush interval in ms; in `shadow` mode this is the trajectory that _would_ be applied (registered only when `report-interval-tuning != off`)              |
+| `zeta.reporter.feedloop.score`             | Gauge           | Feed-loop score in basis points — smoothed arrival rate projected onto the interval in force for the measured window, compared with the target (`10000` means on target) |
+| `zeta.reporter.feedloop.batch`             | Gauge           | Projected keys per flush at the interval that produced the score                                                                                                         |
+| `zeta.stall.broadcast_storm.stopped.total` | FunctionCounter | Put/refresh broadcasts lost to broker errors or a saturated send executor                                                                                                |
+
+### 5.5 Refresh, version and sync
+
+| Meter                                      | Type            | Meaning                                                                                                                                       |
+| ------------------------------------------ | --------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| `zeta.expire.refresh.available`            | Gauge           | Available background-refresh limiter permits                                                                                                  |
+| `zeta.expire.refresh.failure.leased.total` | FunctionCounter | Cumulative refresh failures granted a lease (the stale value stayed servable)                                                                 |
+| `zeta.expire.refresh.lease.debt.keys`      | Gauge           | Keys currently leased (the `staleDebt` size)                                                                                                  |
+| `zeta.version.clock.skew`                  | Gauge           | How far the newest known stamp — local stamp clock or observed peer stamp, refused outliers included — leads local physical time, in ms       |
+| `zeta.sync.send.failed.total`              | FunctionCounter | Cumulative sync-plane publish failures; the only signal for an INVALIDATE that never left the node                                            |
+| `zeta.sync.nodeid.collision.total`         | FunctionCounter | Inbound sync messages from a peer sharing this node's `dataVersion` node id; persistent growth calls for explicit `zeta.local.node-id` values |
+
+### 5.6 Worker detection plane
+
+| Meter                                                 | Type                        | Meaning                                                                                                                                                                                                           |
+| ----------------------------------------------------- | --------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `zeta.worker.alive`                                   | Gauge                       | `1` while the heartbeat view passes the cluster gate; read it on an App                                                                                                                                           |
+| `zeta.worker.detector.keys`                           | Gauge                       | Keys holding a live sliding-window entry                                                                                                                                                                          |
+| `zeta.worker.detector.capacity.evictions`             | FunctionCounter             | Idle windows this sampling pass actually removed to admit a new key at `max-tracked-keys` (Prometheus `_total`)                                                                                                   |
+| `zeta.worker.detector.capacity.rejections`            | FunctionCounter             | New keys rejected at `max-tracked-keys`: the hard headroom is full, or the 50 ms saturation window opened by a completed reclaim sample that found no idle window is still active (Prometheus `_total`)           |
+| `zeta.worker.hot.active`                              | Gauge                       | Keys currently holding a HOT seat                                                                                                                                                                                 |
+| `zeta.worker.hot.capacity`                            | Gauge                       | Seat capacity (`detection.limits.max-active-hot-keys`)                                                                                                                                                            |
+| `zeta.worker.hot.rejected`                            | FunctionCounter             | Promotions refused at the seat cap (read from the registry's LongAdder)                                                                                                                                           |
+| `zeta.worker.hot.aborted`                             | Counter                     | Promotions whose HOT never reached the broker; the seat was returned                                                                                                                                              |
+| `zeta.worker.decisions.hot` / `.cool`                 | Counter                     | Decisions handed to the AMQP client without an exception; no publisher confirm is requested                                                                                                                       |
+| `zeta.worker.decisions.dropped`                       | Counter, tag `type`         | Decisions lost without reaching the broker (publish failure, queue saturation, unexpected drain failure, shutdown)                                                                                                |
+| `zeta.worker.decisions.elided`                        | Counter, tag `type`         | Decisions elided as no-ops: same type inside the 100 ms debounce, a replay of the exact accepted version, a COOL for a key the cluster already holds cold, or a COOL whose displaced HOT never reached the funnel |
+| `zeta.worker.decisions.superseded`                    | Counter, tag `type`         | Decisions dropped because a strictly newer version for the key was already queued or accepted, or because the registry no longer holds the HOT's promotion                                                        |
+| `zeta.worker.decisions.expired`                       | Counter, tag `type`         | Decisions that would have been sent but exceeded `max-decision-age-ms`; a decision the funnel elides or supersedes is counted there, not here                                                                     |
+| `zeta.worker.broadcast.hot.depth` / `.cool.depth`     | Gauge                       | Pending decisions in each queue                                                                                                                                                                                   |
+| `zeta.worker.cooling.scheduled`                       | Gauge                       | Cool-down checks currently linked in the wheels                                                                                                                                                                   |
+| `zeta.worker.cooling.lateness`                        | Timer                       | How late a wheel-fired due check was processed (the repair sweep's grace is excluded)                                                                                                                             |
+| `zeta.worker.cooling.recheck`                         | Counter                     | LOW_QPS re-checks that found the window at or above its cool band; an EXPIRE entry never re-arms, so it cools on its deadline and never counts here                                                               |
+| `zeta.worker.cooling.reason`                          | Counter, tag `reason`       | Cool-downs by trigger: `low_qps`, `expire`, `sweep`                                                                                                                                                               |
+| `zeta.worker.rule.matches` / `.promotions` / `.cools` | FunctionCounter, tag `rule` | Per-rule eligible-report, promotion and cool-out counts, read from the rule's counter field                                                                                                                       |
+| `zeta.worker.reports.epoch.dropped`                   | Counter                     | Report batches dropped by the incarnation fence                                                                                                                                                                   |
+| `zeta.worker.reports.stale.dropped`                   | Counter                     | Report batches dropped by the optional staleness filter                                                                                                                                                           |
+| `zeta.worker.detection.disabled.dropped`              | Counter                     | Reports skipped because detection is disabled                                                                                                                                                                     |
+| `zeta.worker.report.eval`                             | Timer                       | Per-report-batch evaluation latency (monotonic clock, ns resolution)                                                                                                                                              |
+
+The rule counters and the three `cooling.reason` series are registered with the active
+configuration, not lazily: every current rule appears at zero from the first scrape, and a rule that
+a publication removes has its three series removed with it. A retired rule's late cool-down is
+dropped rather than recreating the series.
+
+The decision listener's own counters are registered by the **common** module's
+`ZetaMicrometerAutoConfiguration` when a `WorkerListener` bean exists:
+
+| Meter                                           | Type            | Meaning                                                                   |
+| ----------------------------------------------- | --------------- | ------------------------------------------------------------------------- |
+| `zeta.worker.decision.cool.rejected.total`      | FunctionCounter | COOL decisions the App's ordered dispatcher refused and re-applied inline |
+| `zeta.worker.decision.epoch.regress.skip.total` | FunctionCounter | Decisions skipped for a same-nodeId epoch rollback                        |
+
+The Worker detection-plane meters are registered by the **Worker module's `WorkerAutoConfiguration`**,
+not by `ZetaMicrometerAutoConfiguration`: every other row reads a worker-module class
+(`SlidingWindowDetector`, `HotKeyRegistry`, `RuleResolver`, the queues), while the common
+auto-configuration can only see common-module types. `zeta.worker.alive` is the exception: the
+common `ZetaMicrometerAutoConfiguration` registers it from the common `HealthView`, so it also
+appears on an App that has no Worker module. Counters are created with the meters bean;
+gauges bind once the components they read exist. They register only when a `MeterRegistry` bean
+exists; without one, every recording call is a no-op.
+
+Metric identities, per decision type: `promotions == decisions.hot + dropped{type=hot} +
+elided{type=hot} + superseded{type=hot} + expired{type=hot}` and the same shape for
+`cools`/`decisions.cool`/`type=cool`. Every decision that enters delivery ends in exactly one
+bucket. A HOT lost to a terminal delivery failure is also counted in `hot.aborted` because its
+promotion was undone; a HOT superseded by a newer COOL was already removed and its seat released by
+that transition, so it appears as `cools` instead. At a quiescent scrape the seat ledger is
+therefore `promotions == cools + hot.aborted + hot.active`.
