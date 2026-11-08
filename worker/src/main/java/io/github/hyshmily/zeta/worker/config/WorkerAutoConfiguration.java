@@ -17,83 +17,85 @@ package io.github.hyshmily.zeta.worker.config;
 
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hyshmily.zeta.autoconfigure.ZetaAmqpAutoConfiguration;
 import io.github.hyshmily.zeta.autoconfigure.ZetaAppProperties;
 import io.github.hyshmily.zeta.constants.ZetaConstants;
-import io.github.hyshmily.zeta.detection.ZetaBayesianSM;
-import io.github.hyshmily.zeta.sync.worker.SmConfigSnapshot;
-import io.github.hyshmily.zeta.util.InstanceIdGenerator;
-import io.github.hyshmily.zeta.util.id.SnowflakeIdGenerator;
-import io.github.hyshmily.zeta.worker.confidence.BayesianConfidenceEstimator;
-import io.github.hyshmily.zeta.worker.confidence.ConfidenceEvaluator;
-import io.github.hyshmily.zeta.worker.detection.*;
-import io.github.hyshmily.zeta.worker.dispatch.VerifyConsumer;
-import io.github.hyshmily.zeta.worker.dispatch.WorkerBroadcastBuffer;
+import io.github.hyshmily.zeta.util.NodeIdentity;
+import io.github.hyshmily.zeta.util.executor.SafeScheduledExecutorService;
+import io.github.hyshmily.zeta.util.executor.ZetaThreadFactory;
+import io.github.hyshmily.zeta.worker.detection.DetectionPipeline;
+import io.github.hyshmily.zeta.worker.detection.lifecycle.CoolingScheduler;
+import io.github.hyshmily.zeta.worker.detection.lifecycle.CoolingWheels;
+import io.github.hyshmily.zeta.worker.detection.lifecycle.HotKeyRegistry;
+import io.github.hyshmily.zeta.worker.detection.rule.RuleResolver;
+import io.github.hyshmily.zeta.worker.detection.rule.RuleSet;
+import io.github.hyshmily.zeta.worker.detection.window.SlidingWindowDetector;
+import io.github.hyshmily.zeta.worker.detection.window.WindowGeometry;
+import io.github.hyshmily.zeta.worker.dispatch.DecisionDispatcher;
 import io.github.hyshmily.zeta.worker.dispatch.WorkerBroadcaster;
-import io.github.hyshmily.zeta.worker.dispatch.WorkerHeartbeatProducer;
-import io.github.hyshmily.zeta.worker.endpoint.FastLaneEndpoint;
-import io.github.hyshmily.zeta.worker.ingest.ReportConsumer;
+import io.github.hyshmily.zeta.worker.dispatch.connection.WorkerEpochStore;
+import io.github.hyshmily.zeta.worker.dispatch.connection.WorkerHeartbeatProducer;
+import io.github.hyshmily.zeta.worker.dispatch.connection.WorkerIdentity;
+import io.github.hyshmily.zeta.worker.dispatch.ingest.ReportConsumer;
+import io.github.hyshmily.zeta.worker.endpoint.HotKeyEndpoint;
 import io.github.hyshmily.zeta.worker.metrics.WorkerDetectionMetrics;
-import io.github.hyshmily.zeta.worker.rule.FastLaneRuleManager;
-import io.github.hyshmily.zeta.worker.rule.FastLaneRulesBroadcaster;
-import io.github.hyshmily.zeta.worker.rule.impl.FastLaneRuleManagerImpl;
 import io.micrometer.core.instrument.MeterRegistry;
-import jakarta.annotation.PostConstruct;
+import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.concurrent.atomic.AtomicReference;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.amqp.core.*;
 import org.springframework.amqp.rabbit.config.SimpleRabbitListenerContainerFactory;
 import org.springframework.amqp.rabbit.connection.ConnectionFactory;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
-import org.springframework.amqp.rabbit.listener.SimpleMessageListenerContainer;
 import org.springframework.amqp.support.converter.Jackson2JsonMessageConverter;
 import org.springframework.amqp.support.converter.MessageConverter;
-import org.springframework.amqp.support.converter.SimpleMessageConverter;
+import org.springframework.beans.factory.ListableBeanFactory;
 import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.SmartInitializingSingleton;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
+import org.springframework.context.SmartLifecycle;
 import org.springframework.context.annotation.Bean;
-import org.springframework.context.annotation.Configuration;
-import org.springframework.data.redis.connection.RedisConnectionFactory;
-import org.springframework.scheduling.annotation.EnableScheduling;
-import org.springframework.scheduling.annotation.Scheduled;
-import org.springframework.util.Assert;
 
 /**
  * Auto‑configuration for the <b>hot‑key Worker</b>.
  *
- * <p>Activates when {@code zeta.worker.enabled=true} and RabbitMQ is on the
- * classpath.  The Worker consumes per‑key access counts reported by application
- * instances, applies a sliding‑window + state‑machine pipeline, and broadcasts
- * HOT / COOL decisions back to every instance.
+ * <p>Activates when {@code zeta.worker.enabled=true} and RabbitMQ is on the classpath. The Worker
+ * consumes per‑key access counts reported by application instances, evaluates them against one
+ * sliding window and an ordered rule set, and broadcasts HOT / COOL decisions back to every
+ * instance.
  *
  * <h2>Provisioned beans</h2>
  * <ul>
- *   <li>{@link SlidingWindowDetector} – sliding‑window counter.</li>
- *   <li>{@link ZetaBayesianSM} – per‑key lifecycle state machine.</li>
- *   <li>{@link ReportConsumer} – AMQP listener that drives the pipeline.</li>
- *   <li>{@link WorkerBroadcaster} – publishes HOT / COOL broadcasts.</li>
- *   <li>{@link WorkerDetectionMetrics} – detection-plane meters (ADR-0080; needs a
- *       {@code MeterRegistry} bean, silently meter-less without one).</li>
- *   <li>RabbitMQ topology ({@code reportExchange}, shard‑specific
- *       {@code reportQueue}, binding).</li>
- *   <li>Scheduled tasks for stale‑state eviction.</li>
+ *   <li>{@link DetectionSettings} – the validated detection block, with thresholds converted to
+ *       window counts.</li>
+ *   <li>{@link SlidingWindowDetector} – the shared per-key window table.</li>
+ *   <li>{@link RuleResolver} – the published rule snapshot and its bounded match cache.</li>
+ *   <li>{@link HotKeyRegistry} – the authoritative HOT set and its seat permits.</li>
+ *   <li>{@link CoolingWheels} / {@link CoolingScheduler} – the striped cool-down wheels and their
+ *       advancing threads.</li>
+ *   <li>{@link DetectionPipeline} – the report entry point that ties them together.</li>
+ *   <li>{@link ReportConsumer} – the AMQP listener.</li>
+ *   <li>{@link DecisionDispatcher} / {@link WorkerBroadcaster} – two-queue delivery.</li>
+ *   <li>{@link WorkerIdentity} – this process's node id and restart epoch, stamped on every send.</li>
+ *   <li>{@link WorkerDetectionMetrics} – detection-plane meters (meter-less without a registry).</li>
+ *   <li>RabbitMQ topology, the heartbeat, and the repair sweep's schedule.</li>
  * </ul>
- *
- * Default constructor.
  */
-@Configuration
+@AutoConfiguration(after = ZetaAmqpAutoConfiguration.class)
 @ConditionalOnClass(name = "org.springframework.amqp.rabbit.core.RabbitTemplate")
 @ConditionalOnProperty(prefix = "zeta.worker", name = "enabled", havingValue = "true")
 @EnableConfigurationProperties({ WorkerProperties.class, ZetaAppProperties.class })
-@EnableScheduling
 @RequiredArgsConstructor
 @Slf4j
 public class WorkerAutoConfiguration {
@@ -101,416 +103,410 @@ public class WorkerAutoConfiguration {
   private final WorkerProperties properties;
 
   /**
-   * Worker node identity — auto-generated once per JVM.
+   * Dedicated single-thread scheduler for the Worker <b>control plane</b>: heartbeat emission.
    *
-   * <p>Used in queue names ({@code zeta.worker.config.<nodeId>}) and heartbeat
-   * messages to identify this Worker instance uniquely.
+   * <p>The heartbeat has its own connection factory so data-plane congestion cannot block it; the
+   * thread pool is the other half of that isolation. The repair sweep walks the window table and
+   * the HOT set and runs on the data-plane scheduler, so a long sweep cannot delay a heartbeat —
+   * and an App that sees a late heartbeat drops a perfectly healthy Worker from the ring.
+   *
+   * @return the control-plane scheduler
    */
-  private String nodeId;
-
-  @PostConstruct
-  void initInstanceId() {
-    String envId = System.getenv("INSTANCE_ID");
-    if (envId != null && !envId.isBlank()) {
-      InstanceIdGenerator.setOverride(envId);
-    }
-    this.nodeId = InstanceIdGenerator.get();
+  @Bean(name = "workerControlScheduler", destroyMethod = "shutdownNow")
+  @ConditionalOnMissingBean(name = "workerControlScheduler")
+  public ScheduledExecutorService workerControlScheduler() {
+    return new SafeScheduledExecutorService(1, new ZetaThreadFactory("zeta-worker-control"));
   }
 
   /**
-   * Validates that the sliding-window duration is evenly divisible by the
-   * number of slices to avoid rounding inaccuracies.
-   */
-  @PostConstruct
-  void validateWindowConfig() {
-    if (properties.getSlidingWindow().getDurationMs() % properties.getSlidingWindow().getSlices() != 0) {
-      log.warn(
-        "windowDurationMs ({}) is not evenly divisible by windowSlices ({}). " +
-          "This introduces rounding inaccuracies in window calculations.",
-        properties.getSlidingWindow().getDurationMs(),
-        properties.getSlidingWindow().getSlices()
-      );
-    }
-  }
-
-  /**
-   * Bounds the periodic HOT rebroadcast interval (ADR-0024 / ADR-0068 addendum).
+   * Validates the {@code detection} block once and resolves it into runtime objects.
    *
-   * <p>The rebroadcast interval is the self-healing upper bound for a lost HOT
-   * decision (the whole pipeline is fire-and-forget, ADR-0007), so a misconfigured
-   * value directly widens the preheat loss window. Unlike the cosmetic
-   * window-divisibility check above, this is a correctness knob and fails fast:
-   * below 1s the rebroadcast degenerates into a per-report broadcast storm for
-   * every continuously-hot key; above 60s a lost HOT can leave new instances
-   * un-prewarmed for minutes. Values outside {@code [1_000, 60_000]} abort startup.
-   */
-  @PostConstruct
-  void validateRebroadcastInterval() {
-    long interval = properties.getStateMachine().getRebroadcastIntervalMs();
-    Assert.state(
-      interval >= 1_000 && interval <= 60_000,
-      "zeta.worker.state-machine.rebroadcast-interval-ms must be within [1000, 60000] " +
-        "(self-healing upper bound for a lost HOT decision; default 10000), got: " +
-        interval
-    );
-  }
-
-  /**
-   * Fail-fast guard for the slice-gated {@code addCount} fast path's
-   * no-lost-count precondition (ADR-0064).
+   * <p>Every violation is collected and thrown together, so a misconfiguration fails startup with
+   * the full list instead of one problem per restart.
    *
-   * <p>{@link SlidingWindowDetector} refreshes a window's eviction timestamp at
-   * most once per slice, so a window the evictor can target must never be
-   * removable underneath an arriving count. That holds only while every
-   * staleness threshold applied to the detector is at least one slice. The
-   * detector is evicted on the short COLD tier
-   * ({@code cold-evict-interval-ms}, via {@link EvictStaleTask}), so the bound
-   * is checked against {@code min(evict-interval-ms, cold-evict-interval-ms)}.
-   * Defaults (5 min vs ~62 ms) pass by orders of magnitude; a violation means
-   * a misconfigured sub-second eviction that would silently early-evict hot
-   * windows and flip HOT keys to COOL.
-   */
-  @PostConstruct
-  void validateSliceGatePrecondition() {
-    long durationMs = properties.getSlidingWindow().getDurationMs();
-    int slices = properties.getSlidingWindow().getSlices();
-    final int aligned;
-    try {
-      aligned = SliceWindowMath.alignedSlices(durationMs, slices);
-    } catch (IllegalArgumentException e) {
-      // SliceWindowMath already describes the misconfiguration; the window
-      // bean construction will fail with the same cause. Skip here to avoid
-      // masking it with a second message.
-      return;
-    }
-    long sliceMs = durationMs / aligned;
-    if (sliceMs <= 0) {
-      return;
-    }
-
-    long minStaleMs = Math.min(
-      properties.getStateMachine().getEvictIntervalMs(),
-      properties.getStateMachine().getColdEvictIntervalMs()
-    );
-    Assert.state(
-      minStaleMs >= sliceMs,
-      "staleness thresholds must be >= one sliding-window slice " +
-        "(ADR-0064 slice-gated fast path precondition): min(evict-interval-ms=" +
-        properties.getStateMachine().getEvictIntervalMs() +
-        ", cold-evict-interval-ms=" +
-        properties.getStateMachine().getColdEvictIntervalMs() +
-        ") must be >= sliceMs=" +
-        sliceMs +
-        " (durationMs=" +
-        durationMs +
-        ", slices=" +
-        slices +
-        ", aligned=" +
-        aligned +
-        "), got minStaleMs=" +
-        minStaleMs
-    );
-  }
-
-  /**
-   * Creates the sliding‑window detector.
-   *
-   * <p>If an absolute hot threshold is configured via
-   * {@code zeta.worker.threshold.hot-threshold} it is used directly; otherwise the
-   * value is set to {@code Long.MAX_VALUE} and the ratio‑based threshold
-   * will be calculated later by the dynamic‑threshold logic (not shown here).
-   *
-   * @param properties worker configuration providing sliding-window parameters
-   * @return a new {@link SlidingWindowDetector} instance
+   * @return the resolved detection settings
    */
   @Bean
   @ConditionalOnMissingBean
-  public SlidingWindowDetector slidingWindowDetector(WorkerProperties properties) {
-    long threshold = properties.getThreshold().getHotThreshold();
-    if (threshold <= 0) {
-      threshold = Long.MAX_VALUE;
-    }
-
-    return new SlidingWindowDetector(
-      properties.getSlidingWindow().getDurationMs(),
-      properties.getSlidingWindow().getSlices(),
-      threshold
+  public DetectionSettings detectionSettings() {
+    DetectionSettings settings = DetectionSettings.of(properties);
+    RuleSet ruleSet = settings.ruleSet();
+    log.info(
+      "Worker detection: enabled={}, window={}ms/{} (slice {}ms), rules={}, rulesHash={}, minHotCount={}, maxActiveHotKeys={}",
+      settings.enabled(),
+      settings.window().windowMs(),
+      settings.window().alignedSlices(),
+      settings.window().sliceMs(),
+      ruleSet.rules().size(),
+      ruleSet.hash(),
+      ruleSet.minHotCount(),
+      settings.maxActiveHotKeys()
     );
+    return settings;
   }
 
   /**
-   * Bayesian confidence estimator using Normal-Normal conjugate model — the
-   * default {@link ConfidenceEvaluator} strategy consumed by the state
-   * machine. Register a different {@code ConfidenceEvaluator} Bean to swap
-   * the confidence model entirely, or override this Bean to retune the
-   * conjugate parameters.
+   * The aligned window geometry, exposed for the endpoint.
    *
-   * @param properties worker configuration providing Bayesian prior and likelihood parameters
-   * @return the default {@link BayesianConfidenceEstimator} as a {@link ConfidenceEvaluator}
+   * @param settings the resolved detection settings
+   * @return the geometry
    */
   @Bean
-  @ConditionalOnMissingBean(ConfidenceEvaluator.class)
-  public ConfidenceEvaluator bayesianConfidenceEstimator(WorkerProperties properties) {
-    WorkerProperties.Bayesian cfg = properties.getBayesian();
-    return new BayesianConfidenceEstimator(
-      cfg.getPriorMean(),
-      cfg.getPriorStd(),
-      cfg.getLikelihoodStd(),
-      cfg.getHighConfidenceThreshold(),
-      cfg.getMediumConfidenceThreshold()
-    );
+  @ConditionalOnMissingBean
+  public WindowGeometry windowGeometry(DetectionSettings settings) {
+    return settings.window();
   }
 
   /**
-   * Creates the per‑key lifecycle state machine with optional Bayesian confidence integration.
+   * Creates the sliding-window detector.
    *
-   * @param properties        worker configuration properties providing confirm, cool, and
-   *                          pre-cool grace window counts
-   * @param confidenceEvaluator the Bayesian confidence evaluator injected into the state machine
-   * @return a new {@link ZetaBayesianSM} instance
+   * @param settings the resolved detection settings
+   * @return the shared window table
    */
   @Bean
   @ConditionalOnMissingBean
-  public ZetaBayesianSM hotKeyStateMachine(WorkerProperties properties, ConfidenceEvaluator confidenceEvaluator) {
-    return new io.github.hyshmily.zeta.worker.detection.impl.ZetaBayesianSM(
-      properties.getConfirmWindows(),
-      properties.getCoolWindows(),
-      properties.getPreCoolGraceWindows(),
-      confidenceEvaluator,
-      properties.getBayesian().getPriorMean(),
-      properties.getStateMachine().getRebroadcastIntervalMs(),
-      // Counter time-unit for the idle-epoch shift (kernel-inspired doc
-      // §6.4): one evaluation window = smDurationMs / smSlices (default 50 ms).
-      Math.max(1L, properties.getStateMachine().getSmDurationMs() / properties.getStateMachine().getSmSlices())
-    );
+  public SlidingWindowDetector slidingWindowDetector(DetectionSettings settings) {
+    return new SlidingWindowDetector(settings.window(), properties.getMaxTrackedKeys());
   }
 
   /**
-   * Bayesian key evaluator (always present) with integrated fast-lane support.
+   * Creates the rule resolver over the validated snapshot.
+   *
+   * @param settings the resolved detection settings
+   * @param metrics  detection meters (used for the per-rule match counters)
+   * @return the resolver
    */
   @Bean
   @ConditionalOnMissingBean
-  public FastLaneRuleManager fastLaneRuleManager(WorkerProperties properties) {
-    List<FastLaneRuleManager.FastLaneRule> rules = properties
-      .getFastLane()
-      .getRules()
-      .stream()
-      .map(r -> new FastLaneRuleManager.FastLaneRule(r.getKeyPattern(), r.getThreshold()))
-      .toList();
-    return new FastLaneRuleManagerImpl(rules);
+  public RuleResolver ruleResolver(DetectionSettings settings, WorkerDetectionMetrics metrics) {
+    return new RuleResolver(settings.ruleSet(), settings.maxActiveHotKeys(), metrics);
   }
 
   /**
-   * Bayesian key evaluator (always present) with integrated fast-lane support.
-   * The fast-lane gate is wired from {@code zeta.worker.fast-lane.enabled}:
-   * when {@code false} the evaluator never consults the rule manager (rules
-   * gossip/storage keep running so re-enabling is a property flip).
+   * Detection-plane meters.
+   *
+   * <p>Only the counters are created here. The gauges and the cumulative function counters are
+   * bound by {@link #workerDetectionMeterBinder} once every singleton exists, because they read
+   * components that themselves need these meters to count a rejection.
+   *
+   * @param meterRegistry provider for the registry; absent when the context holds none
+   * @return the meters (meter-less without a registry)
    */
   @Bean
   @ConditionalOnMissingBean
-  public Evaluator keyEvaluator(
+  public WorkerDetectionMetrics workerDetectionMetrics(ObjectProvider<MeterRegistry> meterRegistry) {
+    return new WorkerDetectionMetrics(meterRegistry.getIfAvailable());
+  }
+
+  /**
+   * Worker-wide causal decision-version allocator.
+   *
+   * <p>One counter for the whole Worker, not one per component: the numbers must be comparable
+   * across promotions and cool-downs, otherwise the broadcaster cannot tell "queued behind a slow
+   * chunk" from "already superseded".
+   *
+   * @return a fresh counter
+   */
+  @Bean(name = "workerDecisionVersionCounter")
+  @ConditionalOnMissingBean(name = "workerDecisionVersionCounter")
+  public AtomicLong workerDecisionVersionCounter() {
+    return new AtomicLong(0L);
+  }
+
+  /**
+   * The authoritative HOT set.
+   *
+   * @param settings        the resolved detection settings
+   * @param metrics         detection meters
+   * @param decisionVersion the shared version allocator
+   * @param detector        the window table, read by the LOW_QPS cool-down
+   * @param wheels          the cool-down wheels the entries are scheduled on
+   * @return the registry
+   */
+  @Bean
+  @ConditionalOnMissingBean
+  public HotKeyRegistry hotKeyRegistry(
+    DetectionSettings settings,
+    WorkerDetectionMetrics metrics,
+    @Qualifier("workerDecisionVersionCounter") AtomicLong decisionVersion,
     SlidingWindowDetector detector,
-    ZetaBayesianSM stateMachine,
-    FastLaneRuleManager fastLaneRuleManager,
-    WorkerProperties properties
+    CoolingWheels wheels
   ) {
-    return new DefaultEvaluator(detector, stateMachine, fastLaneRuleManager, properties.getFastLane().isEnabled());
+    return new HotKeyRegistry(settings.maxActiveHotKeys(), metrics, decisionVersion, detector::windowSum, wheels);
   }
 
   /**
-   * Detection-plane meters for the Worker (ADR-0080): the sliding-window detector's
-   * live key count, the HOT/COOL decisions actually emitted to the cluster, and the
-   * per-report-batch evaluation latency.
+   * The striped cool-down wheels: one independent timer wheel and one advancing thread per
+   * configured cooling thread. A key is assigned to a wheel by its hash, so the key space — not a
+   * shared queue — partitions the work.
    *
-   * <p>Registered here rather than in the common module's
-   * {@code ZetaMicrometerAutoConfiguration} because every one of the three meters
-   * reads a worker-module type ({@link SlidingWindowDetector},
-   * {@link WorkerBroadcaster}, {@link ReportConsumer}) while the common
-   * auto-configuration can only see common-module types (it injects
-   * {@code ObjectProvider<ZetaBayesianSM>}, the common interface); reaching them from
-   * there would need a common→worker dependency or a new public interface exposing
-   * worker-private state.
-   *
-   * <p>Micrometer is resolved through an {@link ObjectProvider}, like the Redis
-   * connection factory of {@link #workerEpochCounter} above: a context without a
-   * {@link MeterRegistry} bean (micrometer absent, or metrics auto-configuration
-   * switched off) gets a meter-less instance whose recording methods no-op instead
-   * of failing startup.
-   *
-   * @param detector      the detector whose live per-key window map size is gauged
-   * @param meterRegistry provider for the meter registry; absent when the context
-   *                      holds no registry bean
-   * @return the Worker's detection-plane meters
+   * @param settings the resolved detection settings (wheel count)
+   * @return the wheel set
    */
   @Bean
   @ConditionalOnMissingBean
-  @ConditionalOnClass(name = "io.micrometer.core.instrument.MeterRegistry")
-  public WorkerDetectionMetrics workerDetectionMetrics(
-    SlidingWindowDetector detector,
-    ObjectProvider<MeterRegistry> meterRegistry
+  public CoolingWheels coolingWheels(DetectionSettings settings) {
+    return new CoolingWheels(settings.coolingThreads());
+  }
+
+  /**
+   * Single submission point for Worker decisions: two bounded queues, one drain thread.
+   *
+   * @param settings    the validated detection snapshot providing both send rates
+   * @param broadcaster the send funnel every decision goes through
+   * @param metrics     detection meters
+   * @param registry    the HOT set: an undelivered HOT returns its seat, and a queued HOT whose
+   *                    promotion is gone is dropped
+   * @return the dispatcher
+   */
+  @Bean
+  @ConditionalOnMissingBean
+  public DecisionDispatcher decisionDispatcher(
+    DetectionSettings settings,
+    WorkerBroadcaster broadcaster,
+    WorkerDetectionMetrics metrics,
+    HotKeyRegistry registry
   ) {
-    return new WorkerDetectionMetrics(meterRegistry.getIfAvailable(), detector);
+    WorkerProperties.Broadcast broadcast = properties.getBroadcast();
+    return new DecisionDispatcher(
+      broadcast.getHotQueueCapacity(),
+      broadcast.getCoolQueueCapacity(),
+      settings.maxHotBroadcastsPerSecond(),
+      settings.maxCoolBroadcastsPerSecond(),
+      broadcast.getHotBurst(),
+      broadcast.getCoolBurst(),
+      broadcast.getMaxDecisionAgeMs(),
+      broadcaster,
+      metrics,
+      registry::abortPromotion,
+      registry::isCurrent
+    );
+  }
+
+  /**
+   * Cool-down threads over the striped wheels.
+   *
+   * @param wheels      the striped wheels (one advancing thread each)
+   * @param registry    the HOT set the checks drive
+   * @param dispatcher  the submission point for COOL decisions
+   * @return the scheduler
+   */
+  @Bean
+  @ConditionalOnMissingBean
+  public CoolingScheduler coolingScheduler(
+    CoolingWheels wheels,
+    HotKeyRegistry registry,
+    DecisionDispatcher dispatcher
+  ) {
+    return new CoolingScheduler(wheels, registry, dispatcher);
+  }
+
+  /**
+   * Binds the gauges and cumulative function counters after every singleton exists. This is a
+   * separate bean, not a side effect of {@link #coolingScheduler}, so a caller-supplied
+   * {@code CoolingScheduler} does not silently lose the meters that read the detector, registry
+   * and queues.
+   *
+   * <p>The queue-depth and wheel-count suppliers are method references created here, not fields.
+   * {@link WorkerDetectionMetrics#bindMeters} therefore registers those three gauges with a strong
+   * reference: Micrometer's default weak reference would otherwise let a young collection clear the
+   * supplier and leave the gauge reading {@code NaN}.
+   *
+   * @param metrics   detection meters
+   * @param detector  the window table
+   * @param registry  the HOT set
+   * @param dispatcher the decision queues
+   * @param wheels    the cool-down wheels
+   * @return a callback invoked once after singleton instantiation
+   */
+  @Bean
+  public SmartInitializingSingleton workerDetectionMeterBinder(
+    WorkerDetectionMetrics metrics,
+    SlidingWindowDetector detector,
+    HotKeyRegistry registry,
+    DecisionDispatcher dispatcher,
+    CoolingWheels wheels
+  ) {
+    return () ->
+      metrics.bindMeters(detector, registry, dispatcher::hotDepth, dispatcher::coolDepth, wheels::scheduledCount);
+  }
+
+  /**
+   * The detection entry point the report consumer calls.
+   *
+   * @param detector    the window table
+   * @param rules       the rule resolver
+   * @param registry    the HOT set
+   * @param dispatcher  the decision submission point
+   * @param settings    the resolved detection settings (retention threshold and enablement)
+   * @return the pipeline
+   */
+  @Bean
+  @ConditionalOnMissingBean
+  public DetectionPipeline detectionPipeline(
+    SlidingWindowDetector detector,
+    RuleResolver rules,
+    HotKeyRegistry registry,
+    DecisionDispatcher dispatcher,
+    DetectionSettings settings
+  ) {
+    return new DetectionPipeline(detector, rules, registry, dispatcher, settings.retentionMs(), settings.enabled());
   }
 
   /**
    * Report consumer – the main AMQP entry point.
    *
-   * @param evaluator         the Bayesian evaluator with integrated fast-lane support
-   * @param broadcaster       publishes HOT and COOL decisions to all application instances
-   * @param globalQpsEstimator the global qps estimator tracking overall throughput
-   * @param stateMachine      the per-key lifecycle state machine
-   * @param properties        worker configuration providing the optional staleness filter
-   * @param broadcastBuffer   provider for the optional decision-send buffer (ADR-0061)
-   * @param metrics           provider for the optional detection-plane meters (ADR-0080)
-   * @return a new {@link ReportConsumer} instance
+   * @param pipeline      the detection entry point
+   * @param identity      this process's immutable node id and epoch
+   * @param metrics       detection meters
+   * @return a new {@link ReportConsumer}
    */
   @Bean
   @ConditionalOnMissingBean
   public ReportConsumer reportConsumer(
-    Evaluator evaluator,
-    WorkerBroadcaster broadcaster,
-    GlobalQpsEstimator globalQpsEstimator,
-    ZetaBayesianSM stateMachine,
-    WorkerProperties properties,
-    ObjectProvider<WorkerBroadcastBuffer> broadcastBuffer,
-    ObjectProvider<WorkerDetectionMetrics> metrics
+    DetectionPipeline pipeline,
+    WorkerIdentity identity,
+    WorkerDetectionMetrics metrics
   ) {
     return new ReportConsumer(
-      evaluator,
-      broadcaster,
-      globalQpsEstimator,
-      stateMachine,
+      pipeline,
+      identity.epoch(),
       properties.getReportConsumer().getStalenessThresholdMs(),
-      broadcastBuffer.getIfAvailable(),
-      metrics.getIfAvailable(),
-      properties.getGlobalQpsDynamicThreshold().getLearningPeriodMs()
+      metrics
     );
   }
 
   /**
-   * Dedicated bounded single-threaded send buffer for HOT/COOL decision
-   * broadcasts (ADR-0061). Active unless
-   * {@code zeta.worker.broadcast.buffer-enabled=false}; when absent,
-   * {@code ReportConsumer} keeps the legacy synchronous send on the AMQP
-   * consumer thread.
+   * The repair task: reclaim idle windows, then re-evaluate overdue cool-downs.
    *
-   * @param properties worker configuration providing the buffer capacity
-   * @return a new {@link WorkerBroadcastBuffer} instance
+   * @param pipeline the detection pipeline
+   * @return the task
    */
   @Bean
   @ConditionalOnMissingBean
-  @ConditionalOnProperty(
-    prefix = "zeta.worker.broadcast",
-    name = "buffer-enabled",
-    havingValue = "true",
-    matchIfMissing = true
-  )
-  public WorkerBroadcastBuffer workerBroadcastBuffer(WorkerProperties properties) {
-    return new WorkerBroadcastBuffer(properties.getBroadcast().getBufferCapacity());
+  public SweepTask sweepTask(DetectionPipeline pipeline) {
+    return new SweepTask(pipeline);
+  }
+
+  /** Scheduled housekeeping; the schedule lives in {@link #workerScheduling}. */
+  public static final class SweepTask {
+
+    private final DetectionPipeline pipeline;
+
+    SweepTask(DetectionPipeline pipeline) {
+      this.pipeline = pipeline;
+    }
+
+    /** Runs one sweep and logs the number of overdue checks it selected. */
+    public void sweep() {
+      try {
+        int repaired = pipeline.sweep();
+        if (repaired > 0) {
+          log.debug("Detection sweep repaired {} overdue cool-down check(s)", repaired);
+        }
+      } catch (Exception e) {
+        log.error("Scheduled detection sweep failed", e);
+      }
+    }
   }
 
   /**
-   * Broadcasts HOT / COOL decisions to all application instances.
+   * Dedicated {@link RabbitTemplate} for HOT/COOL decision broadcasts.
    *
-   * <p>COOL repeats (ADR-0087) ride the shared {@code hotKeyScheduler}: the
-   * schedule call is non-blocking and a saturated scheduler drops repeats
-   * with a DEBUG log, so the broadcast path keeps its fire-and-forget shape.
+   * <p>The decision plane is data-plane traffic: it uses the same connection factory as report
+   * consumption and worker-listener containers, never the dedicated heartbeat factory. A shared
+   * template would let broker flow control on a broadcast burst block the heartbeat channel and
+   * make the App drop a healthy Worker from the ring.
    *
-   * @param rabbitTemplate         the RabbitMQ template used to publish messages
-   * @param properties             worker configuration providing exchange and routing settings
-   * @param nodeId                 the Worker's node identity, injected via {@code @Qualifier("workerNodeId")}
-   * @param epochCounter           the Worker's epoch counter, injected via {@code @Qualifier("workerEpochCounter")}
-   * @param metrics                provider for the optional detection-plane meters (ADR-0080)
-   * @param scheduler              shared scheduler for bounded COOL repeats (ADR-0087)
-   * @return a new {@link WorkerBroadcaster} instance
+   * @param beanFactory the bean factory used to resolve the data-plane connection factory
+   * @return a new {@link RabbitTemplate} for decision broadcasts
+   */
+  @Bean("zetaWorkerBroadcastRabbitTemplate")
+  @ConditionalOnMissingBean(name = "zetaWorkerBroadcastRabbitTemplate")
+  public RabbitTemplate workerBroadcastRabbitTemplate(ListableBeanFactory beanFactory) {
+    return new RabbitTemplate(ZetaAmqpAutoConfiguration.dataPlaneConnectionFactory(beanFactory));
+  }
+
+  /**
+   * Publishes HOT / COOL decisions to all application instances.
+   *
+   * <p>One send per decision, fire-and-forget: no repeat chain and no periodic re-emission. A lost
+   * decision is absorbed by the cluster's coarse backstops (the App's hard TTL, the local TopK's
+   * TTL authority when the Worker is down), not repaired per key.
+   *
+   * @param rabbitTemplate  the data-plane template used to publish decisions
+   * @param appProperties   shared {@code zeta.app-name} carried in the decision headers
+   * @param identity        this process's immutable node id and epoch
+   * @param metrics         detection meters
+   * @return a new {@link WorkerBroadcaster}
    */
   @Bean
   @ConditionalOnMissingBean
   public WorkerBroadcaster workerBroadcaster(
-    RabbitTemplate rabbitTemplate,
-    WorkerProperties properties,
+    @Qualifier("zetaWorkerBroadcastRabbitTemplate") RabbitTemplate rabbitTemplate,
     ZetaAppProperties appProperties,
-    @Qualifier("workerNodeId") String nodeId,
-    @Qualifier("workerEpochCounter") AtomicLong epochCounter,
-    SnowflakeIdGenerator snowflakeIdGenerator,
-    ObjectProvider<WorkerDetectionMetrics> metrics,
-    @Qualifier("hotKeyScheduler") ScheduledExecutorService scheduler
+    WorkerIdentity identity,
+    WorkerDetectionMetrics metrics
   ) {
     return new WorkerBroadcaster(
       rabbitTemplate,
       properties.getMessaging().getBroadcastExchange(),
       appProperties.getAppName(),
-      nodeId,
-      epochCounter,
-      snowflakeIdGenerator,
-      metrics.getIfAvailable(),
-      properties.getStateMachine().getCoolRebroadcastTimes(),
-      properties.getStateMachine().getRebroadcastIntervalMs(),
-      scheduler
+      identity,
+      metrics,
+      properties.getBroadcast().getMaxDecisionAgeMs()
     );
   }
 
   /**
-   * Fanout exchange for broadcasting HOT/COOL decisions to all application instances.
+   * Direct exchange for broadcasting HOT/COOL decisions to the instances of one application.
    *
-   * <p>App instances bind their per-instance queues to this exchange to receive
-   * decision broadcasts. Both app and worker declare this exchange so that it
-   * exists regardless of startup order.
+   * <p>App instances bind their per-instance queues with the routing key {@code send.<appName>};
+   * the Worker publishes under that same key. A different {@code appName} sharing the broker sees
+   * nothing, because none of its queues are bound to this key.
    *
-   * <p><b>Note on fanout + routing key:</b> As a fanout exchange, RabbitMQ
-   * ignores the routing key entirely and delivers every message to all bound
-   * queues. The routing key set by {@link WorkerBroadcaster} ({@code send.}
-   * + appName) is purely decorative. If multiple appName clusters share the
-   * same broker, every app queue bound to this exchange receives every
-   * decision — since ADR-0068 each broadcast carries the sender's appName
-   * header and receivers drop foreign-app decisions, so per-appName isolation
-   * now exists at the receiver. Pre-0068 receivers (no appName configured)
-   * process everything, exactly as before.
+   * <p><b>Upgrade note:</b> an exchange's type cannot be changed in place — a broker that still
+   * holds {@code zeta.send.exchange} as {@code fanout} answers {@code PRECONDITION_FAILED}. Delete
+   * the exchange (and the app queues bound to it) before rolling out, or point the property at a
+   * fresh name.
    *
-   * @param properties worker configuration providing the broadcast exchange name
-   * @return a durable, non-auto-delete {@link FanoutExchange}
-   */
-  @Bean
-  @ConditionalOnMissingBean
-  public FanoutExchange broadcastExchange(WorkerProperties properties) {
-    return new FanoutExchange(properties.getMessaging().getBroadcastExchange(), true, false);
-  }
-
-  /**
-   * Direct exchange to which clients publish reportToWorker messages.
-   * Routing keys follow the pattern {@code reportToWorker.<appName>.<nodeId>}.
-   *
-   * @param properties worker configuration providing the reportToWorker exchange name
    * @return a durable, non-auto-delete {@link DirectExchange}
    */
   @Bean
-  @ConditionalOnMissingBean
-  public DirectExchange reportExchange(WorkerProperties properties) {
+  @ConditionalOnMissingBean(name = "broadcastExchange")
+  public DirectExchange broadcastExchange() {
+    return new DirectExchange(properties.getMessaging().getBroadcastExchange(), true, false);
+  }
+
+  /**
+   * Direct exchange to which clients publish report messages.
+   *
+   * @return a durable, non-auto-delete {@link DirectExchange}
+   */
+  @Bean
+  @ConditionalOnMissingBean(name = "reportExchange")
+  public DirectExchange reportExchange() {
     return new DirectExchange(properties.getMessaging().getReportExchange(), true, false);
   }
 
   /**
-   * Queue that this Worker binds to.
-   * Queue name is {@code zeta.reportToWorker.<appName>.<nodeId>},
-   * guaranteeing that a key always lands on the same Worker.
+   * The queue this Worker binds to: {@code zeta.reportToWorker.<appName>.<nodeId>}, so a key
+   * always lands on the same Worker.
    *
-   * <p>The queue has a 7-day idle expiry ({@code x-expires}) since shard queues
-   * are fixed-count and long-lived. Backlog guardrails ({@code x-max-length}
-   * with {@code drop-head} overflow, plus {@code x-message-ttl}) prevent
-   * unbounded broker-side accumulation when consumption stalls; dropped reports
-   * are tolerated per ADR-0007 (fire-and-forget, next cycle self-heals).
+   * <p>A 7-day idle expiry, plus {@code x-max-length} with drop-head and {@code x-message-ttl},
+   * bounds both broker memory and staleness when consumption stalls.
    *
-   * <p><b>Upgrade note:</b> {@code x-*} arguments cannot be altered on an
-   * existing queue — delete the old queue before rolling out this version,
-   * otherwise re-declaration fails with PRECONDITION_FAILED.
+   * <p><b>Upgrade note:</b> {@code x-*} arguments cannot be altered on an existing queue — delete
+   * the old queue before rolling out a change, otherwise re-declaration fails.
    *
-   * @param properties worker configuration providing the routing app name
-   * @return a durable {@link Queue} with the shard-specific name
+   * @param appProperties shared {@code zeta.app-name} used in the queue name
+   * @param identity      this process's immutable identity; its node id is the shard
+   * @return a durable {@link Queue}
    */
   @Bean
   @ConditionalOnMissingBean(name = "reportQueue")
-  public Queue reportQueue(WorkerProperties properties, ZetaAppProperties appProperties) {
-    String queueName = ZetaConstants.Routing.QUEUE_PREFIX_REPORT + appProperties.getAppName() + "." + nodeId;
+  public Queue reportQueue(ZetaAppProperties appProperties, WorkerIdentity identity) {
+    String queueName = ZetaConstants.Routing.QUEUE_PREFIX_REPORT + appProperties.getAppName() + "." + identity.nodeId();
     return QueueBuilder.durable(queueName)
       .withArgument("x-expires", 604_800_000)
       .withArgument("x-max-length", properties.getReportQueue().getMaxLength())
@@ -520,390 +516,215 @@ public class WorkerAutoConfiguration {
   }
 
   /**
-   * Binds the reportToWorker queue to the reportToWorker exchange using the shard-specific
-   * routing key {@code reportToWorker.<appName>.<nodeId>}.
+   * Binds the report queue to the report exchange with the shard-specific routing key.
    *
-   * @param reportQueue    the shard-specific reportToWorker queue
-   * @param reportExchange the reportToWorker exchange
-   * @param properties     worker configuration providing the routing app name
-   * @return a {@link Binding} connecting the queue to the exchange
+   * @param reportQueue    the shard-specific queue
+   * @param reportExchange the report exchange
+   * @param appProperties  shared {@code zeta.app-name} used in the routing key
+   * @param identity       this process's immutable identity; its node id is the shard
+   * @return the binding
    */
   @Bean
   @ConditionalOnMissingBean(name = "reportBinding")
-  public Binding reportBinding(Queue reportQueue, DirectExchange reportExchange, ZetaAppProperties appProperties) {
-    String routingKey = ZetaConstants.Routing.KEY_REPORT + appProperties.getAppName() + "." + nodeId;
+  public Binding reportBinding(
+    @Qualifier("reportQueue") Queue reportQueue,
+    @Qualifier("reportExchange") DirectExchange reportExchange,
+    ZetaAppProperties appProperties,
+    WorkerIdentity identity
+  ) {
+    String routingKey = ZetaConstants.Routing.KEY_REPORT + appProperties.getAppName() + "." + identity.nodeId();
     return BindingBuilder.bind(reportQueue).to(reportExchange).with(routingKey);
   }
 
   /**
-   * Auto-delete queue for receiving gossip from peer Workers.
+   * Starts every periodic Worker task once the context is fully refreshed, and cancels them on
+   * shutdown.
    *
-   * <p>Each Worker declares its own queue named
-   * {@code zeta.worker.config.<nodeId>}, which is automatically removed
-   * when the Worker disconnects.  The queue carries two message types,
-   * demultiplexed by the {@code type} header in {@link WorkerConfigNegotiator}:
-   * state-machine config gossip (bound via {@code heartbeat.*}, ADR-0003) and
-   * fast-lane rules gossip (bound via {@code fastlane.rules}, ADR-0025).
+   * <p>Two tasks: the repair sweep on the data plane (long, in-memory walks) and the heartbeat
+   * on the control plane.
    *
-   * @return a non-durable, auto-delete {@link Queue} unique to this Worker node
-   */
-  @Bean
-  @ConditionalOnMissingBean(name = "workerConfigQueue")
-  public Queue workerConfigQueue() {
-    return QueueBuilder.nonDurable(ZetaConstants.Routing.QUEUE_PREFIX_WORKER_CONFIG + nodeId).autoDelete().build();
-  }
-
-  /**
-   * Binds the per-Worker config queue to the heartbeat exchange with the
-   * routing key pattern {@code heartbeat.*}.
-   *
-   * @param workerConfigQueue the per-Worker config queue to bind
-   * @param heartbeatExchange the heartbeat topic exchange
-   * @return a {@link Binding} connecting the config queue to the heartbeat exchange
-   */
-  @Bean
-  @ConditionalOnMissingBean(name = "workerConfigBinding")
-  public Binding workerConfigBinding(Queue workerConfigQueue, TopicExchange heartbeatExchange) {
-    return BindingBuilder.bind(workerConfigQueue).to(heartbeatExchange).with(ZetaConstants.Routing.KEY_HEARTBEAT + "*");
-  }
-
-  /**
-   * Binds the per-Worker config queue to the heartbeat exchange with the
-   * routing key {@code fastlane.rules} for fast-lane rules gossip (ADR-0025).
-   * Kept outside {@code heartbeat.*} so rule sets are not fanned out to
-   * App-side heartbeat queues.
-   *
-   * @param workerConfigQueue the per-Worker config queue to bind
-   * @param heartbeatExchange the heartbeat topic exchange
-   * @return a {@link Binding} for the fast-lane rules gossip routing key
-   */
-  @Bean
-  @ConditionalOnMissingBean(name = "fastLaneRulesBinding")
-  public Binding fastLaneRulesBinding(Queue workerConfigQueue, TopicExchange heartbeatExchange) {
-    return BindingBuilder.bind(workerConfigQueue).to(heartbeatExchange).with(ZetaConstants.Routing.KEY_FASTLANE_RULES);
-  }
-
-  /**
-   * Publishes the full fast-lane rule set to peer Workers over the
-   * control-plane (heartbeat-dedicated) connection (ADR-0025).
-   *
-   * @param rabbitTemplate        the heartbeat-dedicated RabbitMQ template
-   * @param properties            worker configuration providing the heartbeat exchange name
-   * @param fastLaneRuleManager   the rule manager supplying the current set and version
-   * @param snowflakeIdGenerator  the trace-ID generator
-   * @return a new {@link FastLaneRulesBroadcaster} instance
+   * @param sweepTask         the window-reclamation and timer-repair sweep
+   * @param heartbeatProducer the structured heartbeat sender
+   * @param settings          the resolved detection settings (sweep cadence)
+   * @param controlScheduler  the control-plane scheduler
+   * @param dataPlaneScheduler the scheduler for the repair sweep
+   * @return the lifecycle that owns every schedule
    */
   @Bean
   @ConditionalOnMissingBean
-  public FastLaneRulesBroadcaster fastLaneRulesBroadcaster(
-    @Qualifier("zetaHeartbeatRabbitTemplate") RabbitTemplate rabbitTemplate,
-    WorkerProperties properties,
-    FastLaneRuleManager fastLaneRuleManager,
-    SnowflakeIdGenerator snowflakeIdGenerator
+  public WorkerScheduling workerScheduling(
+    SweepTask sweepTask,
+    WorkerHeartbeatProducer heartbeatProducer,
+    DetectionSettings settings,
+    @Qualifier("workerControlScheduler") ScheduledExecutorService controlScheduler,
+    @Qualifier("hotKeyScheduler") ScheduledExecutorService dataPlaneScheduler
   ) {
-    return new FastLaneRulesBroadcaster(
-      rabbitTemplate,
-      properties.getMessaging().getHeartbeatExchange(),
-      nodeId,
-      fastLaneRuleManager,
-      snowflakeIdGenerator
-    );
-  }
-
-  /**
-   * Management-plane endpoint for fast-lane rule CRUD (ADR-0025).
-   *
-   * <p>Declared explicitly (not component-scanned): {@code @Endpoint} is not
-   * a stereotype annotation, so without this bean the endpoint would silently
-   * vanish when its MVC stereotype was removed.
-   *
-   * @param ruleManager the runtime-managed fast-lane rules
-   * @param broadcaster the gossip broadcaster notified on mutation
-   * @return a new {@link FastLaneEndpoint} instance
-   */
-  @Bean
-  @ConditionalOnMissingBean
-  @ConditionalOnClass(name = "org.springframework.boot.actuate.endpoint.annotation.Endpoint")
-  public FastLaneEndpoint fastLaneEndpoint(FastLaneRuleManager ruleManager, FastLaneRulesBroadcaster broadcaster) {
-    return new FastLaneEndpoint(ruleManager, broadcaster);
-  }
-
-  /**
-   * Schedules the periodic full-set fast-lane rules gossip (ADR-0025).
-   * A fresh or partitioned Worker converges within one gossip interval even
-   * if an immediate post-mutation broadcast was lost.
-   *
-   * @param broadcaster the rules gossip broadcaster
-   * @param properties  worker configuration providing the gossip interval
-   * @param scheduler   the shared worker scheduler
-   * @return a placeholder {@link Runnable} bean that keeps the scheduled task alive
-   */
-  @Bean
-  @ConditionalOnMissingBean(name = "fastLaneRulesGossipTask")
-  public Runnable fastLaneRulesGossipTask(
-    FastLaneRulesBroadcaster broadcaster,
-    WorkerProperties properties,
-    @Qualifier("hotKeyScheduler") ScheduledExecutorService scheduler
-  ) {
-    try {
-      long interval = properties.getFastLane().getGossipIntervalMs();
-      scheduler.scheduleAtFixedRate(broadcaster::broadcastNow, interval, interval, TimeUnit.MILLISECONDS);
-    } catch (Exception e) {
-      log.error("Failed to schedule fast-lane rules gossip task; rules will only propagate on local mutation.", e);
-    }
-    return () -> {};
-  }
-
-  /**
-   * Topic exchange for epoch-aware structured heartbeats from Workers.
-   *
-   * @param properties worker configuration providing the heartbeat exchange name
-   * @return a durable, non-auto-delete {@link TopicExchange}
-   */
-  @Bean
-  @ConditionalOnMissingBean(name = "heartbeatExchange")
-  public TopicExchange heartbeatExchange(WorkerProperties properties) {
-    return new TopicExchange(properties.getMessaging().getHeartbeatExchange(), true, false);
-  }
-
-  /**
-   * Exposes the Worker's node ID as a Spring bean for injection.
-   *
-   * @return the unique node identifier for this Worker instance
-   */
-  @Bean
-  @ConditionalOnMissingBean(name = "workerNodeId")
-  public String workerNodeId() {
-    return nodeId;
-  }
-
-  /**
-   * Monotonically increasing epoch counter for this Worker instance.
-   *
-   * <p>The epoch is incremented on every Worker restart via Redis {@code INCR}
-   * and transmitted in both heartbeat and send messages.  Receiving apps use
-   * the epoch to detect Worker restarts and unconditionally accept decisions
-   * from a higher epoch (ADR-0010).
-   *
-   * <p>Both {@link WorkerHeartbeatProducer} and {@link WorkerBroadcaster}
-   * share this single bean so that heartbeat epoch and broadcast epoch are
-   * guaranteed identical.
-   *
-   * <p>The Redis connection factory is resolved through an
-   * {@link ObjectProvider}: a Redis-less Worker (no
-   * {@code RedisConnectionFactory} bean) passes {@code null} and
-   * {@link WorkerHeartbeatProducer#initEpoch} engages its tested local-file
-   * fallback instead of failing context startup.
-   *
-   * @param workerId the unique node identifier for this Worker instance
-   * @param redis    provider for the Redis connection factory; absent when the
-   *                 Worker runs without Redis
-   * @return a new {@link AtomicLong} initialised to the current epoch value
-   */
-  @Bean
-  @ConditionalOnMissingBean(name = "workerEpochCounter")
-  public AtomicLong workerEpochCounter(
-    @Qualifier("workerNodeId") String workerId,
-    ObjectProvider<RedisConnectionFactory> redis
-  ) {
-    long epoch = WorkerHeartbeatProducer.initEpoch(workerId, redis.getIfAvailable());
-    return new AtomicLong(epoch);
-  }
-
-  /**
-   * Atomic gossip snapshot for state-machine config.
-   *
-   * <p>Holds the confirm/cool/grace counts plus the gossip timestamp as one
-   * immutable value in a shared {@code AtomicReference}, so heartbeat
-   * production and gossip adoption never observe torn fields. Seeded from the
-   * static {@link WorkerProperties} with a wall-clock timestamp
-   * ({@link SmConfigSnapshot#initial}), never zero, so a stale replay can
-   * never reverse-cover the static configuration; later updates use strictly
-   * increasing wall-clock versions and receivers adopt only strictly newer
-   * values.
-   *
-   * @param stateMachine the state machine supplying the static counts
-   * @return the shared snapshot reference
-   */
-  @Bean
-  @ConditionalOnMissingBean(name = "smConfigSnapshot")
-  public AtomicReference<SmConfigSnapshot> smConfigSnapshot(ZetaBayesianSM stateMachine) {
-    return new AtomicReference<>(
-      SmConfigSnapshot.initial(
-        stateMachine.getConfirmCount(),
-        stateMachine.getCoolCount(),
-        stateMachine.getPreCoolGraceCount()
+    long sweepInterval = settings.sweepIntervalMs();
+    long heartbeatInterval = properties.getHeartbeat().getPingIntervalMs();
+    return new WorkerScheduling(
+      List.of(
+        // first sweep one full interval after startup, never during it
+        new WorkerScheduling.Task(dataPlaneScheduler, sweepTask::sweep, sweepInterval, sweepInterval),
+        new WorkerScheduling.Task(
+          controlScheduler,
+          heartbeatProducer::sendHeartbeat,
+          heartbeatInterval,
+          heartbeatInterval
+        )
       )
     );
   }
 
   /**
-   * Legacy monotonic counter for config-change timestamps.
+   * Owns the Worker's periodic tasks: starts them on {@link #start()} (context refreshed, every
+   * bean published) and cancels them on {@link #stop()}.
    *
-   * <p>Kept for actuator compatibility: {@code StateMachineEndpoint} still
-   * bumps it on every write. Seeded with the wall clock (not zero) so the
-   * same reverse-cover rule holds for readers still on the counter. New code
-   * should read {@code smConfigSnapshot} instead.
-   *
-   * @return a new {@link AtomicLong} seeded with the wall clock
+   * <p>{@link SmartLifecycle} rather than {@code @Scheduled}: a starter must not enable scheduling
+   * in the host application, and the futures have to be cancellable.
    */
-  @Bean
-  @ConditionalOnMissingBean(name = "configTimestampCounter")
-  public AtomicLong configTimestampCounter() {
-    return new AtomicLong(Math.max(System.currentTimeMillis(), 0L));
-  }
-
-  /**
-   * Periodically evicts stale keys from the sliding‑window detector,
-   * state machine, and CV history.
-   *
-   * <p>The eviction threshold ({@code staleAfterMs}) is read directly
-   * from {@link WorkerProperties.StateMachine#evictIntervalMs}, which
-   * defaults to {@code 2 * coolDurationMs} = 20 minutes. The scan cadence is
-   * a separate knob — {@code zeta.worker.state-machine.evict-scan-interval-ms}
-   * (default 1 min, ADR-0060).
-   *
-   * @param detector     the sliding-window detector whose idle keys will be evicted
-   * @param stateMachine the state machine whose idle entries will be evicted
-   * @param evaluator the evaluator whose state will be evicted
-   * @param properties      worker configuration providing the cool duration for stale threshold
-   * @param broadcaster     broadcaster used for the eviction COOL callbacks
-   * @return a new {@link EvictStaleTask} instance
-   */
-  @Bean
-  @ConditionalOnMissingBean
-  public EvictStaleTask evictStaleTask(
-    SlidingWindowDetector detector,
-    ZetaBayesianSM stateMachine,
-    Evaluator evaluator,
-    WorkerProperties properties,
-    WorkerBroadcaster broadcaster
-  ) {
-    return new EvictStaleTask(detector, stateMachine, evaluator, properties, broadcaster);
-  }
-
-  /**
-   * Scheduled task that evicts stale keys from the sliding-window detector,
-   * state machine, and evaluator state.
-   *
-   * <p>The schedule cadence is bound to
-   * {@code zeta.worker.state-machine.evict-scan-interval-ms} (default
-   * 60_000 = 1 min) — deliberately a different property from the
-   * staleness threshold {@code evict-interval-ms} it applies (ADR-0060):
-   * the cadence is a housekeeping-cost knob, the threshold a correctness knob
-   * that must stay &gt;= 2 × cool-duration-ms.
-   *
-   * <p>The detector, evaluator, and state machine's COLD tier all use the
-   * tiered short threshold {@code cold-evict-interval-ms} (default 5 min):
-   * COLD entries carry no broadcast obligation and are only meaningful while
-   * the key is still being reported, so the short tier bounds per-key memory
-   * under high cardinality. CONFIRMED_HOT/PRE_COOLING state keeps the full
-   * {@code evict-interval-ms} retention in the state machine — its eviction
-   * is what emits the COOL broadcast. A failed COOL broadcast retains the
-   * state untouched for a retry on the next scan.
-   */
-  @RequiredArgsConstructor
-  public static class EvictStaleTask {
-
-    private final SlidingWindowDetector detector;
-    private final ZetaBayesianSM stateMachine;
-    private final Evaluator evaluator;
-    private final WorkerProperties properties;
-    private final WorkerBroadcaster broadcaster;
-
-    @Scheduled(fixedDelayString = "${zeta.worker.state-machine.evict-scan-interval-ms:60000}")
-    public void evictStale() {
-      try {
-        long staleAfterMs = properties.getStateMachine().getEvictIntervalMs();
-        long coldStaleAfterMs = properties.getStateMachine().getColdEvictIntervalMs();
-        detector.evictStale(coldStaleAfterMs);
-        stateMachine.evictStale(staleAfterMs, coldStaleAfterMs, key -> broadcastCoolRetainOnFailure(key));
-        evaluator.evictStale(coldStaleAfterMs);
-        log.debug("EvictStale tick: staleAfterMs={}, coldStaleAfterMs={}", staleAfterMs, coldStaleAfterMs);
-      } catch (Exception e) {
-        log.error("Scheduled evictStale failed", e);
-      }
-    }
+  public static final class WorkerScheduling implements SmartLifecycle {
 
     /**
-     * Broadcasts COOL for one stale-evicted hot key with retryable semantics.
+     * One periodic task bound to the scheduler of its plane.
      *
-     * @param key the stale hot key owing a COOL broadcast
-     * @return {@code true} when the broadcast succeeded and the state may be
-     *         dropped; {@code false} to retain the state untouched for a retry
-     *         on the next scan
+     * @param scheduler      the pool the task runs on
+     * @param body           the work
+     * @param initialDelayMs delay before the first run; {@code periodMs == 0} makes it one-shot
+     * @param periodMs       period between runs, {@code 0} for a one-shot task
      */
-    private boolean broadcastCoolRetainOnFailure(String key) {
-      boolean ok = broadcaster.broadcastCool(key);
-      if (!ok) {
-        log.warn("Failed to broadcast COOL for stale key, state retained for retry: {}", key);
+    record Task(ScheduledExecutorService scheduler, Runnable body, long initialDelayMs, long periodMs) {}
+
+    private final List<ScheduledFuture<?>> futures = new ArrayList<>();
+    private final List<Task> tasks;
+
+    private volatile boolean running;
+
+    WorkerScheduling(List<Task> tasks) {
+      this.tasks = tasks;
+    }
+
+    @Override
+    public synchronized void start() {
+      if (running) {
+        return;
       }
-      return ok;
+
+      running = true;
+      for (Task task : tasks) {
+        try {
+          futures.add(schedule(task));
+        } catch (Exception e) {
+          // A Worker whose heartbeat or repair sweep cannot be scheduled is not a degraded Worker:
+          // it either never joins the ring or silently leaks cool-down checks. Fail startup instead
+          // of reporting isRunning=true with a dead capability.
+          stop();
+          throw new IllegalStateException(
+            "Failed to schedule worker task (initialDelayMs=" +
+              task.initialDelayMs() +
+              ", periodMs=" +
+              task.periodMs() +
+              ")",
+            e
+          );
+        }
+      }
+    }
+
+    /** Schedules one task as repeating or one-shot; {@code periodMs == 0} means one-shot. */
+    private static ScheduledFuture<?> schedule(Task task) {
+      if (task.periodMs() > 0) {
+        return task
+          .scheduler()
+          .scheduleWithFixedDelay(task.body(), task.initialDelayMs(), task.periodMs(), TimeUnit.MILLISECONDS);
+      }
+      return task.scheduler().schedule(task.body(), task.initialDelayMs(), TimeUnit.MILLISECONDS);
+    }
+
+    @Override
+    public synchronized void stop() {
+      running = false;
+      for (ScheduledFuture<?> future : futures) {
+        future.cancel(false);
+      }
+      futures.clear();
+    }
+
+    @Override
+    public boolean isRunning() {
+      return running;
     }
   }
 
   /**
-   * Global qps estimator that tracks overall throughput across all keys in the
-   * current shard using a sliding window.
+   * Topic exchange for epoch-aware structured heartbeats from Workers.
    *
-   * @param properties worker configuration properties (sliding-window duration
-   *                   and slice count are extracted from here)
-   * @return a new {@link GlobalQpsEstimator} instance
+   * @return a durable, non-auto-delete {@link TopicExchange}
+   */
+  @Bean
+  @ConditionalOnMissingBean(name = "heartbeatExchange")
+  public TopicExchange heartbeatExchange() {
+    return new TopicExchange(properties.getMessaging().getHeartbeatExchange(), true, false);
+  }
+
+  /**
+   * This process's immutable identity: the node id plus the restart-detection epoch, incremented on
+   * every start and persisted in {@code zeta.worker.epoch-file}.
+   *
+   * <p>The epoch is read once at startup and never changes, so one record carries it together with
+   * the node id. That record is the single source of the node identity in the context: the report
+   * queue, its binding and every sender read it instead of a separate {@code String} bean.
+   *
+   * <p>{@code INSTANCE_ID} is the deployment-supplied identity (Kubernetes downward API, Nomad
+   * meta, ...). It is applied before the node id is read, so the override and the read are one step.
+   *
+   * @return the identity every sender stamps
    */
   @Bean
   @ConditionalOnMissingBean
-  public GlobalQpsEstimator globalQpsEstimator(WorkerProperties properties) {
-    return new GlobalQpsEstimator(
-      properties.getSlidingWindow().getDurationMs(),
-      properties.getSlidingWindow().getSlices()
-    );
+  public WorkerIdentity workerIdentity() {
+    String envId = System.getenv("INSTANCE_ID");
+    if (envId != null && !envId.isBlank()) {
+      NodeIdentity.setInstanceOverride(envId);
+    }
+    String nodeId = NodeIdentity.getInstanceId();
+    String configured = properties.getEpochFile();
+    Path epochFile = configured == null || configured.isBlank() ? null : Path.of(configured);
+    return new WorkerIdentity(nodeId, WorkerEpochStore.initEpoch(nodeId, epochFile));
   }
 
   /**
-   * Threshold learner that periodically recalculates the hot-key threshold
-   * based on estimated global qps and updates the sliding-window detector.
+   * Façade endpoint for the detection plane.
    *
-   * @param estimator the global qps estimator
-   * @param detector  the sliding-window detector whose threshold will be
-   *                  dynamically adjusted
-   * @param properties worker configuration properties for threshold tuning
-   *                   parameters (ratio, tolerance, learning period)
-   * @return a new {@link ThresholdLearner} instance
+   * <p>Declared explicitly (not component-scanned): {@code @Endpoint} is not a stereotype, so
+   * without this bean the endpoint would silently vanish. The explicit bean name keeps it
+   * distinct from the App-side {@code ZetaEndpoint} bean, which both auto-configurations would
+   * otherwise register as {@code hotKeyEndpoint}. The shipped {@code application.yml} exposes
+   * only {@code health}; an operator opts in by adding {@code hotkeyworker} to the web exposure
+   * include and mapping its path.
+   *
+   * @param rules    the rule resolver
+   * @param window   the effective window geometry
+   * @param registry the HOT set
+   * @param cooling  the cool-down scheduler
+   * @param detector the window table
+   * @return a new {@link HotKeyEndpoint}
    */
-  @Bean
+  @Bean("hotKeyWorkerEndpoint")
   @ConditionalOnMissingBean
-  public ThresholdLearner thresholdLearner(
-    GlobalQpsEstimator estimator,
-    SlidingWindowDetector detector,
-    WorkerProperties properties
+  @ConditionalOnClass(name = "org.springframework.boot.actuate.endpoint.annotation.Endpoint")
+  public HotKeyEndpoint hotKeyEndpoint(
+    RuleResolver rules,
+    WindowGeometry window,
+    HotKeyRegistry registry,
+    CoolingScheduler cooling,
+    SlidingWindowDetector detector
   ) {
-    return new ThresholdLearner(estimator, detector, properties);
+    return new HotKeyEndpoint(rules, window, registry, cooling, detector);
   }
 
   /**
-   * {@link SimpleRabbitListenerContainerFactory} using {@link SimpleMessageConverter}
-   * for the Worker config listener, avoiding Jackson JSON conversion of heartbeat
-   * messages (which use a custom header-based format).
-   *
-   * @param connectionFactory the RabbitMQ connection factory
-   * @return a configured {@link SimpleRabbitListenerContainerFactory} instance
-   */
-  @Bean
-  @ConditionalOnMissingBean(name = "workerConfigListenerContainerFactory")
-  public SimpleRabbitListenerContainerFactory workerConfigListenerContainerFactory(
-    @Qualifier("zetaHeartbeatConnectionFactory") ConnectionFactory connectionFactory
-  ) {
-    SimpleRabbitListenerContainerFactory factory = new SimpleRabbitListenerContainerFactory();
-    factory.setConnectionFactory(connectionFactory);
-    factory.setMessageConverter(new SimpleMessageConverter());
-    return factory;
-  }
-
-  /**
-   * Fallback report message converter for report messages. Active only when the
-   * common module's {@code zetaReportMessageConverter} is absent (e.g. in tests).
-   * <p>
-   * Jackson JSON only; unknown JSON fields are ignored (ADR-0091).
+   * Fallback report message converter. Active only when the common module's converter is absent
+   * (e.g. in tests). Jackson JSON only; unknown fields are ignored.
    *
    * @return a forward-compatible Jackson JSON converter
    */
@@ -915,24 +736,20 @@ public class WorkerAutoConfiguration {
   }
 
   /**
-   * Container factory for the {@link ReportConsumer}'s {@code @RabbitListener}.
-   * Lifts throughput above Spring Boot's default (concurrency=1) by exposing
-   * concurrent-consumers and prefetch via {@code zeta.worker.report-consumer.*}.
+   * Container factory for {@link ReportConsumer}'s {@code @RabbitListener}.
    *
-   * @param connectionFactory the RabbitMQ connection factory
+   * @param beanFactory            the bean factory used to resolve the data-plane connection factory
    * @param reportMessageConverter the JSON message converter for report messages
-   * @param properties worker configuration properties
-   * @return a configured {@link SimpleRabbitListenerContainerFactory} instance
+   * @return a configured {@link SimpleRabbitListenerContainerFactory}
    */
   @Bean
   @ConditionalOnMissingBean(name = "reportListenerContainerFactory")
   public SimpleRabbitListenerContainerFactory reportListenerContainerFactory(
-    @Qualifier("rabbitConnectionFactory") ConnectionFactory connectionFactory,
-    @Qualifier("reportMessageConverter") MessageConverter reportMessageConverter,
-    WorkerProperties properties
+    ListableBeanFactory beanFactory,
+    @Qualifier("reportMessageConverter") MessageConverter reportMessageConverter
   ) {
     SimpleRabbitListenerContainerFactory factory = new SimpleRabbitListenerContainerFactory();
-    factory.setConnectionFactory(connectionFactory);
+    factory.setConnectionFactory(ZetaAmqpAutoConfiguration.dataPlaneConnectionFactory(beanFactory));
     factory.setMessageConverter(reportMessageConverter);
     factory.setConcurrentConsumers(properties.getReportConsumer().getConcurrentConsumers());
     factory.setMaxConcurrentConsumers(properties.getReportConsumer().getConcurrentConsumers());
@@ -943,127 +760,17 @@ public class WorkerAutoConfiguration {
   }
 
   /**
-   * Listens for gossip from peer Workers and applies it: state-machine config
-   * when the embedded timestamp is strictly newer, and fast-lane rule sets
-   * last-writer-wins by wall-clock version (ADR-0025).
+   * Dedicated {@link RabbitTemplate} for control-plane traffic (heartbeat), backed by
+   * the dedicated heartbeat connection factory.
    *
-   * <p>Schedules a one-shot startup check (~3s) on the shared worker
-   * scheduler that logs a warning when no peer heartbeat has arrived — the
-   * Worker then continues with {@link WorkerProperties} defaults. This
-   * replaces the former dedicated sleeping thread: the check exists only to
-   * log, and the shared scheduler already exists.
+   * <p>Pre-declares the heartbeat exchange before the template is handed to any publisher: the
+   * exchange is otherwise declared lazily by {@code RabbitAdmin}, and that declaration is not
+   * ordered against the control-plane connection — on an empty broker a first publish can reach a
+   * not-yet-existing exchange, RabbitMQ answers {@code 404 NOT_FOUND}, closes the channel and that
+   * tick's heartbeat is lost.
    *
-   * @param stateMachine        the worker's state machine
-   * @param configSnapshot      the shared atomic gossip snapshot
-   * @param fastLaneRuleManager the rule manager receiving gossiped rule sets
-   * @param scheduler           the shared worker scheduler
-   * @return a new {@link WorkerConfigNegotiator} instance
-   */
-  @Bean
-  @ConditionalOnMissingBean
-  public WorkerConfigNegotiator workerConfigNegotiator(
-    ZetaBayesianSM stateMachine,
-    @Qualifier("smConfigSnapshot") AtomicReference<SmConfigSnapshot> configSnapshot,
-    FastLaneRuleManager fastLaneRuleManager,
-    @Qualifier("hotKeyScheduler") ScheduledExecutorService scheduler
-  ) {
-    WorkerConfigNegotiator negotiator = new WorkerConfigNegotiator(
-      stateMachine,
-      configSnapshot,
-      nodeId,
-      fastLaneRuleManager
-    );
-    try {
-      scheduler.schedule(
-        () -> {
-          if (!negotiator.hasReceivedConfig()) {
-            log.warn("No config heartbeat received within 3s, using WorkerProperties defaults");
-          }
-        },
-        3_000,
-        TimeUnit.MILLISECONDS
-      );
-    } catch (Exception e) {
-      log.debug("Startup config check could not be scheduled; proceeding without the warning", e);
-    }
-    return negotiator;
-  }
-
-  /**
-   * Schedules periodic threshold recalculation using the {@link ThresholdLearner}.
-   *
-   * <p>The learner runs at the interval specified by
-   * {@code zeta.worker.global-qps-dynamic-threshold.recalculate-interval-ms}.
-   * The first run fires immediately (initial delay 0) so that when
-   * {@code zeta.worker.threshold.hot-threshold} is unset — the detector threshold sits
-   * at {@code Long.MAX_VALUE}, where NO key can ever be promoted — the
-   * ratio-based threshold is installed as soon as the learner's own learning
-   * period elapses. With the initial delay equal to the interval, the first
-   * threshold could only be applied after ~60s of total blindness. The
-   * returned placeholder bean keeps the scheduled task alive in the context.
-   *
-   * @param learner    the threshold learner to schedule
-   * @param properties worker configuration for the recalculation interval
-   * @param scheduler  the shared worker scheduler
-   * @return a placeholder {@link Runnable} bean that keeps the scheduled task alive
-   */
-  @Bean
-  @ConditionalOnMissingBean(name = "thresholdLearningTask")
-  public Runnable thresholdLearningTask(
-    ThresholdLearner learner,
-    WorkerProperties properties,
-    @Qualifier("hotKeyScheduler") ScheduledExecutorService scheduler
-  ) {
-    try {
-      scheduler.scheduleAtFixedRate(
-        learner,
-        0L,
-        properties.getGlobalQpsDynamicThreshold().getRecalculateIntervalMs(),
-        TimeUnit.MILLISECONDS
-      );
-    } catch (Exception e) {
-      log.error("Failed to schedule threshold learning task; dynamic threshold " + "adjustment will not run.", e);
-    }
-    return () -> {};
-  }
-
-  /**
-   * Auto-delete queue for on-demand verification requests (PING) from Apps.
-   * Queue name: {@code zeta.verify.ping.<nodeId>}.
-   *
-   * @return a non-durable, auto-delete {@link Queue} for PING/PONG verification
-   */
-  @Bean
-  @ConditionalOnMissingBean(name = "verifyPingQueue")
-  public Queue verifyPingQueue() {
-    return QueueBuilder.nonDurable(ZetaConstants.Routing.QUEUE_PREFIX_VERIFY_PING + nodeId).autoDelete().build();
-  }
-
-  /**
-   * Dedicated {@link RabbitTemplate} for control-plane traffic (heartbeat + PING/PONG),
-   * backed by the dedicated heartbeat connection factory from the common module.
-   * Isolated from the data-plane template used by broadcasts and reports.
-   *
-   * <p>Pre-declares the heartbeat exchange before the template is handed to any
-   * publisher. The exchange is otherwise declared lazily by Spring Boot's
-   * {@code RabbitAdmin}, and that declaration is not ordered against the control-plane
-   * connection the heartbeat producer opens — on an empty broker the first Worker to
-   * start published to a not-yet-existing exchange, RabbitMQ answered
-   * {@code 404 NOT_FOUND} and closed the channel, losing that tick's heartbeat and
-   * fast-lane rule gossip. Self-healing one interval later, but an ERROR on every cold
-   * cluster start (and only ever on the first Worker, which is why it is easy to miss).
-   *
-   * <p>Doing it here rather than in a second {@code RabbitAdmin} bean is deliberate:
-   * Boot's {@code amqpAdmin} is {@code @ConditionalOnMissingBean} with the return type
-   * {@code AmqpAdmin}, so any admin Zeta registers would silently switch it off and
-   * leave every data-plane exchange/queue/binding undeclared. Declaring from the
-   * template's own construction is also deterministic — every control-plane publish
-   * goes through this instance, so no publish can precede the declaration.
-   *
-   * <p>A failure is non-fatal: the broker may legitimately be unreachable during
-   * context refresh, in which case {@code RabbitAdmin} declares the exchange on
-   * (re)connect exactly as before. This closes the cold-start race; it does not change
-   * reconnect behaviour.
+   * <p>A failure is non-fatal: the broker may legitimately be unreachable during context refresh,
+   * and {@code RabbitAdmin} declares the exchange on (re)connect.
    *
    * @param connectionFactory the dedicated heartbeat connection factory
    * @return a new {@link RabbitTemplate} for control-plane messaging
@@ -1092,85 +799,33 @@ public class WorkerAutoConfiguration {
   }
 
   /**
-   * Handles PING requests from Apps, replies PONG via Direct reply-to.
-   * Uses the heartbeat-dedicated template so PONG responses are not blocked
-   * by data-plane congestion on the shared connection.
+   * Structured heartbeat producer: epoch and readiness.
    *
-   * @param rabbitTemplate the heartbeat-dedicated RabbitMQ template
-   * @return a new {@link VerifyConsumer} instance for this Worker node
-   */
-  @Bean
-  @ConditionalOnMissingBean
-  public VerifyConsumer verifyConsumer(@Qualifier("zetaHeartbeatRabbitTemplate") RabbitTemplate rabbitTemplate) {
-    return new VerifyConsumer(rabbitTemplate, nodeId);
-  }
-
-  /**
-   * Container for the verification ping queue (NONE ack, on-demand only).
-   * Uses the heartbeat-dedicated connection factory for full control-plane isolation.
+   * <p>Reads the same immutable {@link WorkerIdentity} epoch as {@link WorkerBroadcaster}, so the
+   * values in the heartbeat and decision headers are identical, and sends on the
+   * heartbeat-dedicated template so a data-plane stall cannot delay it.
    *
-   * @param connectionFactory the dedicated heartbeat connection factory
-   * @param verifyPingQueue   the auto-delete ping queue
-   * @param verifyConsumer    the consumer whose {@link VerifyConsumer#handlePing} handles messages
-   * @return a configured {@link SimpleMessageListenerContainer} with NONE acknowledgement mode
-   */
-  @Bean
-  public SimpleMessageListenerContainer verifyPingContainer(
-    @Qualifier("zetaHeartbeatConnectionFactory") ConnectionFactory connectionFactory,
-    Queue verifyPingQueue,
-    VerifyConsumer verifyConsumer
-  ) {
-    SimpleMessageListenerContainer c = new SimpleMessageListenerContainer(connectionFactory);
-    c.setQueues(verifyPingQueue);
-    c.setMessageListener(verifyConsumer::handlePing);
-    c.setAcknowledgeMode(AcknowledgeMode.NONE);
-    c.setErrorHandler(t -> log.warn("Verify ping listener uncaught exception (PONG will not be sent)", t));
-    return c;
-  }
-
-  /**
-   * Enhanced heartbeat producer that sends structured heartbeats with epoch,
-   * load factor, and state-machine config gossip.
-   *
-   * <p>Shares the same epoch counter bean with {@link WorkerBroadcaster}
-   * so that epoch values in heartbeat messages and send messages are
-   * guaranteed identical.
-   *
-   * <p>Uses the heartbeat-dedicated {@link RabbitTemplate} so that
-   * {@code sendHeartbeat()} is not blocked by data-plane congestion on the
-   * shared connection.  See ADR-0010 (dual-queue isolation extended to the
-   * transport layer).
-   *
-   * @param rabbitTemplate         the heartbeat-dedicated RabbitMQ template
-   * @param properties             worker configuration providing exchange and interval settings
-   * @param stateMachine           the state machine for the ready-to-serve tracked-keys check
-   * @param epochCounter           the shared epoch counter (initialised via Redis INTR)
-   * @param configSnapshot         the shared atomic gossip snapshot
-   * @param scheduler              the shared worker scheduler for periodic heartbeat sends
-   * @return a new {@link WorkerHeartbeatProducer} instance
+   * @param rabbitTemplate  the heartbeat-dedicated RabbitMQ template
+   * @param registry        the HOT set for the ready-to-serve check
+   * @param identity        this process's immutable node id and epoch
+   * @param appProperties   shared {@code zeta.app-name} stamped on the heartbeat
+   * @return a new {@link WorkerHeartbeatProducer}
    */
   @Bean
   @ConditionalOnMissingBean
   public WorkerHeartbeatProducer workerHeartbeatProducer(
     @Qualifier("zetaHeartbeatRabbitTemplate") RabbitTemplate rabbitTemplate,
-    WorkerProperties properties,
-    ZetaBayesianSM stateMachine,
-    @Qualifier("workerEpochCounter") AtomicLong epochCounter,
-    @Qualifier("smConfigSnapshot") AtomicReference<SmConfigSnapshot> configSnapshot,
-    @Qualifier("hotKeyScheduler") ScheduledExecutorService scheduler,
-    SnowflakeIdGenerator snowflakeIdGenerator
+    HotKeyRegistry registry,
+    WorkerIdentity identity,
+    ZetaAppProperties appProperties
   ) {
     return new WorkerHeartbeatProducer(
       rabbitTemplate,
       properties.getMessaging().getHeartbeatExchange(),
-      nodeId,
-      stateMachine,
-      configSnapshot,
-      epochCounter.get(),
-      properties.getHeartbeat().getPingIntervalMs(),
+      identity,
+      registry,
       properties.getHeartbeat().getReadyGraceMs(),
-      scheduler,
-      snowflakeIdGenerator
+      appProperties.getAppName()
     );
   }
 }

@@ -15,21 +15,22 @@
  */
 package io.github.hyshmily.zeta.worker;
 
+import io.github.hyshmily.zeta.autoconfigure.ZetaActuatorAutoConfiguration;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 
 /**
  * Entry point for the standalone HotKey Worker server.
  *
- * <p>Listens for batched reports from application instances, runs
- * sliding-window detection and state-machine analysis, and broadcasts
- * HOT/COOL decisions back to all connected apps via RabbitMQ.
+ * <p>Listens for batched reports from application instances, evaluates the sliding window against
+ * the configured rules, and broadcasts HOT/COOL decisions back to all connected apps via RabbitMQ.
+ *
+ * <p>The App-only {@code /actuator/hotkey} and {@code /actuator/hotkeyring} endpoint
+ * auto-configuration is excluded: this process exposes health and, only when an operator opts in,
+ * the Worker's own detection view.
  */
-@SpringBootApplication
+@SpringBootApplication(exclude = ZetaActuatorAutoConfiguration.class)
 public class WorkerApplication {
-
-  /** Default constructor. */
-  public WorkerApplication() {}
 
   /**
    * Starts the standalone HotKey Worker server.

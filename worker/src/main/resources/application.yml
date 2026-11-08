@@ -1,6 +1,6 @@
 spring:
   application:
-    name: hotkey-worker
+    name: zeta-worker
 
   rabbitmq:
     host: localhost
@@ -9,10 +9,33 @@ spring:
     password: guest
     virtual-host: /
 
-  data:
-    redis:
-      host: localhost
-      port: 6379
+server:
+  # Management-only port: the Worker serves no business traffic.
+  port: 8080
+
+management:
+  endpoints:
+    web:
+      exposure:
+        # The Worker serves health only. The detection diagnostic endpoint
+        # (/actuator/hotkey-worker) is opt-in: add `hotkeyworker` to this include
+        # and map `hotkeyworker: hotkey-worker` when an operator explicitly needs
+        # the read-only key view. WorkerApplication excludes the App-only actuator
+        # auto-configuration, and the empty /actuator/info stays unexposed.
+        # Endpoint ids are alphanumeric (Boot 3.5).
+        include: health
+  endpoint:
+    health:
+      # Liveness excludes RabbitMQ: a broker outage must not restart a healthy
+      # Worker. Readiness includes it, so an instance that cannot consume
+      # reports is taken out of service without being killed.
+      probes:
+        enabled: true
+      group:
+        liveness:
+          include: livenessState,ping
+        readiness:
+          include: readinessState,rabbit
 
 zeta:
   report:
@@ -20,9 +43,14 @@ zeta:
   worker:
     enabled: true
 
-    threshold:
-      hot-threshold: -1
-      hot-threshold-ratio: 0.01
+    # The default rule for keys nothing else matches: required in full.
+    detection:
+      defaults:
+        hot-qps: 1000
+        cool:
+          strategy: COOL_FOR_LOW_QPS
+          cool-qps: 100
+          low-qps-for: 30s
 
 logging:
   level:

@@ -7,9 +7,21 @@
       "defaultValue": false
     },
     {
+      "name": "zeta.worker.max-tracked-keys",
+      "type": "java.lang.Long",
+      "description": "Upper bound on distinct keys holding a sliding-window entry; a brand-new key at the cap first reclaims an idle window. A key already holding a HOT seat may exceed the cap when its window is re-created. 0 disables the cap.",
+      "defaultValue": 1000000
+    },
+    {
+      "name": "zeta.worker.epoch-file",
+      "type": "java.lang.String",
+      "description": "File used to persist and increment the Worker epoch across restarts. When empty, ${java.io.tmpdir}/zeta-epoch-<workerId> is used, with filesystem-significant characters in the id replaced by '_'.",
+      "defaultValue": ""
+    },
+    {
       "name": "zeta.app-name",
       "type": "java.lang.String",
-      "description": "Logical application name (tenant discriminator) for queue routing. Shared with the App side (zeta.app-name) — a single key both ends bind, so report bindings and decision headers always agree.",
+      "description": "Logical application name (tenant discriminator) for queue routing. Shared with the App side (zeta.app-name) so report bindings and decision headers always agree.",
       "defaultValue": "default"
     },
     {
@@ -21,31 +33,31 @@
     {
       "name": "zeta.worker.messaging.broadcast-exchange",
       "type": "java.lang.String",
-      "description": "Fanout exchange name for broadcasting HOT/COOL decisions.",
+      "description": "Direct exchange name for Worker-to-app HOT/COOL decisions.",
       "defaultValue": "zeta.send.exchange"
     },
     {
       "name": "zeta.worker.messaging.heartbeat-exchange",
       "type": "java.lang.String",
-      "description": "Topic exchange name for epoch-driven structured worker heartbeats.",
+      "description": "Topic exchange name for Worker heartbeats.",
       "defaultValue": "zeta.heartbeat.exchange"
     },
     {
       "name": "zeta.worker.report-consumer.concurrent-consumers",
       "type": "java.lang.Integer",
-      "description": "Number of concurrent consumers for the report queue. Minimum 1.",
+      "description": "Consumer threads on the report queue.",
       "defaultValue": 8
     },
     {
       "name": "zeta.worker.report-consumer.prefetch-count",
       "type": "java.lang.Integer",
-      "description": "Prefetch count per consumer; balances throughput vs memory pressure.",
+      "description": "Unacknowledged messages allowed per report consumer.",
       "defaultValue": 50
     },
     {
       "name": "zeta.worker.report-consumer.staleness-threshold-ms",
       "type": "java.lang.Long",
-      "description": "Optional consumer-side staleness filter (ms); 0 disables it — staleness is then bounded by the queue's x-message-ttl instead of a cross-host wall-clock comparison. When enabled, only a positive age (now - timestamp) beyond the threshold drops a report; a negative age (reporter clock ahead) always passes.",
+      "description": "Optional consumer-side staleness filter in milliseconds; 0 disables it and leaves staleness to the queue's x-message-ttl.",
       "defaultValue": 0
     },
     {
@@ -57,182 +69,186 @@
     {
       "name": "zeta.worker.report-queue.message-ttl-ms",
       "type": "java.lang.Long",
-      "description": "Per-message TTL (ms). Reports sitting unconsumed longer than this are discarded by the broker.",
-      "defaultValue": 60000
-    },
-    {
-      "name": "zeta.worker.sliding-window.duration-ms",
-      "type": "java.lang.Long",
-      "description": "Sliding window duration in milliseconds for QPS tracking.",
-      "defaultValue": 1000
-    },
-    {
-      "name": "zeta.worker.sliding-window.slices",
-      "type": "java.lang.Integer",
-      "description": "Number of time slices within one sliding window. Minimum 1.",
-      "defaultValue": 10
-    },
-    {
-      "name": "zeta.worker.threshold.hot-threshold",
-      "type": "java.lang.Long",
-      "description": "Absolute hot-key threshold; ≤0 disables absolute threshold (uses ratio-based).",
-      "defaultValue": 1000
-    },
-    {
-      "name": "zeta.worker.threshold.hot-threshold-ratio",
-      "type": "java.lang.Double",
-      "description": "Hot-key threshold as fraction of estimated global QPS (1%).",
-      "defaultValue": 0.01
-    },
-    {
-      "name": "zeta.worker.state-machine.sm-duration-ms",
-      "type": "java.lang.Long",
-      "description": "State-machine base window duration in milliseconds. Each slice = sm-duration-ms / sm-slices.",
-      "defaultValue": 500
-    },
-    {
-      "name": "zeta.worker.state-machine.sm-slices",
-      "type": "java.lang.Integer",
-      "description": "Number of slices within the state-machine window. Minimum 1.",
-      "defaultValue": 10
-    },
-    {
-      "name": "zeta.worker.state-machine.confirm-duration-ms",
-      "type": "java.lang.Long",
-      "description": "Total duration in milliseconds for HOT confirmation (confirmCount = ceil(confirmDurationMs / sliceMs)).",
-      "defaultValue": 50
-    },
-    {
-      "name": "zeta.worker.state-machine.cool-duration-ms",
-      "type": "java.lang.Long",
-      "description": "Duration in milliseconds a key must stay below threshold to be considered COLD.",
-      "defaultValue": 600000
-    },
-    {
-      "name": "zeta.worker.state-machine.pre-cool-grace-ms",
-      "type": "java.lang.Long",
-      "description": "Grace period in milliseconds at end of cool-down for silent revival.",
-      "defaultValue": 60000
-    },
-    {
-      "name": "zeta.worker.state-machine.evict-interval-ms",
-      "type": "java.lang.Long",
-      "description": "Staleness threshold (ms): a key is evicted after this many ms without any report. Only the correctness bound — the scan cadence is evict-scan-interval-ms (ADR-0060). Default = 2 × coolDurationMs = 20 minutes.",
-      "defaultValue": 1200000
-    },
-    {
-      "name": "zeta.worker.state-machine.evict-scan-interval-ms",
-      "type": "java.lang.Long",
-      "description": "Interval (ms) between periodic eviction scans over the detector, state machine, and evaluator maps. Housekeeping cadence knob, deliberately separate from the staleness threshold evict-interval-ms (ADR-0060). Minimum 1.",
-      "defaultValue": 60000
-    },
-    {
-      "name": "zeta.worker.state-machine.ready-grace-ms",
-      "type": "java.lang.Long",
-      "description": "Grace period (ms) before the Worker reports readyToServe without tracked keys. Only gates ring admission: after this long the Worker joins the hash ring even with zero tracked keys, breaking the cold-start chicken-and-egg. Early dynamic-threshold and COOL suppression stay on the separate learning-period-ms clock. Minimum 0.",
-      "defaultValue": 3000
-    },
-    {
-      "name": "zeta.worker.state-machine.rebroadcast-interval-ms",
-      "type": "java.lang.Long",
-      "description": "Minimum interval (ms) between periodic HOT rebroadcasts. Recovers lost broadcasts (fire-and-forget). Default 10 s; minimum 1 s.",
-      "defaultValue": 10000
-    },
-    {
-      "name": "zeta.worker.state-machine.cool-rebroadcast-times",
-      "type": "java.lang.Integer",
-      "description": "Bounded COOL re-emission count (ADR-0087): repeats per COOL broadcast, spaced one rebroadcast-interval-ms apart with the same decision version. 0 restores single-send. Range [0, 5].",
-      "defaultValue": 2
-    },
-    {
-      "name": "zeta.worker.global-qps-dynamic-threshold.qps-change-tolerance",
-      "type": "java.lang.Double",
-      "description": "QPS change tolerance before threshold update (±50%).",
-      "defaultValue": 0.5
-    },
-    {
-      "name": "zeta.worker.global-qps-dynamic-threshold.learning-period-ms",
-      "type": "java.lang.Long",
-      "description": "Learning period in milliseconds for baseline QPS estimation.",
-      "defaultValue": 30000
-    },
-    {
-      "name": "zeta.worker.global-qps-dynamic-threshold.hot-threshold-ratio",
-      "type": "java.lang.Double",
-      "description": "Dynamic hot threshold ratio relative to baseline QPS.",
-      "defaultValue": 0.01
-    },
-    {
-      "name": "zeta.worker.global-qps-dynamic-threshold.recalculate-interval-ms",
-      "type": "java.lang.Long",
-      "description": "Interval in milliseconds between dynamic threshold recalculations.",
+      "description": "Per-message TTL inside the report queue.",
       "defaultValue": 60000
     },
     {
       "name": "zeta.worker.heartbeat.ping-interval-ms",
       "type": "java.lang.Integer",
-      "description": "Interval in milliseconds between structured heartbeat sends.",
+      "description": "Interval between Worker heartbeats.",
       "defaultValue": 1000
     },
     {
-      "name": "zeta.worker.bayesian.prior-mean",
-      "type": "java.lang.Double",
-      "description": "Prior mean of log-frequency distribution (ln(10) — key with ~10 accesses per window is neutral).",
-      "defaultValue": 2.3026
+      "name": "zeta.worker.heartbeat.ready-grace-ms",
+      "type": "java.lang.Long",
+      "description": "Grace period before the Worker reports ready with an empty HOT set.",
+      "defaultValue": 3000
     },
     {
-      "name": "zeta.worker.bayesian.prior-std",
-      "type": "java.lang.Double",
-      "description": "Prior standard deviation; larger = more data-driven, smaller = anchored to prior.",
-      "defaultValue": 2.0
+      "name": "zeta.worker.broadcast.hot-queue-capacity",
+      "type": "java.lang.Integer",
+      "description": "Pending HOT decisions before drop-on-saturation. A HOT dropped at saturation, expiry, publish failure or shutdown undoes its promotion and returns the seat.",
+      "defaultValue": 10000
     },
     {
-      "name": "zeta.worker.bayesian.likelihood-std",
-      "type": "java.lang.Double",
-      "description": "Base likelihood standard deviation; adjusted dynamically by CV for traffic-adaptive confidence.",
-      "defaultValue": 0.8
+      "name": "zeta.worker.broadcast.cool-queue-capacity",
+      "type": "java.lang.Integer",
+      "description": "Pending COOL decisions before drop-on-saturation. A burst buffer, not a per-seat guarantee: a dropped COOL converges through the App's hard TTL.",
+      "defaultValue": 10000
     },
     {
-      "name": "zeta.worker.fast-lane.enabled",
+      "name": "zeta.worker.broadcast.cool-burst",
+      "type": "java.lang.Integer",
+      "description": "Most COOL decisions sent in one drain round before yielding to HOT.",
+      "defaultValue": 32
+    },
+    {
+      "name": "zeta.worker.broadcast.hot-burst",
+      "type": "java.lang.Integer",
+      "description": "Most HOT decisions sent in one drain round; the floor that keeps COOL from starving HOT.",
+      "defaultValue": 8
+    },
+    {
+      "name": "zeta.worker.broadcast.max-decision-age-ms",
+      "type": "java.lang.Long",
+      "description": "Maximum time a decision may wait in its queue before the drain drops it as expired (1ms-1h). An expired HOT returns its seat. This is a latency bound; a cold accepted record is retained for twice this value and a hot record until a COOL is accepted, never size-evicted.",
+      "defaultValue": 30000
+    },
+    {
+      "name": "zeta.worker.detection.enabled",
       "type": "java.lang.Boolean",
-      "description": "Bypass Bayesian state machine; broadcast on sliding-window threshold only.",
-      "defaultValue": false
-    },
-    {
-      "name": "zeta.worker.fast-lane.rules[].key-pattern",
-      "type": "java.lang.String",
-      "description": "Key pattern for fast-lane rule matching.",
-      "defaultValue": ""
-    },
-    {
-      "name": "zeta.worker.fast-lane.rules[].threshold",
-      "type": "java.lang.Long",
-      "description": "Count threshold for fast-lane rule; matched keys exceeding this are promoted immediately.",
-      "defaultValue": 100
-    },
-    {
-      "name": "zeta.worker.fast-lane.gossip-interval-ms",
-      "type": "java.lang.Long",
-      "description": "Interval (ms) between periodic full-set rule gossip broadcasts to peer Workers.",
-      "defaultValue": 60000
-    },
-    {
-      "name": "zeta.worker.state-machine.cold-evict-interval-ms",
-      "type": "java.lang.Long",
-      "description": "Tiered staleness threshold (ms) for COLD-state keys: evicted early because their retained state is only meaningful while the key is still reported. CONFIRMED_HOT / PRE_COOLING keys keep evict-interval-ms (their eviction discharges the COOL broadcast obligation). A value >= evict-interval-ms disables the tiering.",
-      "defaultValue": 300000
-    },
-    {
-      "name": "zeta.worker.broadcast.buffer-enabled",
-      "type": "java.lang.Boolean",
-      "description": "Send HOT/COOL decisions from a dedicated bounded single-threaded executor (ADR-0061, ADR-0037 conventions) so a mass-heat event cannot stall report consumption behind serial AMQP publishes. false restores the legacy synchronous send on the AMQP consumer thread.",
+      "description": "When false the listener stays registered but every evaluation is skipped and counted. detection.defaults is not required in this mode.",
       "defaultValue": true
     },
     {
-      "name": "zeta.worker.broadcast.buffer-capacity",
+      "name": "zeta.worker.detection.window.duration",
+      "type": "java.time.Duration",
+      "description": "Configured window length. The effective length is alignedSlices * sliceMs, which can be shorter.",
+      "defaultValue": "1s"
+    },
+    {
+      "name": "zeta.worker.detection.window.slices",
       "type": "java.lang.Integer",
-      "description": "Capacity of the pending-decision queue; a decision arriving when full is dropped immediately with its state rolled back on the caller thread (lenient per ADR-0007/ADR-0024; the next evaluation re-emits it).",
+      "description": "Slice count; rounded up to a power of two.",
+      "defaultValue": 16
+    },
+    {
+      "name": "zeta.worker.detection.window.retention",
+      "type": "java.time.Duration",
+      "description": "Idle-window reclamation threshold. Memory only: an idle window sums to zero anyway.",
+      "defaultValue": "2m"
+    },
+    {
+      "name": "zeta.worker.detection.defaults.hot-qps",
+      "type": "java.lang.Integer",
+      "description": "HOT threshold for keys no rule matches. Required when detection is enabled."
+    },
+    {
+      "name": "zeta.worker.detection.defaults.cool.strategy",
+      "type": "io.github.hyshmily.zeta.worker.detection.rule.CoolStrategy",
+      "description": "COOL_FOR_LOW_QPS or COOL_FOR_EXPIRE. Required when detection is enabled."
+    },
+    {
+      "name": "zeta.worker.detection.defaults.cool.cool-qps",
+      "type": "java.lang.Integer",
+      "description": "COOL_FOR_LOW_QPS cool-band ceiling; must convert to a coolCount strictly below hotCount."
+    },
+    {
+      "name": "zeta.worker.detection.defaults.cool.low-qps-for",
+      "type": "java.time.Duration",
+      "description": "How long the key must stay below cool-qps before it cools; must be at least the window duration."
+    },
+    {
+      "name": "zeta.worker.detection.defaults.cool.cool-after",
+      "type": "java.time.Duration",
+      "description": "COOL_FOR_EXPIRE HOT lifetime; at least 1s. Setting it on a LOW_QPS rule is a startup failure."
+    },
+    {
+      "name": "zeta.worker.detection.rules",
+      "type": "java.util.List<io.github.hyshmily.zeta.worker.config.WorkerProperties$Rule>",
+      "description": "Ordered rules; each one must be complete (match + hot-qps + cool)."
+    },
+    {
+      "name": "zeta.worker.detection.rules[].id",
+      "type": "java.lang.String",
+      "description": "Stable rule id used in metrics tags; defaults to rule-<index>."
+    },
+    {
+      "name": "zeta.worker.detection.rules[].match.type",
+      "type": "io.github.hyshmily.zeta.worker.detection.rule.MatchType",
+      "description": "exact, prefix or regex. Effective exact rules are indexed by key and checked before the global promotion floor."
+    },
+    {
+      "name": "zeta.worker.detection.rules[].match.key",
+      "type": "java.lang.String",
+      "description": "Exact key, prefix, or regex source (whole-key match)."
+    },
+    {
+      "name": "zeta.worker.detection.rules[].priority",
+      "type": "java.lang.Integer",
+      "description": "Higher wins; the primary sort key, so a regex rule can outrank an exact one.",
+      "defaultValue": 0
+    },
+    {
+      "name": "zeta.worker.detection.rules[].hot-qps",
+      "type": "java.lang.Integer",
+      "description": "HOT threshold in QPS; converted against the effective window."
+    },
+    {
+      "name": "zeta.worker.detection.rules[].cool.strategy",
+      "type": "io.github.hyshmily.zeta.worker.detection.rule.CoolStrategy",
+      "description": "COOL_FOR_LOW_QPS or COOL_FOR_EXPIRE; required in full, nothing is inherited from defaults."
+    },
+    {
+      "name": "zeta.worker.detection.rules[].cool.cool-qps",
+      "type": "java.lang.Integer",
+      "description": "COOL_FOR_LOW_QPS cool-band ceiling; must convert to a coolCount strictly below hotCount."
+    },
+    {
+      "name": "zeta.worker.detection.rules[].cool.low-qps-for",
+      "type": "java.time.Duration",
+      "description": "How long the key must stay below cool-qps before it cools; must be at least the window duration."
+    },
+    {
+      "name": "zeta.worker.detection.rules[].cool.cool-after",
+      "type": "java.time.Duration",
+      "description": "COOL_FOR_EXPIRE HOT lifetime; at least 1s."
+    },
+    {
+      "name": "zeta.worker.detection.cooling.low-qps-check-interval",
+      "type": "java.time.Duration",
+      "description": "LOW_QPS re-check period. Between one slice and the configured window duration.",
+      "defaultValue": "1s"
+    },
+    {
+      "name": "zeta.worker.detection.cooling.sweep-interval",
+      "type": "java.time.Duration",
+      "description": "Period of the window-reclamation and timer-repair sweep.",
+      "defaultValue": "30s"
+    },
+    {
+      "name": "zeta.worker.detection.cooling.threads",
+      "type": "java.lang.Integer",
+      "description": "Striped cool-down wheels, one advancing thread each.",
+      "defaultValue": 2
+    },
+    {
+      "name": "zeta.worker.detection.limits.max-active-hot-keys",
+      "type": "java.lang.Integer",
+      "description": "HOT seats; new promotions are refused at the cap and existing keys are never evicted.",
       "defaultValue": 10000
+    },
+    {
+      "name": "zeta.worker.detection.limits.max-hot-broadcasts-per-second",
+      "type": "java.lang.Integer",
+      "description": "HOT send budget enforced on the drain thread.",
+      "defaultValue": 500
+    },
+    {
+      "name": "zeta.worker.detection.limits.max-cool-broadcasts-per-second",
+      "type": "java.lang.Integer",
+      "description": "COOL send budget enforced on the drain thread.",
+      "defaultValue": 500
     }
   ]
 }

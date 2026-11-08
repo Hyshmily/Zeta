@@ -16,10 +16,12 @@
 package io.github.hyshmily.zeta.worker.config;
 
 import io.github.hyshmily.zeta.constants.ZetaConstants;
-import io.github.hyshmily.zeta.worker.confidence.BayesianConfidenceEstimator;
+import io.github.hyshmily.zeta.worker.detection.rule.CoolStrategy;
+import io.github.hyshmily.zeta.worker.detection.rule.MatchType;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import lombok.Data;
@@ -31,307 +33,39 @@ import org.springframework.validation.annotation.Validated;
  *
  * <p>Prefix: {@code zeta.worker}.
  *
- * <p>Groups cover routing, AMQP exchange names, sliding-window parameters,
- * threshold settings, state-machine timings, and dynamic threshold adaptation.
+ * <p>The detection half is one {@code detection} block: one shared window, one required default
+ * rule, an ordered rule list, the cool-down scheduler's cadences, and the per-Worker capacity and
+ * broadcast-rate limits. Thresholds are expressed in <b>QPS</b> and converted to window counts
+ * once at startup, so changing the window changes every rule's meaning in one place.
  *
- * Default constructor.
+ * <p>Fields that participate in "this must be configured" are boxed ({@link Integer},
+ * {@link Duration}) rather than primitives with defaults: a default value cannot be told apart
+ * from an omitted one, so the startup validator could not enforce completeness.
  */
 @Data
 @Validated
 @ConfigurationProperties(prefix = "zeta.worker")
 public class WorkerProperties {
 
-  /**
-   * Dedicated send buffer for HOT/COOL decision broadcasts (ADR-0061). Default constructor.
-   *
-   * <p>When enabled, {@code ReportConsumer} hands decision sends to a bounded
-   * single-threaded executor instead of publishing synchronously on the AMQP
-   * consumer thread, so a mass-heat event (thousands of keys transitioning in
-   * one batch) cannot stall report consumption behind serial AMQP publishes.
-   * Same ADR-0037 conventions as the App-side broadcast flush: drop-on-saturation
-   * and one aggregated WARN per 10s window.
-   */
-  @Data
-  public static class Broadcast {
-
-    /**
-     * Whether decision broadcasts are sent from the dedicated buffered
-     * executor. {@code false} restores the legacy synchronous send on the
-     * AMQP consumer thread.
-     */
-    private boolean bufferEnabled = true;
-
-    /**
-     * Capacity of the pending-decision queue. A decision arriving when the
-     * queue is full is dropped immediately and its state rolled back on the
-     * caller thread (the next evaluation re-emits it) — a lost decision
-     * fails lenient per ADR-0007/ADR-0024.
-     */
-    @Min(1)
-    private int bufferCapacity = 10_000;
-  }
-
-  /** AMQP exchange names for reportToWorker and send messages. Default constructor. */
-  @Data
-  public static class Messaging {
-
-    private String reportExchange = ZetaConstants.Exchange.REPORT;
-    private String broadcastExchange = ZetaConstants.Exchange.BROADCAST;
-    private String heartbeatExchange = ZetaConstants.Exchange.HEARTBEAT;
-  }
-
-  /** Container tuning for the reportToWorker-message RabbitMQ listener. Default constructor. */
-  @Data
-  public static class ReportConsumer {
-
-    @Min(1)
-    private int concurrentConsumers = 8;
-
-    private int prefetchCount = 50;
-
-    /**
-     * Optional consumer-side staleness filter (ms). {@code 0} disables the
-     * filter — staleness is then bounded by the queue's {@code x-message-ttl}
-     * ({@link ReportQueue#messageTtlMs}) instead, avoiding a cross-host
-     * wall-clock comparison between App and Worker (an App clock lag beyond
-     * the threshold would otherwise silently blind that instance). When
-     * enabled, only a positive age ({@code now - timestamp}) beyond the
-     * threshold drops a report; a negative age (reporter clock ahead) always
-     * passes.
-     */
-    @Min(0)
-    private long stalenessThresholdMs = 0L;
-  }
-
-  /**
-   * Broker-side backlog guardrails for the per-shard report queue.
-   *
-   * <p>The queue is durable; without a length cap a stalled consumer (GC storm,
-   * lock contention) lets reports pile up unboundedly and pressures broker memory.
-   * Lost reports are tolerated by design (ADR-0007), so the queue drops the
-   * <em>oldest</em> messages first, keeping the freshest statistical signal.
-   *
-   * <p><b>Deployment note:</b> {@code x-*} queue arguments cannot be altered on an
-   * existing queue. Upgrading from a version without these arguments requires
-   * deleting the old queue first (drain traffic → delete queue → start new version),
-   * otherwise RabbitAdmin re-declaration fails with PRECONDITION_FAILED.
-   */
-  @Data
-  public static class ReportQueue {
-
-    /** Maximum number of messages buffered in the report queue before drop-head applies. */
-    @Min(1)
-    private long maxLength = 10_000;
-
-    /**
-     * Per-message TTL (ms) inside the report queue. Reports sitting unconsumed
-     * for this long are discarded by the broker — they are stale anyway (the
-     * consumer-side staleness filter is disabled by default, see
-     * {@link io.github.hyshmily.zeta.worker.ingest.ReportConsumer#stalenessThresholdMs}).
-     */
-    @Min(1000)
-    private long messageTtlMs = 60_000;
-  }
-
-  /** Sliding-window parameters for local qps tracking. Default constructor. */
-  @Data
-  public static class SlidingWindow {
-
-    private long durationMs = 1000;
-
-    @Min(1)
-    private int slices = 10;
-  }
-
-  /** Absolute and ratio-based thresholds for HOT key classification. Default constructor. */
-  @Data
-  public static class Threshold {
-
-    private long hotThreshold = 1000;
-    private double hotThresholdRatio = 0.01;
-  }
-
-  /** State-machine timing for HOT/COOL decision transitions. Default constructor. */
-  @Data
-  public static class StateMachine {
-
-    /**
-     * State-machine base window duration (ms). Each slice is
-     * {@code smDurationMs / smSlices}; the confirm/cool/pre-cool window counts
-     * derive from this slice size, so {@code 0} would make every window count
-     * degenerate ({@code ceil(x/0.0) = Integer.MAX_VALUE}).
-     */
-    @Min(1)
-    private long smDurationMs = 500;
-
-    @Min(1)
-    private int smSlices = 10;
-
-    /** Total duration (ms) for HOT confirmation. */
-    @Min(1)
-    private long confirmDurationMs = 50;
-
-    /** Duration (ms) a key must stay below threshold to be considered COLD. */
-    @Min(1)
-    private long coolDurationMs = 600_000;
-
-    /** Grace period (ms) at the end of cool-down during which a key can silently revive. */
-    @Min(1)
-    private long preCoolGraceMs = 60_000;
-
-    /**
-     * Staleness threshold (ms): a key is evicted after this many milliseconds
-     * without any report. Default = 2 × coolDurationMs = 20 minutes.
-     *
-     * <p>This property is <b>only</b> the staleness threshold — the cadence of
-     * the periodic eviction scan is {@link #evictScanIntervalMs} (ADR-0060).
-     */
-    private long evictIntervalMs = 1_200_000;
-
-    /**
-     * Tiered staleness threshold (ms) for COLD-state keys: a COLD key that has
-     * not been reported for this long is evicted on the periodic scan, while
-     * CONFIRMED_HOT / PRE_COOLING keys keep the full {@link #evictIntervalMs}
-     * retention (their eviction is what discharges the COOL broadcast
-     * obligation). A COLD key's retained state only matters while it is still
-     * being reported — a resumed key re-evaluates from scratch exactly as it
-     * would after the full-threshold eviction — so the short tier bounds the
-     * state map's memory under high key cardinality without touching any
-     * broadcast semantics. Default 300_000 (5 min); a value
-     * {@code >= evict-interval-ms} disables the tiering.
-     */
-    @Min(1)
-    private long coldEvictIntervalMs = 300_000;
-
-    /**
-     * Interval (ms) between periodic eviction SCANs over the detector, state
-     * machine, and evaluator maps (ADR-0060). Deliberately a separate knob from
-     * {@link #evictIntervalMs} (the staleness threshold): the scan cadence is a
-     * housekeeping-cost decision, the threshold a correctness decision (it must
-     * stay &gt;= 2 × coolDurationMs so cooling keys are not evicted prematurely).
-     * Default 60_000 (1 min, bounded by min(coldEvictIntervalMs / 2, 60s)) so a
-     * stale key is collected promptly after crossing the threshold without a
-     * 20-minute blind window.
-     */
-    @Min(1)
-    private long evictScanIntervalMs = 60_000;
-
-    /**
-     * Minimum interval (ms) between periodic HOT rebroadcasts for a key that
-     * stays in {@code CONFIRMED_HOT}. Recovers lost HOT broadcasts (ADR-0007
-     * fire-and-forget) and caps fast-lane steady-state emission to one HOT
-     * decision per interval (ADR-0024). Default 10 s; range [1s, 60s].
-     *
-     * <p>Bounds are correctness constraints (ADR-0068 addendum): below 1s the
-     * rebroadcast degenerates into a per-report broadcast storm for every
-     * continuously-hot key; above 60s a lost HOT decision — the whole pipeline
-     * is fire-and-forget — can leave new instances un-prewarmed for minutes.
-     * Enforced at binding time via {@code @Min}/{@code @Max}.
-     */
-    @Min(1000)
-    @Max(60_000)
-    private long rebroadcastIntervalMs = 10_000;
-
-    /**
-     * Bounded COOL re-emission count (ADR-0087): how many times a COOL decision
-     * is re-sent after its initial broadcast, spaced one
-     * {@link #rebroadcastIntervalMs} apart with the <em>same</em> decision
-     * version (idempotent retry — receivers skip it when already applied or
-     * superseded, apply it when the first send was lost).
-     *
-     * <p>A lost COOL is the only decision loss without self-healing (HOT has
-     * the periodic rebroadcast, ADR-0024): the entry stays HOT until its hard
-     * TTL. Two repeats cut a single-loss window from ~1h to ~10-20s at the
-     * cost of two extra sends per cool episode — cooling is edge-triggered
-     * (once per hot episode), so this cannot storm. {@code 0} restores the
-     * legacy single-send behaviour. Range [0, 5].
-     */
-    @Min(0)
-    @Max(5)
-    private int coolRebroadcastTimes = 2;
-  }
-
-  /** Dynamic threshold adaptation based on global qps changes. Default constructor. */
-  @Data
-  public static class GlobalQpsDynamicThreshold {
-
-    private double qpsChangeTolerance = 0.5;
-    private long learningPeriodMs = 30_000;
-    private double hotThresholdRatio = 0.01;
-    private long recalculateIntervalMs = 60_000;
-  }
-
-  /** Heartbeat (ping) interval configuration for worker-to-worker health signalling and config sync. Default constructor. */
-  @Data
-  public static class Heartbeat {
-
-    private int pingIntervalMs = 1_000;
-
-    /**
-     * Grace period (ms) before the Worker reports ready without tracked keys.
-     *
-     * <p>Only gates the ring-admission ({@code readyToServe}) signal: after this
-     * long the Worker joins the hash ring even with no tracked keys. Early
-     * dynamic-threshold and COOL suppression stay on the separate
-     * {@code global-qps-dynamic-threshold.learning-period-ms} clock, so traffic
-     * is received (and HOT is reported for warmup) while cooling stays held.
-     */
-    @Min(0)
-    private long readyGraceMs = 3_000;
-  }
-
-  /** Bayesian confidence estimation for hot-key decisions. Default constructor. */
-  @Data
-  public static class Bayesian {
-
-    private double priorMean = BayesianConfidenceEstimator.PRIOR_MEAN;
-    private double priorStd = 2.0;
-    private double likelihoodStd = 0.8;
-
-    /**
-     * Posterior probability at or above which a decision is HIGH confidence
-     * (gates the expensive HOT broadcast); must be in (0, 1) and strictly
-     * above {@link #mediumConfidenceThreshold}. The tuning protocol behind
-     * the default is documented on
-     * {@link io.github.hyshmily.zeta.worker.confidence.ProbabilityResult}.
-     */
-    private double highConfidenceThreshold = 0.95;
-
-    /**
-     * Posterior probability at or above which a decision is MEDIUM confidence
-     * (gates CANDIDATE_HOT tracking); must be in (0, 1). The tuning protocol
-     * behind the default is documented on
-     * {@link io.github.hyshmily.zeta.worker.confidence.ProbabilityResult}.
-     */
-    private double mediumConfidenceThreshold = 0.76;
-  }
-
-  /** Fast-lane rules — bypass Bayesian state machine, broadcast on sliding-window threshold only. */
-  @Data
-  public static class FastLane {
-
-    private boolean enabled = false;
-
-    private List<FastLaneRule> rules = new ArrayList<>();
-
-    /**
-     * Interval (ms) between periodic full-set rule gossip broadcasts to peer
-     * Workers (ADR-0025). A fresh or partitioned Worker converges within one
-     * interval; local mutations additionally broadcast immediately. Default 60 s.
-     */
-    @Min(1000)
-    private long gossipIntervalMs = 60_000;
-  }
-
-  /** A single fast-lane rule: key pattern + threshold. */
-  @Data
-  public static class FastLaneRule {
-
-    private String keyPattern = "";
-    private long threshold = 100;
-  }
-
+  /** Whether this process is a Worker. */
   private boolean enabled = false;
+
+  /**
+   * Soft admission cap on the number of <b>distinct keys</b> the window table tracks at once. A
+   * key already tracked keeps counting; a brand-new key at the cap first reclaims an idle window
+   * and is rejected only when a bounded sample finds none. A hard headroom above the cap bounds
+   * the overshoot from contended admissions. {@code 0} disables the cap.
+   */
+  @Min(0)
+  private long maxTrackedKeys = 1_000_000L;
+
+  /**
+   * Epoch file for restart detection. Must survive restarts: the Worker increments the stored
+   * value on every start, and Apps use the epoch to accept decisions from a newer incarnation.
+   * Empty means {@code ${java.io.tmpdir}/zeta-epoch-<workerId>} (with filesystem-significant
+   * characters in the id replaced by {@code _}), which a container restart wipes.
+   */
+  private String epochFile = "";
 
   @Valid
   private Messaging messaging = new Messaging();
@@ -346,61 +80,241 @@ public class WorkerProperties {
   private ReportQueue reportQueue = new ReportQueue();
 
   @Valid
-  private SlidingWindow slidingWindow = new SlidingWindow();
-
-  @Valid
-  private Threshold threshold = new Threshold();
-
-  @Valid
-  private StateMachine stateMachine = new StateMachine();
-
-  @Valid
-  private GlobalQpsDynamicThreshold globalQpsDynamicThreshold = new GlobalQpsDynamicThreshold();
-
-  @Valid
   private Heartbeat heartbeat = new Heartbeat();
 
   @Valid
-  private Bayesian bayesian = new Bayesian();
+  private Detection detection = new Detection();
 
-  @Valid
-  private FastLane fastLane = new FastLane();
+  /** AMQP exchange names for reports, decisions and heartbeats. */
+  @Data
+  public static class Messaging {
 
-  /**
-   * Number of state-machine time slices that fit within the CONFIRM duration.
-   * Uses {@code stateMachine.smDurationMs / stateMachine.smSlices} as the slice size,
-   * independent of the sliding-window detector's own slice timing.
-   *
-   * @return window count for the confirmation phase
-   */
-  public int getConfirmWindows() {
-    return toSmWindows(stateMachine.getConfirmDurationMs());
+    private String reportExchange = ZetaConstants.Exchange.REPORT;
+    private String broadcastExchange = ZetaConstants.Exchange.BROADCAST;
+    private String heartbeatExchange = ZetaConstants.Exchange.HEARTBEAT;
   }
 
   /**
-   * Number of sliding-window slices that fit within the COOL duration.
-   *
-   * @return window count for the cool phase
+   * Decision delivery: two bounded queues drained by one thread under token buckets
+   * (design decisions: decision delivery).
    */
-  public int getCoolWindows() {
-    return toSmWindows(stateMachine.getCoolDurationMs());
+  @Data
+  public static class Broadcast {
+
+    /** Pending HOT decisions. Full means the HOT is dropped and its promotion rolled back. */
+    @Min(1)
+    private int hotQueueCapacity = 10_000;
+
+    /**
+     * Pending COOL decisions before drop-on-saturation. A COOL is emitted after its seat is
+     * released and the same key can cool again before the first COOL drains, so this is a burst
+     * buffer, not a per-seat guarantee; a dropped COOL converges through the App's hard TTL.
+     */
+    @Min(1)
+    private int coolQueueCapacity = 10_000;
+
+    /** Most COOL decisions sent in one drain round, before yielding to HOT. */
+    @Min(1)
+    private int coolBurst = 32;
+
+    /** Most HOT decisions sent in one drain round; COOL is capped first, so every round reaches HOT too. */
+    @Min(1)
+    private int hotBurst = 8;
+
+    /**
+     * Maximum time a decision may wait in its queue before the drain drops it as expired. The
+     * broadcaster retains a cold accepted record for twice this value and a hot record until a COOL
+     * is accepted, so the decision age is the only ordering bound an operator has to reason about
+     * for cold keys.
+     */
+    @Min(1)
+    @Max(3_600_000L)
+    private long maxDecisionAgeMs = 30_000L;
+  }
+
+  /** Container tuning for the report listener. */
+  @Data
+  public static class ReportConsumer {
+
+    @Min(1)
+    private int concurrentConsumers = 8;
+
+    @Min(0)
+    private int prefetchCount = 50;
+
+    /**
+     * Optional consumer-side staleness filter (ms). {@code 0} disables it — staleness is then
+     * bounded by the queue's {@code x-message-ttl}, avoiding a cross-host wall-clock comparison
+     * that would silently blind an App whose clock lags.
+     */
+    @Min(0)
+    private long stalenessThresholdMs = 0L;
   }
 
   /**
-   * Number of sliding-window slices that fit within the pre-cool grace period.
+   * Broker-side guardrails for the per-shard report queue.
    *
-   * @return window count for the pre-cool grace phase
+   * <p><b>Deployment note:</b> {@code x-*} queue arguments cannot be altered on an existing
+   * queue; changing these requires deleting the old queue first.
    */
-  public int getPreCoolGraceWindows() {
-    return toSmWindows(stateMachine.getPreCoolGraceMs());
+  @Data
+  public static class ReportQueue {
+
+    @Min(1)
+    private long maxLength = 10_000;
+
+    @Min(1000)
+    private long messageTtlMs = 60_000;
+  }
+
+  /** Worker-to-Worker heartbeat. */
+  @Data
+  public static class Heartbeat {
+
+    @Min(100)
+    private int pingIntervalMs = 1_000;
+
+    /**
+     * Grace period before the Worker reports ready with an empty HOT registry. Only gates the
+     * ring-admission signal.
+     */
+    @Min(0)
+    private long readyGraceMs = 3_000;
+  }
+
+  /** The detection plane. */
+  @Data
+  public static class Detection {
+
+    /**
+     * {@code false} keeps the listener but skips every evaluation, counting the dropped reports.
+     * Removing the listener instead would let the report queue back up.
+     */
+    private boolean enabled = true;
+
+    @Valid
+    private Window window = new Window();
+
+    /** Rule used for keys nothing else matches. Required in full when detection is enabled. */
+    @Valid
+    private Defaults defaults = new Defaults();
+
+    /** Rules in configuration order; precedence is computed at startup. */
+    @Valid
+    private List<Rule> rules = new ArrayList<>();
+
+    @Valid
+    private Cooling cooling = new Cooling();
+
+    @Valid
+    private Limits limits = new Limits();
+  }
+
+  /** The one sliding window every rule shares. */
+  @Data
+  public static class Window {
+
+    /** Configured window length; the effective length is {@code alignedSlices * sliceMs}. */
+    private Duration duration = Duration.ofSeconds(1);
+
+    /** Slice count; rounded up to a power of two. */
+    @Min(1)
+    private int slices = 16;
+
+    /** Idle-window reclamation threshold. Memory only: an idle window sums to zero anyway. */
+    private Duration retention = Duration.ofMinutes(2);
+  }
+
+  /** The mandatory fallback rule. */
+  @Data
+  public static class Defaults {
+
+    private Integer hotQps;
+
+    @Valid
+    private Cool cool;
+  }
+
+  /** One rule. Every rule is complete; nothing is inherited from {@link Defaults}. */
+  @Data
+  public static class Rule {
+
+    private String id;
+
+    @Valid
+    private Match match;
+
+    /** Higher wins; the only knob an operator needs to override type specificity. */
+    private int priority;
+
+    private Integer hotQps;
+
+    @Valid
+    private Cool cool;
+  }
+
+  /** How a rule selects keys. */
+  @Data
+  public static class Match {
+
+    private MatchType type;
+
+    private String key;
   }
 
   /**
-   * Number of state-machine slices that fit within the given duration, using
-   * {@code stateMachine.smDurationMs / stateMachine.smSlices} as the slice size.
+   * Cool-down parameters.
+   *
+   * <p>The fields used depend on {@link #strategy}: {@code COOL_FOR_LOW_QPS} uses
+   * {@code coolQps} + {@code lowQpsFor}, {@code COOL_FOR_EXPIRE} uses {@code coolAfter}. Setting
+   * a field the selected strategy does not read is a startup failure, not a silent no-op.
    */
-  private int toSmWindows(long durationMs) {
-    double sliceMs = (double) stateMachine.getSmDurationMs() / stateMachine.getSmSlices();
-    return (int) Math.ceil(durationMs / sliceMs);
+  @Data
+  public static class Cool {
+
+    private CoolStrategy strategy;
+
+    private Integer coolQps;
+
+    private Duration lowQpsFor;
+
+    private Duration coolAfter;
+  }
+
+  /** Cool-down scheduler cadences. */
+  @Data
+  public static class Cooling {
+
+    /**
+     * LOW_QPS re-check period. Upper bound is the window length (a slower re-check cannot see the
+     * window it is judging); lower bound is one slice — it sets the per-key check rate
+     * {@code max-active-hot-keys / interval}.
+     */
+    private Duration lowQpsCheckInterval = Duration.ofSeconds(1);
+
+    /** Period of the timer-repair scan; a lost check is late by at most this interval plus the repair grace. */
+    private Duration sweepInterval = Duration.ofSeconds(30);
+
+    /**
+     * Number of striped cool-down wheels, one advancing thread each. The wheel's links and clock
+     * are single-owner, so a key space split across wheels is what parallelizes the checks.
+     */
+    @Min(1)
+    private int threads = 2;
+  }
+
+  /** Per-Worker capacity and broadcast budget. */
+  @Data
+  public static class Limits {
+
+    /** HOT seats. A promotion takes one before the entry becomes visible; a cool-down returns it after the removal. */
+    @Min(1)
+    private int maxActiveHotKeys = 10_000;
+
+    @Min(1)
+    private int maxHotBroadcastsPerSecond = 500;
+
+    @Min(1)
+    private int maxCoolBroadcastsPerSecond = 500;
   }
 }

@@ -15,50 +15,27 @@
  */
 package io.github.hyshmily.zeta.worker.dispatch;
 
-import static io.github.hyshmily.zeta.constants.ZetaConstants.Amqp.*;
-import static io.github.hyshmily.zeta.constants.ZetaConstants.Exchange.HEARTBEAT;
+import static io.github.hyshmily.zeta.constants.ZetaConstants.Amqp.HEADER_APP_NAME;
+import static io.github.hyshmily.zeta.constants.ZetaConstants.Amqp.HEADER_HEARTBEAT_EPOCH;
+import static io.github.hyshmily.zeta.constants.ZetaConstants.Amqp.HEADER_HEARTBEAT_READY;
 import static io.github.hyshmily.zeta.constants.ZetaConstants.Routing.KEY_HEARTBEAT;
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatCode;
-import static org.mockito.ArgumentMatchers.*;
-import static org.mockito.Mockito.*;
-import static org.mockito.Mockito.anyLong;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.verify;
 
-import io.github.hyshmily.zeta.detection.ZetaBayesianSM;
-import io.github.hyshmily.zeta.sync.worker.WorkerHeartbeatMessage;
-import io.github.hyshmily.zeta.util.executor.SafeScheduledExecutorService;
-import io.github.hyshmily.zeta.util.id.SnowflakeIdGenerator;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.ScheduledFuture;
-import java.util.concurrent.TimeUnit;
-import io.github.hyshmily.zeta.sync.worker.SmConfigSnapshot;
-import java.util.concurrent.atomic.AtomicReference;
-import org.junit.jupiter.api.BeforeEach;
+import io.github.hyshmily.zeta.worker.detection.lifecycle.HotKeyRegistry;
+import io.github.hyshmily.zeta.worker.dispatch.connection.WorkerHeartbeatProducer;
+import io.github.hyshmily.zeta.worker.dispatch.connection.WorkerIdentity;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
-import org.junit.jupiter.api.io.TempDir;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Captor;
 import org.mockito.Mock;
-import org.mockito.MockedConstruction;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.amqp.core.Message;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
-import org.springframework.data.redis.connection.RedisConnectionFactory;
-import org.springframework.data.redis.core.StringRedisTemplate;
-import org.springframework.data.redis.core.script.RedisScript;
-import org.springframework.test.util.ReflectionTestUtils;
 
-/**
- * Tests for {@link WorkerHeartbeatProducer}.
- *
- * <p>Covers epoch initialisation via Redis (primary), local file (fallback), and
- * {@code System.currentTimeMillis()} (last resort). Also verifies the heartbeat
- * message structure, ready-to-serve logic, config fingerprint computation, and
- * lifecycle (start/stop).
- */
+/** Heartbeat payload: epoch and readiness. */
 @ExtendWith(MockitoExtension.class)
 class WorkerHeartbeatProducerTest {
 
@@ -66,368 +43,48 @@ class WorkerHeartbeatProducerTest {
   private RabbitTemplate rabbitTemplate;
 
   @Mock
-  private ZetaBayesianSM stateMachine;
-
-  /** Gossip snapshot the producer reads atomically per heartbeat (production shape, not a mock). */
-  private AtomicReference<SmConfigSnapshot> configSnapshot;
+  private HotKeyRegistry registry;
 
   @Captor
   private ArgumentCaptor<Message> messageCaptor;
 
-  private static final String WORKER_ID = "worker1";
-  private static final String HB_EXCHANGE = HEARTBEAT;
-  private static final long PING_INTERVAL_MS = 1000L;
-  private static final long READY_GRACE_MS = 3_000L;
-
-  /** Each file-based test gets its own temp directory for isolation. */
-  @TempDir
-  private Path tempDir;
-
-  @BeforeEach
-  void cleanEpochFile() {
-    configSnapshot = new AtomicReference<>(new SmConfigSnapshot(3, 10, 3, 0L));
-    try {
-      Files.deleteIfExists(epochFilePath());
-    } catch (Exception e) {
-      // ignore
-    }
-  }
-
-  // ── Epoch initialisation ──
-
-  /**
-   * First start with Redis available and no prior epoch.
-   * Epoch is floored at {@code System.currentTimeMillis() * 1000} to prevent
-   * counter rollback across Redis resets or file deletion.
-   */
   @Test
-  void constructor_shouldDoInitEpochFromRedis_whenFirstStart() {
-    var producer = newProducer();
+  void sendsEpochAndReadiness() {
+    WorkerHeartbeatProducer producer = new WorkerHeartbeatProducer(
+      rabbitTemplate,
+      "hb.exchange",
+      new WorkerIdentity("worker-1", 7L),
+      registry,
+      0L,
+      "tenant-a"
+    );
+
     producer.sendHeartbeat();
 
-    verify(rabbitTemplate).send(eq(HB_EXCHANGE), eq(KEY_HEARTBEAT + WORKER_ID), messageCaptor.capture());
-    assertThat(messageCaptor.getValue().getMessageProperties().getHeaders())
-      .extracting(HEADER_HEARTBEAT_EPOCH)
-      .isInstanceOfSatisfying(Long.class, epoch ->
-        assertThat(epoch).isPositive().isGreaterThan(1_500_000_000_000_000L)
-      );
+    verify(rabbitTemplate).send(eq("hb.exchange"), eq(KEY_HEARTBEAT + "worker-1"), messageCaptor.capture());
+    Message message = messageCaptor.getValue();
+    assertThat(message.getMessageProperties().getHeaders().get(HEADER_HEARTBEAT_EPOCH)).isEqualTo(7L);
+    assertThat(message.getMessageProperties().getHeaders().get(HEADER_HEARTBEAT_READY)).isEqualTo(true);
+    assertThat(message.getMessageProperties().getHeaders().get(HEADER_APP_NAME)).isEqualTo("tenant-a");
+    assertThat(new String(message.getBody())).isEqualTo("worker-1");
   }
 
-  /**
-   * Subsequent start with Redis available.  INCR returns a value below the
-   * timestamp floor → epoch is floored at the current timestamp.
-   */
   @Test
-  void constructor_shouldDoInitEpochFromRedis_whenRestart() {
-    var redisFactoryMock = mock(RedisConnectionFactory.class);
-    try (var ignored = mockConstruction(StringRedisTemplate.class, redisReturning(6L))) {
-      var producer = new WorkerHeartbeatProducer(
-        rabbitTemplate,
-        HB_EXCHANGE,
-        WORKER_ID,
-        stateMachine,
-        configSnapshot,
-        redisFactoryMock,
-        PING_INTERVAL_MS,
-        READY_GRACE_MS,
-        mock(ScheduledExecutorService.class),
-        mock(SnowflakeIdGenerator.class)
-      );
-      producer.sendHeartbeat();
+  void reportsNotReadyUntilTheGracePeriodElapsesOrAKeyIsHot() {
+    WorkerHeartbeatProducer producer = new WorkerHeartbeatProducer(
+      rabbitTemplate,
+      "hb.exchange",
+      new WorkerIdentity("worker-1", 7L),
+      registry,
+      60_000L,
+      null
+    );
 
-      verify(rabbitTemplate).send(eq(HB_EXCHANGE), eq(KEY_HEARTBEAT + WORKER_ID), messageCaptor.capture());
-      assertThat(messageCaptor.getValue().getMessageProperties().getHeaders())
-        .extracting(HEADER_HEARTBEAT_EPOCH)
-        .isInstanceOfSatisfying(Long.class, epoch ->
-          assertThat(epoch).isPositive().isGreaterThan(1_500_000_000_000_000L)
-        );
-    }
-  }
-
-  /**
-   * Redis unavailable → fallback to local temp file.
-   * File does not exist → created with the timestamp-based floor.
-   */
-  @Test
-  void constructor_shouldFallbackToLocalFile_whenRedisFails() throws Exception {
-    var origTmpdir = System.setProperty("java.io.tmpdir", tempDir.toString());
-    try {
-      var producer = newProducer();
-      producer.sendHeartbeat();
-
-      verify(rabbitTemplate).send(any(), any(), messageCaptor.capture());
-      long epoch = (Long) messageCaptor.getValue().getMessageProperties().getHeaders().get(HEADER_HEARTBEAT_EPOCH);
-      assertThat(epoch).isPositive().isGreaterThan(1_500_000_000_000_000L);
-
-      var path = epochFilePath();
-      assertThat(path).exists();
-      assertThat(Files.readString(path)).isEqualTo(String.valueOf(epoch));
-    } finally {
-      System.setProperty("java.io.tmpdir", origTmpdir);
-    }
-  }
-
-  /**
-   * Redis unavailable, local file pre-seeded with "3".
-   * Epoch is floored at the timestamp, which dominates the increment.
-   */
-  @Test
-  void constructor_shouldIncrementLocalFileEpochOnRestart() throws Exception {
-    var origTmpdir = System.setProperty("java.io.tmpdir", tempDir.toString());
-    try {
-      Files.writeString(epochFilePath(), "3");
-      var producer = newProducer();
-      producer.sendHeartbeat();
-
-      verify(rabbitTemplate).send(any(), any(), messageCaptor.capture());
-      long epoch = (Long) messageCaptor.getValue().getMessageProperties().getHeaders().get(HEADER_HEARTBEAT_EPOCH);
-      assertThat(epoch).isPositive().isGreaterThan(1_500_000_000_000_000L);
-
-      assertThat(Files.readString(epochFilePath())).isEqualTo(String.valueOf(epoch));
-    } finally {
-      System.setProperty("java.io.tmpdir", origTmpdir);
-    }
-  }
-
-  /**
-   * Redis and local file both fail → epoch falls back to
-   * {@code System.currentTimeMillis()}.
-   */
-  @Test
-  void constructor_shouldFallbackToCurrentTimeMillis_whenAllFallbacksFail() {
-    var origTmpdir = System.setProperty("java.io.tmpdir", "C:\\nonexistent_hotkey_test_xyz");
-    try {
-      var producer = newProducer();
-      producer.sendHeartbeat();
-
-      verify(rabbitTemplate).send(any(), any(), messageCaptor.capture());
-      var epoch = (Long) messageCaptor.getValue().getMessageProperties().getHeaders().get(HEADER_HEARTBEAT_EPOCH);
-      assertThat(epoch).isPositive().isGreaterThan(1_500_000_000_000_000L);
-    } finally {
-      System.setProperty("java.io.tmpdir", origTmpdir);
-    }
-  }
-
-  // ── sendHeartbeat message structure ──
-
-  /** Verifies exchange, routing key, and every heartbeat header. */
-  @Test
-  void sendHeartbeat_shouldDeliverAllFields() {
-    long configTs = 456L;
-    // Gossip fields now travel inside the snapshot, not via stateMachine reads.
-    configSnapshot.set(new SmConfigSnapshot(3, 10, 3, configTs));
-    when(stateMachine.getTrackedKeys()).thenReturn(1);
-
-    var producer = newProducer();
     producer.sendHeartbeat();
 
-    verify(rabbitTemplate).send(eq(HB_EXCHANGE), eq(KEY_HEARTBEAT + WORKER_ID), messageCaptor.capture());
-    var headers = messageCaptor.getValue().getMessageProperties().getHeaders();
-
-    assertThat(headers).containsEntry(HEADER_TYPE, WorkerHeartbeatMessage.TYPE);
-    assertThat(headers).containsEntry(HEADER_NODE_ID, WORKER_ID);
-    assertThat((Long) headers.get(HEADER_HEARTBEAT_EPOCH)).isPositive().isGreaterThan(1_500_000_000_000_000L);
-    assertThat(headers.get(HEADER_HEARTBEAT_LOAD)).isInstanceOf(Double.class);
-    assertThat((Double) headers.get(HEADER_HEARTBEAT_LOAD)).isBetween(0.0, 1.0);
-    assertThat(headers).containsEntry(HEADER_HEARTBEAT_READY, true);
-    assertThat(headers).containsEntry(HEADER_HEARTBEAT_CONFIG_CONFIRM, 3);
-    assertThat(headers).containsEntry(HEADER_HEARTBEAT_CONFIG_COOL, 10);
-    assertThat(headers).containsEntry(HEADER_HEARTBEAT_CONFIG_GRACE, 3);
-    assertThat(headers).containsEntry(HEADER_HEARTBEAT_CONFIG_TIMESTAMP, configTs);
-  }
-
-  /** Uptime < 3s AND no tracked keys → readyToServe = false. */
-  @Test
-  void sendHeartbeat_shouldReportNotReady_whenColdStartAndNoTrackedKeys() {
-    var producer = newProducer();
-    producer.sendHeartbeat();
-
-    verify(rabbitTemplate).send(any(), any(), messageCaptor.capture());
-    assertThat(messageCaptor.getValue().getMessageProperties().getHeaders()).containsEntry(
-      HEADER_HEARTBEAT_READY,
+    verify(rabbitTemplate).send(eq("hb.exchange"), eq(KEY_HEARTBEAT + "worker-1"), messageCaptor.capture());
+    assertThat(messageCaptor.getValue().getMessageProperties().getHeaders().get(HEADER_HEARTBEAT_READY)).isEqualTo(
       false
     );
-  }
-
-  /** Tracked keys > 0 → readyToServe = true (regardless of uptime). */
-  @Test
-  void sendHeartbeat_shouldReportReady_whenTrackedKeysPresent() {
-    when(stateMachine.getTrackedKeys()).thenReturn(5);
-    var producer = newProducer();
-    producer.sendHeartbeat();
-
-    verify(rabbitTemplate).send(any(), any(), messageCaptor.capture());
-    assertThat(messageCaptor.getValue().getMessageProperties().getHeaders()).containsEntry(
-      HEADER_HEARTBEAT_READY,
-      true
-    );
-  }
-
-  // ── Lifecycle ──
-
-  /** {@code start()} schedules the heartbeat task at fixed rate. */
-  @Test
-  void start_shouldScheduleHeartbeatAtFixedRate() {
-    try (var construction = mockConstruction(SafeScheduledExecutorService.class)) {
-      var producer = newProducer();
-      producer.start();
-
-      var schedulerMock = construction.constructed().get(0);
-      verify(schedulerMock).scheduleAtFixedRate(
-        any(Runnable.class),
-        eq(PING_INTERVAL_MS),
-        eq(PING_INTERVAL_MS),
-        eq(TimeUnit.MILLISECONDS)
-      );
-      producer.stop();
-    }
-  }
-
-  /** {@code stop()} shuts down the internal scheduler. */
-  @Test
-  void stop_shouldShutdownScheduler() {
-    var producer = newProducer();
-    producer.stop();
-
-    var scheduler = (ScheduledExecutorService) ReflectionTestUtils.getField(producer, "scheduler");
-    assertThat(scheduler).isNotNull();
-    assertThat(scheduler.isShutdown()).isTrue();
-  }
-
-  /**
-   * {@code stop()} cancels the scheduled task when {@code heartbeatTask} is
-   * non-null (i.e., the producer was started).  Also shuts down the scheduler.
-   */
-  @Test
-  void stop_shouldCancelHeartbeatTaskWhenRunning() {
-    try (
-      var construction = mockConstruction(SafeScheduledExecutorService.class, (mock, context) ->
-        when(mock.scheduleAtFixedRate(any(Runnable.class), anyLong(), anyLong(), any())).thenReturn(
-          mock(ScheduledFuture.class)
-        )
-      )
-    ) {
-      var producer = newProducer();
-      producer.start();
-      // heartbeatTask is now non-null; stop() must cancel it and shut down
-      assertThatCode(producer::stop).doesNotThrowAnyException();
-    }
-  }
-
-  /**
-   * Tests the first public constructor (9-param with {@link RedisConnectionFactory}
-   * and {@link ScheduledExecutorService}).  This constructor is called by
-   * auto-configuration and sets {@code ownsScheduler = false}.  Verifies that
-   * {@code stop()} does <em>not</em> shut down the externally-owned scheduler.
-   */
-  @Test
-  void constructorWithExternalScheduler_shouldNotShutdownSchedulerOnStop() {
-    var schedulerMock = mock(ScheduledExecutorService.class);
-    when(schedulerMock.scheduleAtFixedRate(any(Runnable.class), anyLong(), anyLong(), any())).thenReturn(
-      mock(ScheduledFuture.class)
-    );
-    var redisFactoryMock = mock(RedisConnectionFactory.class);
-    try (var ignored = mockConstruction(StringRedisTemplate.class, redisReturning(null))) {
-      var producer = new WorkerHeartbeatProducer(
-        rabbitTemplate,
-        HB_EXCHANGE,
-        WORKER_ID,
-        stateMachine,
-        configSnapshot,
-        redisFactoryMock,
-        PING_INTERVAL_MS,
-        READY_GRACE_MS,
-        schedulerMock,
-        mock(SnowflakeIdGenerator.class)
-      );
-      producer.start();
-      producer.stop();
-      verify(schedulerMock, never()).shutdown();
-    }
-  }
-
-  /**
-   * Using the real executor (via the 7-param constructor), {@code start()}
-   * schedules the heartbeat task.  The {@code ScheduledThreadPoolExecutor}
-   * creates a daemon thread through the thread-factory lambda, exercises the
-   * thread-factory body, and the new thread executes {@code sendHeartbeat}.
-   */
-  @Test
-  void start_shouldInvokeThreadFactoryViaRealExecutor() {
-    var producer = newProducer();
-    producer.start();
-    verify(rabbitTemplate, timeout(2000)).send(anyString(), anyString(), any());
-    producer.stop();
-  }
-
-  // ── Fault tolerance ──
-
-  /**
-   * {@code sendHeartbeat} catches exceptions from {@code rabbitTemplate.send}
-   * and does not propagate them.
-   */
-  @Test
-  void sendHeartbeat_shouldCatchRabbitMqException() {
-    configSnapshot.set(new SmConfigSnapshot(3, 10, 3, 0L));
-    doThrow(new RuntimeException("RabbitMQ unavailable")).when(rabbitTemplate).send(anyString(), anyString(), any());
-
-    var producer = newProducer();
-    producer.sendHeartbeat();
-    // must not throw — exception caught in catch block
-  }
-
-  /**
-   * Verifies that when the local epoch file contains invalid content (not a number),
-   * the epoch falls back to {@code System.currentTimeMillis()} as a last resort.
-   */
-  @Test
-  void constructor_shouldFallbackToCurrentTimeMillisForCorruptedEpochFile() throws Exception {
-    var origTmpdir = System.setProperty("java.io.tmpdir", tempDir.toString());
-    try {
-      Files.writeString(epochFilePath(), "not-a-number");
-      var producer = newProducer();
-      producer.sendHeartbeat();
-      verify(rabbitTemplate).send(any(), any(), messageCaptor.capture());
-      var epoch = (Long) messageCaptor.getValue().getMessageProperties().getHeaders().get(HEADER_HEARTBEAT_EPOCH);
-      assertThat(epoch).isPositive().isGreaterThan(1_500_000_000_000_000L);
-    } finally {
-      System.setProperty("java.io.tmpdir", origTmpdir);
-    }
-  }
-
-  // ── Helpers ──
-
-  private WorkerHeartbeatProducer newProducer() {
-    return WorkerHeartbeatProducer.forTesting(
-      rabbitTemplate,
-      HB_EXCHANGE,
-      WORKER_ID,
-      stateMachine,
-      configSnapshot,
-      PING_INTERVAL_MS,
-      READY_GRACE_MS,
-      mock(SnowflakeIdGenerator.class)
-    );
-  }
-
-  @SuppressWarnings("all")
-  private static MockedConstruction.MockInitializer<StringRedisTemplate> redisReturning(Long incrValue) {
-    // Emulates the atomic Lua init script (max of INCR and the wall-clock floor);
-    // a null INCR passes through so production takes the local-file fallback.
-    return (mock, ctx) ->
-      when(mock.execute(any(RedisScript.class), anyList(), any())).thenAnswer(inv -> {
-        if (incrValue == null) {
-          return null;
-        }
-        return Math.max(incrValue, System.currentTimeMillis() * 1000L);
-      });
-  }
-
-  private static MockedConstruction.MockInitializer<StringRedisTemplate> redisThrowing() {
-    return (mock, ctx) -> when(mock.opsForValue()).thenThrow(new RuntimeException("Redis unavailable"));
-  }
-
-  private Path epochFilePath() {
-    return Path.of(System.getProperty("java.io.tmpdir"), "zeta-epoch-" + WORKER_ID);
   }
 }
