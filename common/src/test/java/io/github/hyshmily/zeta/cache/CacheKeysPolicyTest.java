@@ -18,7 +18,8 @@ package io.github.hyshmily.zeta.cache;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
-import io.github.hyshmily.zeta.cache.cachesupport.CacheKeysPolicy;
+import java.util.Arrays;
+import java.util.List;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -100,5 +101,42 @@ class CacheKeysPolicyTest {
     assertThatThrownBy(() -> CacheKeysPolicy.class.getDeclaredConstructor().newInstance()).isInstanceOf(
       IllegalAccessException.class
     );
+  }
+
+  /**
+   * Verifies that filtering keeps valid keys, drops null/blank ones, and
+   * preserves the caller's order.
+   */
+  @Test
+  void validKeys_shouldDropInvalidAndKeepOrder() {
+    assertThat(CacheKeysPolicy.validKeys(Arrays.asList("k1", null, " ", "k2", ""))).containsExactly("k1", "k2");
+  }
+
+  /**
+   * Verifies that duplicates are preserved: deduplicating a batch is the
+   * engine's counting decision, not a key-validity one.
+   */
+  @Test
+  void validKeys_shouldKeepDuplicates() {
+    assertThat(CacheKeysPolicy.validKeys(List.of("k1", "k1"))).containsExactly("k1", "k1");
+  }
+
+  /**
+   * Verifies that an all-invalid collection resolves to an empty list — the
+   * facade's no-op signal — and that an empty collection stays empty.
+   */
+  @Test
+  void validKeys_allInvalidOrEmpty_shouldReturnEmptyList() {
+    assertThat(CacheKeysPolicy.validKeys(Arrays.asList(null, "", "  "))).isEmpty();
+    assertThat(CacheKeysPolicy.validKeys(List.of())).isEmpty();
+  }
+
+  /**
+   * Verifies that an already-clean collection is returned as an equal list
+   * (the facade always hands the engine a fresh list, never the caller's).
+   */
+  @Test
+  void validKeys_allValid_shouldReturnEqualList() {
+    assertThat(CacheKeysPolicy.validKeys(List.of("a", "b"))).containsExactly("a", "b");
   }
 }

@@ -16,54 +16,49 @@
 package io.github.hyshmily.zeta.exception;
 
 import io.github.hyshmily.zeta.Zeta;
+import java.io.Serial;
 import lombok.Getter;
 
 /**
- * Thrown when a {@link Zeta} API is called in a
- * deployment mode that does not support it.
+ * Thrown when a {@link Zeta} API is called in a deployment mode that does not support it.
  *
- * <p>For example, calling {@code hotKey.get(key, reader)} in Worker-only mode
- * throws this exception because there is no app-side cache. Callers can probe
- * the current mode before calling cache-dependent APIs:
+ * <p>For example, calling {@code zeta.get(key, reader, options)} in Worker-only mode throws this
+ * exception because there is no app-side cache. Callers can probe the current mode before calling
+ * cache-dependent APIs:
  * <pre>{@code
- * if (hotKey.isCacheAvailable()) {
- *     Optional<User> user = hotKey.get("user:42", repo::findById);
+ * if (zeta.isCacheAvailable()) {
+ *     User user = zeta.get("user:42", repo::findById, GetPolicy.defaults());
  * }
  * }</pre>
- *
- * <p>The exception carries three fields to help diagnose the mismatch:
- * <ul>
- *   <li>{@code getOperation()} — the API name that was called</li>
- *   <li>{@code getCurrentMode()} — the human-readable label of the current
- *       deployment mode (e.g. {@code "Worker-only mode"})</li>
- *   <li>{@code getRequiredMode()} — the human-readable label of the mode
- *       required to perform the operation (e.g. {@code "App-mode cache"})</li>
- * </ul>
  *
  * @see Zeta#isCacheAvailable()
  */
 @Getter
-public class ZetaModeException extends ZetaContextException {
+public class ZetaModeException extends IllegalStateException {
 
-  private static final String SOURCE_CLASS = "ZetaModeException";
+  @Serial
+  private static final long serialVersionUID = 1L;
 
-  private final String operation;
-
-  private final String currentMode;
-
+  /** Human-readable label of the mode the operation requires. */
   private final String requiredMode;
 
+  /** Human-readable label of the current deployment mode. */
+  private final String currentMode;
+
+  /** The API operation that was called (e.g. {@code "get"}). */
+  private final String operation;
+
   /**
-   * Creates a new {@code ZetaModeException}.
+   * Creates a mode mismatch.
    *
-   * @param operation     the API operation name that was called (e.g. {@code "get"})
-   * @param currentMode   human-readable label of the current deployment mode
-   *                      (e.g. {@code "Worker-only mode"})
-   * @param requiredMode  human-readable label of the mode required to perform
-   *                      the operation (e.g. {@code "App-mode cache"})
+   * @param operation    the API operation name that was called (e.g. {@code "get"})
+   * @param currentMode  human-readable label of the current deployment mode
+   *                     (e.g. {@code "Worker-only mode"})
+   * @param requiredMode human-readable label of the mode required to perform the operation
+   *                     (e.g. {@code "App-mode cache"})
    */
   public ZetaModeException(String operation, String currentMode, String requiredMode) {
-    super(SOURCE_CLASS, "HotKey '" + operation + "' requires " + requiredMode + ", but instance is in " + currentMode, null);
+    super("Zeta '" + operation + "' requires " + requiredMode + ", but instance is in " + currentMode);
     this.operation = operation;
     this.currentMode = currentMode;
     this.requiredMode = requiredMode;

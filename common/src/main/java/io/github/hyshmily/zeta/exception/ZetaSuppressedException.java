@@ -15,37 +15,41 @@
  */
 package io.github.hyshmily.zeta.exception;
 
-import io.github.hyshmily.zeta.cache.cachesupport.LoadStatus;
+import io.github.hyshmily.zeta.cache.cachesupport.loader.LoadStatus;
+import java.io.Serial;
 import lombok.Getter;
 
 /**
- * A read-path load was suppressed by protection machinery (circuit breaker
- * open, per-load timeout, executor saturation) while the caller demanded
- * fail-fast semantics.
+ * A read-path load was suppressed by protection machinery (per-load timeout, executor
+ * saturation).
  *
- * <p>Unlike "source returned null" (an empty result cached as a
- * sentinel entry), a suppression means the data source was never
- * consulted or never answered — mapping it to {@code null} would let 500s
- * masquerade as 404s. Thrown only when {@code failOnError} is set; the
- * default swallow path still resolves suppressed loads to empty. Keeps its
- * stack trace (a fail-fast diagnostic, not hot-path control flow — contrast
- * {@link ZetaBlockedException}).
+ * <p>Unlike "source returned null" (an empty read that is never cached), a suppression means the
+ * data source was never consulted or never answered — mapping it to {@code null} would let 500s
+ * masquerade as 404s. A timeout or executor rejection throws this exception; a breaker-open load
+ * does not, because the caller serves the stale fallback instead. Keeps its stack trace (a
+ * diagnostic, not hot-path control flow).
  */
 @Getter
-public class ZetaSuppressedException extends ZetaContextException {
+public class ZetaSuppressedException extends IllegalStateException {
+
+  @Serial
+  private static final long serialVersionUID = 1L;
 
   /** Which protection machinery suppressed the load. */
   private final LoadStatus status;
 
+  /** The key whose load was suppressed. */
+  private final String cacheKey;
+
   /**
    * Creates a suppression failure for the given key.
    *
-   * @param sourceClass the simple name of the throwing class
-   * @param cacheKey    the key whose load was suppressed
-   * @param status      the suppression reason (a SUPPRESSED_* status)
+   * @param cacheKey the key whose load was suppressed
+   * @param status   the suppression reason (a {@code SUPPRESSED_*} status)
    */
-  public ZetaSuppressedException(String sourceClass, String cacheKey, LoadStatus status) {
-    super(sourceClass, "Load suppressed (" + status + ") for key=" + cacheKey, null);
+  public ZetaSuppressedException(String cacheKey, LoadStatus status) {
+    super("Load suppressed (" + status + ") for key=" + cacheKey);
     this.status = status;
+    this.cacheKey = cacheKey;
   }
 }

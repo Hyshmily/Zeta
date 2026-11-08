@@ -15,1002 +15,338 @@
  */
 package io.github.hyshmily.zeta;
 
+import static io.github.hyshmily.zeta.cache.CacheKeysPolicy.validKeys;
+
+import com.github.benmanes.caffeine.cache.Cache;
 import io.github.hyshmily.zeta.cache.HotKeyCache;
-import io.github.hyshmily.zeta.cache.loader.ZetaLoaderRegistry;
-import io.github.hyshmily.zeta.cache.loader.ZetaLoadingSpec;
+import io.github.hyshmily.zeta.cache.cachesupport.loader.CacheLoader;
+import io.github.hyshmily.zeta.cache.cachesupport.policy.GetPolicy;
+import io.github.hyshmily.zeta.cache.cachesupport.policy.InvalidatePolicy;
+import io.github.hyshmily.zeta.cache.cachesupport.policy.PutPolicy;
+import io.github.hyshmily.zeta.cache.cachesupport.policy.StalePolicy;
+import io.github.hyshmily.zeta.cache.cachesupport.raw.CacheEntry;
 import io.github.hyshmily.zeta.exception.ZetaModeException;
-import io.github.hyshmily.zeta.hotkeydetector.HotKeyDetector;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.Item;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.TopK;
-import io.github.hyshmily.zeta.model.HotKey;
-import io.github.hyshmily.zeta.model.InvalidatePolicy;
-import io.github.hyshmily.zeta.model.ReadPolicy;
-import io.github.hyshmily.zeta.model.ReadPolicy;
-import io.github.hyshmily.zeta.model.StalePolicy;
-import io.github.hyshmily.zeta.model.WritePolicy;
 import io.github.hyshmily.zeta.model.ZetaCacheStats;
-import io.github.hyshmily.zeta.rule.Rule;
-import io.github.hyshmily.zeta.rule.RuleService;
 import io.github.hyshmily.zeta.scheduler.TimedRefreshCoordinator;
-import io.github.hyshmily.zeta.sync.distributedlock.AutoReleaseLock;
-import io.github.hyshmily.zeta.sync.distributedlock.LockProvider;
-import jakarta.validation.constraints.NotBlank;
-import jakarta.validation.constraints.NotNull;
+import io.github.hyshmily.zeta.util.Internal;
 import java.util.*;
-import java.util.concurrent.BlockingQueue;
-import java.util.concurrent.LinkedBlockingQueue;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.*;
 import java.util.function.Function;
 import java.util.function.Supplier;
+import lombok.Setter;
 import org.jspecify.annotations.Nullable;
 import org.springframework.beans.factory.DisposableBean;
 import org.springframework.util.Assert;
 
 /**
  * Default implementation of the {@link Zeta} facade — the sole public API
- * entry point. This adapter owns no logic of its own beyond validation and
- * delegation: reads/writes/invalidations go to {@link HotKeyCache}, rule
- * administration to {@code RuleService}, timed refresh scheduling to
- * {@code TimedRefreshCoordinator}, and the administrative views
- * ({@link Zeta.RuleAdmin rules()}, {@link Zeta.RefreshAdmin refresh()},
- * {@link Zeta.StatsAdmin stats()}) are projected from the same components.
+ * entry point. Reads/writes/invalidations go to {@link HotKeyCache}, timed
+ * refresh scheduling to {@code TimedRefreshCoordinator}, and the
+ * administrative views ({@link Zeta.DetectorAdmin detector()},
+ * {@link Zeta.RefreshAdmin refresh()}, {@link Zeta.UnsafeAdmin unsafe()}) are
+ * projected from the same components. The facade adds only orchestration that
+ * has no better home: argument validation, option normalization,
+ * deployment-mode gating, the bulk-refresh fan-out, and the projections
+ * themselves.
  *
  * <p>
  * All cache read/write/invalidation operations are dispatched through this
  * class, which delegates to {@link HotKeyCache} for L1 orchestration, version
- * tracking, and cross-instance broadcast, and to {@link TopK} (HeavyKeeper)
- * for local and cluster-wide hot-key detection queries. The detection view
- * ({@link Zeta.DetectorAdmin detector()}) is a dedicated inner object rather
- * than implemented directly: its method signatures collide with the
- * deprecated direct detection methods this class must keep for compatibility,
- * so the directs delegate to the view.
- *
- * <p>
- * Rule management (blacklist/whitelist) is also exposed here, with pattern
- * matching for exact, prefix, wildcard, and regex rules.
+ * stamping, SingleFlight dedup, and cluster sync. {@code null} options
+ * arguments are normalized to their family's {@code defaults()}; a loader's
+ * {@code isCacheable} decision travels as an explicit admission predicate, so
+ * a caller can never override it per call.
  *
  * <p>
  * <b>Thread safety:</b> All public methods are thread-safe. The underlying
- * Caffeine cache and HeavyKeeper sketch are designed for concurrent access.
- *
- * <p>
- * <b>API shape — two-arity convention:</b> every operation family exposes
- * exactly two positional forms — the common-case convenience form, and a
- * full-control form whose last parameter is the family's closed policy
- * record ({@link ReadPolicy}, {@link WritePolicy}, {@link InvalidatePolicy}).
- * Intermediate positional overloads (per-parameter TTLs,
- * boolean flags) intentionally do not exist: customize via
- * {@code ReadPolicy.defaults().withHardTtl(...)}-style chains, or via the
- * fluent {@link #read(String)}/{@link #write(String)} builders for complex
- * chains. Each policy record carries exactly the knobs its family honors,
- * so there is no honored/ignored matrix to consult. The single
- * exception to the no-boolean rule is {@link #tag(String, boolean, boolean)},
- * the transport for the {@code @Intercept} annotation path.
- *
- * <p>
- * Depending on the runtime mode, some dependencies may be absent:
- * <ul>
- * <li><b>App-only mode</b> (default): all services available.</li>
- * <li><b>Worker-only mode</b> ({@code zeta.worker.enabled=true}):
- * cache and app‑side TopK are absent; only the Worker TopK is available.</li>
- * </ul>
- * Methods whose backing service is absent throw {@link ZetaModeException}
- * (cache read/write) or return empty / zero (TopK queries).
- *
- * <p>
- * <b>Version constraint for permanent entries:</b> Entries created with
- * {@link Long#MAX_VALUE} hard TTL ("permanent" entry) can outlive the Redis
- * version key ({@code zeta:version:{key}}), whose TTL defaults to 7 days
- * ({@code zeta.local.versionKeyTtlMinutes}). When the version key expires,
- * the next write produces a version of 1 (INCR restart), which is numerically
- * lower than the existing entry's version on peer instances — causing
- * {@link io.github.hyshmily.zeta.util.version.VersionGuard#shouldSkipForSync}
- * to reject the update silently. Avoid {@link Long#MAX_VALUE} hard TTL on keys
- * that participate in cross-instance cache sync, or ensure
- * {@code versionKeyTtlMinutes} exceeds the entry's actual lifetime.
+ * collaborators are thread-safe by contract; the facade keeps no per-call
+ * mutable state, only the shared stateless views and the injected refresh
+ * executor.
  */
-public class DefaultZeta implements ZetaInternal, Zeta.RefreshAdmin, Zeta.StatsAdmin, DisposableBean {
-
-  private final HotKeyCache hotKeyCache;
-
-  private final HotKeyDetector appHotKeyDetector;
-
-  private final LockProvider lockProvider;
-
-  @Nullable
-  private final RuleService ruleService;
+public class DefaultZeta implements Zeta, DisposableBean {
 
   /**
-   * Facade-plane view over {@link #ruleService} — a validating adapter, never
-   * the service itself, so the facade keeps its reject-blank-key contract.
+   * Label used when the facade runs without an app-side cache. Kept as one
+   * constant so the mode report cannot drift from the exception text.
    */
-  private final Zeta.RuleAdmin ruleAdmin;
+  private static final String WORKER_ONLY_MODE = "Worker-only mode (no app-side cache)";
 
-  @Nullable
-  private final ZetaLoaderRegistry loaderRegistry;
+  /** Timed background refresh scheduler, or {@code null} in Worker-only deployments. */
+  private final @Nullable TimedRefreshCoordinator refreshCoordinator;
+  /** Core cache engine. {@code null} in Worker-only deployments. */
+  private final @Nullable HotKeyCache hotKeyCache;
+  /** App-side TopK sketch (read side). {@code null} when the detector is not wired. */
+  private final @Nullable TopK appTopK;
 
-  private final TimedRefreshCoordinator refreshCoordinator;
+  /** Shared administrative views; all are stateless projections. */
+  private final Zeta.DetectorAdmin detectorAdmin = new DetectorView();
+  private final Zeta.RefreshAdmin refreshAdmin = new RefreshView();
+  private final Zeta.UnsafeAdmin unsafeAdmin = new UnsafeView();
 
   /**
-   * Detection-observation view over {@link #appHotKeyDetector} and
-   * {@link #hotKeyCache}. Deliberately always active (no INACTIVE variant
-   * unlike rules/refresh/stats): the per-method {@code require*} guards and
-   * null-tolerant query branches already encode the Worker-only behavior
-   * exactly, so a second mode switch would only duplicate it.
+   * Executor for fan-out bulk operations ({@link #refreshAll}). Wired from the
+   * dedicated refresh pool ({@code hotKeyExecutor}) by the auto-configuration;
+   * when absent (direct construction, mostly tests) the bulk path falls back to
+   * the common pool. The pool is shared and never shut down here.
    */
-  private final Zeta.DetectorAdmin detectorAdmin;
+  @Setter
+  private volatile Executor refreshExecutor;
 
   /**
-   * Create a facade implementation with an optional distributed lock provider and
-   * loader registry (ADR-0070).
-   *
-   * <p>
-   * Each parameter may be {@code null} depending on the deployment mode.
-   *
-   * @param hotKeyCache       the cache orchestrator (maybe {@code null} in
-   *                          Worker-only mode)
-   * @param appHotKeyDetector the app-side local TopK detector (maybe {@code null}
-   *                          in Worker-only mode)
-   * @param lockProvider      the distributed lock provider (maybe {@code null}
-   *                          when no Redis)
-   * @param loaderRegistry    the prefix→loader registry backing the no-reader
-   *                          {@code get(cacheKey)} overloads (maybe {@code null})
-   * @param ruleService       the rule administration service (maybe {@code null} in
-   *                          Worker-only mode)
+   * Creates the facade. Container wiring, not an extension point: the
+   * auto-configuration wires it ({@code ZetaFacadeAutoConfiguration});
+   * subclassing is not supported.
    */
-  public DefaultZeta(
-    HotKeyCache hotKeyCache,
-    HotKeyDetector appHotKeyDetector,
-    LockProvider lockProvider,
-    @Nullable ZetaLoaderRegistry loaderRegistry,
-    @Nullable RuleService ruleService
-  ) {
+  @Internal
+  public DefaultZeta(@Nullable HotKeyCache hotKeyCache, @Nullable TopK appTopK) {
+    this.appTopK = appTopK;
     this.hotKeyCache = hotKeyCache;
-    this.appHotKeyDetector = appHotKeyDetector;
-    this.lockProvider = lockProvider;
-    this.loaderRegistry = loaderRegistry;
-    this.ruleService = ruleService;
-    this.ruleAdmin = ruleService == null ? null : new ValidatingRuleAdmin(ruleService);
-    this.refreshCoordinator = new TimedRefreshCoordinator();
-    this.detectorAdmin = new DetectorView();
+    this.refreshCoordinator = hotKeyCache != null ? new TimedRefreshCoordinator() : null;
   }
 
   @Override
   public void tag(String cacheKey) {
-    Assert.hasText(cacheKey, "cacheKey must not be empty");
-    requireAppCache("tag");
-    hotKeyCache.recordAccess(cacheKey);
+    requireKey(cacheKey);
+    requireAppCache("tag").recordAccess(cacheKey);
   }
 
   @Override
   public void tag(String cacheKey, TagMode mode) {
-    Assert.hasText(cacheKey, "cacheKey must not be empty");
+    requireKey(cacheKey);
     Objects.requireNonNull(mode, "mode must not be null");
-    requireAppCache("tag");
-    hotKeyCache.recordAccess(cacheKey, mode);
+    requireAppCache("tag").recordAccess(cacheKey, mode);
   }
 
   @Override
-  public <T> Optional<T> get(String cacheKey) {
-    ZetaLoadingSpec<?> spec = requireRegisteredSpec(cacheKey, "get");
-    return get(cacheKey, spec.toReadPolicy(cacheKey));
+  public void tag(String cacheKey, long count) {
+    requireKey(cacheKey);
+    Assert.isTrue(count > 0, () -> "count must be positive, but got: " + count);
+    requireAppCache("tag").recordAccess(cacheKey, count);
   }
 
   @Override
-  public <T> Optional<T> getWithSoftExpire(String cacheKey) {
-    ZetaLoadingSpec<?> spec = requireRegisteredSpec(cacheKey, "getWithSoftExpire");
-    return getWithSoftExpire(cacheKey, spec.toReadPolicy(cacheKey, StalePolicy.SOFT_REFRESH));
+  public <V> V get(String cacheKey, CacheLoader<String, V> loader, GetPolicy options) {
+    requireKey(cacheKey);
+    Objects.requireNonNull(loader, "loader must not be null");
+    GetPolicy opts = orDefault(options, GetPolicy.defaults());
+    return requireAppCache("get").get(cacheKey, loader, opts);
   }
 
   @Override
-  public <T> Optional<T> get(String cacheKey, Supplier<T> reader) {
-    return get(cacheKey, ReadPolicy.of(reader));
+  public <V> V get(String cacheKey, Supplier<V> reader, GetPolicy options) {
+    requireKey(cacheKey);
+    Objects.requireNonNull(reader, "reader must not be null");
+    GetPolicy opts = orDefault(options, GetPolicy.defaults());
+    return requireAppCache("get").get(cacheKey, reader, opts);
   }
 
   @Override
-  public <T> Optional<T> get(String cacheKey, ReadPolicy policy) {
-    Assert.hasText(cacheKey, "cacheKey must not be empty");
-    Objects.requireNonNull(policy, "policy must not be null");
-    requireAppCache("get");
-    requireAppDetector("get");
-    return hotKeyCache.get(cacheKey, policy);
+  public <T> T peek(String cacheKey) {
+    requireKey(cacheKey);
+    return requireAppCache("peek").peek(cacheKey);
   }
 
   @Override
-  public <T> Optional<T> getWithSoftExpire(String cacheKey, Supplier<T> reader) {
-    return getWithSoftExpire(cacheKey, ReadPolicy.of(reader));
+  public void put(String cacheKey, Object value, PutPolicy options) {
+    requireKey(cacheKey);
+    // Null is never cached: a null put is a caller error.
+    Objects.requireNonNull(value, "value must not be null: put(key, null) is rejected (null is never cached)");
+    PutPolicy opts = orDefault(options, PutPolicy.defaults());
+    ResolvedTtls ttls = ResolvedTtls.of(opts);
+    HotKeyCache cache = requireWritableCache("put", opts.sync(), ttls.hardMs());
+    if (opts.sync()) {
+      cache.putThrough(cacheKey, value, ttls.hardMs(), ttls.softMs());
+    } else {
+      cache.putLocal(cacheKey, value, ttls.hardMs(), ttls.softMs());
+    }
   }
 
   @Override
-  public <T> Optional<T> getWithSoftExpire(String cacheKey, ReadPolicy policy) {
-    Assert.hasText(cacheKey, "cacheKey must not be empty");
-    Objects.requireNonNull(policy, "policy must not be null");
-    requireAppCache("getWithSoftExpire");
-    requireAppDetector("getWithSoftExpire");
-    // Naming contract: this overload forces SOFT_REFRESH regardless of the
-    // policy's stale policy — a caller that wants RETURN/REVALIDATE uses get().
-    return hotKeyCache.getWithSoftExpire(cacheKey, policy.withStalePolicy(StalePolicy.SOFT_REFRESH));
-  }
-
-  @Override
-  @SuppressWarnings("unchecked")
-  public <T> Map<String, T> getAll(Iterable<String> cacheKeys) {
-    Objects.requireNonNull(cacheKeys, "cacheKeys must not be null");
-    Map<ZetaLoadingSpec<?>, List<String>> groups = groupKeysBySpec(cacheKeys, "getAll");
-    Map<String, Optional<T>> merged = new LinkedHashMap<>();
-    for (Map.Entry<ZetaLoadingSpec<?>, List<String>> group : groups.entrySet()) {
-      ZetaLoadingSpec<?> spec = group.getKey();
-      List<String> keys = group.getValue();
-      Function<String, T> groupReader = key -> (T) spec.loader().load(key);
-      merged.putAll(
-        hotKeyCache.get(
-          keys,
-          groupReader,
-          spec.hardTtlMs(),
-          spec.softTtlMs(),
-          spec.reportEnabled(),
-          spec.failOnError(),
-          spec.nullCaching(),
-          spec.stalePolicy()
-        )
+  public void putAll(Map<String, ?> entries, PutPolicy options) {
+    Objects.requireNonNull(entries, "entries must not be null");
+    // The mode check precedes the empty short-circuit: Worker-only deployments
+    // throw for every data-plane call, including one with nothing to write.
+    HotKeyCache cache = requireAppCache("putAll");
+    if (entries.isEmpty()) {
+      return;
+    }
+    PutPolicy opts = orDefault(options, PutPolicy.defaults());
+    ResolvedTtls ttls = ResolvedTtls.of(opts);
+    // Writes are caller intent: reject the whole batch before any key lands.
+    // Unlike the read/invalidate collection methods, dropping an invalid element
+    // would silently leave a batch half-applied.
+    for (Map.Entry<String, ?> entry : entries.entrySet()) {
+      requireKey(entry.getKey());
+      Objects.requireNonNull(
+        entry.getValue(),
+        "value must not be null: putAll rejects a null value (null is never cached)"
       );
     }
-    return unwrapPresent(merged);
+    if (opts.sync()) {
+      PutPolicy.requireSyncable(cache.resolveSyncableHardTtl(ttls.hardMs()), true);
+    }
+    cache.putAll(entries, ttls.hardMs(), ttls.softMs(), opts.sync());
   }
 
   @Override
-  @SuppressWarnings("unchecked")
-  public <T> Map<String, T> getAllWithSoftExpire(Iterable<String> cacheKeys) {
+  public void invalidate(String cacheKey, InvalidatePolicy options) {
+    requireKey(cacheKey);
+    InvalidatePolicy opts = orDefault(options, InvalidatePolicy.defaults());
+    requireAppCache("invalidate").invalidate(cacheKey, opts);
+  }
+
+  @Override
+  public void invalidate(Collection<String> cacheKeys, InvalidatePolicy options) {
     Objects.requireNonNull(cacheKeys, "cacheKeys must not be null");
-    Map<ZetaLoadingSpec<?>, List<String>> groups = groupKeysBySpec(cacheKeys, "getAllWithSoftExpire");
-    Map<String, Optional<T>> merged = new LinkedHashMap<>();
-    for (Map.Entry<ZetaLoadingSpec<?>, List<String>> group : groups.entrySet()) {
-      ZetaLoadingSpec<?> spec = group.getKey();
-      List<String> keys = group.getValue();
-      Function<String, T> groupReader = key -> (T) spec.loader().load(key);
-      merged.putAll(
-        hotKeyCache.getWithSoftExpire(
-          keys,
-          groupReader,
-          spec.hardTtlMs(),
-          spec.softTtlMs(),
-          spec.reportEnabled(),
-          spec.failOnError(),
-          spec.nullCaching(),
-          StalePolicy.SOFT_REFRESH
-        )
-      );
+    InvalidatePolicy opts = orDefault(options, InvalidatePolicy.defaults());
+    HotKeyCache cache = requireAppCache("invalidate");
+    // An invalid key has no local or peer copy to invalidate. Dropped here —
+    // the only gate — so the engine's batch paths assume valid keys.
+    List<String> keys = validKeys(cacheKeys);
+    if (!keys.isEmpty()) {
+      cache.invalidate(keys, opts);
     }
-    return unwrapPresent(merged);
-  }
-
-  /**
-   * Unwrap a batch engine result for the facade: present values carried over,
-   * empty optionals (miss or cached null) omitted. The engine keeps
-   * {@code Optional} as its internal null-vs-miss channel; the facade never
-   * exposes it (a map cannot distinguish "absent" from "empty" per key).
-   *
-   * @param engineResult the engine batch result
-   * @param <T>          the value type
-   * @return insertion-ordered map of key → present value
-   */
-  private static <T> Map<String, T> unwrapPresent(Map<String, Optional<T>> engineResult) {
-    Map<String, T> out = new LinkedHashMap<>();
-    for (Map.Entry<String, Optional<T>> e : engineResult.entrySet()) {
-      if (e.getValue().isPresent()) {
-        out.put(e.getKey(), e.getValue().get());
-      }
-    }
-    return out;
   }
 
   @Override
-  public <T> Map<String, T> getAll(Iterable<String> cacheKeys, Function<? super String, ? extends T> reader) {
-    return getAll(cacheKeys, reader, ReadPolicy.defaults());
+  public void clearAll(InvalidatePolicy options) {
+    InvalidatePolicy opts = orDefault(options, InvalidatePolicy.defaults());
+    requireAppCache("clearAll").clear(opts);
   }
 
   @Override
-  public <T> Map<String, T> getAll(
-    Iterable<String> cacheKeys,
-    Function<? super String, ? extends T> reader,
-    ReadPolicy policy
+  public void clearPrefix(String prefix, InvalidatePolicy options) {
+    Assert.hasText(prefix, "prefix must not be blank");
+    InvalidatePolicy opts = orDefault(options, InvalidatePolicy.defaults());
+    requireAppCache("clearPrefix").clearPrefix(prefix, opts);
+  }
+
+  @Override
+  public <V> Map<String, V> getAll(
+    Collection<String> cacheKeys,
+    Function<? super String, ? extends V> reader,
+    GetPolicy options
   ) {
     Objects.requireNonNull(cacheKeys, "cacheKeys must not be null");
     Objects.requireNonNull(reader, "reader must not be null");
-    Objects.requireNonNull(policy, "policy must not be null");
-    requireAppCache("getAll");
-    requireAppDetector("getAll");
-    ResolvedTtls ttls = resolveTtlsOrAssert(policy);
-    long hardTtlMs = ttls.hardTtlMs();
-    long softTtlMs = ttls.softTtlMs();
-    return unwrapPresent(
-      hotKeyCache.get(
-        cacheKeys,
-        reader,
-        hardTtlMs,
-        softTtlMs,
-        policy.reportEnabled(),
-        policy.failOnError(),
-        policy.nullCaching(),
-        policy.stalePolicy()
-      )
-    );
+    GetPolicy opts = orDefault(options, GetPolicy.defaults());
+    HotKeyCache cache = requireAppCache("getAll");
+    // An invalid key cannot be a map key and is a miss by definition: dropped
+    // here, so the engine's batch read assumes valid keys.
+    return cache.get(validKeys(cacheKeys), reader, opts);
   }
 
   @Override
-  public <T> Map<String, T> getAllWithSoftExpire(
-    Iterable<String> cacheKeys,
-    Function<? super String, ? extends T> reader
-  ) {
-    return getAllWithSoftExpire(cacheKeys, reader, ReadPolicy.defaults());
-  }
-
-  @Override
-  public <T> Map<String, T> getAllWithSoftExpire(
-    Iterable<String> cacheKeys,
-    Function<? super String, ? extends T> reader,
-    ReadPolicy policy
-  ) {
-    Objects.requireNonNull(cacheKeys, "cacheKeys must not be null");
-    Objects.requireNonNull(reader, "reader must not be null");
-    Objects.requireNonNull(policy, "policy must not be null");
-    requireAppCache("getAllWithSoftExpire");
-    requireAppDetector("getAllWithSoftExpire");
-    ResolvedTtls ttls = resolveTtlsOrAssert(policy);
-    long hardTtlMs = ttls.hardTtlMs();
-    long softTtlMs = ttls.softTtlMs();
-    return unwrapPresent(
-      hotKeyCache.getWithSoftExpire(
-        cacheKeys,
-        reader,
-        hardTtlMs,
-        softTtlMs,
-        policy.reportEnabled(),
-        policy.failOnError(),
-        policy.nullCaching(),
-        StalePolicy.SOFT_REFRESH
-      )
-    );
-  }
-
-  /**
-   * Routes each key to its winning {@link ZetaLoadingSpec} and groups the keys
-   * by spec (insertion-ordered) for the batch no-reader operations. Fails fast —
-   * with an actionable message — when no registry is wired or any key matches
-   * no registered prefix: the batch never partially resolves.
-   *
-   * @param cacheKeys the keys to route; never {@code null}
-   * @param operation the calling operation name (used in error messages)
-   * @return keys grouped by winning spec
-   */
-  private Map<ZetaLoadingSpec<?>, List<String>> groupKeysBySpec(Iterable<String> cacheKeys, String operation) {
-    requireAppCache(operation);
-    requireAppDetector(operation);
-    if (loaderRegistry == null) {
-      throw new IllegalStateException(
-        "No ZetaLoaderRegistry is wired — register one (ZetaLoaderRegistry bean) or use " +
-          operation +
-          "(keys, reader) for these keys"
-      );
-    }
-    Map<ZetaLoadingSpec<?>, List<String>> groups = new LinkedHashMap<>();
-    for (String key : cacheKeys) {
-      ZetaLoadingSpec<?> spec = loaderRegistry.match(key);
-      if (spec == null) {
-        throw new IllegalStateException(
-          "No CacheLoader registered for key '" +
-            key +
-            "' — register a matching prefix via ZetaLoaderRegistry.register(prefix, spec), or use " +
-            operation +
-            "(keys, reader)"
-        );
-      }
-      groups.computeIfAbsent(spec, s -> new ArrayList<>()).add(key);
-    }
-    return groups;
-  }
-
-  /**
-   * Resolves the winning {@link ZetaLoadingSpec} for a no-reader call, failing
-   * fast with an actionable message when no registry is wired or no prefix
-   * matches.
-   */
-  private ZetaLoadingSpec<?> requireRegisteredSpec(String cacheKey, String operation) {
-    Assert.hasText(cacheKey, "cacheKey must not be empty");
-    requireAppCache(operation);
-    requireAppDetector(operation);
-    if (loaderRegistry == null) {
-      throw new IllegalStateException(
-        "No ZetaLoaderRegistry is wired — register one (ZetaLoaderRegistry bean) or use " +
-          operation +
-          "(key, reader) for this key: " +
-          cacheKey
-      );
-    }
-    ZetaLoadingSpec<?> spec = loaderRegistry.match(cacheKey);
-    if (spec == null) {
-      throw new IllegalStateException(
-        "No CacheLoader registered for key '" +
-          cacheKey +
-          "' — register a matching prefix via ZetaLoaderRegistry.register(prefix, spec), or use " +
-          operation +
-          "(key, reader)"
-      );
-    }
-    return spec;
-  }
-
-  @Override
-  @SuppressWarnings("unchecked")
-  public <V> V computeIfAbsent(String cacheKey) {
-    ZetaLoadingSpec<?> spec = requireRegisteredSpec(cacheKey, "computeIfAbsent");
-    return (V) hotKeyCache.computeIfAbsent(cacheKey, spec.toReadPolicy(cacheKey)).orElse(null);
-  }
-
-  @Override
-  @SuppressWarnings("unchecked")
-  public <V> V computeIfAbsent(String cacheKey, Supplier<V> loader) {
+  public <V> void refresh(String cacheKey, Supplier<V> loader, PutPolicy options) {
+    requireKey(cacheKey);
     Objects.requireNonNull(loader, "loader must not be null");
-    requireAppCache("computeIfAbsent");
-    requireAppDetector("computeIfAbsent");
-    return (V) hotKeyCache.computeIfAbsent(cacheKey, ReadPolicy.of(loader)).orElse(null);
-  }
-
-  @Override
-  @SuppressWarnings("unchecked")
-  public <T> Optional<T> computeIfAbsentOptional(String cacheKey, ReadPolicy policy) {
-    Objects.requireNonNull(policy, "policy must not be null");
-    requireAppCache("computeIfAbsent");
-    requireAppDetector("computeIfAbsent");
-    return hotKeyCache.computeIfAbsent(cacheKey, policy);
-  }
-
-  @Override
-  @SuppressWarnings("unchecked")
-  public <V> V computeIfAbsentWithSoftExpire(String cacheKey) {
-    ZetaLoadingSpec<?> spec = requireRegisteredSpec(cacheKey, "computeIfAbsentWithSoftExpire");
-    return (V) hotKeyCache
-      .computeIfAbsentWithSoftExpire(cacheKey, spec.toReadPolicy(cacheKey, StalePolicy.SOFT_REFRESH))
-      .orElse(null);
-  }
-
-  @Override
-  @SuppressWarnings("unchecked")
-  public <V> V computeIfAbsentWithSoftExpire(String cacheKey, Supplier<V> loader) {
-    Objects.requireNonNull(loader, "loader must not be null");
-    requireAppCache("computeIfAbsentWithSoftExpire");
-    requireAppDetector("computeIfAbsentWithSoftExpire");
-    return (V) hotKeyCache.computeIfAbsentWithSoftExpire(cacheKey, ReadPolicy.of(loader)).orElse(null);
-  }
-
-  @Override
-  @SuppressWarnings("unchecked")
-  public <T> Optional<T> computeIfAbsentWithSoftExpireOptional(String cacheKey, ReadPolicy policy) {
-    Objects.requireNonNull(policy, "policy must not be null");
-    requireAppCache("computeIfAbsentWithSoftExpire");
-    requireAppDetector("computeIfAbsentWithSoftExpire");
-    return hotKeyCache.computeIfAbsentWithSoftExpire(cacheKey, policy);
-  }
-
-  @Override
-  public <T> Optional<T> peek(@NotNull @NotBlank String cacheKey) {
-    Assert.hasText(cacheKey, "cacheKey must not be empty");
-    requireAppCache("peek");
-    return hotKeyCache.peek(cacheKey);
-  }
-
-  @Override
-  @Internal
-  public Object peekAndTag(String cacheKey) {
-    Assert.hasText(cacheKey, "cacheKey must not be empty");
-    requireAppCache("peekAndTag");
-    return hotKeyCache.peekAndTag(cacheKey);
-  }
-
-  @Override
-  public <T> void putThrough(String cacheKey, T value, Runnable writer, WritePolicy policy) {
-    Assert.hasText(cacheKey, "cacheKey must not be empty");
-    // C4: null values are allowed — the engine stores them as a short-TTL
-    // NullValue sentinel (penetration protection), mirroring the read path.
-    Objects.requireNonNull(writer, "writer must not be null");
-    Objects.requireNonNull(policy, "policy must not be null");
-    ResolvedTtls ttls = resolveTtlsOrAssert(policy);
-    long hardTtlMs = ttls.hardTtlMs();
-    long softTtlMs = ttls.softTtlMs();
-    // S3: a permanent entry outlives the Redis version key (7-day TTL) — the
-    // next INCR restarts at 1 and peers silently reject the update. Fail fast
-    // when broadcast is on; local-only permanent entries stay allowed.
-    if (hardTtlMs == Long.MAX_VALUE && !policy.skipBroadcast()) {
-      throw new IllegalArgumentException(
-        "putThrough with Long.MAX_VALUE hard TTL cannot broadcast: the entry outlives the Redis " +
-          "version key and peers would silently reject later updates — use a bounded TTL or " +
-          "skipBroadcast for permanent entries"
-      );
-    }
-    requireAppCache("putThrough");
-    hotKeyCache.putThrough(cacheKey, value, writer, hardTtlMs, softTtlMs, !policy.skipBroadcast());
-  }
-
-  @Override
-  public void putLocal(String cacheKey, Object value, WritePolicy policy) {
-    Assert.hasText(cacheKey, "cacheKey must not be empty");
-    Objects.requireNonNull(value, "value must not be null");
-    Objects.requireNonNull(policy, "policy must not be null");
-    ResolvedTtls ttls = resolveTtlsOrAssert(policy);
-    long hardTtlMs = ttls.hardTtlMs();
-    long softTtlMs = ttls.softTtlMs();
-    // C5: Worker-only must fail fast like every other data-plane method —
-    // the silent no-op hid wiring errors (caller thought the write landed).
-    requireAppCache("putLocal");
-    hotKeyCache.putLocal(cacheKey, value, hardTtlMs, softTtlMs);
-  }
-
-  @Override
-  public void invalidate(String cacheKey, InvalidatePolicy policy) {
-    Assert.hasText(cacheKey, "cacheKey must not be empty");
-    Objects.requireNonNull(policy, "policy must not be null");
-    requireAppCache("invalidate");
-    hotKeyCache.invalidate(cacheKey, !policy.skipBroadcast());
-  }
-
-  @Override
-  public void invalidate(Collection<String> cacheKeys, InvalidatePolicy policy) {
-    Objects.requireNonNull(cacheKeys, "cacheKeys must not be null");
-    Objects.requireNonNull(policy, "policy must not be null");
-    requireAppCache("invalidate");
-    hotKeyCache.invalidate(cacheKeys, !policy.skipBroadcast());
-  }
-
-  @Override
-  public void invalidateAfterPut(String cacheKey, Runnable mutation, InvalidatePolicy policy) {
-    Assert.hasText(cacheKey, "cacheKey must not be empty");
-    Objects.requireNonNull(mutation, "mutation must not be null");
-    Objects.requireNonNull(policy, "policy must not be null");
-    requireAppCache("invalidateAfterPut");
-    requireAppDetector("invalidateAfterPut");
-    hotKeyCache.invalidateAfterPut(cacheKey, mutation, !policy.skipBroadcast());
-  }
-
-  @Override
-  public Set<String> invalidateAfterPut(Map<String, ? extends Runnable> mutations, InvalidatePolicy policy) {
-    Objects.requireNonNull(mutations, "mutations must not be null");
-    Objects.requireNonNull(policy, "policy must not be null");
-    requireAppCache("invalidateAfterPut");
-    requireAppDetector("invalidateAfterPut");
-    return hotKeyCache.invalidateAfterPut(mutations, !policy.skipBroadcast());
-  }
-
-  @Override
-  public long invalidateAndGetVersion(String cacheKey, InvalidatePolicy policy) {
-    Assert.hasText(cacheKey, "cacheKey must not be empty");
-    Objects.requireNonNull(policy, "policy must not be null");
-    requireAppCache("invalidateAndGetVersion");
-    return hotKeyCache.invalidate(cacheKey, !policy.skipBroadcast());
-  }
-
-  @Override
-  public Map<String, Long> invalidateAndGetVersions(Collection<String> cacheKeys, InvalidatePolicy policy) {
-    Objects.requireNonNull(cacheKeys, "cacheKeys must not be null");
-    Objects.requireNonNull(policy, "policy must not be null");
-    requireAppCache("invalidateAndGetVersions");
-    return hotKeyCache.invalidate(cacheKeys, !policy.skipBroadcast());
-  }
-
-  @Override
-  public void flushLocalEmergency() {
-    requireAppCache("flushLocalEmergency");
-    hotKeyCache.flushLocalEmergency();
-  }
-
-  @Override
-  @Deprecated
-  public void invalidateAllLocal() {
-    flushLocalEmergency();
-  }
-
-  @Override
-  public long estimatedSize() {
-    if (hotKeyCache == null) {
-      return 0L;
-    }
-    return hotKeyCache.estimatedSize();
-  }
-
-  @Override
-  public ZetaCacheStats snapshot() {
-    if (hotKeyCache == null) {
-      return null;
-    }
-    return hotKeyCache.stats();
-  }
-
-  @Override
-  public Map<String, Object> snapshotValues(int limit) {
-    if (hotKeyCache == null) {
-      return Map.of();
-    }
-    return hotKeyCache.snapshotValues(limit);
-  }
-
-  @Override
-  public List<String> localKeysWithPrefix(String prefix) {
-    if (hotKeyCache == null) {
-      return List.of();
-    }
-    return hotKeyCache.localKeysWithPrefix(prefix);
-  }
-
-  @Override
-  @Nullable
-  public AutoReleaseLock tryLock(String key, long expire, TimeUnit unit) {
-    Assert.hasText(key, "key must not be empty");
-    Assert.isTrue(expire >= 0, "expire must not be negative");
-    Objects.requireNonNull(unit, "unit must not be null");
-    return lockProvider != null ? lockProvider.tryLock(key, expire, unit) : null;
-  }
-
-  @Override
-  @Nullable
-  public AutoReleaseLock tryLock(
-    String key,
-    long expire,
-    TimeUnit unit,
-    int tryLockLockCount,
-    int tryLockInquiryCount,
-    int tryLockUnlockCount
-  ) {
-    Assert.hasText(key, "key must not be empty");
-    Assert.isTrue(expire >= 0, "expire must not be negative");
-    Objects.requireNonNull(unit, "unit must not be null");
-    return lockProvider != null
-      ? lockProvider.tryLock(key, expire, unit, tryLockLockCount, tryLockInquiryCount, tryLockUnlockCount)
-      : null;
-  }
-
-  @Override
-  public boolean tryLockAndRun(String key, long expire, TimeUnit unit, Runnable action) {
-    Assert.hasText(key, "key must not be empty");
-    Assert.isTrue(expire >= 0, "expire must not be negative");
-    Objects.requireNonNull(unit, "unit must not be null");
-    Objects.requireNonNull(action, "action must not be null");
-    if (lockProvider == null) {
-      return false;
-    }
-    try (AutoReleaseLock lock = tryLock(key, expire, unit)) {
-      if (lock != null) {
-        action.run();
-        // Lease recheck (P0-8): a GC pause / failover / partition longer than
-        // the TTL breaks mutual exclusion mid-action with no exception from
-        // close() — report false so the caller knows the critical section was
-        // not exclusive. Unobservable handles report true (no loss detected).
-        return lock.isHeld();
-      }
-      return false;
-    }
-  }
-
-  @Override
-  public boolean tryLockAndRun(
-    String key,
-    long expire,
-    TimeUnit unit,
-    Runnable action,
-    int tryLockLockCount,
-    int tryLockInquiryCount,
-    int tryLockUnlockCount
-  ) {
-    Assert.hasText(key, "key must not be empty");
-    Assert.isTrue(expire >= 0, "expire must not be negative");
-    Objects.requireNonNull(unit, "unit must not be null");
-    Objects.requireNonNull(action, "action must not be null");
-    try (AutoReleaseLock lock = tryLock(key, expire, unit, tryLockLockCount, tryLockInquiryCount, tryLockUnlockCount)) {
-      if (lock != null) {
-        action.run();
-        // Lease recheck (P0-8): see the 3-arg overload — a lapsed lease
-        // reports false even though the action ran.
-        return lock.isHeld();
-      }
-      return false;
-    }
-  }
-
-  /**
-   * Resolve the hard/soft TTL overrides from a read policy, evaluating
-   * each lazy supplier exactly once, and assert both are non-negative.
-   * Centralizes the boundary decomposition shared by every policy-form
-   * read/batch entry point; the assertion messages are intentional contract
-   * text and must not be altered.
-   *
-   * @param policy the read policy supplying the TTL overrides
-   * @return the resolved hard and soft TTL in milliseconds
-   */
-  private static ResolvedTtls resolveTtlsOrAssert(ReadPolicy policy) {
-    long hardTtlMs = policy.hardTtlMs().getAsLong();
-    long softTtlMs = policy.softTtlMs().getAsLong();
-    Assert.isTrue(hardTtlMs >= 0, "hardTtlMs must not be negative");
-    Assert.isTrue(softTtlMs >= 0, "softTtlMs must not be negative");
-    return new ResolvedTtls(hardTtlMs, softTtlMs);
-  }
-
-  /**
-   * Resolve the hard/soft TTL overrides from a write policy — same contract
-   * as the read-policy overload, for the write/refresh entry points.
-   *
-   * @param policy the write policy supplying the TTL overrides
-   * @return the resolved hard and soft TTL in milliseconds
-   */
-  private static ResolvedTtls resolveTtlsOrAssert(WritePolicy policy) {
-    long hardTtlMs = policy.hardTtlMs().getAsLong();
-    long softTtlMs = policy.softTtlMs().getAsLong();
-    Assert.isTrue(hardTtlMs >= 0, "hardTtlMs must not be negative");
-    Assert.isTrue(softTtlMs >= 0, "softTtlMs must not be negative");
-    return new ResolvedTtls(hardTtlMs, softTtlMs);
-  }
-
-  /** Resolved hard/soft TTL pair extracted from a policy. */
-  private record ResolvedTtls(long hardTtlMs, long softTtlMs) {}
-
-  @Override
-  public <T> void registerRefresh(String key, Supplier<T> supplier, ReadPolicy policy) {
-    Assert.hasText(key, "key must not be empty");
-    Objects.requireNonNull(supplier, "supplier must not be null");
-    Objects.requireNonNull(policy, "policy must not be null");
-    ResolvedTtls ttls = resolveTtlsOrAssert(policy);
-    long hardTtlMs = ttls.hardTtlMs();
-    long softTtlMs = ttls.softTtlMs();
-    requireAppCache("registerRefresh");
-    long effectiveSoft = hotKeyCache.resolveEffectiveSoftTtl(softTtlMs);
-    if (effectiveSoft <= 0) {
-      throw new IllegalArgumentException(
-        "registerRefresh requires a positive effective soft TTL (stale-while-revalidate cadence); " +
-          "got " + effectiveSoft + " — enable zeta.local.default-soft-ttl-ms or pass a positive softTtlMs"
-      );
-    }
-    long intervalMs = TimedRefreshCoordinator.intervalFor(effectiveSoft);
-    // Freeze the per-tick policy outside the coordinator's map lock; the tick
-    // does not rebuild the ReadPolicy on every firing.
-    var ref = new Object() {
-      ReadPolicy tick = ReadPolicy.of(
-        supplier,
-        hardTtlMs,
-        softTtlMs,
-        policy.nullCaching(),
-        policy.reportEnabled(),
-        StalePolicy.SOFT_REFRESH
-      );
-    };
-    if (policy.failOnError()) {
-      ref.tick = ref.tick.withFailOnError();
-    }
-    refreshCoordinator.register(key, intervalMs, () -> getWithSoftExpire(key, ref.tick));
-  }
-
-  @Override
-  public void unregisterRefresh(String key) {
-    Assert.hasText(key, "key must not be empty");
-    refreshCoordinator.unregister(key);
-  }
-
-  /**
-   * Cancel all timed refreshes and shut down the refresh scheduler.
-   * Called automatically by Spring when this bean is destroyed.
-   */
-  @Override
-  public void destroy() {
-    refreshCoordinator.destroy();
-  }
-
-  @Override
-  public <V> void refresh(String cacheKey, Supplier<V> loader, WritePolicy policy) {
-    Assert.hasText(cacheKey, "cacheKey must not be empty");
-    Objects.requireNonNull(loader, "loader must not be null");
-    Objects.requireNonNull(policy, "policy must not be null");
-    ResolvedTtls ttls = resolveTtlsOrAssert(policy);
-    long hardTtlMs = ttls.hardTtlMs();
-    long softTtlMs = ttls.softTtlMs();
-    requireAppCache("refresh");
-    // C2: bump-before-load lives in HotKeyCache.refresh — a concurrent
-    // putThrough during the load holds the newer version and the stale apply
+    PutPolicy opts = orDefault(options, PutPolicy.defaults());
+    ResolvedTtls ttls = ResolvedTtls.of(opts);
+    HotKeyCache cache = requireWritableCache("refresh", opts.sync(), ttls.hardMs());
+    // Bump-before-load ordering lives in HotKeyCache#refresh: a concurrent
+    // synced put during the load holds the newer version and the stale apply
     // is skipped instead of regressing it.
-    hotKeyCache.refresh(cacheKey, loader, hardTtlMs, softTtlMs, !policy.skipBroadcast());
+    cache.refresh(cacheKey, loader, ttls.hardMs(), ttls.softMs(), opts.sync());
   }
 
   @Override
   public void refreshAll(Map<String, Supplier<?>> loaders) {
     Objects.requireNonNull(loaders, "loaders must not be null");
-    requireAppCache("refreshAll");
-    // S1: refreshes are independent per key — a slow loader must not head-block
-    // the rest behind a sequential loop. Per-key isolation: one bad loader
-    // must not abort the batch — every key is attempted, failures are
-    // collected, and the first failure is rethrown after the batch completes
-    // (all keys attempted, caller still observes the failure).
-    List<RuntimeException> failures = java.util.Collections.synchronizedList(new java.util.ArrayList<>());
-    loaders
-      .entrySet()
-      .parallelStream()
-      .forEach(e -> {
-        try {
-          refresh(e.getKey(), e.getValue());
-        } catch (RuntimeException ex) {
-          failures.add(ex);
+    // The mode check precedes the empty short-circuit: Worker-only deployments
+    // throw for every data-plane call, including one with nothing to refresh.
+    HotKeyCache cache = requireAppCache("refreshAll");
+    if (loaders.isEmpty()) {
+      return;
+    }
+    // refreshAll is always a cluster write; validate the effective default hard
+    // TTL once before any task is submitted.
+    PutPolicy.requireSyncable(cache.resolveSyncableHardTtl(0L), true);
+    // Validate every entry before submitting anything: argument errors are caller
+    // errors, not per-key loader failures.
+    for (Map.Entry<String, Supplier<?>> entry : loaders.entrySet()) {
+      requireKey(entry.getKey());
+      Objects.requireNonNull(entry.getValue(), "loader must not be null");
+    }
+    // Independent per key: fan out so one slow loader cannot head-block the
+    // rest, and rethrow the first failure after the fan-out settles.
+    // The injected refresh pool keeps this off the JVM-global common pool
+    // (directly constructed facades, mostly tests, fall back to it).
+    Executor executor = refreshExecutor != null ? refreshExecutor : ForkJoinPool.commonPool();
+    // Lock-free collector: the fan-out tasks add concurrently, and the list is only
+    // materialized when something failed — the normal path allocates no synchronized
+    // wrapper and no backing array.
+    Queue<Throwable> failures = new ConcurrentLinkedQueue<>();
+    List<CompletableFuture<Void>> futures = new ArrayList<>(loaders.size());
+    for (Map.Entry<String, Supplier<?>> entry : loaders.entrySet()) {
+      try {
+        futures.add(
+          CompletableFuture.runAsync(
+            () -> {
+              try {
+                // Same defaults as refresh(key, loader): no TTL override, synced.
+                cache.refresh(entry.getKey(), entry.getValue(), 0L, 0L, true);
+              } catch (Throwable ex) {
+                // Throwable, not RuntimeException: an Error escaping the task
+                // would complete the future exceptionally and every other key's
+                // failure would be lost.
+                failures.add(ex);
+              }
+            },
+            executor
+          )
+        );
+      } catch (RejectedExecutionException rejection) {
+        // The pool is saturated or shut down: every further submission would
+        // allocate another full-stack rejection for a key that cannot run.
+        // Record the admission failure and stop submitting — continuing the
+        // loop only turns one saturation event into a rejection storm.
+        failures.add(rejection);
+        break;
+      } catch (RuntimeException submission) {
+        // Any other submission failure is an admission failure for THIS key
+        // only; the remaining keys are still attempted.
+        failures.add(submission);
+      }
+    }
+    // Every task catches Throwable, so no future can complete exceptionally: a
+    // plain join loop waits exactly as long as allOf (the slowest task) without
+    // the array copy and the BiCompletion tree allOf builds.
+    for (CompletableFuture<Void> future : futures) {
+      future.join();
+    }
+    // All tasks have settled, so the queue is quiescent: poll the first and build
+    // the identity set only when a second failure actually needs it.
+    Throwable first = failures.poll();
+    if (first != null) {
+      if (!failures.isEmpty()) {
+        Set<Throwable> attached = Collections.newSetFromMap(new IdentityHashMap<>());
+        attached.add(first);
+        for (Throwable next : failures) {
+          if (attached.add(next)) {
+            first.addSuppressed(next);
+          }
         }
-      });
-    if (!failures.isEmpty()) {
-      throw failures.get(0);
+      }
+      if (first instanceof RuntimeException runtime) {
+        throw runtime;
+      }
+      if (first instanceof Error error) {
+        throw error;
+      }
+      // A checked Throwable from a sneaky-throwing supplier: wrap instead of
+      // casting, or the cast itself would mask the real failure.
+      throw new CompletionException(first);
     }
   }
 
   @Override
-  public boolean isApp() {
-    // Both collaborators are required: get-family paths guard on the cache
-    // AND the detector, so a cache-without-detector wiring must not report
-    // itself as usable (callers gate on this before calling get()).
-    return hotKeyCache != null && appHotKeyDetector != null;
-  }
-
-  /**
-   * Returns a human-readable label of the current deployment mode.
-   */
-  private String currentModeLabel() {
-    if (hotKeyCache != null && appHotKeyDetector != null) {
-      return "App-only mode";
-    }
-    if (hotKeyCache == null) {
-      // The facade is only ever created with a null cache in Worker-only
-      // deployments (ZetaFacadeAutoConfiguration wires it via ObjectProvider);
-      // a cache-less facade in an app deployment would be a wiring error.
-      return "Worker-only mode (no app-side cache)";
-    }
-    return "App-mode with missing TopK detector (partial wiring)";
-  }
-
-  private void requireAppCache(String operation) {
-    if (hotKeyCache == null) {
-      throw new ZetaModeException(operation, currentModeLabel(), "App-mode cache");
-    }
-  }
-
-  /**
-   * Requires app-side TopK detector; throws {@link ZetaModeException} when
-   * the app-side detector is unavailable (Worker-only mode).
-   *
-   * @param operation the API operation name
-   */
-  private void requireAppDetector(String operation) {
-    if (appHotKeyDetector == null) {
-      throw new ZetaModeException(operation, currentModeLabel(), "App-mode TopK detector");
-    }
-  }
-
-  private static final Zeta.RuleAdmin INACTIVE_RULE_ADMIN = new Zeta.RuleAdmin() {
-    @Override
-    public void addBlacklist(String keyPattern) {
-      throw new ZetaModeException(
-        "addBlacklist",
-        "Worker-only mode (no app-side cache)",
-        "App-mode rule administration"
-      );
-    }
-
-    @Override
-    public void removeBlacklist(String keyPattern) {
-      throw new ZetaModeException(
-        "removeBlacklist",
-        "Worker-only mode (no app-side cache)",
-        "App-mode rule administration"
-      );
-    }
-
-    @Override
-    public void addWhitelist(String keyPattern) {
-      throw new ZetaModeException(
-        "addWhitelist",
-        "Worker-only mode (no app-side cache)",
-        "App-mode rule administration"
-      );
-    }
-
-    @Override
-    public void removeWhitelist(String keyPattern) {
-      throw new ZetaModeException(
-        "removeWhitelist",
-        "Worker-only mode (no app-side cache)",
-        "App-mode rule administration"
-      );
-    }
-
-    @Override
-    public Rule.RuleAction evaluateRule(String cacheKey) {
-      return Rule.RuleAction.ALLOW;
-    }
-
-    @Override
-    public boolean isBlacklisted(String cacheKey) {
-      return false;
-    }
-
-    @Override
-    public boolean isWhitelisted(String cacheKey) {
-      return false;
-    }
-
-    @Override
-    public List<Rule> getAllRules() {
-      return List.of();
-    }
-
-    @Override
-    public void clearAllRules() {
-      throw new ZetaModeException(
-        "clearAllRules",
-        "Worker-only mode (no app-side cache)",
-        "App-mode rule administration"
-      );
-    }
-
-    @Override
-    public void broadcastAllLocalRulesManually() {
-      throw new ZetaModeException(
-        "broadcastAllLocalRulesManually",
-        "Worker-only mode (no app-side cache)",
-        "App-mode rule administration"
-      );
-    }
-  };
-
-  private static final Zeta.RefreshAdmin INACTIVE_REFRESH_ADMIN = new Zeta.RefreshAdmin() {
-    @Override
-    public <T> void registerRefresh(String key, Supplier<T> supplier, ReadPolicy policy) {
-      throw new ZetaModeException(
-        "registerRefresh",
-        "Worker-only mode (no app-side cache)",
-        "App-mode refresh scheduling"
-      );
-    }
-
-    @Override
-    public void unregisterRefresh(String key) {
-      // no-op: the worker mode has no scheduler to unregister from
-    }
-  };
-
-  private static final Zeta.StatsAdmin INACTIVE_STATS_ADMIN = new Zeta.StatsAdmin() {
-    @Override
-    public long estimatedSize() {
-      return 0L;
-    }
-
-    @Override
-    public ZetaCacheStats snapshot() {
-      // C5: returning null manufactured NPEs at the caller — fail fast like
-      // every other Worker-only data-plane method.
-      throw new ZetaModeException("snapshot", "Worker-only mode (no app-side cache)", "App-mode cache statistics");
-    }
-
-    @Override
-    public Map<String, Object> snapshotValues(int limit) {
-      return Map.of();
-    }
-
-    @Override
-    public List<String> localKeysWithPrefix(String prefix) {
-      return List.of();
-    }
-  };
-
-  @Override
-  public Zeta.RuleAdmin rules() {
-    return ruleAdmin != null ? ruleAdmin : INACTIVE_RULE_ADMIN;
-  }
-
-  @Override
-  public Zeta.RefreshAdmin refresh() {
-    return isApp() ? this : INACTIVE_REFRESH_ADMIN;
-  }
-
-  @Override
-  public Zeta.StatsAdmin stats() {
-    return isApp() ? this : INACTIVE_STATS_ADMIN;
+  public boolean isCacheAvailable() {
+    // Cache presence is the whole availability contract: the cache owns a
+    // detector by construction, while the facade's detector field feeds only
+    // detector().
+    return hotKeyCache != null;
   }
 
   @Override
@@ -1018,167 +354,217 @@ public class DefaultZeta implements ZetaInternal, Zeta.RefreshAdmin, Zeta.StatsA
     return detectorAdmin;
   }
 
+  @Override
+  public Zeta.RefreshAdmin refresh() {
+    return refreshAdmin;
+  }
+
+  @Override
+  public Zeta.UnsafeAdmin unsafe() {
+    return unsafeAdmin;
+  }
+
+  @Override
+  public ZetaCacheStats stats() {
+    return requireAppCache("stats").stats();
+  }
+
   /**
-   * Facade-plane guard over {@link RuleService}: rejects blank key patterns
-   * before delegating.
+   * Cancel all timed refreshes and shut down the refresh scheduler. Called
+   * automatically by Spring when this bean is destroyed.
    *
-   * <p>
-   * This adapter carries the <i>validation</i> half of the rule contract.
-   * Before rule management was extracted, the facade asserted on blank keys
-   * while the cache engine silently skipped invalid ones; collapsing both into
-   * {@code RuleService} would have forced one behaviour on both planes. Keeping
-   * the assertion here preserves the facade contract and lets
-   * {@code RuleService} stay a lenient engine-side component for callers that
-   * hold it directly.
-   *
-   * <p>
-   * The batch forms are deliberately <b>not</b> overridden: they are
-   * {@code default} methods on {@link Zeta.RuleAdmin} that fan out over the
-   * single-key forms, so they inherit this validation (and per-key delegation)
-   * for free.
+   * <p>The {@link io.github.hyshmily.zeta.util.TimeSource} ticker is NOT
+   * stopped here: it is a JVM-global singleton, and this bean is not its owner.
+   * The owning auto-configuration holds a reference-counted lifecycle claim
+   * ({@code registerLifecycleUser}/{@code releaseLifecycleUser}), so tearing
+   * down one context in a JVM that runs several (parallel integration tests,
+   * modular multi-context deployments) does not degrade every other context to
+   * a JNI clock read per call.
    */
-  private static final class ValidatingRuleAdmin implements Zeta.RuleAdmin {
+  @Override
+  public void destroy() {
+    TimedRefreshCoordinator coordinator = refreshCoordinator;
+    if (coordinator != null) {
+      coordinator.destroy();
+    }
+  }
 
-    private final RuleService delegate;
+  /**
+   * Returns a human-readable label of the current deployment mode.
+   */
+  private String currentModeLabel() {
+    if (hotKeyCache != null && appTopK != null) {
+      return "App-only mode";
+    }
+    if (hotKeyCache == null) {
+      // The facade is only ever created with a null cache in Worker-only
+      // deployments (ZetaFacadeAutoConfiguration wires it via ObjectProvider);
+      // a cache-less facade in an app deployment would be a wiring error.
+      return WORKER_ONLY_MODE;
+    }
+    return "App-mode with missing TopK detector (partial wiring)";
+  }
 
-    ValidatingRuleAdmin(RuleService delegate) {
-      this.delegate = delegate;
+  private HotKeyCache requireAppCache(String operation) {
+    if (hotKeyCache == null) {
+      throw new ZetaModeException(operation, currentModeLabel(), "App-mode cache");
+    }
+    return hotKeyCache;
+  }
+
+  /**
+   * The write-side entry guard: resolve the cache and, for a synced write,
+   * reject a hard TTL the sync plane cannot honour before any state changes.
+   *
+   * @param operation the facade verb, for the mode error
+   * @param sync      whether the write is broadcast to peers
+   * @param hardMs    the resolved hard TTL of the write
+   * @return the app-side cache
+   */
+  private HotKeyCache requireWritableCache(String operation, boolean sync, long hardMs) {
+    HotKeyCache cache = requireAppCache(operation);
+    if (sync) {
+      PutPolicy.requireSyncable(cache.resolveSyncableHardTtl(hardMs), true);
+    }
+    return cache;
+  }
+
+  /**
+   * The facade's single-key contract: every public data-plane method rejects a
+   * null/blank key here, and the engine below assumes validity instead of
+   * re-checking it. Collection arguments take the sibling policy
+   * ({@link io.github.hyshmily.zeta.cache.CacheKeysPolicy#validKeys validKeys}):
+   * invalid elements are dropped rather than rejected, because a batch built
+   * from a query result legitimately contains no-key rows.
+   *
+   * @param key the key to validate
+   */
+  private static void requireKey(@Nullable String key) {
+    Assert.hasText(key, "cacheKey must not be null or blank");
+  }
+
+  private static <T> T orDefault(@Nullable T value, T fallback) {
+    return value == null ? fallback : value;
+  }
+
+  /**
+   * Static TTL values resolved exactly once per call, with the shared
+   * non-negative guard.
+   */
+  private record ResolvedTtls(long hardMs, long softMs) {
+    /** The all-default resolution: no TTL override on either axis. */
+    static final ResolvedTtls DEFAULT = new ResolvedTtls(0L, 0L);
+
+    static ResolvedTtls of(PutPolicy options) {
+      if (options == PutPolicy.defaults() || options == PutPolicy.synced()) {
+        return DEFAULT;
+      }
+      return of(options.hardTtlMs().getAsLong(), options.softTtlMs().getAsLong());
+    }
+
+    static ResolvedTtls of(GetPolicy options) {
+      return options == GetPolicy.defaults()
+        ? DEFAULT
+        : of(options.hardTtlMs().getAsLong(), options.softTtlMs().getAsLong());
+    }
+
+    private static ResolvedTtls of(long hardMs, long softMs) {
+      Assert.isTrue(hardMs >= 0, "hardTtlMs must not be negative");
+      Assert.isTrue(softMs >= 0, "softTtlMs must not be negative");
+      return new ResolvedTtls(hardMs, softMs);
+    }
+  }
+
+  /**
+   * Timed-refresh administration view. A dedicated projection (not the
+   * facade) so callers cannot cast through to the full facade — the same
+   * pattern as {@link DetectorView}. In Worker-only deployments the coordinator
+   * is absent and registration throws the mode error.
+   */
+  private final class RefreshView implements Zeta.RefreshAdmin {
+
+    @Override
+    public <T> void registerRefresh(String key, Supplier<T> supplier, GetPolicy options) {
+      requireKey(key);
+      Objects.requireNonNull(supplier, "supplier must not be null");
+      HotKeyCache cache = requireAppCache("registerRefresh");
+      GetPolicy opts = orDefault(options, GetPolicy.defaults());
+      ResolvedTtls ttls = ResolvedTtls.of(opts);
+      long effectiveSoft = cache.resolveEffectiveSoftTtl(ttls.softMs());
+      Assert.isTrue(
+        effectiveSoft > 0,
+        "registerRefresh requires a positive effective soft TTL (stale-while-revalidate cadence); " +
+          "got " +
+          effectiveSoft +
+          " — enable zeta.local.soft-ttl-ms or pass a positive softTtlMs"
+      );
+
+      long intervalMs = TimedRefreshCoordinator.intervalFor(effectiveSoft);
+      // The constructor creates the coordinator together with the cache; a null here is a
+      // wiring bug, not a deployment mode.
+      TimedRefreshCoordinator coordinator = Objects.requireNonNull(
+        refreshCoordinator,
+        "refresh coordinator must exist with an app cache"
+      );
+      // Freeze the per-tick options outside the coordinator's map lock. The tick calls the
+      // cache directly: key, supplier and options were validated at registration, so the
+      // facade's argument/normalization path does not run again on every firing.
+      final GetPolicy tick = GetPolicy.of(ttls.hardMs(), ttls.softMs(), opts.report(), StalePolicy.SOFT_REFRESH);
+      coordinator.register(key, intervalMs, () -> cache.get(key, supplier, tick));
     }
 
     @Override
-    public void addBlacklist(String keyPattern) {
-      Assert.hasText(keyPattern, "keyPattern must not be empty");
-      delegate.addBlacklist(keyPattern);
+    public void unregisterRefresh(String key) {
+      TimedRefreshCoordinator coordinator = refreshCoordinator;
+      if (coordinator == null) {
+        // Worker-only mode has no scheduler to unregister from.
+        return;
+      }
+      requireKey(key);
+      coordinator.unregister(key);
+    }
+  }
+
+  /**
+   * Raw-table escape-hatch view. A dedicated projection (not the facade) so
+   * callers cannot cast through to the full facade — the same pattern as
+   * {@link DetectorView}.
+   */
+  private final class UnsafeView implements Zeta.UnsafeAdmin {
+
+    @Override
+    public Cache<String, CacheEntry> raw() {
+      return requireAppCache("raw").table();
     }
 
     @Override
-    public void removeBlacklist(String keyPattern) {
-      Assert.hasText(keyPattern, "keyPattern must not be empty");
-      delegate.removeBlacklist(keyPattern);
-    }
-
-    @Override
-    public void addWhitelist(String keyPattern) {
-      Assert.hasText(keyPattern, "keyPattern must not be empty");
-      delegate.addWhitelist(keyPattern);
-    }
-
-    @Override
-    public void removeWhitelist(String keyPattern) {
-      Assert.hasText(keyPattern, "keyPattern must not be empty");
-      delegate.removeWhitelist(keyPattern);
-    }
-
-    @Override
-    public Rule.RuleAction evaluateRule(String cacheKey) {
-      Assert.hasText(cacheKey, "cacheKey must not be empty");
-      return delegate.evaluateRule(cacheKey);
-    }
-
-    @Override
-    public boolean isBlacklisted(String cacheKey) {
-      Assert.hasText(cacheKey, "cacheKey must not be empty");
-      return delegate.isBlacklisted(cacheKey);
-    }
-
-    @Override
-    public boolean isWhitelisted(String cacheKey) {
-      Assert.hasText(cacheKey, "cacheKey must not be empty");
-      return delegate.isWhitelisted(cacheKey);
-    }
-
-    @Override
-    public List<Rule> getAllRules() {
-      return delegate.getAllRules();
-    }
-
-    @Override
-    public void clearAllRules() {
-      delegate.clearAllRules();
-    }
-
-    @Override
-    public void broadcastAllLocalRulesManually() {
-      delegate.broadcastAllLocalRulesManually();
+    public void forgetDedup(String... cacheKeys) {
+      Objects.requireNonNull(cacheKeys, "cacheKeys must not be null");
+      // Fail-fast per element, as on every single-key verb: the engine's dedup
+      // loop assumes valid keys.
+      for (String cacheKey : cacheKeys) {
+        requireKey(cacheKey);
+      }
+      requireAppCache("forgetDedup").forgetDedup(cacheKeys);
     }
   }
 
   /**
    * Detection-observation view over the facade's detector and cache.
-   * Non-static inner class so the bodies stay identical call-for-call with
-   * the former direct methods (same {@code require*} guards, same
-   * null-detector-tolerant query branches) — the directs now delegate here.
+   * Non-static inner class for direct access to the facade's guards and
+   * collaborators.
    */
   private final class DetectorView implements Zeta.DetectorAdmin {
 
     @Override
     public boolean isLocalHotKey(String cacheKey) {
-      Assert.hasText(cacheKey, "cacheKey must not be empty");
-      requireAppCache("isHot");
-      requireAppDetector("isHot");
-      return hotKeyCache.isHot(cacheKey);
+      requireKey(cacheKey);
+      return requireAppCache("isLocalHotKey").isHot(cacheKey);
     }
 
     @Override
-    public void notifyLocalDetectorDirect(String cacheKey, long count) {
-      requireAppDetector("notifyLocalDetectorDirect");
-      appHotKeyDetector.addDirect(cacheKey, count);
-    }
-
-    @Override
-    public void notifyLocalDetectorDirect(Map<String, Long> keyCounts) {
-      requireAppDetector("notifyLocalDetectorDirect");
-      appHotKeyDetector.addDirect(keyCounts);
-    }
-
-    @Override
-    public void notifyLocalDetector(String cacheKey) {
-      requireAppDetector("notifyLocalDetector");
-      appHotKeyDetector.add(cacheKey);
-    }
-
-    @Override
-    public void notifyLocalDetector(String cacheKey, long count) {
-      requireAppDetector("notifyLocalDetector");
-      appHotKeyDetector.add(cacheKey, count);
-    }
-
-    @Override
-    public void notifyLocalDetector(Map<String, Long> keyCounts) {
-      requireAppDetector("notifyLocalDetector");
-      appHotKeyDetector.add(keyCounts);
-    }
-
-    @Override
-    public List<HotKey> localTopKeys(int n) {
-      return appHotKeyDetector != null
-        ? appHotKeyDetector
-            .listTopN(n)
-            .stream()
-            .map(item -> new HotKey(item.key(), item.count()))
-            .toList()
-        : List.of();
-    }
-
-    @Override
-    public List<HotKey> localTopKeys() {
-      return appHotKeyDetector != null
-        ? appHotKeyDetector
-            .list()
-            .stream()
-            .map(item -> new HotKey(item.key(), item.count()))
-            .toList()
-        : List.of();
-    }
-
-    @Override
-    public BlockingQueue<Item> returnLocalExpelledHotKeys() {
-      return appHotKeyDetector != null ? appHotKeyDetector.expelled() : new LinkedBlockingQueue<>();
-    }
-
-    @Override
-    public long returnLocalTotalDataStreams() {
-      return appHotKeyDetector != null ? appHotKeyDetector.total() : 0L;
+    public List<Item> localTopKeys(int limit) {
+      return appTopK == null ? List.of() : appTopK.listTopN(limit);
     }
   }
 }

@@ -15,52 +15,49 @@
  */
 package io.github.hyshmily.zeta.cache.cachesupport;
 
-import io.github.hyshmily.zeta.Internal;
 import io.github.hyshmily.zeta.cache.HotKeyCache;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.Executor;
-import java.util.concurrent.RejectedExecutionException;
-import lombok.extern.slf4j.Slf4j;
+import io.github.hyshmily.zeta.util.Internal;
 import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 /**
- * Executes tasks with awareness of Spring transaction boundaries.
+ * Runs cache write-path tasks at the right Spring transaction boundary.
  * <p>
- * Within a transaction, tasks are deferred to {@code afterCommit}.
- * Outside a transaction:
- * <ul>
- *   <li>{@link #runAsyncAfterCommit} submits to an async executor</li>
- *   <li>{@link #runNowOrAfterCommit} executes synchronously on the caller's thread</li>
- * </ul>
+ * Within a transaction the task is deferred to {@code afterCommit} and runs
+ * <i>synchronously on the committing thread</i>; outside one it executes
+ * inline on the caller's thread ({@link #run(boolean, Runnable)}). The deferred
+ * task itself has no executor-backed async path: the version bump and the L1
+ * apply run on the committing thread, so their order is a property of the call
+ * site rather than of executor scheduling (design decisions: invalidation).
  *
+ * <p>The deferral preserves commit order for a single transaction's own
+ * deferred work: a key's write-through is version-bumped and applied only
+ * after its transaction commits, so it can never precede the commit that
+ * produced it. Two transactions committing concurrently run their afterCommit
+ * hooks on different threads with no mutual exclusion — their version INCR and
+ * L1 applies DO interleave. What makes that safe is the {@code VersionGuard}
+ * skip inside the putThrough L1 apply: a losing (older-version) write never
+ * overwrites a newer entry. Keep this in mind when estimating request tail
+ * latency: within a transaction the deferred work (reader, version bump, L1
+ * apply, broadcast submission) is paid by the committing thread before the hook
+ * returns.
  *
- * <p><b>Asymmetry (deliberate):</b> despite the name,
- * {@link #runAsyncAfterCommit} runs the task <i>synchronously on the
- * committing thread</i> inside the {@code afterCommit} hook — only the
- * non-transactional path is asynchronous. The deferral preserves commit order
- * for a single transaction's own deferred work: a key's write-through is
- * version-bumped and applied only after its transaction commits, so it can
- * never precede the commit that produced it. Two transactions committing
- * concurrently run their afterCommit hooks on different threads with no
- * mutual exclusion — their version INCR and L1 applies DO interleave. What
- * makes that safe is the {@code VersionGuard} skip inside the putThrough L1
- * apply: a losing (older-version) write never overwrites a newer entry.
- * Keep this in mind when estimating request tail latency: within a
- * transaction the deferred work (writer, version bump, broadcast) is paid by
- * the committing thread before the hook returns.
+ * <p><b>Failure propagation.</b> A task that fails inside the {@code afterCommit}
+ * hook is rethrown to the committing caller, because a silently skipped cache
+ * update after a committed write is worse than a loud commit-path error — the
+ * transaction is already committed either way. Outside a transaction the
+ * failure propagates directly to the caller.
  *
  * <p><b>Rollback behavior:</b> Deferred actions registered via
- * {@code runNowOrAfterCommit} are NOT executed if the surrounding
+ * {@code run} are NOT executed if the surrounding
  * transaction rolls back. This is standard Spring
  * {@code TransactionSynchronization.afterCommit()} behavior.
-  * Callers using {@code invalidate()} inside a transaction that may
-  * roll back should be aware that the invalidation will be silently
-  * dropped on rollback (every invalidation defers to after-commit, with or
-  * without broadcast). For critical invalidations, register an
-  * {@code afterCompletion} callback manually.
+ * Callers using {@code invalidate()} with {@code immediate = false} inside a
+ * transaction that may roll back should be aware that the invalidation is
+ * dropped on rollback, whether or not it broadcasts; {@code immediate = true}
+ * runs on the calling thread before the transaction settles. For critical
+ * invalidations, register an {@code afterCompletion} callback manually.
  */
-@Slf4j
 @Internal
 public final class TransactionSupport {
 
@@ -70,107 +67,68 @@ public final class TransactionSupport {
   private TransactionSupport() {}
 
   /**
-   * Defer a task to after transaction commit, or submit to async executor outside a transaction.
-   * Used by {@link HotKeyCache#putThrough} for async write-through.
-   * Errors during async execution are logged but not propagated to the caller.
-   * <p>
-   * <b>Semantics note:</b> "async" applies to the non-transactional path only.
-   * Inside a transaction the task runs synchronously on the committing thread
-   * in the {@code afterCommit} hook (see the class Javadoc for why the
-   * ordering guarantee is deliberate).
-   * <p>
-   * <b>Submission failure is absorbed too.</b> {@code CompletableFuture.runAsync}
-   * throws <em>synchronously</em> when the executor rejects the task, and
-   * {@code exceptionally()} only sees failures of the async stage — it cannot
-   * catch a submit-time rejection. Left unhandled, that {@link
-   * RejectedExecutionException} would surface as a success-turned-exception on a
-   * business call whose method body already ran (and whose data-source write is
-   * inside the rejected task, so the write silently never happens). The
-   * rejection is therefore caught and logged at WARN here, matching what
-   * {@code HotKeyCache.bumpAndInvalidate} already does for its own executor
-   * submission — the cache update is best-effort, the caller's contract is not.
+   * Whether a Spring transaction synchronization is active on the current thread.
    *
-   * @param task     the task to execute
-   * @param executor async executor for the non-transactional case
+   * <p>Write paths consult this to decide version-allocation timing: inside a transaction the
+   * version bump must wait for {@code afterCommit} (registration order = version order),
+   * otherwise an uncommitted bump leaks on rollback and a same-transaction put-then-invalidate
+   * inverts versions.
+   *
+   * @return {@code true} when deferred work would run in {@code afterCommit}
    */
-  public static void runAsyncAfterCommit(Runnable task, Executor executor) {
-    if (TransactionSynchronizationManager.isSynchronizationActive()) {
-      TransactionSynchronizationManager.registerSynchronization(
-        new TransactionSynchronization() {
-          @Override
-          public void afterCommit() {
-            // Same guard as runNowOrAfterCommit: a failure of the deferred body
-            // must not turn an already-committed transaction into an error for
-            // the caller. This is also what makes the "errors are logged, not
-            // propagated" contract in the method Javadoc true on BOTH paths.
-            // NOTE: failures are rethrown so commit callers observe them —
-            // a silently skipped cache update after a committed DB write is
-            // worse than a loud commit-path error (P0-4). Spring wraps this
-            // as a transaction-system error; the data is already committed.
-            try {
-              task.run();
-            } catch (RuntimeException e) {
-              log.error("Deferred post-commit async task failed; transaction already committed", e);
-              throw e;
-            } catch (Exception e) {
-              log.error("Deferred post-commit async task failed; transaction already committed", e);
-              throw new IllegalStateException("Deferred post-commit task failed after commit", e);
-            }
-          }
-        }
-      );
-      return;
-    }
-    log.debug("Called outside transaction, submitting to async executor");
-    try {
-      CompletableFuture.runAsync(task, executor).exceptionally(e -> {
-        log.error("Async task failed after non-transactional call", e);
-        return null;
-      });
-    } catch (RejectedExecutionException e) {
-      log.warn(
-        "Async cache task rejected by executor after a non-transactional call; cache update skipped " +
-          "(the underlying write may not have been applied): {}",
-        e.getMessage()
-      );
+  private static boolean isTransactionActive() {
+    return TransactionSynchronizationManager.isSynchronizationActive();
+  }
+
+  /**
+   * Whether a write-path task must wait for {@code afterCommit}: the transaction is
+   * active and the caller did not request an immediate run. This is the single owner
+   * of that decision for both {@link #run} and the clear paths.
+   *
+   * @param immediate {@code true} runs on the calling thread even inside a transaction
+   * @return {@code true} when the task belongs in {@code afterCommit}
+   */
+  public static boolean isDeferred(boolean immediate) {
+    return !immediate && isTransactionActive();
+  }
+
+  /**
+   * Run a write-path task at the right boundary: inline when {@code immediate} is set or no
+   * transaction is active, otherwise from {@code afterCommit} on the committing thread.
+   *
+   * <p>Delegates the deferral decision to {@link #isDeferred(boolean)}; call sites pass their
+   * {@code immediate} flag instead of testing the transaction state themselves. Used by the
+   * {@link HotKeyCache} write paths ({@code putThrough}, {@code putLocal}, {@code refresh},
+   * {@code invalidate}) so version allocation and the L1 apply share the commit boundary
+   * (design decisions: invalidation).
+   *
+   * @param immediate {@code true} runs on the calling thread even inside a transaction
+   * @param task      the task to execute
+   */
+  public static void run(boolean immediate, Runnable task) {
+    if (isDeferred(immediate)) {
+      registerAfterCommit(task);
+    } else {
+      task.run();
     }
   }
 
   /**
-   * Defer a task to after transaction commit, or execute synchronously outside a transaction.
-   * Used by {@link HotKeyCache#invalidate(String, boolean)},
-   * {@link HotKeyCache#invalidate(Iterable, boolean)}, and
-   * {@link HotKeyCache#invalidateAfterPut(String, Runnable, boolean)}.
-   * Exceptions propagate directly to the caller when executed outside a transaction.
+   * Registers the task on the current transaction's afterCommit hook. The caller
+   * has already established that a synchronization is active.
    *
-   * @param task the task to execute
+   * @param task the task to run after commit
    */
-  public static void runNowOrAfterCommit(Runnable task) {
-    if (TransactionSynchronizationManager.isSynchronizationActive()) {
-      TransactionSynchronizationManager.registerSynchronization(
-        new TransactionSynchronization() {
-          @Override
-          public void afterCommit() {
-            // afterCommit() runs on the commit path: an exception escaping here
-            // surfaces to the caller of commit() as a transaction-system error
-            // even though the data was already committed. That loud failure is
-            // deliberate (P0-4): a silently skipped cache update after a
-            // committed DB write leaves cache and DB inconsistent with the
-            // caller believing they agree.
-            try {
-              task.run();
-            } catch (RuntimeException e) {
-              log.error("Deferred post-commit cache task failed; transaction already committed", e);
-              throw e;
-            } catch (Exception e) {
-              log.error("Deferred post-commit cache task failed; transaction already committed", e);
-              throw new IllegalStateException("Deferred post-commit cache task failed after commit", e);
-            }
-          }
+  private static void registerAfterCommit(Runnable task) {
+    TransactionSynchronizationManager.registerSynchronization(
+      new TransactionSynchronization() {
+        @Override
+        public void afterCommit() {
+          // The committing thread runs one deferred task; a failure reaches the commit caller
+          // as a transaction-system error instead of being silently skipped.
+          task.run();
         }
-      );
-      return;
-    }
-    task.run();
+      }
+    );
   }
 }

@@ -19,79 +19,34 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import io.github.hyshmily.zeta.cache.cachesupport.TransactionSupport;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.Executor;
-import java.util.concurrent.Executors;
-import java.util.concurrent.RejectedExecutionException;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import org.junit.jupiter.api.Test;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 /**
- * Tests for {@link TransactionSupport}, verifying sync and async execution outside transaction context.
+ * Tests for {@link TransactionSupport}: synchronous execution outside a transaction,
+ * deferral to {@code afterCommit} inside one, and failure propagation.
  */
 class TransactionSupportTest {
 
   /**
-   * Verifies that {@code runNowOrAfterCommit} executes the action synchronously when there is no active transaction.
+   * Verifies that {@code run(false, ...)} executes the action synchronously when there is no active transaction.
    */
   @Test
-  void runNowOrAfterCommit_shouldExecuteSynchronouslyOutsideTransaction() {
+  void run_shouldExecuteSynchronouslyOutsideTransaction() {
     AtomicBoolean executed = new AtomicBoolean(false);
-    TransactionSupport.runNowOrAfterCommit(() -> executed.set(true));
+    TransactionSupport.run(false, () -> executed.set(true));
     assertThat(executed).isTrue();
   }
 
   /**
-   * Verifies that a <em>submit-time</em> rejection is absorbed instead of propagating.
-   * {@code CompletableFuture.runAsync} throws {@link RejectedExecutionException} synchronously when
-   * the executor refuses the task, and {@code exceptionally()} is attached to the future — it never
-   * sees a submit-time failure. Unhandled, that would surface as an exception on a business call
-   * whose method body already ran, while the deferred work (including the data-source write) never
-   * happened.
-   */
-  @Test
-  void runAsyncAfterCommit_whenExecutorRejects_shouldNotPropagate() {
-    AtomicBoolean executed = new AtomicBoolean(false);
-    Executor rejecting = task -> {
-      throw new RejectedExecutionException("queue full");
-    };
-
-    TransactionSupport.runAsyncAfterCommit(() -> executed.set(true), rejecting);
-
-    assertThat(executed).isFalse();
-  }
-
-  /**
-   * Verifies that {@code runAsyncAfterCommit} executes the action asynchronously via the provided executor when there is no active transaction.
-   */
-  @Test
-  void runAsyncAfterCommit_shouldExecuteAsyncOutsideTransaction() throws InterruptedException {
-    AtomicBoolean executed = new AtomicBoolean(false);
-    CountDownLatch latch = new CountDownLatch(1);
-    Executor executor = Executors.newSingleThreadExecutor();
-
-    TransactionSupport.runAsyncAfterCommit(
-      () -> {
-        executed.set(true);
-        latch.countDown();
-      },
-      executor
-    );
-
-    assertThat(latch.await(5, TimeUnit.SECONDS)).isTrue();
-    assertThat(executed).isTrue();
-  }
-
-  /**
-   * Verifies that an exception thrown inside {@code runNowOrAfterCommit} propagates to the caller
+   * Verifies that an exception thrown inside {@code run(false, ...)} propagates to the caller
    * when called outside a transaction (fault mode: exception propagation).
    */
   @Test
-  void runNowOrAfterCommit_withException_shouldPropagate() {
+  void run_withException_shouldPropagate() {
     assertThatThrownBy(() ->
-      TransactionSupport.runNowOrAfterCommit(() -> {
+      TransactionSupport.run(false, () -> {
         throw new RuntimeException("task-failed");
       })
     )
@@ -100,37 +55,13 @@ class TransactionSupportTest {
   }
 
   /**
-   * Verifies that an exception thrown inside {@code runAsyncAfterCommit} is caught and logged,
-   * NOT propagated to the caller (fault mode: exception suppression).
-   */
-  @Test
-  void runAsyncAfterCommit_withException_shouldNotPropagate() throws InterruptedException {
-    AtomicBoolean executed = new AtomicBoolean(false);
-    CountDownLatch latch = new CountDownLatch(1);
-    Executor executor = Executors.newSingleThreadExecutor();
-
-    TransactionSupport.runAsyncAfterCommit(
-      () -> {
-        executed.set(true);
-        latch.countDown();
-        throw new RuntimeException("async-fail");
-      },
-      executor
-    );
-
-    assertThat(latch.await(5, TimeUnit.SECONDS)).isTrue();
-    assertThat(executed).isTrue();
-    // No exception should reach here — the exceptionally callback swallows it
-  }
-
-  /**
-   * Verifies that {@code runNowOrAfterCommit} executes the task even when the task throws,
+   * Verifies that {@code run(false, ...)} executes the task even when the task throws,
    * and the exception is not wrapped (fault mode: bare exception propagation).
    */
   @Test
-  void runNowOrAfterCommit_withCheckedExceptionInRunnable_shouldPropagate() {
+  void run_withCheckedExceptionInRunnable_shouldPropagate() {
     assertThatThrownBy(() ->
-      TransactionSupport.runNowOrAfterCommit(() -> {
+      TransactionSupport.run(false, () -> {
         throw new IllegalStateException("state-error");
       })
     )
@@ -141,15 +72,15 @@ class TransactionSupportTest {
   // ── Transaction-aware paths ──
 
   /**
-   * Verifies that {@code runAsyncAfterCommit} defers the task when a transaction is active,
+   * Verifies that {@code run(false, ...)} defers the task when a transaction is active,
    * and executes it only after commit.
    */
   @Test
-  void runAsyncAfterCommit_withinTransaction_shouldDeferAfterCommit() {
+  void run_withinTransaction_shouldDeferAfterCommit() {
     TransactionSynchronizationManager.initSynchronization();
     try {
       AtomicBoolean executed = new AtomicBoolean(false);
-      TransactionSupport.runAsyncAfterCommit(() -> executed.set(true), Runnable::run);
+      TransactionSupport.run(false, () -> executed.set(true));
 
       assertThat(executed).isFalse();
 
@@ -162,41 +93,22 @@ class TransactionSupportTest {
   }
 
   /**
-   * Verifies that {@code runNowOrAfterCommit} defers the task when a transaction is active,
-   * and executes it only after commit.
+   * Verifies that a failure inside the deferred {@code afterCommit} body is logged and rethrown
+   * to the committing caller (P0-4) — a post-commit cache failure must never be silent.
    */
   @Test
-  void runNowOrAfterCommit_withinTransaction_shouldDeferAfterCommit() {
+  void run_withinTransaction_failure_shouldRethrow() {
     TransactionSynchronizationManager.initSynchronization();
     try {
-      AtomicBoolean executed = new AtomicBoolean(false);
-      TransactionSupport.runNowOrAfterCommit(() -> executed.set(true));
+      TransactionSupport.run(false, () -> {
+        throw new IllegalStateException("post-commit-fail");
+      });
 
-      assertThat(executed).isFalse();
-
-      TransactionSynchronizationManager.getSynchronizations().forEach(s -> s.afterCommit());
-
-      assertThat(executed).isTrue();
+      assertThatThrownBy(() -> TransactionSynchronizationManager.getSynchronizations().forEach(s -> s.afterCommit()))
+        .isInstanceOf(IllegalStateException.class)
+        .hasMessage("post-commit-fail");
     } finally {
       TransactionSynchronizationManager.clear();
     }
-  }
-
-  /**
-   * Verifies that the {@code exceptionally} callback in {@code runAsyncAfterCommit} is invoked
-   * when the async task fails, using a direct executor for deterministic execution.
-   */
-  @Test
-  void runAsyncAfterCommit_withException_shouldInvokeExceptionallyCallback() {
-    AtomicBoolean executed = new AtomicBoolean(false);
-    TransactionSupport.runAsyncAfterCommit(
-      () -> {
-        executed.set(true);
-        throw new RuntimeException("async-fail");
-      },
-      Runnable::run
-    );
-
-    assertThat(executed).isTrue();
   }
 }

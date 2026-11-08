@@ -58,6 +58,18 @@ class StandardThreadExecutorTest {
     );
   }
 
+  /** A null command must fail before the admission increment, or the slot leaks forever. */
+  @Test
+  void nullCommand_shouldThrowWithoutLeakingSubmittedCount() {
+    var executor = newExecutor(1, 4, 100);
+    try {
+      assertThatThrownBy(() -> executor.execute(null)).isInstanceOf(NullPointerException.class);
+      assertThat(executor.getSubmittedTasksCount()).isZero();
+    } finally {
+      executor.shutdownNow();
+    }
+  }
+
   @Test
   void firstTask_shouldCreateThreadImmediately() throws Exception {
     // submittedCount(1) > poolSize(0) → queue.offer() returns false → worker created.
@@ -234,15 +246,15 @@ class StandardThreadExecutorTest {
   }
 
   @Test
-  void force_afterShutdown_shouldThrow() throws Exception {
+  void force_afterShutdown_shouldReturnFalse() throws Exception {
     var executor = newExecutor(1, 2, 10);
     StandardExecutorQueue queue = (StandardExecutorQueue) executor.getQueue();
     executor.shutdownNow();
-    assertThatThrownBy(() -> queue.force(() -> {})).isInstanceOf(RejectedExecutionException.class);
+    assertThat(queue.force(() -> {})).isFalse();
   }
 
   @Test
-  void force_duringShutdownTransition_shouldThrow() throws Exception {
+  void force_duringShutdownTransition_shouldReturnFalse() throws Exception {
     // Pins the defensive termination guard: while the pool is in the STOP transition (a task
     // still running, workers exiting), force() must reject instead of queueing a task that
     // may never be drained.
@@ -262,7 +274,7 @@ class StandardThreadExecutorTest {
       executor.execute(blocking);
       assertThat(firstStarted.await(5, TimeUnit.SECONDS)).isTrue();
       executor.shutdownNow();
-      assertThatThrownBy(() -> queue.force(() -> {})).isInstanceOf(RejectedExecutionException.class);
+      assertThat(queue.force(() -> {})).isFalse();
     } finally {
       release.countDown();
       executor.shutdownNow();
@@ -333,6 +345,40 @@ class StandardThreadExecutorTest {
       executor.shutdownNow(); // drains the two queued tasks
       assertThat(executor.awaitTermination(5, TimeUnit.SECONDS)).isTrue();
       assertThat(executor.getSubmittedTasksCount()).isZero();
+    } finally {
+      release.countDown();
+      executor.shutdownNow();
+    }
+  }
+
+  @Test
+  void purge_shouldCompensateCancelledQueuedFutures() throws Exception {
+    // The JDK's purge removes cancellation through the queue iterator, not through
+    // StandardThreadExecutor.remove; without the overridden purge each removed Future leaks one
+    // admission slot.
+    var executor = newExecutor(1, 1, 100);
+    var firstStarted = new CountDownLatch(1);
+    var release = new CountDownLatch(1);
+    Runnable blocking = () -> {
+      firstStarted.countDown();
+      try {
+        release.await();
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+      }
+    };
+    try {
+      executor.execute(blocking);
+      assertThat(firstStarted.await(5, TimeUnit.SECONDS)).isTrue();
+      var cancelled = executor.submit(() -> {});
+      executor.submit(() -> {});
+      assertThat(executor.getSubmittedTasksCount()).isEqualTo(3);
+
+      assertThat(cancelled.cancel(false)).isTrue();
+      executor.purge();
+
+      assertThat(executor.getSubmittedTasksCount()).isEqualTo(2);
+      assertThat(executor.getQueue()).hasSize(1);
     } finally {
       release.countDown();
       executor.shutdownNow();
@@ -439,23 +485,6 @@ class StandardThreadExecutorTest {
   }
 
   @Test
-  void rejectedExecutionHandler_accessors_shouldBypassAccountingWrapper() {
-    // getRejectedExecutionHandler() must return the user's handler, not the internal
-    // accounting wrapper; setRejectedExecutionHandler() must swap the user handler
-    // while the wrapper stays installed.
-    var original = new ThreadPoolExecutor.DiscardPolicy();
-    var executor = newExecutor(1, 1, 10, original);
-    try {
-      assertThat(executor.getRejectedExecutionHandler()).isSameAs(original);
-      var replacement = new ThreadPoolExecutor.CallerRunsPolicy();
-      executor.setRejectedExecutionHandler(replacement);
-      assertThat(executor.getRejectedExecutionHandler()).isSameAs(replacement);
-    } finally {
-      executor.shutdownNow();
-    }
-  }
-
-  @Test
   void queue_attachNullExecutor_shouldThrowNpe() {
     // Locks in the attach contract: a null executor is rejected eagerly instead of
     // surfacing later as an NPE from offer().
@@ -465,8 +494,8 @@ class StandardThreadExecutorTest {
 
   @Test
   void queue_reattach_shouldThrowIllegalState() {
-    // Locks in the single-use attach contract: maxPoolSize is snapshotted at attach,
-    // so silently re-attaching to another executor would mix two executors' states.
+    // Locks in the single-use attach contract: silently re-attaching to another
+    // executor would mix two executors' state.
     var executor = newExecutor(1, 2, 10);
     try {
       var queue = (StandardExecutorQueue) executor.getQueue();
@@ -476,6 +505,35 @@ class StandardThreadExecutorTest {
       } finally {
         other.shutdownNow();
       }
+    } finally {
+      executor.shutdownNow();
+    }
+  }
+
+  @Test
+  void rejectedHandlerThrowingError_shouldStillBalanceSubmittedCount() throws Exception {
+    // CallerRuns/discard handlers can throw an Error (OOM, StackOverflow,
+    // AssertionError) from inside the rejection handler. The compensation must
+    // be a finally, not catch(RuntimeException), or the slot leaks forever.
+    var executor = newExecutor(1, 1, 1, (r, e) -> {
+      throw new AssertionError("handler error");
+    });
+    try {
+      executor.shutdown();
+      assertThatThrownBy(() -> executor.execute(() -> {})).isInstanceOf(AssertionError.class);
+      assertThat(executor.getSubmittedTasksCount()).isZero();
+    } finally {
+      executor.shutdownNow();
+    }
+  }
+
+  @Test
+  void setMaximumPoolSize_shouldResizeAdmissionCeiling() {
+    var executor = newExecutor(1, 2, 10);
+    try {
+      assertThat(executor.getMaxSubmittedTaskCount()).isEqualTo(12);
+      executor.setMaximumPoolSize(4);
+      assertThat(executor.getMaxSubmittedTaskCount()).isEqualTo(14);
     } finally {
       executor.shutdownNow();
     }

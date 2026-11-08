@@ -28,15 +28,12 @@ class ZetaConstantsTest {
   void shouldHaveExpectedAmqpHeaders() {
     assertThat(ZetaConstants.Amqp.HEADER_TYPE).isEqualTo("type");
     assertThat(ZetaConstants.Amqp.HEADER_VERSION).isEqualTo("version");
-    assertThat(ZetaConstants.Amqp.HEADER_IS_VERSION_DEGRADED).isEqualTo("isVersionDegraded");
   }
 
   @Test
   void shouldHaveExpectedThreadPrefixes() {
-    assertThat(ZetaConstants.Threads.PREFIX_HOTKEY).isEqualTo("zeta-");
-    assertThat(ZetaConstants.Threads.PREFIX_SYNC).isEqualTo("zeta-sync");
-    assertThat(ZetaConstants.Threads.PREFIX_WORKER).isEqualTo("zeta-worker");
-    assertThat(ZetaConstants.Threads.PREFIX_REPORT).isEqualTo("zeta-report");
+    assertThat(ZetaConstants.Threads.PREFIX_KEY).isEqualTo("zeta-");
+    assertThat(ZetaConstants.Threads.PREFIX_SCHEDULER).isEqualTo("zeta-scheduler");
   }
 
   @Test
@@ -51,17 +48,6 @@ class ZetaConstantsTest {
   }
 
   @Test
-  void shouldHaveExpectedSources() {
-    assertThat(ZetaConstants.Source.SLIDING_WINDOW).isEqualTo("sliding_window");
-    assertThat(ZetaConstants.Source.TOPK_PRE_WARM).isEqualTo("topk_pre_warm");
-  }
-
-  @Test
-  void shouldHaveExpectedRedisKeyPrefix() {
-    assertThat(ZetaConstants.Redis.VERSION_KEY_PREFIX).isEqualTo("zeta:ver:");
-  }
-
-  @Test
   void shouldHaveExpectedDefaultVersion() {
     assertThat(ZetaConstants.Version.VERSION_DEFAULT).isZero();
   }
@@ -72,26 +58,14 @@ class ZetaConstantsTest {
   }
 
   @Test
-  void shouldHaveExpectedNodeAndTimestampHeaders() {
+  void shouldHaveExpectedNodeHeader() {
     assertThat(ZetaConstants.Amqp.HEADER_NODE_ID).isEqualTo("nodeId");
-    assertThat(ZetaConstants.Amqp.HEADER_TIMESTAMP).isEqualTo("timestamp");
   }
 
   @Test
   void shouldHaveExpectedHeartbeatHeaders() {
     assertThat(ZetaConstants.Amqp.HEADER_HEARTBEAT_EPOCH).isEqualTo("hbEpoch");
-    assertThat(ZetaConstants.Amqp.HEADER_HEARTBEAT_LOAD).isEqualTo("hbLoad");
     assertThat(ZetaConstants.Amqp.HEADER_HEARTBEAT_READY).isEqualTo("hbReady");
-    assertThat(ZetaConstants.Amqp.HEADER_HEARTBEAT_CONFIG_FP).isEqualTo("hbConfigFp");
-  }
-
-  @Test
-  void shouldHaveExpectedVerifyHeaders() {
-    assertThat(ZetaConstants.Amqp.HEADER_VERIFY_TYPE).isEqualTo("verifyType");
-    assertThat(ZetaConstants.Amqp.HEADER_VERIFY_APP_INSTANCE).isEqualTo("verifyAppInstance");
-    assertThat(ZetaConstants.Amqp.HEADER_VERIFY_WORKER_ID).isEqualTo("verifyWorkerId");
-    assertThat(ZetaConstants.Amqp.HEADER_VERIFY_PING).isEqualTo("PING");
-    assertThat(ZetaConstants.Amqp.HEADER_VERIFY_PONG).isEqualTo("PONG");
   }
 
   @Test
@@ -104,23 +78,12 @@ class ZetaConstantsTest {
     assertThat(ZetaConstants.NO_SYNC_PUBLISHER_MESSAGE).isEqualTo("No sync publisher found, please enable zeta.sync");
   }
 
-
-  @Test
-  void shouldHaveExpectedRedisKeyRules() {
-    assertThat(ZetaConstants.Redis.KEY_RULES).isEqualTo("zeta:rules");
-  }
-
   @Test
   void shouldHaveExpectedExchangeNames() {
     assertThat(ZetaConstants.Exchange.REPORT).isEqualTo("zeta.reportToWorker.exchange");
     assertThat(ZetaConstants.Exchange.HEARTBEAT).isEqualTo("zeta.heartbeat.exchange");
     assertThat(ZetaConstants.Exchange.BROADCAST).isEqualTo("zeta.send.exchange");
     assertThat(ZetaConstants.Exchange.SYNC).isEqualTo("zeta.sync.exchange");
-  }
-
-  @Test
-  void shouldHaveExpectedRedisLockKeyPrefix() {
-    assertThat(ZetaConstants.Redis.LOCK_KEY_PREFIX).isEqualTo("zeta:lock:");
   }
 
   @Test

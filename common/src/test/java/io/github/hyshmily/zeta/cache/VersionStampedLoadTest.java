@@ -17,51 +17,51 @@ package io.github.hyshmily.zeta.cache;
 
 import static io.github.hyshmily.zeta.constants.ZetaConstants.Amqp.*;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import com.rabbitmq.client.Channel;
-import io.github.hyshmily.zeta.annotation.annotationsupporter.NullValue;
 import io.github.hyshmily.zeta.autoconfigure.ZetaProperties;
-import io.github.hyshmily.zeta.cache.cachesupport.BroadcastBuffer;
-import io.github.hyshmily.zeta.cache.cachesupport.EntryLifecycle;
-import io.github.hyshmily.zeta.cache.cachesupport.LoaderOutcome;
-import io.github.hyshmily.zeta.cache.cachesupport.SingleFlight;
-import io.github.hyshmily.zeta.cache.cachesupport.impl.EntryLifecycleImpl;
+import io.github.hyshmily.zeta.cache.cachesupport.lifecycle.EntryLifecycle;
+import io.github.hyshmily.zeta.cache.cachesupport.lifecycle.EntryLifecycleImpl;
+import io.github.hyshmily.zeta.cache.cachesupport.loader.CacheLoader;
+import io.github.hyshmily.zeta.cache.cachesupport.loader.LoadStatus;
+import io.github.hyshmily.zeta.cache.cachesupport.loader.LoaderOutcome;
+import io.github.hyshmily.zeta.cache.cachesupport.loader.singleflight.SingleFlight;
+import io.github.hyshmily.zeta.cache.cachesupport.policy.GetPolicy;
+import io.github.hyshmily.zeta.cache.cachesupport.policy.StalePolicy;
+import io.github.hyshmily.zeta.cache.cachesupport.raw.CacheEntry;
+import io.github.hyshmily.zeta.cache.cachesupport.raw.EntryDraft;
+import io.github.hyshmily.zeta.cache.cachesupport.raw.VersionedValue;
+import io.github.hyshmily.zeta.hotkeydetector.HotKeyDetector;
+import io.github.hyshmily.zeta.model.DecisionStamp;
+import io.github.hyshmily.zeta.model.KeyState;
 import io.github.hyshmily.zeta.scheduler.BackgroundRefresher;
 import io.github.hyshmily.zeta.scheduler.DefaultBackgroundRefresher;
-import io.github.hyshmily.zeta.cache.codec.CacheCompressor;
-import io.github.hyshmily.zeta.cache.loader.CacheLoader;
-import io.github.hyshmily.zeta.hotkeydetector.HotKeyDetector;
-import io.github.hyshmily.zeta.model.CacheEntry;
-import io.github.hyshmily.zeta.model.ReadPolicy;
-import io.github.hyshmily.zeta.model.KeyState;
-import io.github.hyshmily.zeta.model.StalePolicy;
-import io.github.hyshmily.zeta.rule.RuleMatcher;
-import io.github.hyshmily.zeta.rule.impl.RuleMatcherImpl;
 import io.github.hyshmily.zeta.sharding.HealthView;
 import io.github.hyshmily.zeta.sync.local.CacheSyncListener;
 import io.github.hyshmily.zeta.sync.local.CacheSyncProperties;
 import io.github.hyshmily.zeta.sync.local.DefaultSyncDecisionHandler;
 import io.github.hyshmily.zeta.sync.local.SyncDecisionHandler;
 import io.github.hyshmily.zeta.sync.local.SyncMessage;
+import io.github.hyshmily.zeta.sync.local.SyncType;
 import io.github.hyshmily.zeta.util.TimeSource;
-import io.github.hyshmily.zeta.util.id.SnowflakeIdGenerator;
-import io.github.hyshmily.zeta.util.version.VersionController;
-import io.github.hyshmily.zeta.util.version.impl.VersionControllerImpl;
+import io.github.hyshmily.zeta.util.clock.StampClock;
 import java.nio.charset.StandardCharsets;
-import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executor;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.BiConsumer;
+import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.function.Supplier;
 import org.junit.jupiter.api.AfterEach;
@@ -71,22 +71,18 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.springframework.amqp.core.Message;
 import org.springframework.amqp.core.MessageProperties;
-import org.springframework.data.redis.core.StringRedisTemplate;
-import org.springframework.data.redis.core.ValueOperations;
 
 /**
- * Tests for ADR-0033 Read-Path Version Stamping.
+ * Tests for design decisions: version stamps pre-read stamping.
  *
- * <p>Covers: miss loads stamped with the probed {@code dataVersion} (so late
- * stale broadcasts are rejected), fail-open probe behavior, stamped
- * {@code NullValue} sentinels, the refresh 4-case apply guard (including the
- * degraded-entry self-heal), batch probe pairing, and the pipelined
- * {@code currentVersions} MGET.
+ * <p>Covers: loads stamped before the value read (so late stale broadcasts are
+ * rejected), the refresh snapshot guard, the v2 null-answer no-entry contract,
+ * and batch stamp allocation.
  */
 @Timeout(30)
 class VersionStampedLoadTest {
 
-  private final SnowflakeIdGenerator snowflakeIdGenerator = new SnowflakeIdGenerator(0, 1, 5L, false);
+  private final AtomicLong stampSequence = new AtomicLong();
 
   private HotKeyDetector hotKeyDetector;
   private Cache<String, CacheEntry> cache;
@@ -94,7 +90,7 @@ class VersionStampedLoadTest {
   private EntryLifecycle entryLifecycle;
   private BackgroundRefresher backgroundRefresher;
   private Executor executor;
-  private VersionController versionController;
+  private StampClock stampClock;
   private HotKeyCache hotKeyCache;
   private ScheduledExecutorService scheduler;
   private com.rabbitmq.client.Channel channel;
@@ -106,30 +102,45 @@ class VersionStampedLoadTest {
     cache = Caffeine.newBuilder().maximumSize(10_000).build();
     singleFlight = mock(SingleFlight.class);
     // Run the composite (value read + version probe) supplier inline.
-    when(singleFlight.loadOutcome(anyString(), any())).thenAnswer(inv -> {
-      @SuppressWarnings("all")
+    when(singleFlight.load(anyString(), any(), anyBoolean(), any())).thenAnswer(inv -> {
+      @SuppressWarnings("unchecked")
       Supplier<Object> supplier = inv.getArgument(1);
+      @SuppressWarnings("unchecked")
+      Consumer<Object> commit = inv.getArgument(3);
       Object v = supplier.get();
-      return v == null ? LoaderOutcome.sourceEmpty() : LoaderOutcome.loaded(v);
+      if (v != null) {
+        commit.accept(v);
+        return LoaderOutcome.loaded(v);
+      }
+      return LoaderOutcome.sourceEmpty();
     });
-    when(singleFlight.loadOutcome(anyIterable(), any())).thenAnswer(inv -> {
+    when(singleFlight.load(anyIterable(), any(), any())).thenAnswer(inv -> {
       Iterable<String> keys = inv.getArgument(0);
-      @SuppressWarnings("all")
+      @SuppressWarnings("unchecked")
       Function<String, Object> fn = inv.getArgument(1);
+      @SuppressWarnings("unchecked")
+      BiConsumer<String, Object> commit = inv.getArgument(2);
       Map<String, LoaderOutcome<Object>> out = new LinkedHashMap<>();
       for (String key : keys) {
         Object v = fn.apply(key);
+        if (v != null) {
+          commit.accept(key, v);
+        }
         out.put(key, v == null ? LoaderOutcome.sourceEmpty() : LoaderOutcome.loaded(v));
       }
       return out;
     });
     executor = Runnable::run;
     ZetaProperties ttlConfig = new ZetaProperties();
-    entryLifecycle = new EntryLifecycleImpl(cache, ttlConfig, CacheCompressor.NONE, null);
-    backgroundRefresher = new DefaultBackgroundRefresher(cache, executor, entryLifecycle.ttlPolicy(), CacheCompressor.NONE, 10);
-    versionController = mock(VersionController.class);
-    when(versionController.currentVersion(anyString())).thenReturn(Optional.empty());
-    when(versionController.currentVersions(anyIterable())).thenReturn(new LinkedHashMap<>());
+    entryLifecycle = new EntryLifecycleImpl(cache, ttlConfig, null);
+    backgroundRefresher = new DefaultBackgroundRefresher(cache, executor, entryLifecycle, 10);
+    stampClock = mock(StampClock.class);
+    stampSequence.set(0L);
+    when(stampClock.nextStamp()).thenAnswer(inv -> stampSequence.incrementAndGet());
+    when(stampClock.nextStamps(org.mockito.ArgumentMatchers.anyInt())).thenAnswer(inv -> {
+      int n = inv.getArgument(0);
+      return stampSequence.addAndGet(n) - n + 1;
+    });
     scheduler = Executors.newSingleThreadScheduledExecutor();
     channel = mock(Channel.class);
 
@@ -139,19 +150,14 @@ class VersionStampedLoadTest {
       singleFlight,
       entryLifecycle,
       backgroundRefresher,
-      executor,
       new CentralDispatcher(
-        Optional.empty(),
-        Optional.empty(),
-        new BroadcastBuffer(scheduler, Optional.empty(), 500, 2_000, null),
-        hotKeyDetector
+        new AccessCounter(hotKeyDetector, null, scheduler, 50L, AccessCounter.DEFAULT_DETECTOR_INTERVAL_MS),
+        null,
+        new BroadcastBuffer(scheduler, null, 500, 2_000, null),
+        null
       ),
-      new RuleMatcherImpl(Optional.empty(), Optional.empty()),
-      versionController,
-      ttlConfig,
-      mock(HealthView.class),
-      CacheCompressor.NONE,
-      null
+      stampClock,
+      mock(HealthView.class)
     );
   }
 
@@ -169,82 +175,74 @@ class VersionStampedLoadTest {
     assertThat(phase2.await(10, TimeUnit.SECONDS)).isTrue();
   }
 
-  private static Message syncMessage(String key, String type, long version, boolean degraded) {
+  private static Message syncMessage(String key, String type, long version) {
     MessageProperties props = new MessageProperties();
     props.setHeader(HEADER_TYPE, type);
     props.setHeader(HEADER_VERSION, version);
-    props.setHeader(HEADER_IS_VERSION_DEGRADED, degraded);
     return new Message(key.getBytes(StandardCharsets.UTF_8), props);
   }
 
   private CacheSyncListener createListener(CacheLoader loader) {
     CacheSyncProperties props = new CacheSyncProperties();
     props.setWarmupJitterMs(0);
-    SyncDecisionHandler handler = new DefaultSyncDecisionHandler(
-      cache,
-      loader,
-      entryLifecycle,
-      mock(RuleMatcher.class),
-      List.of()
-    , null);
-    CacheSyncListener l = new CacheSyncListener(props, scheduler, handler, null);
-    l.init();
+    SyncDecisionHandler handler = new DefaultSyncDecisionHandler(cache, loader, entryLifecycle, List.of(), null, null);
+    CacheSyncListener l = new CacheSyncListener(props, scheduler, handler, null, null);
     return l;
   }
 
-  private static CacheEntry entry(
-    Object value,
-    long dataVersion,
-    boolean degraded,
-    long softExpireAtMs,
-    KeyState keyState
-  ) {
-    return CacheEntry.builder()
+  private static CacheEntry entry(Object value, long dataVersion, long softExpireAtMs, KeyState keyState) {
+    return EntryDraft.blank(null)
       .value(value)
-      .dataVersion(dataVersion)
-      .isVersionDegraded(degraded)
-      .decisionVersion(0)
-      .hardTtlMs(300_000)
-      .hardExpireAtMs(Long.MAX_VALUE)
-      .softTtlMs(30_000)
-      .softExpireAtMs(softExpireAtMs)
+      .version(dataVersion)
+      .decision(DecisionStamp.hot(0, null, 0L))
+      .ttl(300_000, 30_000, 300_000, 30_000)
+      .expiryAt(Long.MAX_VALUE, softExpireAtMs)
       .keyState(keyState)
-      .normalHardTtlMs(300_000)
-      .normalSoftTtlMs(30_000)
       .build();
   }
 
-  private static CacheEntry softExpiredEntry(Object value, long dataVersion, boolean degraded, KeyState keyState) {
-    return entry(value, dataVersion, degraded, TimeSource.currentTimeMillis() - 1_000, keyState);
+  private static CacheEntry softExpiredEntry(Object value, long dataVersion, KeyState keyState) {
+    return entry(value, dataVersion, TimeSource.currentTimeMillis() - 1_000, keyState);
+  }
+
+  /** An entry past its hard TTL — still physically resident, logically expired. */
+  private static CacheEntry hardExpiredEntry(Object value, long dataVersion) {
+    return EntryDraft.blank(null)
+      .value(value)
+      .version(dataVersion)
+      .decision(DecisionStamp.hot(0, null, 0L))
+      .ttl(300_000, 30_000, 300_000, 30_000)
+      .expiryAt(TimeSource.currentTimeMillis() - 1_000, Long.MAX_VALUE)
+      .keyState(KeyState.NORMAL)
+      .build();
   }
 
   // ═══════════════════════════════════════════════════════════════
-  // Miss-load stamping + late-broadcast rejection (gap B regression)
+  // Pre-read stamping + late-broadcast rejection
   // ═══════════════════════════════════════════════════════════════
 
   @Test
-  @DisplayName("miss load stamps the probed version; a late stale REFRESH broadcast is rejected")
-  void missLoad_stampsProbedVersion_lateStaleBroadcastRejected() throws Exception {
-    when(versionController.currentVersion("k")).thenReturn(Optional.of(42L));
+  @DisplayName("miss load stamps the pre-read version; a late stale REFRESH broadcast is rejected")
+  void missLoad_stampsPreReadVersion_lateStaleBroadcastRejected() throws Exception {
+    when(stampClock.nextStamp()).thenReturn(42L);
     CacheSyncListener listener = createListener(key -> "fresh");
 
-    assertThat(hotKeyCache.get("k", ReadPolicy.of(() -> "v", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH))).contains(
-      "v"
-    );
+    assertThat(
+      (Object) hotKeyCache.get("k", () -> "v", GetPolicy.of(0L, 0L, true, StalePolicy.SOFT_REFRESH))
+    ).isEqualTo("v");
 
     CacheEntry ce = (CacheEntry) cache.getIfPresent("k");
     assertThat(ce.getDataVersion()).isEqualTo(42L);
-    assertThat(ce.isVersionDegraded()).isFalse();
 
-    // Late stale broadcast (version 10 < probed 42) — must be rejected.
-    listener.handleSyncMessage(channel, syncMessage("k", SyncMessage.TYPE_REFRESH, 10L, false));
+    // Late stale broadcast (version 10 < the load's 42) — must be rejected.
+    listener.handleSyncMessage(channel, syncMessage("k", SyncType.REFRESH.code(), 10L));
     awaitScheduler();
     ce = (CacheEntry) cache.getIfPresent("k");
     assertThat(ce.getDataVersion()).isEqualTo(42L);
     assertThat(ce.getValue()).isEqualTo("v");
 
     // A genuinely newer broadcast (version 50 > 42) still applies.
-    listener.handleSyncMessage(channel, syncMessage("k", SyncMessage.TYPE_REFRESH, 50L, false));
+    listener.handleSyncMessage(channel, syncMessage("k", SyncType.REFRESH.code(), 50L));
     awaitScheduler();
     ce = (CacheEntry) cache.getIfPresent("k");
     assertThat(ce.getDataVersion()).isEqualTo(50L);
@@ -252,110 +250,80 @@ class VersionStampedLoadTest {
   }
 
   @Test
-  @DisplayName("probe failure withholds the stamp (fail-open): legacy acceptance preserved")
-  void probeFailure_failOpen_legacyAcceptancePreserved() throws Exception {
-    // currentVersion returns empty → unstamped entry at VERSION_DEFAULT.
-    when(versionController.currentVersion("k")).thenReturn(Optional.empty());
-    CacheSyncListener listener = createListener(key -> "fresh");
-
-    assertThat(hotKeyCache.get("k", ReadPolicy.of(() -> "v", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH))).contains(
-      "v"
-    );
-
-    CacheEntry ce = (CacheEntry) cache.getIfPresent("k");
-    assertThat(ce.getDataVersion()).isZero();
-
-    // A broadcast with m > 0 is accepted exactly as before the stamping change.
-    listener.handleSyncMessage(channel, syncMessage("k", SyncMessage.TYPE_REFRESH, 5L, false));
-    awaitScheduler();
-    ce = (CacheEntry) cache.getIfPresent("k");
-    assertThat(ce.getDataVersion()).isEqualTo(5L);
-  }
-
-  @Test
-  @DisplayName("fail-open reload preserves the existing entry's version identity")
-  void failOpenReload_preservesExistingVersionIdentity() {
-    cache.put("k", entry("old", 7L, false, TimeSource.currentTimeMillis() - 1_000, KeyState.NORMAL));
-    when(versionController.currentVersion("k")).thenReturn(Optional.empty());
+  @DisplayName("REVALIDATE reload carries the pre-read stamp instead of the resident identity")
+  void revalidateReload_stampsThePreReadVersion() {
+    cache.put("k", entry("old", 7L, TimeSource.currentTimeMillis() - 1_000, KeyState.NORMAL));
+    when(stampClock.nextStamp()).thenReturn(42L);
 
     // computeIfAbsentWithSoftExpire REVALIDATE keeps the stale entry in L1
-    // during the load, so the fail-open reload must preserve its version.
+    // during the load; the reload result carries the pre-read stamp.
     assertThat(
-      hotKeyCache.computeIfAbsentWithSoftExpire(
-        "k",
-        ReadPolicy.of(() -> "fresh", 0L, 0L, true, true, StalePolicy.REVALIDATE)
-      )
-    ).contains("fresh");
+      (Object) hotKeyCache.get("k", () -> "fresh", GetPolicy.of(0L, 0L, true, StalePolicy.REVALIDATE))
+    ).isEqualTo("fresh");
 
     CacheEntry ce = (CacheEntry) cache.getIfPresent("k");
-    assertThat(ce.getDataVersion()).isEqualTo(7L);
+    assertThat(ce.getDataVersion()).isEqualTo(42L);
     assertThat(ce.getValue()).isEqualTo("fresh");
   }
 
   // ═══════════════════════════════════════════════════════════════
-  // NullValue sentinel stamping
+  // Null-answer contract (v2): null is never cached
   // ═══════════════════════════════════════════════════════════════
 
   @Test
-  @DisplayName("null sentinel is stamped; stale broadcast cannot overwrite it, newer one can")
-  void nullSentinel_stamped_staleBroadcastRejected() throws Exception {
-    when(versionController.currentVersion("k")).thenReturn(Optional.of(100L));
+  @DisplayName("null loader result writes no entry; a later REFRESH populates it")
+  void nullAnswer_noEntry_laterBroadcastApplies() throws Exception {
     CacheSyncListener listener = createListener(key -> "fresh");
 
     assertThat(
-      hotKeyCache.get("k", ReadPolicy.of(() -> null, 0L, 0L, true, true, StalePolicy.SOFT_REFRESH))
-    ).isEmpty();
+      (Object) hotKeyCache.get("k", () -> null, GetPolicy.of(0L, 0L, true, StalePolicy.SOFT_REFRESH))
+    ).isNull();
 
+    // No sentinel, no entry: the next read re-invokes the loader.
+    assertThat(cache.getIfPresent("k")).isNull();
+
+    // A versioned REFRESH broadcast still applies normally.
+    listener.handleSyncMessage(channel, syncMessage("k", SyncType.REFRESH.code(), 150L));
+    awaitScheduler();
     CacheEntry ce = (CacheEntry) cache.getIfPresent("k");
-    assertThat(ce.getValue()).isInstanceOf(NullValue.class);
-    assertThat(ce.getDataVersion()).isEqualTo(100L);
-
-    // Stale broadcast (50 < 100): the null marker must survive.
-    listener.handleSyncMessage(channel, syncMessage("k", SyncMessage.TYPE_REFRESH, 50L, false));
-    awaitScheduler();
-    ce = (CacheEntry) cache.getIfPresent("k");
-    assertThat(ce.getValue()).isInstanceOf(NullValue.class);
-    assertThat(ce.getDataVersion()).isEqualTo(100L);
-
-    // Newer broadcast (150 > 100): replaces the sentinel with real data.
-    listener.handleSyncMessage(channel, syncMessage("k", SyncMessage.TYPE_REFRESH, 150L, false));
-    awaitScheduler();
-    ce = (CacheEntry) cache.getIfPresent("k");
+    assertThat(ce).isNotNull();
     assertThat(ce.getDataVersion()).isEqualTo(150L);
     assertThat(ce.getValue()).isEqualTo("fresh");
   }
 
   // ═══════════════════════════════════════════════════════════════
-  // Refresh apply guard (4-case, stamped)
+  // Refresh snapshot guard
   // ═══════════════════════════════════════════════════════════════
 
   @Test
-  @DisplayName("soft refresh stamps the probed version on the refreshed entry")
-  void refreshTask_stampsProbedVersion() {
-    cache.put("k", softExpiredEntry("old", 5L, false, KeyState.HOT));
-    when(versionController.currentVersion("k")).thenReturn(Optional.of(42L));
+  @DisplayName("soft refresh stamps the pre-read version on the refreshed entry")
+  void refreshTask_stampsPreReadVersion() {
+    cache.put("k", softExpiredEntry("old", 5L, KeyState.HOT));
+    when(stampClock.nextStamp()).thenReturn(42L);
 
-    hotKeyCache.getWithSoftExpire("k", ReadPolicy.of(() -> "fresh", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH));
+    hotKeyCache.get("k", () -> "fresh", GetPolicy.of(0L, 0L, true, StalePolicy.SOFT_REFRESH));
 
     CacheEntry ce = (CacheEntry) cache.getIfPresent("k");
     assertThat(ce.getValue()).isEqualTo("fresh");
     assertThat(ce.getDataVersion()).isEqualTo(42L);
-    assertThat(ce.isVersionDegraded()).isFalse();
   }
 
   @Test
   @DisplayName("refresh result is discarded when L1 advanced beyond the trigger-time snapshot")
-  void refreshTask_discardedWhenEntryAdvancedBeyondProbe() {
-    cache.put("k", softExpiredEntry("old", 60L, false, KeyState.HOT));
-    // Probe older than the entry: with no concurrent write the refresh
-    // applies (see below); here the reader simulates a write landing while
-    // the refresh is in flight, advancing L1 beyond the snapshot.
-    when(versionController.currentVersion("k")).thenReturn(Optional.of(50L));
+  void refreshTask_discardedWhenEntryAdvancedBeyondSnapshot() {
+    cache.put("k", softExpiredEntry("old", 60L, KeyState.HOT));
+    // The reader simulates a write landing while the refresh is in flight,
+    // advancing L1 beyond the snapshot taken at refresh-creation time.
+    when(stampClock.nextStamp()).thenReturn(50L);
 
-    hotKeyCache.getWithSoftExpire("k", ReadPolicy.of(() -> {
-      cache.put("k", softExpiredEntry("newer", 70L, false, KeyState.HOT));
-      return "fresh";
-    }, 0L, 0L, true, true, StalePolicy.SOFT_REFRESH));
+    hotKeyCache.get(
+      "k",
+      () -> {
+        cache.put("k", softExpiredEntry("newer", 70L, KeyState.HOT));
+        return "fresh";
+      },
+      GetPolicy.of(0L, 0L, true, StalePolicy.SOFT_REFRESH)
+    );
 
     CacheEntry ce = (CacheEntry) cache.getIfPresent("k");
     assertThat(ce.getValue()).isEqualTo("newer");
@@ -363,42 +331,14 @@ class VersionStampedLoadTest {
   }
 
   @Test
-  @DisplayName("refresh applies with max(entry, probe) version when no write landed in flight")
-  void refreshTask_appliesWithMaxVersionWhenNoConcurrentWrite() {
-    cache.put("k", softExpiredEntry("old", 60L, false, KeyState.HOT));
-    // Stale probe (version-key wraparound shape): the fresh value and
-    // extended TTLs still apply, but the entry's own version wins so the
-    // L1 watermark never regresses.
-    when(versionController.currentVersion("k")).thenReturn(Optional.of(50L));
+  @DisplayName("refresh applies with max(entry, pre-read stamp) when no write landed in flight")
+  void refreshTask_appliesWithMaxStampWhenNoConcurrentWrite() {
+    cache.put("k", softExpiredEntry("old", 60L, KeyState.HOT));
+    // Older incoming stamp: the fresh value and extended TTLs still apply, but
+    // the entry's own stamp wins so the L1 watermark never regresses.
+    when(stampClock.nextStamp()).thenReturn(50L);
 
-    hotKeyCache.getWithSoftExpire("k", ReadPolicy.of(() -> "fresh", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH));
-
-    CacheEntry ce = (CacheEntry) cache.getIfPresent("k");
-    assertThat(ce.getValue()).isEqualTo("fresh");
-    assertThat(ce.getDataVersion()).isEqualTo(60L);
-  }
-
-  @Test
-  @DisplayName("degraded entry is healed by a normal probe (4-case, not numeric)")
-  void degradedEntry_healedByNormalProbe() {
-    cache.put("k", softExpiredEntry("old", Long.MIN_VALUE | snowflakeIdGenerator.nextId(), true, KeyState.HOT));
-    when(versionController.currentVersion("k")).thenReturn(Optional.of(42L));
-
-    hotKeyCache.getWithSoftExpire("k", ReadPolicy.of(() -> "fresh", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH));
-
-    CacheEntry ce = (CacheEntry) cache.getIfPresent("k");
-    assertThat(ce.getValue()).isEqualTo("fresh");
-    assertThat(ce.getDataVersion()).isEqualTo(42L);
-    assertThat(ce.isVersionDegraded()).isFalse();
-  }
-
-  @Test
-  @DisplayName("unstamped refresh (probe withheld) keeps the legacy L1-internal guard")
-  void refreshTask_unstamped_legacyGuardApplied() {
-    cache.put("k", softExpiredEntry("old", 60L, false, KeyState.HOT));
-    when(versionController.currentVersion("k")).thenReturn(Optional.empty());
-
-    hotKeyCache.getWithSoftExpire("k", ReadPolicy.of(() -> "fresh", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH));
+    hotKeyCache.get("k", () -> "fresh", GetPolicy.of(0L, 0L, true, StalePolicy.SOFT_REFRESH));
 
     CacheEntry ce = (CacheEntry) cache.getIfPresent("k");
     assertThat(ce.getValue()).isEqualTo("fresh");
@@ -406,77 +346,94 @@ class VersionStampedLoadTest {
   }
 
   // ═══════════════════════════════════════════════════════════════
-  // Batch load probe pairing
+  // Batch load: dedup-ticket lifecycle + probe scope
   // ═══════════════════════════════════════════════════════════════
 
+  /**
+   * Every key that reaches L1 carries a real stamp, and each key gets its own
+   * value (design decisions: version stamps I4). A key whose source answered {@code null} writes no
+   * entry and therefore exposes no stamp.
+   */
   @Test
-  @DisplayName("batch load pairs versions from currentVersions, fail-open per key")
-  void batchLoad_stampsVersions_failOpenPerKey() {
-    when(versionController.currentVersions(anyIterable())).thenAnswer(inv -> {
+  @DisplayName("batch load stamps only the keys that were actually stored")
+  void batchLoad_stampsOnlyStoredKeys() {
+    when(singleFlight.load(anyIterable(), any(), any())).thenAnswer(inv -> {
       Iterable<String> keys = inv.getArgument(0);
-      Map<String, Optional<Long>> out = new LinkedHashMap<>();
+      @SuppressWarnings("unchecked")
+      Function<String, Object> reader = inv.getArgument(1);
+      @SuppressWarnings("unchecked")
+      BiConsumer<String, Object> commit = inv.getArgument(2);
+      Map<String, LoaderOutcome<Object>> out = new LinkedHashMap<>();
       for (String key : keys) {
-        out.put(key, "b".equals(key) ? Optional.empty() : Optional.of("a".equals(key) ? 7L : 9L));
+        switch (key) {
+          case "empty" -> out.put(key, LoaderOutcome.sourceEmpty());
+          case "failed" -> out.put(key, LoaderOutcome.failed(new IllegalStateException("boom")));
+          case "suppressed" -> out.put(key, LoaderOutcome.suppressed(LoadStatus.SUPPRESSED_BREAKER));
+          default -> {
+            Object value = new VersionedValue("v-" + key, 1L);
+            commit.accept(key, value);
+            out.put(key, LoaderOutcome.loaded(value));
+          }
+        }
       }
       return out;
     });
+    long[] sequence = { 40L };
+    when(stampClock.nextStamp()).thenAnswer(inv -> sequence[0] += 10L);
 
-    Map<String, Optional<String>> result = hotKeyCache.get(
-      List.of("a", "b", "c"),
-      key -> "val-" + key,
-      0L,
-      0L,
-      true,
-      false,
-      true,
-      StalePolicy.SOFT_REFRESH
+    hotKeyCache.get(
+      List.of("stored1", "stored2", "empty"),
+      key -> "empty".equals(key) ? null : "v-" + key,
+      GetPolicy.of(0L, 0L, true, StalePolicy.SOFT_REFRESH)
     );
 
-    assertThat(result.get("a")).contains("val-a");
-    assertThat(result.get("b")).contains("val-b");
-    assertThat(result.get("c")).contains("val-c");
+    assertThat(((CacheEntry) cache.getIfPresent("stored1")).getDataVersion()).isPositive();
+    assertThat(((CacheEntry) cache.getIfPresent("stored2")).getDataVersion()).isPositive();
+    assertThat(cache.getIfPresent("empty")).isNull();
 
-    assertThat(((CacheEntry) cache.getIfPresent("a")).getDataVersion()).isEqualTo(7L);
-    assertThat(((CacheEntry) cache.getIfPresent("b")).getDataVersion()).isZero();
-    assertThat(((CacheEntry) cache.getIfPresent("c")).getDataVersion()).isEqualTo(9L);
+    // A failed or suppressed load writes no entry and now propagates instead of
+    // masquerading as a missing key.
+    assertThatThrownBy(() ->
+      hotKeyCache.get(List.of("failed"), key -> "v-failed", GetPolicy.of(0L, 0L, true, StalePolicy.SOFT_REFRESH))
+    )
+      .isInstanceOf(IllegalStateException.class)
+      .hasMessage("boom");
+    assertThatThrownBy(() ->
+      hotKeyCache.get(
+        List.of("suppressed"),
+        key -> "v-suppressed",
+        GetPolicy.of(0L, 0L, true, StalePolicy.SOFT_REFRESH)
+      )
+    ).isInstanceOf(io.github.hyshmily.zeta.exception.ZetaSuppressedException.class);
+    assertThat(cache.getIfPresent("failed")).isNull();
+    assertThat(cache.getIfPresent("suppressed")).isNull();
   }
 
   // ═══════════════════════════════════════════════════════════════
-  // VersionControllerImpl.currentVersions — pipelined MGET
+  // Batch load stamp allocation
   // ═══════════════════════════════════════════════════════════════
 
   @Test
-  @DisplayName("currentVersions reads all keys in one MGET with per-key fail-open")
-  void currentVersions_mget_mapsAndFailOpen() {
-    StringRedisTemplate redisTemplate = mock(StringRedisTemplate.class);
-    @SuppressWarnings("all")
-    ValueOperations<String, String> ops = mock(ValueOperations.class);
-    when(redisTemplate.opsForValue()).thenReturn(ops);
-    when(ops.multiGet(anyList())).thenReturn(Arrays.asList("10", null, "abc"));
+  @DisplayName("batch load assigns a distinct pre-read stamp per key")
+  void batchLoad_assignsDistinctStampsPerKey() {
+    long[] sequence = { 6L };
+    when(stampClock.nextStamp()).thenAnswer(inv -> sequence[0] += 3L);
 
-    VersionController vc = new VersionControllerImpl(Optional.of(redisTemplate), 60, snowflakeIdGenerator);
-    Map<String, Optional<Long>> versions = vc.currentVersions(List.of("k1", "k2", "k3"));
+    Map<String, String> result = hotKeyCache.get(
+      List.of("a", "b", "c"),
+      key -> "val-" + key,
+      GetPolicy.of(0L, 0L, true, StalePolicy.SOFT_REFRESH)
+    );
 
-    assertThat(versions.get("k1")).contains(10L);
-    assertThat(versions.get("k2")).isEmpty();
-    assertThat(versions.get("k3")).isEmpty();
+    assertThat(result.get("a")).isEqualTo("val-a");
+    assertThat(result.get("b")).isEqualTo("val-b");
+    assertThat(result.get("c")).isEqualTo("val-c");
 
-    verify(ops).multiGet(List.of("zeta:ver:k1", "zeta:ver:k2", "zeta:ver:k3"));
-  }
-
-  @Test
-  @DisplayName("currentVersions maps every key to empty on a batch Redis failure")
-  void currentVersions_batchFailure_allEmpty() {
-    StringRedisTemplate redisTemplate = mock(StringRedisTemplate.class);
-    @SuppressWarnings("all")
-    ValueOperations<String, String> ops = mock(ValueOperations.class);
-    when(redisTemplate.opsForValue()).thenReturn(ops);
-    when(ops.multiGet(anyList())).thenThrow(new RuntimeException("boom"));
-
-    VersionController vc = new VersionControllerImpl(Optional.of(redisTemplate), 60, snowflakeIdGenerator);
-    Map<String, Optional<Long>> versions = vc.currentVersions(List.of("k1", "k2"));
-
-    assertThat(versions.get("k1")).isEmpty();
-    assertThat(versions.get("k2")).isEmpty();
+    long va = ((CacheEntry) cache.getIfPresent("a")).getDataVersion();
+    long vb = ((CacheEntry) cache.getIfPresent("b")).getDataVersion();
+    long vc = ((CacheEntry) cache.getIfPresent("c")).getDataVersion();
+    assertThat(va).isPositive();
+    assertThat(vb).isGreaterThan(va);
+    assertThat(vc).isGreaterThan(vb);
   }
 }

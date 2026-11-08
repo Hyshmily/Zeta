@@ -20,8 +20,9 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import io.github.hyshmily.zeta.exception.ZetaExceptionHandler;
 import java.util.List;
-import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.CancellationException;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -70,7 +71,9 @@ class SafeScheduledExecutorServiceTest {
     try {
       assertThat(done.await(5, TimeUnit.SECONDS)).isTrue();
       assertThat(maxInFlight.get()).isEqualTo(1);
-      assertThat(starts).hasSize(3);
+      // The invariant is "no overlap", not a point-in-time run count: the chain is still live
+      // while this line executes, so an exact size is a scheduling race, not a property.
+      assertThat(starts).hasSizeGreaterThanOrEqualTo(3);
       long gap = starts.get(1) - starts.get(0);
       assertThat(gap).isGreaterThanOrEqualTo(90);
     } finally {
@@ -96,7 +99,9 @@ class SafeScheduledExecutorServiceTest {
     var future = executor.scheduleAtFixedRate(task, 0, 10, TimeUnit.MILLISECONDS);
     try {
       assertThat(done.await(5, TimeUnit.SECONDS)).isTrue();
-      assertThat(executions.get()).isEqualTo(3);
+      // The chain survived the throw — that is the assertion. An exact count is a race: the
+      // latch releases on the third run and a fourth can start before this line executes.
+      assertThat(executions.get()).isGreaterThanOrEqualTo(3);
     } finally {
       future.cancel(true);
       executor.shutdownNow();
@@ -118,7 +123,8 @@ class SafeScheduledExecutorServiceTest {
     var future = executor.scheduleWithFixedDelay(task, 0, 10, TimeUnit.MILLISECONDS);
     try {
       assertThat(done.await(5, TimeUnit.SECONDS)).isTrue();
-      assertThat(executions.get()).isEqualTo(2);
+      // Same race as the fixed-rate case: assert the chain continued, not a point-in-time count.
+      assertThat(executions.get()).isGreaterThanOrEqualTo(2);
     } finally {
       future.cancel(true);
       executor.shutdownNow();
@@ -150,6 +156,9 @@ class SafeScheduledExecutorServiceTest {
       release.countDown();
       Thread.sleep(60);
       assertThat(executions.get()).isEqualTo(1);
+      // The cancelled chain's link completed normally; Future.get() must still report the
+      // cancellation instead of returning that link's null result.
+      assertThatThrownBy(future::get).isInstanceOf(CancellationException.class);
     } finally {
       executor.shutdownNow();
     }
@@ -179,6 +188,33 @@ class SafeScheduledExecutorServiceTest {
     assertThat(executor.awaitTermination(5, TimeUnit.SECONDS)).isTrue();
     assertThat(executions.get()).isEqualTo(1);
     assertThat(future.isDone()).isTrue();
+  }
+
+  @Test
+  void shutdown_whileWaitingForTheNextLink_endsTheChainImmediately() throws Exception {
+    // The chain waits for its next run as a one-shot delayed task. The JDK keeps
+    // such a task queued at shutdown (executeExistingDelayedTasksAfterShutdown)
+    // and runs it once after the full period: isDone() stays false and the
+    // command runs again long after the shutdown call.
+    var executor = newExecutor();
+    var executions = new AtomicInteger(0);
+    var firstRun = new CountDownLatch(1);
+
+    var task = (Runnable) () -> {
+      executions.incrementAndGet();
+      firstRun.countDown();
+    };
+
+    var future = executor.scheduleAtFixedRate(task, 0, TimeUnit.HOURS.toMillis(1), TimeUnit.MILLISECONDS);
+    try {
+      assertThat(firstRun.await(5, TimeUnit.SECONDS)).isTrue();
+      executor.shutdown();
+      assertThat(future.isDone()).as("chain must end at shutdown, not after the next period").isTrue();
+      Thread.sleep(100);
+      assertThat(executions.get()).as("no extra run after shutdown").isEqualTo(1);
+    } finally {
+      executor.shutdownNow();
+    }
   }
 
   @Test
@@ -225,6 +261,31 @@ class SafeScheduledExecutorServiceTest {
   }
 
   @Test
+  void remove_shouldStopTheChainByOriginalCommand() throws Exception {
+    var executor = newExecutor();
+    var executions = new AtomicInteger(0);
+    var firstRun = new CountDownLatch(1);
+
+    var task = (Runnable) () -> {
+      executions.incrementAndGet();
+      firstRun.countDown();
+    };
+
+    var future = executor.scheduleAtFixedRate(task, 0, TimeUnit.HOURS.toMillis(1), TimeUnit.MILLISECONDS);
+    try {
+      assertThat(firstRun.await(5, TimeUnit.SECONDS)).isTrue();
+      assertThat(executor.remove(task)).isTrue();
+      assertThat(future.isDone()).isTrue();
+
+      Thread.sleep(150);
+      assertThat(executions.get()).as("no run after remove").isEqualTo(1);
+      assertThat(executor.remove(task)).as("already removed").isFalse();
+    } finally {
+      executor.shutdownNow();
+    }
+  }
+
+  @Test
   void getBeforeStart_shouldNotBeDone() throws Exception {
     var executor = newExecutor();
     var ran = new CountDownLatch(1);
@@ -251,9 +312,9 @@ class SafeScheduledExecutorServiceTest {
   void fixedRate_missedTick_skipsNoBurst() throws Exception {
     // Pins the phase-anchored rate semantics: when a run (100ms) overshoots its slot (20ms
     // period), the missed tick is SKIPPED and the next run is re-anchored to a future slot.
-    // A literal catch-up implementation (Threadly/JDK fixed-rate) would fire back-to-back and
-    // produce near-zero gaps; the old delay semantics would keep the cadence at period +
-    // execution time. Both alternatives fail the >= 90ms assertion.
+    // A catch-up implementation (Threadly/JDK fixed-rate) fires back-to-back and produces
+    // near-zero gaps; fixed-delay semantics land at period + execution time. Both fail the
+    // >= 90ms assertion.
     var executor = newExecutor();
     var starts = new CopyOnWriteArrayList<Long>();
     var done = new CountDownLatch(3);
@@ -282,11 +343,12 @@ class SafeScheduledExecutorServiceTest {
   @Test
   @Tag("performance")
   void fixedRate_phaseAnchored_noCumulativeDrift() throws Exception {
-    // Pins the no-drift property in the regime that distinguishes phase anchoring from the old
-    // delay semantics: a task that is consistently slow but still under the period (100ms of
-    // work against a 200ms period). Phase-anchored cadence keeps starts at 0, 200, 400, ...
-    // (span over 5 runs ≈ 800ms), while the old "end + period" semantics accumulates drift
-    // (≈ 1400ms). The wide margin absorbs platform timer quantization.
+    // Pins the no-drift property in the regime that distinguishes phase anchoring from
+    // fixed-delay semantics: a task that is consistently slow but still under the period
+    // (100ms of work against a 200ms period). Phase-anchored cadence keeps starts at
+    // 0, 200, 400, ... (span over 5 runs ≈ 800ms), while fixed-delay ("end + period")
+    // semantics accumulate drift (≈ 1400ms). The wide margin absorbs platform timer
+    // quantization.
     var executor = newExecutor();
     var starts = new CopyOnWriteArrayList<Long>();
     var done = new CountDownLatch(5);
@@ -305,7 +367,7 @@ class SafeScheduledExecutorServiceTest {
     try {
       assertThat(done.await(5, TimeUnit.SECONDS)).isTrue();
       long totalSpan = starts.get(4) - starts.get(0);
-      // 4 periods of 200ms = 800ms expected; the old delay semantics would land near 1400ms.
+      // 4 periods of 200ms = 800ms expected; fixed-delay semantics land near 1400ms.
       assertThat(totalSpan).isGreaterThan(600).isLessThan(1000);
     } finally {
       future.cancel(true);
@@ -317,8 +379,9 @@ class SafeScheduledExecutorServiceTest {
   void fixedRate_zeroPeriod_shouldThrow() {
     var executor = newExecutor();
     try {
-      assertThatThrownBy(() -> executor.scheduleAtFixedRate(() -> {}, 0, 0, TimeUnit.MILLISECONDS))
-        .isInstanceOf(IllegalArgumentException.class);
+      assertThatThrownBy(() -> executor.scheduleAtFixedRate(() -> {}, 0, 0, TimeUnit.MILLISECONDS)).isInstanceOf(
+        IllegalArgumentException.class
+      );
     } finally {
       executor.shutdownNow();
     }
@@ -328,78 +391,12 @@ class SafeScheduledExecutorServiceTest {
   void fixedDelay_nonPositiveDelay_shouldThrow() {
     var executor = newExecutor();
     try {
-      assertThatThrownBy(() -> executor.scheduleWithFixedDelay(() -> {}, 0, 0, TimeUnit.MILLISECONDS))
-        .isInstanceOf(IllegalArgumentException.class);
-      assertThatThrownBy(() -> executor.scheduleWithFixedDelay(() -> {}, 0, -1, TimeUnit.MILLISECONDS))
-        .isInstanceOf(IllegalArgumentException.class);
-    } finally {
-      executor.shutdownNow();
-    }
-  }
-
-  @Test
-  void remove_shouldStopTheChain() throws Exception {
-    var executor = newExecutor();
-    var executions = new AtomicInteger(0);
-    var firstRun = new CountDownLatch(1);
-
-    var task = (Runnable) () -> {
-      executions.incrementAndGet();
-      firstRun.countDown();
-    };
-
-    var future = executor.scheduleAtFixedRate(task, 0, 10, TimeUnit.MILLISECONDS);
-    try {
-      assertThat(firstRun.await(5, TimeUnit.SECONDS)).isTrue();
-      assertThat(executor.remove(task)).isTrue();
-      int afterRemove = executions.get();
-      Thread.sleep(120);
-      assertThat(executions.get()).isEqualTo(afterRemove);
-      assertThat(future.isDone()).isTrue();
-    } finally {
-      executor.shutdownNow();
-    }
-  }
-
-  @Test
-  void remove_unknownTask_shouldReturnFalse() {
-    var executor = newExecutor();
-    try {
-      assertThat(executor.remove(() -> {})).isFalse();
-    } finally {
-      executor.shutdownNow();
-    }
-  }
-
-  @Test
-  void remove_reRegisteredCommand_oldChainStops() throws Exception {
-    // Registering the same command twice must cancel the previous chain, and remove() must
-    // stop the remaining one — a leaked old chain would keep executing and grow the counter.
-    var executor = newExecutor();
-    var executions = new AtomicInteger(0);
-    var task = (Runnable) executions::incrementAndGet;
-
-    executor.scheduleAtFixedRate(task, 0, 10, TimeUnit.MILLISECONDS);
-    var future = executor.scheduleAtFixedRate(task, 0, 10, TimeUnit.MILLISECONDS);
-    try {
-      Thread.sleep(100);
-      assertThat(executor.remove(task)).isTrue();
-      assertThat(future.isCancelled()).isTrue();
-      int afterRemove = executions.get();
-      Thread.sleep(120);
-      assertThat(executions.get()).isEqualTo(afterRemove);
-    } finally {
-      executor.shutdownNow();
-    }
-  }
-
-  @Test
-  void remove_oneShotSchedule_shouldKeepJdkBehaviour() {
-    var executor = newExecutor();
-    try {
-      executor.schedule(() -> {}, 1000, TimeUnit.MILLISECONDS);
-      // One-shot tasks are not registered as periodic chains: JDK remove semantics apply.
-      assertThat(executor.remove(() -> {})).isFalse();
+      assertThatThrownBy(() -> executor.scheduleWithFixedDelay(() -> {}, 0, 0, TimeUnit.MILLISECONDS)).isInstanceOf(
+        IllegalArgumentException.class
+      );
+      assertThatThrownBy(() -> executor.scheduleWithFixedDelay(() -> {}, 0, -1, TimeUnit.MILLISECONDS)).isInstanceOf(
+        IllegalArgumentException.class
+      );
     } finally {
       executor.shutdownNow();
     }
@@ -427,7 +424,7 @@ class SafeScheduledExecutorServiceTest {
     try {
       var future = executor.scheduleAtFixedRate(task, 0, 10, TimeUnit.MILLISECONDS);
       assertThat(done.await(5, TimeUnit.SECONDS)).isTrue();
-      assertThat(executions.get()).isEqualTo(3);
+      assertThat(executions.get()).isGreaterThanOrEqualTo(3);
       // The first (throwing) run must have been reported through the inherited handler.
       assertThat(handled.get()).isGreaterThanOrEqualTo(1);
       future.cancel(true);

@@ -15,79 +15,63 @@
  */
 package io.github.hyshmily.zeta.constants;
 
-import io.github.hyshmily.zeta.Internal;
+import io.github.hyshmily.zeta.util.Internal;
 
 /**
- * Shared constants used across the HotKey library, organized by category.
+ * Shared constants used across the Zeta library, organized by category.
  *
  * <p>Each nested interface groups related constants for improved discoverability.
  */
 @Internal
-@SuppressWarnings("all")
 public interface ZetaConstants {
+  /** Logged at DEBUG when a sync operation is skipped because no publisher is available. */
+  String NO_SYNC_PUBLISHER_MESSAGE = "No sync publisher found, please enable zeta.sync";
+
+  /** Increment value applied to the local TopK frequency counter on each access. */
+  int TOPK_INCR = 1;
+
   /** AMQP message header keys. */
   @Internal
   interface Amqp {
-    /** Message type header (SYNC/REPORT/WORKER). */
+    /** Message type discriminator header (sync operation, HOT/COOL decision, or heartbeat type). */
     String HEADER_TYPE = "type";
     /** Data version header. */
     String HEADER_VERSION = "version";
-    /** Indicates whether the version is degraded. */
-    String HEADER_IS_VERSION_DEGRADED = "isVersionDegraded";
     /** Origin node identifier. */
     String HEADER_NODE_ID = "nodeId";
     /**
-     * Sending Worker's appName on HOT/COOL decision broadcasts (ADR-0068). Receivers
-     * configured with their own appName drop decisions whose appName header differs —
-     * the fanout exchange ignores the routing key, so on a shared broker every bound
-     * queue receives every app's decisions. Absent on messages from pre-0068 Workers
-     * (rolling upgrade); an absent appName is always processed.
+     * Sending application's appName on decision, sync and heartbeat broadcasts (design
+     * decisions: sync messages). Delivery isolation comes from the binding key
+     * {@code send.<appName>} on the decision exchange; this header is the receiver's own
+     * boundary check, so a queue bound to the wrong key still drops another application's
+     * decisions instead of importing them. Absent on messages from older senders (rolling
+     * upgrade); an absent appName is always processed.
      */
     String HEADER_APP_NAME = "appName";
-    /** Message creation timestamp. */
-    String HEADER_TIMESTAMP = "timestamp";
     /** Worker epoch (restart generation counter). */
     String HEADER_EPOCH = "epoch";
     /** Heartbeat epoch (state machine generation). */
     String HEADER_HEARTBEAT_EPOCH = "hbEpoch";
-    /** Sender's current load metric. */
-    String HEADER_HEARTBEAT_LOAD = "hbLoad";
     /** Whether the sender is ready to serve. */
     String HEADER_HEARTBEAT_READY = "hbReady";
-    /** Sender's config fingerprint for change detection. */
-    String HEADER_HEARTBEAT_CONFIG_FP = "hbConfigFp";
-    /** Sender's config confirm count. */
-    String HEADER_HEARTBEAT_CONFIG_CONFIRM = "hbConfigConfirm";
-    /** Sender's config cool count. */
-    String HEADER_HEARTBEAT_CONFIG_COOL = "hbConfigCool";
-    /** Sender's config grace count. */
-    String HEADER_HEARTBEAT_CONFIG_GRACE = "hbConfigGrace";
-    /** Sender's config timestamp. */
-    String HEADER_HEARTBEAT_CONFIG_TIMESTAMP = "hbConfigTs";
-    /** Verification message type (PING or PONG). */
-    String HEADER_VERIFY_TYPE = "verifyType";
-    /** Originating app instance identifier. */
-    String HEADER_VERIFY_APP_INSTANCE = "verifyAppInstance";
-    /** Responding worker identifier. */
-    String HEADER_VERIFY_WORKER_ID = "verifyWorkerId";
-    /** Verification request type. */
-    String HEADER_VERIFY_PING = "PING";
-    /** Verification response type. */
-    String HEADER_VERIFY_PONG = "PONG";
-    /** Fast-lane rule set version for Worker-to-Worker rules gossip (ADR-0025). */
-    String HEADER_FASTLANE_RULES_VERSION = "fastlaneRulesVersion";
-    /** Snowflake message ID for end-to-end tracing. */
+    /** Time-sortable wall-clock value used as the message trace ID. */
     String HEADER_MESSAGE_ID = "messageId";
     /**
-     * Publishing app instance's {@code InstanceIdGenerator.get()} instance ID on
-     * instance-to-instance sync messages (ADR-0067). Receivers drop their own
-     * REFRESH broadcasts — the sender's entry at the broadcast version is
-     * definitionally current — while self-INVALIDATE is still processed (it
-     * heals invalidate-vs-reload repopulations stamped with older versions).
-     * Absent on messages from pre-0067 senders (rolling upgrade); an absent
-     * origin is always processed.
+     * Publishing app instance's {@code NodeIdentity#getInstanceId()} instance ID on
+     * instance-to-instance sync messages (design decisions: dedup lifecycle). Receivers drop
+     * their own REFRESH, PUT and clear/batch INVALIDATE broadcasts — the sender already
+     * applied them — while a plain self-INVALIDATE is still processed (it heals
+     * invalidate-vs-reload repopulations stamped with older versions). Absent on messages
+     * from older senders (rolling upgrade); an absent origin is always processed.
      */
     String HEADER_ORIGIN_INSTANCE = "originInstance";
+    /**
+     * Sender's 10-bit {@code dataVersion} node id on instance-to-instance sync
+     * messages. Receivers compare it with their own id to detect the
+     * misconfiguration that equal stamps cannot converge (design decisions:
+     * version stamps).
+     */
+    String HEADER_ORIGIN_NODE_ID = "originNodeId";
     /**
      * Real cache key carried in the AMQP header of {@code PUT} sync messages.
      * A PUT's body is the JSON value payload (not a bare key), so receivers
@@ -102,13 +86,7 @@ public interface ZetaConstants {
   @Internal
   interface Threads {
     /** General zeta operations. */
-    String PREFIX_HOTKEY = "zeta-";
-    /** Cross-instance sync tasks. */
-    String PREFIX_SYNC = "zeta-sync";
-    /** Worker-mode tasks. */
-    String PREFIX_WORKER = "zeta-worker";
-    /** Report submission tasks. */
-    String PREFIX_REPORT = "zeta-report";
+    String PREFIX_KEY = "zeta-";
     /** Shared scheduler pool. */
     String PREFIX_SCHEDULER = "zeta-scheduler";
   }
@@ -125,48 +103,18 @@ public interface ZetaConstants {
     String KEY_REPORT = "reportToWorker.";
     /** Prefix for heartbeat messages from workers to apps. */
     String KEY_HEARTBEAT = "heartbeat.";
-    /**
-     * Routing key for Worker-to-Worker fast-lane rules gossip on the heartbeat
-     * exchange (ADR-0025). Deliberately outside {@code heartbeat.*} so the
-     * messages are not fanned out to App-side heartbeat queues.
-     */
-    String KEY_FASTLANE_RULES = "fastlane.rules";
-    /** Queue name prefix for reportToWorker queues (appended with app name). */
+    /** Queue name prefix for reportToWorker queues ({@code <appName>.<nodeId>} appended). */
     String QUEUE_PREFIX_REPORT = "zeta.reportToWorker.";
-    /** Queue name prefix for the Worker's per-node config gossip queue (appended with nodeId). */
-    String QUEUE_PREFIX_WORKER_CONFIG = "zeta.worker.config.";
-    /** Queue name prefix for the Worker's per-node verify PING queue (appended with nodeId). */
-    String QUEUE_PREFIX_VERIFY_PING = "zeta.verify.ping.";
-  }
-
-  /** Source identifiers for decision origins. */
-  @Internal
-  interface Source {
-    /** Sliding-window-based decisions. */
-    String SLIDING_WINDOW = "sliding_window";
-    /** TopK pre-warm validation based decisions. */
-    String TOPK_PRE_WARM = "topk_pre_warm";
-  }
-
-  /** Redis key prefixes and keys. */
-  @Internal
-  interface Redis {
-    /** Prefix for version tracking entries. */
-    String VERSION_KEY_PREFIX = "zeta:ver:";
-    /** Key for the dynamic rules hash (blacklist / whitelist entries). */
-    String KEY_RULES = "zeta:rules";
-    /** Prefix for distributed lock entries. */
-    String LOCK_KEY_PREFIX = "zeta:lock:";
   }
 
   /** Exchange names for AMQP routing. */
   @Internal
   interface Exchange {
-    /** App-to-Worker reportToWorker routing (topic). */
+    /** App-to-Worker reportToWorker routing (direct). */
     String REPORT = "zeta.reportToWorker.exchange";
     /** Worker heartbeat broadcasts (topic). */
     String HEARTBEAT = "zeta.heartbeat.exchange";
-    /** Worker HOT/COOL decision broadcasts (fanout). */
+    /** Worker HOT/COOL decision broadcasts (direct, bound per {@code send.<appName>}). */
     String BROADCAST = "zeta.send.exchange";
     /** Cross-instance cache sync broadcasts (fanout). */
     String SYNC = "zeta.sync.exchange";
@@ -175,33 +123,10 @@ public interface ZetaConstants {
   /** Version tracking defaults. */
   @Internal
   interface Version {
-    /** Default initial version value when no prior version exists. */
+    /**
+     * The "unknown" data stamp: an entry with this stamp makes the weakest
+     * claim and accepts any real (positive) stamp (design decisions: version stamps).
+     */
     long VERSION_DEFAULT = 0L;
   }
-
-  /** Shared capacity defaults for the library's auxiliary bounded caches. */
-  @Internal
-  interface Caches {
-    /**
-     * Default {@code maximumSize} for the auxiliary per-key memo/lookup caches
-     * (the rule decision memo, the version floor cache, and the Worker's
-     * fast-lane match cache).
-     *
-     * <p>One shared value rather than three identical literals: every one of
-     * them is a pure acceleration structure whose miss falls back to a cheap
-     * recomputation (an ordered rule scan, one {@code INCR} comparison, an
-     * O(rules) glob scan), so the cap is a memory bound and not a correctness
-     * bound — a single knob is the honest shape, and a re-tune is a one-line
-     * change. 10k keeps the three structures together at a few MB while a
-     * high-cardinality key space degrades to the recomputation instead of
-     * growing without bound.
-     */
-    int DEFAULT_DEDUP_SIZE = 10_000;
-  }
-
-  /** Increment value applied to the local TopK frequency counter on each access. */
-  int TOPK_INCR = 1;
-
-  /** Warning message logged when sync publisher is not available. */
-  String NO_SYNC_PUBLISHER_MESSAGE = "No sync publisher found, please enable zeta.sync";
 }

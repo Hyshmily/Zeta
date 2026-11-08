@@ -18,17 +18,19 @@ package io.github.hyshmily.zeta.model;
 import io.github.hyshmily.zeta.Zeta;
 
 /**
- * Immutable snapshot of L1 (Caffeine) cache performance counters and current capacity.
+ * Immutable snapshot of L1 (Caffeine) cache performance counters and current
+ * entry estimate.
  *
- * <p>This reportToWorker is returned by {@link Zeta#stats()}
+ * <p>This snapshot is returned by {@link Zeta#stats()}
  * for monitoring and observability purposes.
  *
  * <p><b>Availability:</b>
  * <ul>
- *   <li>{@code hitCount}, {@code missCount}, and {@code hitRate} are
- *       request-level counters maintained by the cache itself — one increment
- *       per served key on the load-capable read paths. They are always
- *       available, independent of Caffeine's {@code recordStats()}.</li>
+ *   <li>{@code hitCount} and {@code missCount} are request-level counters
+ *       maintained by the cache itself — one increment per served key on the
+ *       load-capable read paths — and {@code hitRate} is derived from them.
+ *       They are always available, independent of Caffeine's
+ *       {@code recordStats()}.</li>
  *   <li>{@code evictionCount} is populated by the default L1 cache, which
  *       always enables Caffeine's {@code recordStats()}. If a custom
  *       {@code Cache} bean is supplied without {@code recordStats()}, it
@@ -37,21 +39,47 @@ import io.github.hyshmily.zeta.Zeta;
  *       underlying Caffeine estimate and does not require stats recording.</li>
  * </ul>
  *
- * <p>The counters are cumulative for the process lifetime. Use {@code hitRate}
+ * <p>The hit, miss and eviction counters are cumulative for the process
+ * lifetime; {@code estimatedSize} is current. Use {@code hitRate}
  * as a measure of cache effectiveness: a low hit rate may indicate that the
  * cache is too small, TTLs are too short, or keys are not being reused.
  *
  * @param hitCount       total number of request-level cache hits (served from
- *                       L1 without invoking the reader, sentinel hits included)
+ *                       L1 without invoking the reader)
  * @param missCount      total number of request-level cache misses (reached
  *                       the loader, including blocking REVALIDATE reloads)
- * @param hitRate        hit rate in {@code [0.0, 1.0]} — {@code hitCount /
- *                       (hitCount + missCount)}; {@code 0.0} if no requests
- *                       have been made yet
+ * @param hitRate        hit rate in {@code [0.0, 1.0]} — derived by the compact
+ *                       constructor as {@code hitCount / (hitCount + missCount)};
+ *                       {@code 0.0} if no requests have been made yet, so a
+ *                       caller-supplied rate can never disagree with the counts
  * @param evictionCount  total number of entries evicted by Caffeine
  *                       (due to size, weight, or TTL expiry); 0 if not
  *                       recorded
  * @param estimatedSize  best-effort estimate of current number of entries
  *                       in the cache; always available
  */
-public record ZetaCacheStats(long hitCount, long missCount, double hitRate, long evictionCount, long estimatedSize) {}
+public record ZetaCacheStats(long hitCount, long missCount, double hitRate, long evictionCount, long estimatedSize) {
+  /**
+   * Normalizes {@code hitRate} from the counters: it is a derived value, so a
+   * caller cannot publish a rate that disagrees with its own counts (or forget
+   * the divide-by-zero guard). The canonical constructor stays available for
+   * callers that already have all five values; the supplied rate is recomputed.
+   */
+  public ZetaCacheStats {
+    long total = hitCount + missCount;
+    hitRate = total == 0L ? 0.0d : (double) hitCount / total;
+  }
+
+  /**
+   * Builds a stats snapshot from the counters and entry estimate, deriving
+   * {@code hitRate} in one place.
+   *
+   * @param hitCount      request-level cache hits
+   * @param missCount     request-level cache misses
+   * @param evictionCount entries evicted by Caffeine
+   * @param estimatedSize best-effort current entry count
+   */
+  public ZetaCacheStats(long hitCount, long missCount, long evictionCount, long estimatedSize) {
+    this(hitCount, missCount, 0.0d, evictionCount, estimatedSize);
+  }
+}

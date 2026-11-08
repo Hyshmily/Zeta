@@ -19,26 +19,29 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 
 import java.lang.reflect.Field;
-import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
 /**
- * Tests for {@link TimeSource} verifying idempotent start, max-attempt guard, and correct time
- * retrieval.
+ * Tests for {@link TimeSource} verifying idempotent start, restart after the
+ * clock-cache thread is marked dead, and correct time retrieval.
  */
 class TimeSourceTest {
 
   @AfterEach
   void tearDown() throws Exception {
-    Field tryCountField = TimeSource.class.getDeclaredField("threadTryCount");
-    tryCountField.setAccessible(true);
-    ((AtomicInteger) tryCountField.get(null)).set(0);
+    Field attemptsField = TimeSource.class.getDeclaredField("startAttempts");
+    attemptsField.setAccessible(true);
+    attemptsField.setInt(null, 0);
 
-    Field runningField = TimeSource.class.getDeclaredField("threadRunning");
-    runningField.setAccessible(true);
-    ((AtomicBoolean) runningField.get(null)).set(false);
+    // The ticker lifecycle is the sign of currentMillis: a negative value is
+    // the stopped encoding (~rawFloor), not a separate boolean.
+    Field currentField = TimeSource.class.getDeclaredField("currentMillis");
+    currentField.setAccessible(true);
+    currentField.setLong(null, ~System.currentTimeMillis());
+    Field threadField = TimeSource.class.getDeclaredField("clockThread");
+    threadField.setAccessible(true);
+    threadField.set(null, null);
   }
 
   @Test
@@ -68,22 +71,79 @@ class TimeSourceTest {
   }
 
   @Test
-  void start_afterMaxAttempts_shouldNotRestartInNewThread() throws Exception {
-    // First 3 calls increment counter; only the 1st starts a thread
+  void start_afterThreadMarkedDead_shouldRestartAndKeepReading() throws Exception {
+    // First 3 calls are all idempotent no-ops after the first one starts the thread.
     for (int i = 0; i < 3; i++) {
       TimeSource.start();
     }
 
-    // Simulate thread death so CAS could otherwise succeed
-    Field runningField = TimeSource.class.getDeclaredField("threadRunning");
-    runningField.setAccessible(true);
-    ((AtomicBoolean) runningField.get(null)).set(false);
+    // Simulate thread death so start() can install a replacement: the stopped
+    // encoding is a negative currentMillis plus no installed thread.
+    Field currentField = TimeSource.class.getDeclaredField("currentMillis");
+    currentField.setAccessible(true);
+    currentField.setLong(null, ~System.currentTimeMillis());
+    Field threadField = TimeSource.class.getDeclaredField("clockThread");
+    threadField.setAccessible(true);
+    threadField.set(null, null);
 
-    // 4th call — counter is now 4 which exceeds THREAD_TRY_MAX (3)
+    // start() is restart-capable: a replacement clock thread is started, and reads work
+    // either way (the cached clock falls back to System.currentTimeMillis()).
     TimeSource.start();
 
-    // With no thread running, currentTimeMillis() falls back to System.currentTimeMillis()
     assertThat(TimeSource.currentTimeMillis()).isPositive();
+  }
+
+  @Test
+  void start_duringRestartBackoff_shouldNotInstallASecondTicker() throws Exception {
+    Thread fakeTicker = new Thread(() -> {}, "fake-timesource");
+    fakeTicker.start();
+
+    Field currentField = TimeSource.class.getDeclaredField("currentMillis");
+    currentField.setAccessible(true);
+    currentField.setLong(null, ~System.currentTimeMillis());
+    Field threadField = TimeSource.class.getDeclaredField("clockThread");
+    threadField.setAccessible(true);
+    threadField.set(null, fakeTicker);
+    try {
+      TimeSource.start();
+
+      assertThat(threadField.get(null)).as("the in-backoff ticker keeps ownership").isSameAs(fakeTicker);
+    } finally {
+      fakeTicker.interrupt();
+      fakeTicker.join(1_000L);
+    }
+  }
+
+  /**
+   * A ticker that has been superseded must not enter the one-second backoff. The stopper's
+   * bounded join would otherwise burn its full timeout waiting for a thread that can never
+   * resurrect the slot.
+   */
+  @Test
+  void resumeAfterBackoff_whenSuperseded_shouldReturnWithoutSleeping() throws Exception {
+    Field currentField = TimeSource.class.getDeclaredField("currentMillis");
+    currentField.setAccessible(true);
+    currentField.setLong(null, ~System.currentTimeMillis());
+    Field threadField = TimeSource.class.getDeclaredField("clockThread");
+    threadField.setAccessible(true);
+    threadField.set(null, new Thread(() -> {}, "superseded-timesource"));
+
+    var resumeAfterBackoff = TimeSource.class.getDeclaredMethod("resumeAfterBackoff");
+    resumeAfterBackoff.setAccessible(true);
+
+    long start = System.nanoTime();
+    boolean resumed = (boolean) resumeAfterBackoff.invoke(null);
+    long elapsedMs = (System.nanoTime() - start) / 1_000_000L;
+
+    assertThat(resumed).isFalse();
+    assertThat(elapsedMs).as("a superseded ticker must not pay the restart backoff").isLessThan(250L);
+  }
+
+  @Test
+  void monotonicSecondsSinceBoot_shouldNeverReturnTheUnknownSentinel() {
+    // 0 is CacheEntry.getBirthStampSec()'s "unknown" marker; a value loaded in the
+    // first boot second must still receive a real max-lease-eligible stamp.
+    assertThat(TimeSource.monotonicSecondsSinceBoot()).isPositive();
   }
 
   @Test

@@ -18,10 +18,13 @@ package io.github.hyshmily.zeta.model;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import io.github.hyshmily.zeta.cache.cachesupport.raw.CacheEntry;
+import io.github.hyshmily.zeta.cache.cachesupport.raw.EntryDraft;
+import io.github.hyshmily.zeta.model.DecisionStamp;
 import org.junit.jupiter.api.Test;
 
 /**
- * Tests for {@link CacheEntry} builder covering full, normal, and degraded entry construction.
+ * Tests for {@link CacheEntry} builder covering full, normal, and draft construction.
  */
 class CacheEntryTest {
 
@@ -30,23 +33,17 @@ class CacheEntryTest {
    */
   @Test
   void shouldBuildEntryWithAllFields() {
-    CacheEntry entry = CacheEntry.builder()
+    CacheEntry entry = EntryDraft.blank(null)
       .value("testValue")
-      .dataVersion(100L)
-      .isVersionDegraded(false)
-      .decisionVersion(5L)
-      .hardTtlMs(300_000L)
-      .hardExpireAtMs(System.currentTimeMillis() + 300_000L)
-      .softTtlMs(30_000L)
-      .softExpireAtMs(System.currentTimeMillis() + 30_000L)
+      .version(100L)
+      .decision(DecisionStamp.hot(5L, null, 0L))
+      .ttl(300_000L, 30_000L, 300_000L, 30_000L)
+      .expiryAt(System.currentTimeMillis() + 300_000L, System.currentTimeMillis() + 30_000L)
       .keyState(KeyState.HOT)
-      .normalHardTtlMs(300_000L)
-      .normalSoftTtlMs(30_000L)
       .build();
 
     assertThat(entry.getValue()).isEqualTo("testValue");
     assertThat(entry.getDataVersion()).isEqualTo(100L);
-    assertThat(entry.isVersionDegraded()).isFalse();
     assertThat(entry.getDecisionVersion()).isEqualTo(5L);
     assertThat(entry.getKeyState()).isEqualTo(KeyState.HOT);
   }
@@ -56,45 +53,24 @@ class CacheEntryTest {
    */
   @Test
   void shouldBuildNormalEntry() {
-    CacheEntry entry = CacheEntry.builder()
+    CacheEntry entry = EntryDraft.blank(null)
       .value(42)
-      .dataVersion(0L)
-      .isVersionDegraded(false)
-      .decisionVersion(0L)
-      .hardTtlMs(300_000L)
-      .hardExpireAtMs(Long.MAX_VALUE)
-      .softTtlMs(0L)
-      .softExpireAtMs(0L)
+      .version(0L)
+      .decision(DecisionStamp.hot(0L, null, 0L))
+      .ttl(300_000L, 0L, 300_000L, 30_000L)
+      .expiryAt(Long.MAX_VALUE, 0L)
       .keyState(KeyState.NORMAL)
-      .normalHardTtlMs(300_000L)
-      .normalSoftTtlMs(30_000L)
       .build();
 
     assertThat(entry.getValue()).isEqualTo(42);
     assertThat(entry.getKeyState()).isEqualTo(KeyState.NORMAL);
   }
 
-  /**
-   * Verifies building a CacheEntry with version degraded flag set and negative data version space.
-   */
-  @Test
-  void shouldBuildDegradedEntry() {
-    CacheEntry entry = CacheEntry.builder()
-      .value("degraded")
-      .dataVersion(Long.MIN_VALUE + 1)
-      .isVersionDegraded(true)
-      .build();
-
-    assertThat(entry.isVersionDegraded()).isTrue();
-    assertThat(entry.getDataVersion()).isEqualTo(Long.MIN_VALUE + 1);
-  }
-
   @Test
   void builderDefaults_shouldBeNullForObjectZeroForLongFalseForBoolean() {
-    CacheEntry entry = CacheEntry.builder().build();
+    CacheEntry entry = EntryDraft.blank(null).build();
     assertThat(entry.getValue()).isNull();
     assertThat(entry.getDataVersion()).isZero();
-    assertThat(entry.isVersionDegraded()).isFalse();
     assertThat(entry.getDecisionVersion()).isZero();
     assertThat(entry.getHardTtlMs()).isZero();
     assertThat(entry.getHardExpireAtMs()).isZero();
@@ -107,167 +83,122 @@ class CacheEntryTest {
 
   @Test
   void infiniteHardExpiry_shouldAcceptMaxValue() {
-    CacheEntry entry = CacheEntry.builder().value("infinite").hardExpireAtMs(Long.MAX_VALUE).build();
+    CacheEntry entry = EntryDraft.blank(null).value("infinite").hardExpiryAt(Long.MAX_VALUE).build();
     assertThat(entry.getHardExpireAtMs()).isEqualTo(Long.MAX_VALUE);
   }
 
   @Test
   void keyStateCOOL_shouldBuildCorrectly() {
-    CacheEntry entry = CacheEntry.builder().value("cooling").keyState(KeyState.COOL).build();
+    CacheEntry entry = EntryDraft.blank(null).value("cooling").keyState(KeyState.COOL).build();
     assertThat(entry.getKeyState()).isEqualTo(KeyState.COOL);
   }
 
   @Test
   void valueAsString_shouldBeStored() {
-    CacheEntry entry = CacheEntry.builder().value("hello").build();
+    CacheEntry entry = EntryDraft.blank(null).value("hello").build();
     assertThat(entry.getValue()).isEqualTo("hello");
   }
 
   @Test
   void valueAsInteger_shouldBeStored() {
-    CacheEntry entry = CacheEntry.builder().value(123).build();
+    CacheEntry entry = EntryDraft.blank(null).value(123).build();
     assertThat(entry.getValue()).isEqualTo(123);
   }
 
   @Test
   void valueAsNull_shouldBeAccepted() {
-    CacheEntry entry = CacheEntry.builder().value(null).build();
+    CacheEntry entry = EntryDraft.blank(null).value(null).build();
     assertThat(entry.getValue()).isNull();
   }
 
   @Test
-  void isVersionDegradedTrue_combinedWithDecisionVersion() {
-    CacheEntry entry = CacheEntry.builder()
-      .value("degraded-hot")
-      .dataVersion(Long.MIN_VALUE + 10)
-      .isVersionDegraded(true)
-      .decisionVersion(10L)
-      .build();
-    assertThat(entry.isVersionDegraded()).isTrue();
-    assertThat(entry.getDecisionVersion()).isEqualTo(10L);
-  }
-
-  @Test
-  void isVersionDegradedFalse_combinedWithDecisionVersion() {
-    CacheEntry entry = CacheEntry.builder().value("non-degraded").isVersionDegraded(false).decisionVersion(20L).build();
-    assertThat(entry.isVersionDegraded()).isFalse();
-    assertThat(entry.getDecisionVersion()).isEqualTo(20L);
-  }
-
-  @Test
   void draftCopy_shouldCarryAllFields() {
-    CacheEntry original = CacheEntry.builder()
-      .value("original")
-      .dataVersion(Long.MIN_VALUE + 1)
-      .isVersionDegraded(true)
-      .keyState(KeyState.HOT)
-      .build();
+    CacheEntry original = EntryDraft.blank(null).value("original").version(7L).keyState(KeyState.HOT).build();
     CacheEntry copy = EntryDraft.of(original).value("modified").build();
     assertThat(copy.getValue()).isEqualTo("modified");
-    assertThat(copy.getDataVersion()).isEqualTo(Long.MIN_VALUE + 1);
-    assertThat(copy.isVersionDegraded()).isTrue();
+    assertThat(copy.getDataVersion()).isEqualTo(7L);
     assertThat(copy.getKeyState()).isEqualTo(KeyState.HOT);
   }
 
   @Test
   void equalsAndHashCode_shouldWorkForIdenticalEntries() {
-    CacheEntry a = CacheEntry.builder().value("x").dataVersion(1L).build();
-    CacheEntry b = CacheEntry.builder().value("x").dataVersion(1L).build();
+    CacheEntry a = EntryDraft.blank(null).value("x").version(1L).build();
+    CacheEntry b = EntryDraft.blank(null).value("x").version(1L).build();
     assertThat(a).isEqualTo(b);
     assertThat(a).hasSameHashCodeAs(b);
   }
 
   @Test
   void equalsAndHashCode_shouldDistinguishDifferentEntries() {
-    CacheEntry a = CacheEntry.builder().value("x").dataVersion(1L).build();
-    CacheEntry b = CacheEntry.builder().value("y").dataVersion(1L).build();
+    CacheEntry a = EntryDraft.blank(null).value("x").version(1L).build();
+    CacheEntry b = EntryDraft.blank(null).value("y").version(1L).build();
     assertThat(a).isNotEqualTo(b);
   }
 
   @Test
-  void dataVersionMinMax_shouldAcceptBoundaryValues() {
-    CacheEntry min = CacheEntry.builder().value("min").dataVersion(Long.MIN_VALUE).isVersionDegraded(true).build();
-    CacheEntry max = CacheEntry.builder().value("max").dataVersion(Long.MAX_VALUE).build();
-    assertThat(min.getDataVersion()).isEqualTo(Long.MIN_VALUE);
+  void dataVersionUnknownAndMax_shouldAcceptBoundaryValues() {
+    CacheEntry unknown = EntryDraft.blank(null).value("unknown").version(0L).build();
+    CacheEntry max = EntryDraft.blank(null).value("max").version(Long.MAX_VALUE).build();
+    assertThat(unknown.getDataVersion()).isZero();
     assertThat(max.getDataVersion()).isEqualTo(Long.MAX_VALUE);
   }
 
   @Test
   void decisionVersionMinMax_shouldAcceptBoundaryValues() {
-    CacheEntry min = CacheEntry.builder().value("min").decisionVersion(Long.MIN_VALUE).build();
-    CacheEntry max = CacheEntry.builder().value("max").decisionVersion(Long.MAX_VALUE).build();
+    CacheEntry min = EntryDraft.blank(null).value("min").decision(DecisionStamp.hot(Long.MIN_VALUE, null, 0L)).build();
+    CacheEntry max = EntryDraft.blank(null).value("max").decision(DecisionStamp.hot(Long.MAX_VALUE, null, 0L)).build();
     assertThat(min.getDecisionVersion()).isEqualTo(Long.MIN_VALUE);
     assertThat(max.getDecisionVersion()).isEqualTo(Long.MAX_VALUE);
   }
 
   @Test
   void hardExpireAtMsInPast_shouldAcceptExpiredEntry() {
-    CacheEntry entry = CacheEntry.builder().value("expired").hardExpireAtMs(-1L).build();
+    CacheEntry entry = EntryDraft.blank(null).value("expired").hardExpiryAt(-1L).build();
     assertThat(entry.getHardExpireAtMs()).isNegative();
   }
 
   @Test
   void negativeTtlValues_shouldBeRejected() {
-    assertThatThrownBy(() -> CacheEntry.builder().value("neg").hardTtlMs(-100L).softTtlMs(-50L).build()).isInstanceOf(
+    assertThatThrownBy(() -> EntryDraft.blank(null).value("neg").ttl(-100L, -50L).build()).isInstanceOf(
       IllegalArgumentException.class
     );
   }
 
-  /**
-   * Locks the diagnostic message of the degraded-flag assertion. The message is
-   * only materialised on the failure path (Supplier-based Assert overload), so
-   * the happy path allocates nothing — this test is the only thing pinning the
-   * text down.
-   */
+  /** The epoch is a full long now that it lives in the decision stamp, not a 56-bit field. */
   @Test
-  void inconsistentDegradedFlag_shouldBeRejectedWithDiagnosticMessage() {
-    assertThatThrownBy(() -> CacheEntry.builder().value("v").dataVersion(5L).isVersionDegraded(true).build())
-      .isInstanceOf(IllegalArgumentException.class)
-      .hasMessage("isVersionDegraded(true) must equal (dataVersion < 0) for dataVersion=5");
-  }
-
-  /** Locks the diagnostic message of the decision-epoch range assertion. */
-  @Test
-  void outOfRangeDecisionEpoch_shouldBeRejectedWithDiagnosticMessage() {
-    long epoch = 1L << 56;
-    assertThatThrownBy(() -> CacheEntry.builder().value("v").decisionEpoch(epoch).build())
-      .isInstanceOf(IllegalArgumentException.class)
-      .hasMessage("decisionEpoch out of range [0, " + ((1L << 56) - 1) + "]: " + epoch);
+  void fullWidthDecisionEpoch_shouldRoundTrip() {
+    long epoch = Long.MAX_VALUE;
+    CacheEntry entry = EntryDraft.blank(null).value("v").decision(DecisionStamp.hot(0L, "worker-1", epoch)).build();
+    assertThat(entry.getDecisionEpoch()).isEqualTo(epoch);
   }
 
   @Test
   void veryLongValue_shouldBeStored() {
     String longStr = "a".repeat(10_000);
-    CacheEntry entry = CacheEntry.builder().value(longStr).build();
+    CacheEntry entry = EntryDraft.blank(null).value(longStr).build();
     assertThat(entry.getValue()).isEqualTo(longStr);
   }
 
   @Test
   void specialCharactersInValue_shouldBeStored() {
     String specials = "hello\n\t\r\0unicode:\u00E9\u4E2D\u6587";
-    CacheEntry entry = CacheEntry.builder().value(specials).build();
+    CacheEntry entry = EntryDraft.blank(null).value(specials).build();
     assertThat(entry.getValue()).isEqualTo(specials);
   }
 
   @Test
   void draftCopy_shouldPreserveAllFieldsExceptModified() {
-    CacheEntry original = CacheEntry.builder()
+    CacheEntry original = EntryDraft.blank(null)
       .value("orig")
-      .dataVersion(Long.MIN_VALUE + 1)
-      .isVersionDegraded(true)
-      .decisionVersion(2L)
-      .hardTtlMs(100L)
-      .hardExpireAtMs(200L)
-      .softTtlMs(10L)
-      .softExpireAtMs(20L)
+      .version(7L)
+      .decision(DecisionStamp.hot(2L, null, 0L))
+      .ttl(100L, 10L, 100L, 10L)
+      .expiryAt(200L, 20L)
       .keyState(KeyState.HOT)
-      .normalHardTtlMs(100L)
-      .normalSoftTtlMs(10L)
       .build();
     CacheEntry copy = EntryDraft.of(original).value("modified").build();
     assertThat(copy.getValue()).isEqualTo("modified");
-    assertThat(copy.getDataVersion()).isEqualTo(Long.MIN_VALUE + 1);
-    assertThat(copy.isVersionDegraded()).isTrue();
+    assertThat(copy.getDataVersion()).isEqualTo(7L);
     assertThat(copy.getDecisionVersion()).isEqualTo(2L);
     assertThat(copy.getHardTtlMs()).isEqualTo(100L);
     assertThat(copy.getHardExpireAtMs()).isEqualTo(200L);
@@ -280,27 +211,41 @@ class CacheEntryTest {
 
   @Test
   void equalsWithNullValue_shouldWork() {
-    CacheEntry a = CacheEntry.builder().value(null).dataVersion(1L).build();
-    CacheEntry b = CacheEntry.builder().value(null).dataVersion(1L).build();
+    CacheEntry a = EntryDraft.blank(null).value(null).version(1L).build();
+    CacheEntry b = EntryDraft.blank(null).value(null).version(1L).build();
     assertThat(a).isEqualTo(b);
     assertThat(a).hasSameHashCodeAs(b);
   }
 
   /**
-   * Verifies decisionNodeId set via builder is stored and retrieved correctly.
+   * The entry keeps the immutable stamp by reference: a seeded draft must not copy
+   * its fields, and a Worker decision must cost one reference rather than three fields.
+   */
+  @Test
+  void decisionStamp_shouldBeStoredByReference() {
+    DecisionStamp stamp = DecisionStamp.hot(5L, "worker-1", 7L);
+    CacheEntry entry = EntryDraft.blank(null).value("v").decision(stamp).build();
+    assertThat(entry.decision()).isSameAs(stamp);
+
+    CacheEntry copy = EntryDraft.of(entry).value("copy").build();
+    assertThat(copy.decision()).isSameAs(stamp);
+  }
+
+  /**
+   * Verifies decisionNodeId set through the draft is stored and retrieved correctly.
    */
   @Test
   void decisionNodeId_shouldBeStoredAndRetrieved() {
-    CacheEntry entry = CacheEntry.builder().value("v").decisionNodeId("worker-1").build();
+    CacheEntry entry = EntryDraft.blank(null).value("v").decision(DecisionStamp.hot(0L, "worker-1", 0L)).build();
     assertThat(entry.getDecisionNodeId()).isEqualTo("worker-1");
   }
 
   /**
-   * Verifies decisionEpoch set via builder is stored and retrieved correctly.
+   * Verifies decisionEpoch set through the draft is stored and retrieved correctly.
    */
   @Test
   void decisionEpoch_shouldBeStoredAndRetrieved() {
-    CacheEntry entry = CacheEntry.builder().value("v").decisionEpoch(5L).build();
+    CacheEntry entry = EntryDraft.blank(null).value("v").decision(DecisionStamp.hot(0L, "worker-1", 5L)).build();
     assertThat(entry.getDecisionEpoch()).isEqualTo(5L);
   }
 
@@ -309,7 +254,7 @@ class CacheEntryTest {
    */
   @Test
   void decisionNodeId_defaultNull_whenNotSet() {
-    CacheEntry entry = CacheEntry.builder().value("v").build();
+    CacheEntry entry = EntryDraft.blank(null).value("v").build();
     assertThat(entry.getDecisionNodeId()).isNull();
   }
 
@@ -318,7 +263,7 @@ class CacheEntryTest {
    */
   @Test
   void decisionEpoch_defaultZero_whenNotSet() {
-    CacheEntry entry = CacheEntry.builder().value("v").build();
+    CacheEntry entry = EntryDraft.blank(null).value("v").build();
     assertThat(entry.getDecisionEpoch()).isZero();
   }
 
@@ -327,7 +272,7 @@ class CacheEntryTest {
    */
   @Test
   void draftCopy_shouldCarryDecisionFields() {
-    CacheEntry original = CacheEntry.builder().value("orig").decisionNodeId("worker-1").decisionEpoch(5L).build();
+    CacheEntry original = EntryDraft.blank(null).value("orig").decision(DecisionStamp.hot(0L, "worker-1", 5L)).build();
     CacheEntry copy = EntryDraft.of(original).value("new").build();
     assertThat(copy.getValue()).isEqualTo("new");
     assertThat(copy.getDecisionNodeId()).isEqualTo("worker-1");
@@ -339,12 +284,16 @@ class CacheEntryTest {
    */
   @Test
   void equalsAndHashCode_shouldConsiderDecisionFields() {
-    CacheEntry a = CacheEntry.builder().value("x").dataVersion(1L).decisionNodeId("worker-1").decisionEpoch(5L).build();
-    CacheEntry b = CacheEntry.builder().value("x").dataVersion(1L).decisionNodeId("worker-2").decisionEpoch(5L).build();
+    CacheEntry a = EntryDraft.blank(null)
+      .value("x")
+      .version(1L)
+      .decision(DecisionStamp.hot(0L, "worker-1", 5L))
+      .build();
+    CacheEntry b = EntryDraft.blank(null).value("x").version(1L).build();
     assertThat(a).isNotEqualTo(b);
   }
 
-  // ── EntryDraft copy-on-write (replaces the former withXxx() family) ──
+  // ── EntryDraft copy-on-write ──
 
   /**
    * A deterministic stub arithmetic for draft tests: computed hard expiry is
@@ -364,20 +313,13 @@ class CacheEntryTest {
 
   /** Creates a fully-populated base entry for testing draft copy-on-write. */
   private static CacheEntry fullEntry() {
-    return CacheEntry.builder()
+    return EntryDraft.blank(null)
       .value("baseValue")
-      .dataVersion(Long.MIN_VALUE + 100)
-      .isVersionDegraded(true)
-      .decisionVersion(5L)
-      .decisionNodeId("worker-1")
-      .decisionEpoch(3L)
-      .hardTtlMs(300_000L)
-      .hardExpireAtMs(400_000L)
-      .softTtlMs(30_000L)
-      .softExpireAtMs(40_000L)
+      .version(100L)
+      .decision(DecisionStamp.hot(5L, "worker-1", 3L))
+      .ttl(300_000L, 30_000L, 150_000L, 15_000L)
+      .expiryAt(400_000L, 40_000L)
       .keyState(KeyState.HOT)
-      .normalHardTtlMs(150_000L)
-      .normalSoftTtlMs(15_000L)
       .build();
   }
 
@@ -405,25 +347,25 @@ class CacheEntryTest {
   @Test
   void draftDecision_shouldCreateCopyWithNewDecisionVersion() {
     CacheEntry base = fullEntry();
-    CacheEntry copy = EntryDraft.of(base).decision(new DecisionStamp(99L, "worker-1", 3L)).build();
+    CacheEntry copy = EntryDraft.of(base).decision(DecisionStamp.hot(99L, "worker-1", 3L)).build();
     assertThat(copy.getDecisionVersion()).isEqualTo(99L);
-    assertThat(copy).usingRecursiveComparison().ignoringFields("decisionVersion").isEqualTo(base);
+    assertThat(copy).usingRecursiveComparison().ignoringFields("decision").isEqualTo(base);
   }
 
   @Test
   void draftDecision_shouldCreateCopyWithNewDecisionNodeId() {
     CacheEntry base = fullEntry();
-    CacheEntry copy = EntryDraft.of(base).decision(new DecisionStamp(5L, "worker-2", 3L)).build();
+    CacheEntry copy = EntryDraft.of(base).decision(DecisionStamp.hot(5L, "worker-2", 3L)).build();
     assertThat(copy.getDecisionNodeId()).isEqualTo("worker-2");
-    assertThat(copy).usingRecursiveComparison().ignoringFields("decisionNodeId").isEqualTo(base);
+    assertThat(copy).usingRecursiveComparison().ignoringFields("decision").isEqualTo(base);
   }
 
   @Test
   void draftDecision_shouldCreateCopyWithNewDecisionEpoch() {
     CacheEntry base = fullEntry();
-    CacheEntry copy = EntryDraft.of(base).decision(new DecisionStamp(5L, "worker-1", 42L)).build();
+    CacheEntry copy = EntryDraft.of(base).decision(DecisionStamp.hot(5L, "worker-1", 42L)).build();
     assertThat(copy.getDecisionEpoch()).isEqualTo(42L);
-    assertThat(copy).usingRecursiveComparison().ignoringFields("decisionEpoch", "packedState").isEqualTo(base);
+    assertThat(copy).usingRecursiveComparison().ignoringFields("decision").isEqualTo(base);
   }
 
   @Test
@@ -433,19 +375,16 @@ class CacheEntryTest {
     assertThat(copy.getDecisionVersion()).isZero();
     assertThat(copy.getDecisionNodeId()).isNull();
     assertThat(copy.getDecisionEpoch()).isZero();
-    assertThat(copy)
-      .usingRecursiveComparison()
-      .ignoringFields("decisionVersion", "decisionNodeId", "decisionEpoch", "packedState")
-      .isEqualTo(base);
+    assertThat(copy).usingRecursiveComparison().ignoringFields("decision").isEqualTo(base);
   }
 
   @Test
   void draftHardTtl_shouldUpdateDurationAndComputedTimestamp() {
     CacheEntry base = fullEntry();
-    CacheEntry copy = edit(base).hardTtl(600_000L).build();
+    CacheEntry copy = edit(base).ttl(600_000L, base.getSoftTtlMs()).softExpiryAt(base.getSoftExpireAtMs()).build();
     assertThat(copy.getHardTtlMs()).isEqualTo(600_000L);
     assertThat(copy.getHardExpireAtMs()).isEqualTo(600_000L + 1000);
-    assertThat(copy).usingRecursiveComparison().ignoringFields("hardTtlMs", "hardExpireAtMs").isEqualTo(base);
+    assertThat(copy).usingRecursiveComparison().ignoringFields("packedMeta", "hardExpireAtMs").isEqualTo(base);
   }
 
   @Test
@@ -486,16 +425,7 @@ class CacheEntryTest {
     CacheEntry base = fullEntry();
     CacheEntry copy = EntryDraft.of(base).keyState(KeyState.COOL).build();
     assertThat(copy.getKeyState()).isEqualTo(KeyState.COOL);
-    assertThat(copy).usingRecursiveComparison().ignoringFields("keyState", "packedState").isEqualTo(base);
-  }
-
-  @Test
-  void draftNormalTtl_shouldUpdateBaselineOnly() {
-    CacheEntry base = fullEntry();
-    CacheEntry copy = EntryDraft.of(base).normalTtl(250_000L, 25_000L).build();
-    assertThat(copy.getNormalHardTtlMs()).isEqualTo(250_000L);
-    assertThat(copy.getNormalSoftTtlMs()).isEqualTo(25_000L);
-    assertThat(copy).usingRecursiveComparison().ignoringFields("normalHardTtlMs", "normalSoftTtlMs").isEqualTo(base);
+    assertThat(copy).usingRecursiveComparison().ignoringFields("packedMeta").isEqualTo(base);
   }
 
   @Test
@@ -508,7 +438,7 @@ class CacheEntryTest {
     assertThat(copy.getSoftExpireAtMs()).isEqualTo(60L);
     assertThat(copy)
       .usingRecursiveComparison()
-      .ignoringFields("hardTtlMs", "hardExpireAtMs", "softTtlMs", "softExpireAtMs")
+      .ignoringFields("packedMeta", "hardExpireAtMs", "softTtlMs", "softExpireAtMs")
       .isEqualTo(base);
   }
 
@@ -525,7 +455,7 @@ class CacheEntryTest {
     assertThat(copy)
       .usingRecursiveComparison()
       .ignoringFields(
-        "hardTtlMs",
+        "packedMeta",
         "hardExpireAtMs",
         "softTtlMs",
         "softExpireAtMs",
@@ -546,7 +476,7 @@ class CacheEntryTest {
     assertThat(copy.getKeyState()).isEqualTo(KeyState.COOL);
     assertThat(copy)
       .usingRecursiveComparison()
-      .ignoringFields("hardTtlMs", "hardExpireAtMs", "softTtlMs", "softExpireAtMs", "keyState", "packedState")
+      .ignoringFields("packedMeta", "hardExpireAtMs", "softTtlMs", "softExpireAtMs")
       .isEqualTo(base);
   }
 
@@ -554,7 +484,7 @@ class CacheEntryTest {
   void draftDecisionTtlAndState_shouldCreateCopyWithDecisionTtlAndState() {
     CacheEntry base = fullEntry();
     CacheEntry copy = EntryDraft.of(base)
-      .decision(new DecisionStamp(99L, "worker-9", 7L))
+      .decision(DecisionStamp.hot(99L, "worker-9", 7L))
       .ttl(111L, 22L)
       .expiryAt(333L, 44L)
       .keyState(KeyState.COOL)
@@ -569,17 +499,7 @@ class CacheEntryTest {
     assertThat(copy.getKeyState()).isEqualTo(KeyState.COOL);
     assertThat(copy)
       .usingRecursiveComparison()
-      .ignoringFields(
-        "decisionVersion",
-        "decisionNodeId",
-        "decisionEpoch",
-        "hardTtlMs",
-        "hardExpireAtMs",
-        "softTtlMs",
-        "softExpireAtMs",
-        "keyState",
-        "packedState"
-      )
+      .ignoringFields("decision", "packedMeta", "hardExpireAtMs", "softTtlMs", "softExpireAtMs")
       .isEqualTo(base);
   }
 
@@ -589,7 +509,6 @@ class CacheEntryTest {
     CacheEntry copy = EntryDraft.of(base).value("refreshed").version(200L).expiryAt(999_000L, 99_000L).build();
     assertThat(copy.getValue()).isEqualTo("refreshed");
     assertThat(copy.getDataVersion()).isEqualTo(200L);
-    assertThat(copy.isVersionDegraded()).isFalse();
     assertThat(copy.getHardExpireAtMs()).isEqualTo(999_000L);
     assertThat(copy.getSoftExpireAtMs()).isEqualTo(99_000L);
     assertThat(copy)
@@ -620,37 +539,19 @@ class CacheEntryTest {
   }
 
   @Test
-  void draftWithoutArithmetic_computedExpiry_shouldFailFast() {
-    CacheEntry base = fullEntry();
-    assertThatThrownBy(() -> EntryDraft.of(base).ttl(60_000L, 30_000L).build()).isInstanceOf(
-      IllegalStateException.class
-    );
-    assertThatThrownBy(() -> EntryDraft.of(base).rearmExpiry().build()).isInstanceOf(IllegalStateException.class);
-  }
-
-  @Test
   void draftWithoutArithmetic_hardExpiryAfterTtl_shouldResolvePending() {
     CacheEntry base = fullEntry();
-    // hardTtl arms the hard pending flag (positive duration, no arithmetic);
+    // ttl arms the hard pending flag (positive duration, no arithmetic);
     // hardExpiryAt must resolve it exactly like softExpiryAt resolves the
     // soft side — the explicit override replaces the uncomputed timestamp.
-    CacheEntry copy = EntryDraft.of(base).hardTtl(5000L).hardExpiryAt(999_000L).build();
+    CacheEntry copy = EntryDraft.of(base)
+      .ttl(5000L, base.getSoftTtlMs())
+      .hardExpiryAt(999_000L)
+      .softExpiryAt(base.getSoftExpireAtMs())
+      .build();
     assertThat(copy.getHardTtlMs()).isEqualTo(5000L);
     assertThat(copy.getHardExpireAtMs()).isEqualTo(999_000L);
-    assertThat(copy).usingRecursiveComparison().ignoringFields("hardTtlMs", "hardExpireAtMs").isEqualTo(base);
-  }
-
-  @Test
-  void draftWithoutArithmetic_partialPending_shouldStillFailFast() {
-    CacheEntry base = fullEntry();
-    // Resolving only one side leaves the other pending: the flags are
-    // independent, so build() must still fail fast.
-    assertThatThrownBy(() -> EntryDraft.of(base).ttl(5000L, 30_000L).hardExpiryAt(999_000L).build()).isInstanceOf(
-      IllegalStateException.class
-    );
-    assertThatThrownBy(() -> EntryDraft.of(base).ttl(60_000L, 30_000L).softExpiryAt(90_000L).build()).isInstanceOf(
-      IllegalStateException.class
-    );
+    assertThat(copy).usingRecursiveComparison().ignoringFields("packedMeta", "hardExpireAtMs").isEqualTo(base);
   }
 
   @Test
@@ -667,7 +568,6 @@ class CacheEntryTest {
     CacheEntry entry = EntryDraft.blank(ARITH).build();
     assertThat(entry.getValue()).isNull();
     assertThat(entry.getDataVersion()).isZero();
-    assertThat(entry.isVersionDegraded()).isFalse();
     assertThat(entry.getDecisionVersion()).isZero();
     assertThat(entry.getDecisionNodeId()).isNull();
     assertThat(entry.getDecisionEpoch()).isZero();
@@ -678,27 +578,68 @@ class CacheEntryTest {
     assertThat(entry.getKeyState()).isNull();
     assertThat(entry.getNormalHardTtlMs()).isZero();
     assertThat(entry.getNormalSoftTtlMs()).isZero();
-    assertThat(entry.isSoloFlight()).isFalse();
   }
 
   @Test
-  void soloFlight_shouldRoundTripAndSurviveDraftCopy() {
-    // The load path's solo-flight construction (ADR-0079): short hard TTL, no
-    // soft cadence, NORMAL state, flag set. The flag must round-trip the packed
-    // state and survive every later draft copy of the entry.
-    CacheEntry solo = EntryDraft.blank(ARITH)
-      .value("v")
-      .ttl(200, 0, 200, 0)
-      .keyState(KeyState.NORMAL)
-      .soloFlight(true)
+  void ttlEncoding_shouldBeIdempotentAcrossUnitBoundary() {
+    // Above 2^31-1 ms the encoder switches to whole seconds, rounded up. A no-op draft rebuild
+    // must re-encode to the same packed int; the getters, equals and hashCode must all agree.
+    long aboveMillisTier = (1L << 31) + 500;
+    CacheEntry original = EntryDraft.blank(null)
+      .value("x")
+      .ttlDurations(aboveMillisTier, Long.MAX_VALUE)
+      .expiryAt(Long.MAX_VALUE, 0L)
       .build();
-    assertThat(solo.isSoloFlight()).isTrue();
+    CacheEntry copy = EntryDraft.of(original).build();
 
-    CacheEntry edited = EntryDraft.of(solo).softTtl(0).build();
-    assertThat(edited.isSoloFlight()).isTrue();
+    assertThat(original.getHardTtlMs()).as("seconds tier rounds up to 2,147,485,000ms").isEqualTo(2_147_485_000L);
+    assertThat(original.getSoftTtlMs()).as("permanent keeps its sentinel").isEqualTo(Long.MAX_VALUE);
+    assertThat(copy.getHardTtlMs()).isEqualTo(original.getHardTtlMs());
+    assertThat(copy.getSoftTtlMs()).isEqualTo(Long.MAX_VALUE);
+    assertThat(copy).isEqualTo(original);
+    assertThat(copy).hasSameHashCodeAs(original);
+  }
 
-    // Default construction stays unflagged.
-    CacheEntry normal = CacheEntry.builder().value("v").build();
-    assertThat(normal.isSoloFlight()).isFalse();
+  @Test
+  void ttlEncoding_shouldRoundTripExactAtMillisTierBoundary() {
+    long exact = Integer.MAX_VALUE;
+    CacheEntry entry = EntryDraft.blank(null)
+      .value("x")
+      .ttlDurations(exact, exact)
+      .expiryAt(Long.MAX_VALUE, 0L)
+      .build();
+
+    assertThat(entry.getHardTtlMs()).isEqualTo(exact);
+    assertThat(entry.getSoftTtlMs()).isEqualTo(exact);
+    assertThat(EntryDraft.of(entry).build()).isEqualTo(entry);
+  }
+
+  @Test
+  void permanentZeroDuration_shouldNormalizeToMaxSentinel() {
+    CacheEntry entry = EntryDraft.blank(null).value("v").ttl(0L, 0L).build();
+
+    assertThat(entry.getHardExpireAtMs()).isEqualTo(Long.MAX_VALUE);
+    assertThat(entry.getHardTtlMs())
+      .as("0 means permanent in the duration contract; the entry must store the explicit sentinel")
+      .isEqualTo(Long.MAX_VALUE);
+  }
+
+  @Test
+  void negativeSoftTtl_shouldBeRejectedAtTheSetter() {
+    assertThatThrownBy(() -> EntryDraft.blank(null).softTtl(-1L)).isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void negativeNormalTtl_shouldBeRejectedAtBuild() {
+    assertThatThrownBy(() -> EntryDraft.blank(null).ttl(1L, 1L, -1L, 0L).expiryAt(1L, 1L).build()).isInstanceOf(
+      IllegalArgumentException.class
+    );
+  }
+
+  @Test
+  void toString_shouldNotExposeTheCachedValue() {
+    CacheEntry entry = EntryDraft.blank(null).value("customer-secret").version(1L).build();
+
+    assertThat(entry.toString()).doesNotContain("customer-secret").contains("dataVersion");
   }
 }

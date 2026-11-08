@@ -17,6 +17,7 @@ package io.github.hyshmily.zeta.util;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import io.github.hyshmily.zeta.util.executor.ZetaThreadFactory;
 import org.junit.jupiter.api.Test;
 
 /**

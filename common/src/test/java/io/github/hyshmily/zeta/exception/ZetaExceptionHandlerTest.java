@@ -21,6 +21,7 @@ import static org.assertj.core.api.Assertions.assertThatCode;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
@@ -28,8 +29,8 @@ import org.junit.jupiter.api.Test;
  * Tests for {@link ZetaExceptionHandler}.
  *
  * <p>Verifies the resolution chain (thread-local → inheritable → default → WARN-log fallback),
- * the never-throw guarantee, and the end-to-end propagation into executor pool threads via
- * {@link InheritableThreadLocal}.
+ * the never-throw guarantee (including a handler that fails), context forwarding, and the
+ * creation-time propagation of an inheritable value to an explicitly started child thread.
  */
 class ZetaExceptionHandlerTest {
 
@@ -86,7 +87,8 @@ class ZetaExceptionHandlerTest {
   void inheritableHandler_shouldPropagateToChildThreads() throws Exception {
     AtomicInteger calls = new AtomicInteger(0);
     // InheritableThreadLocal values are copied at thread creation: a thread created AFTER this
-    // binding resolves the handler, which is how a lazily-started executor pool gets instrumented.
+    // binding resolves the handler. This covers explicit parent→child creation only; a pool
+    // worker created by an unrelated submitting thread does not see this value.
     ZetaExceptionHandler.setInheritableExceptionHandler(t -> calls.incrementAndGet());
 
     CountDownLatch done = new CountDownLatch(1);
@@ -137,22 +139,50 @@ class ZetaExceptionHandlerTest {
   }
 
   @Test
-  void fallbackDisabled_noHandler_shouldBeSilentNoOp() {
-    // Call sites that own their fallback logging (HotKeyCache read paths) disable the WARN
-    // fallback: without a handler nothing happens, and it never throws.
-    assertThatCode(() ->
-      ZetaExceptionHandler.handleException("ctx", new IllegalStateException("boom"), false)
-    ).doesNotThrowAnyException();
+  void throwingHandler_shouldAttachOriginalAsSuppressed() {
+    IllegalStateException handlerFailure = new IllegalStateException("handler is broken");
+    ZetaExceptionHandler.setDefaultExceptionHandler(t -> {
+      throw handlerFailure;
+    });
+    IllegalStateException original = new IllegalStateException("boom");
+
+    ZetaExceptionHandler.handleException("ctx", original);
+
+    // The ERROR log carries the handler failure, whose suppressed chain carries the original:
+    // one broken monitoring SDK must not make the task failure disappear from diagnostics.
+    assertThat(handlerFailure.getSuppressed()).containsExactly(original);
   }
 
   @Test
-  void fallbackDisabled_handlerPresent_shouldStillRoute() {
-    // The overload only disables the WARN fallback — a configured handler is still invoked.
-    AtomicInteger calls = new AtomicInteger(0);
-    ZetaExceptionHandler.setThreadExceptionHandler(t -> calls.incrementAndGet());
+  void handlerRethrowingOriginal_shouldNotSelfSuppress() {
+    IllegalStateException original = new IllegalStateException("boom");
+    ZetaExceptionHandler.setDefaultExceptionHandler(t -> {
+      throw (IllegalStateException) t;
+    });
 
-    ZetaExceptionHandler.handleException("ctx", new IllegalStateException("boom"), false);
+    assertThatCode(() -> ZetaExceptionHandler.handleException("ctx", original)).doesNotThrowAnyException();
+    assertThat(original.getSuppressed()).isEmpty();
+  }
 
-    assertThat(calls.get()).isEqualTo(1);
+  @Test
+  void context_shouldReachHandlerWhenOverridden() {
+    AtomicReference<String> seen = new AtomicReference<>();
+    ZetaExceptionHandler.setDefaultExceptionHandler(
+      new ZetaExceptionHandler.Handler() {
+        @Override
+        public void handleException(Throwable t) {
+          seen.set("single-arg");
+        }
+
+        @Override
+        public void handleException(String context, Throwable t) {
+          seen.set(context);
+        }
+      }
+    );
+
+    ZetaExceptionHandler.handleException("scheduler tick", new IllegalStateException("boom"));
+
+    assertThat(seen).hasValue("scheduler tick");
   }
 }

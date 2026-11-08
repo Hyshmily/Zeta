@@ -15,75 +15,47 @@
  */
 package io.github.hyshmily.zeta.exception;
 
-import io.github.hyshmily.zeta.Internal;
 import lombok.extern.slf4j.Slf4j;
 
 /**
- * Central exception-handling chain for tasks executed by Zeta's own executors.
+ * Failures raised by tasks running on a Zeta executor are reported here, never rethrown on the
+ * executor thread.
  *
- * <p>Zeta's executor framework is designed so that <b>a task exception never kills a worker
- * thread</b> (see {@code SafeScheduledExecutorService} and {@code PerKeyOrderedDispatcher}).
- * Instead of each call site deciding how to report failures, they all funnel the throwable
- * through {@link #handleException(String, Throwable)}, which resolves the target handler with
- * this precedence:
+ * <p>The handlers resolve in this order:
  * <ol>
- *   <li><b>Thread-local handler</b> — bound to the <em>current</em> thread via
- *       {@link #setThreadExceptionHandler(ExceptionHandler)}. Only visible to that one thread.</li>
- *   <li><b>Inheritable handler</b> — bound via {@link #setInheritableExceptionHandler(ExceptionHandler)}.
- *       Propagates to every thread created <em>after</em> the binding, which makes it the
- *       natural way to install a handler for a lazily-started executor pool (set it before the
- *       first task is submitted and every pool thread inherits it).</li>
- *   <li><b>Default handler</b> — JVM-wide, set via {@link #setDefaultExceptionHandler(ExceptionHandler)}.
- *       Good for global concerns such as Micrometer failure counters or alerting.</li>
- *   <li><b>Fallback WARN log</b> — if no handler is configured anywhere, the throwable is logged
- *       at WARN level with the provided context message. This preserves Zeta's historical
- *       observable behaviour (exceptions are visible in logs, never silently swallowed).</li>
+ *   <li>the handler bound to the current thread ({@link #setThreadExceptionHandler(Handler)});</li>
+ *   <li>the handler inherited at thread creation ({@link #setInheritableExceptionHandler(Handler)});</li>
+ *   <li>the JVM-wide default ({@link #setDefaultExceptionHandler(Handler)});</li>
+ *   <li>a WARN log.</li>
  * </ol>
  *
- * <p>{@link #handleException(String, Throwable)} is guaranteed to never throw: a throwing
- * handler is caught and reported at ERROR level, and {@code null} inputs are no-ops. This makes
- * it safe to call on the executor hot path.
+ * <p>{@link #handleException(String, Throwable)} never throws: a handler that throws is logged at
+ * ERROR with the original failure attached as suppressed, so neither a broken handler nor a
+ * failing task can break the executor that reported it.
  *
- * <p>Design note: this is adapted from Threadly's {@code ExceptionUtils} resolution chain
- * (thread-local → inheritable → default → thread's {@link java.lang.Thread.UncaughtExceptionHandler}).
- * Two deliberate simplifications for Zeta:
- * <ul>
- *   <li>The final fallback is a WARN log instead of {@code UncaughtExceptionHandler} — Zeta's
- *       threads are daemons with no per-thread handler installed, and a log preserves the
- *       pre-existing behaviour.</li>
- *   <li>Threadly's async {@code StackOverflowError} re-reporting is omitted — a stack-overflowed
- *       handler attempt degrades to the ERROR log inside {@link #handleException(String, Throwable)}
- *       itself, which is good enough for a best-effort report.</li>
- * </ul>
- *
- * @see ExceptionHandler
+ * @see Handler
  */
 @Slf4j
-@Internal
 public final class ZetaExceptionHandler {
 
-  private static final ThreadLocal<ExceptionHandler> THREAD_LOCAL_HANDLER = new ThreadLocal<>();
+  private static final InheritableThreadLocal<Handler> INHERITED_HANDLER = new InheritableThreadLocal<>();
 
-  private static final InheritableThreadLocal<ExceptionHandler> INHERITED_HANDLER = new InheritableThreadLocal<>();
+  private static final ThreadLocal<Handler> THREAD_LOCAL_HANDLER = new ThreadLocal<>();
 
-  @SuppressWarnings("java:S3077") // volatile is enough for a single reference, no need for AtomicReference
-  private static volatile ExceptionHandler defaultHandler = null;
+  @SuppressWarnings("java:S3077") // a single reference; volatile is enough, no AtomicReference needed
+  private static volatile Handler defaultHandler;
 
   private ZetaExceptionHandler() {
     // utility class, not meant to be instantiated
   }
 
   /**
-   * Binds a handler to the <em>current</em> thread only. Subsequent
-   * {@link #handleException(String, Throwable)} calls on this thread resolve to this handler
-   * (highest precedence), regardless of any inheritable or default handler.
+   * Binds a handler to the <em>current</em> thread only (highest precedence).
    *
    * @param exceptionHandler the handler to use on this thread, or {@code null} to clear it
    */
-  public static void setThreadExceptionHandler(ExceptionHandler exceptionHandler) {
+  public static void setThreadExceptionHandler(Handler exceptionHandler) {
     if (exceptionHandler == null) {
-      // remove() instead of set(null): clears the ThreadLocalMap entry entirely, so a cleared
-      // handler cannot be resurrected by an inherited value and the entry is not retained.
       THREAD_LOCAL_HANDLER.remove();
     } else {
       THREAD_LOCAL_HANDLER.set(exceptionHandler);
@@ -91,18 +63,15 @@ public final class ZetaExceptionHandler {
   }
 
   /**
-   * Binds a handler to the current thread <em>and</em> every thread created from it afterwards.
+   * Binds a handler to the current thread and to every thread created from it afterwards.
    *
-   * <p>Because {@link InheritableThreadLocal} values are copied to child threads at creation
-   * time, this is the recommended way to instrument an executor pool: call this once before the
-   * pool starts its (lazily created) worker threads, and every worker inherits the handler.
+   * <p>The value is copied when a thread is created, so it does not reach a pool whose threads
+   * already exist. Use {@link #setDefaultExceptionHandler(Handler)} for a process-wide handler.
    *
    * @param exceptionHandler the handler to inherit, or {@code null} to clear it
    */
-  public static void setInheritableExceptionHandler(ExceptionHandler exceptionHandler) {
+  public static void setInheritableExceptionHandler(Handler exceptionHandler) {
     if (exceptionHandler == null) {
-      // remove() instead of set(null): clears the ThreadLocalMap entry entirely, so a cleared
-      // handler cannot be resurrected by an inherited value and the entry is not retained.
       INHERITED_HANDLER.remove();
     } else {
       INHERITED_HANDLER.set(exceptionHandler);
@@ -110,25 +79,49 @@ public final class ZetaExceptionHandler {
   }
 
   /**
-   * Sets the JVM-wide default handler, used when neither a thread-local nor an inheritable
-   * handler is bound.
+   * Sets the JVM-wide default handler, used when neither a thread-local nor an inheritable handler
+   * is bound.
    *
-   * @param exceptionHandler the default handler, or {@code null} to clear it (falls back to the
-   *                         WARN log)
+   * @param exceptionHandler the default handler, or {@code null} to fall back to the WARN log
    */
-  public static void setDefaultExceptionHandler(ExceptionHandler exceptionHandler) {
+  public static void setDefaultExceptionHandler(Handler exceptionHandler) {
     defaultHandler = exceptionHandler;
   }
 
   /**
-   * Resolves the handler currently in effect for this thread, applying the documented precedence
-   * (thread-local → inheritable → default). Returns {@code null} when no handler is configured,
-   * in which case {@link #handleException(String, Throwable)} falls back to the WARN log.
+   * Routes a task failure to the resolved handler, or logs it at WARN when none is configured.
    *
-   * @return the resolved handler, or {@code null} if none is configured
+   * @param context human-readable description of where the failure occurred; included in the
+   *                fallback log
+   * @param t       the throwable to handle; {@code null} is a no-op
    */
-  public static ExceptionHandler getExceptionHandler() {
-    ExceptionHandler handler = THREAD_LOCAL_HANDLER.get();
+  public static void handleException(String context, Throwable t) {
+    if (t == null) {
+      return;
+    }
+    try {
+      Handler handler = currentHandler();
+      if (handler != null) {
+        handler.handleException(context, t);
+      } else {
+        log.warn("{} — uncaught exception", context, t);
+      }
+    } catch (Throwable handlerError) {
+      // A handler failure must neither mask the original nor kill the executor thread.
+      if (handlerError != t) {
+        handlerError.addSuppressed(t);
+      }
+      log.error("Exception handler threw while handling '{}'", context, handlerError);
+    }
+  }
+
+  /**
+   * Resolves the handler in effect for the current thread.
+   *
+   * @return the resolved handler, or {@code null} when none is configured
+   */
+  private static Handler currentHandler() {
+    Handler handler = THREAD_LOCAL_HANDLER.get();
     if (handler != null) {
       return handler;
     }
@@ -139,61 +132,27 @@ public final class ZetaExceptionHandler {
     return defaultHandler;
   }
 
-  /**
-   * Routes a throwable produced by a Zeta-managed task to the resolved handler, or logs it at
-   * WARN level (with the given context) when no handler is configured.
-   *
-   * <p>Guarantees:
-   * <ul>
-   *   <li>Never throws — a throwing handler is caught and reported at ERROR level, so a broken
-   *       handler cannot break the executor path that reported the original failure.</li>
-   *   <li>{@code null} input is a no-op.</li>
-   *   <li>The context message preserves the informative wording that used to live at each call
-   *       site (e.g. "the next run is still scheduled"), so log-based debugging keeps its
-   *       quality when no handler is installed.</li>
-   * </ul>
-   *
-   * @param context human-readable description of where the failure occurred; included in the
-   *                fallback WARN log
-   * @param t       the throwable to handle; may be {@code null} (no-op)
-   */
-  public static void handleException(String context, Throwable t) {
-    handleException(context, t, true);
-  }
+  /** Callback invoked when a task running on a Zeta executor throws. */
+  @FunctionalInterface
+  public interface Handler {
+    /**
+     * Handles a throwable produced by a Zeta-managed task.
+     *
+     * @param t the throwable to handle; never {@code null}
+     */
+    void handleException(Throwable t);
 
-  /**
-   * Resolves the handler <b>exactly once</b> and routes the throwable to it. Call sites that
-   * own their fallback logging (e.g. {@code HotKeyCache} read paths log their own rate-limited
-   * ERROR) pass {@code fallbackToWarn=false} so that a missing handler is a silent no-op here
-   * instead of the WARN fallback — this also avoids the duplicate-log race of a
-   * {@link #getExceptionHandler()} pre-check followed by {@link #handleException(String, Throwable)},
-   * where a handler being installed or cleared between the two resolutions could produce both
-   * the handler route and a fallback log for one failure.
-   *
-   * <p>Same never-throws guarantee as {@link #handleException(String, Throwable)}: a throwing
-   * handler is caught and reported at ERROR level, and {@code null} input is a no-op.
-   *
-   * @param context         human-readable description of where the failure occurred
-   * @param t               the throwable to handle; may be {@code null} (no-op)
-   * @param fallbackToWarn  {@code true} to log at WARN when no handler is configured (the
-   *                        {@link #handleException(String, Throwable)} behaviour);
-   *                        {@code false} to do nothing when no handler is configured
-   */
-  public static void handleException(String context, Throwable t, boolean fallbackToWarn) {
-    if (t == null) {
-      return;
-    }
-    try {
-      ExceptionHandler handler = getExceptionHandler();
-      if (handler != null) {
-        handler.handleException(t);
-      } else if (fallbackToWarn) {
-        log.warn("{} — uncaught exception", context, t);
-      }
-    } catch (Throwable handlerError) {
-      // A misbehaving handler must never mask the original failure nor crash the executor
-      // thread. Report the handler's own failure at ERROR level and move on.
-      log.error("Exception handler threw while handling '{}'", context, handlerError);
+    /**
+     * Handles a throwable together with the call site's context.
+     *
+     * <p>The default drops the context; override it when a metric tag or alert needs to
+     * distinguish, for example, the scheduler from the ordered dispatcher.
+     *
+     * @param context human-readable description of where the failure occurred; never {@code null}
+     * @param t       the throwable to handle; never {@code null}
+     */
+    default void handleException(String context, Throwable t) {
+      handleException(t);
     }
   }
 }

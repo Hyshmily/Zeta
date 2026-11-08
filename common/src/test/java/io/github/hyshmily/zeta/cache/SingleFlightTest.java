@@ -17,32 +17,59 @@ package io.github.hyshmily.zeta.cache;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.LoggerContext;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.AppenderBase;
 import io.github.hyshmily.zeta.autoconfigure.ZetaProperties;
-import io.github.hyshmily.zeta.cache.cachesupport.CircuitBreaker;
-import io.github.hyshmily.zeta.cache.cachesupport.SingleFlight;
-import io.github.hyshmily.zeta.cache.cachesupport.impl.CircuitBreakerImpl;
-import io.github.hyshmily.zeta.cache.cachesupport.impl.SingleFlightImpl;
+import io.github.hyshmily.zeta.cache.cachesupport.circuitbreaker.CircuitBreaker;
+import io.github.hyshmily.zeta.cache.cachesupport.circuitbreaker.CircuitBreakerImpl;
+import io.github.hyshmily.zeta.cache.cachesupport.circuitbreaker.CircuitBreakerRegistry;
+import io.github.hyshmily.zeta.cache.cachesupport.loader.LoadStatus;
+import io.github.hyshmily.zeta.cache.cachesupport.loader.LoaderOutcome;
+import io.github.hyshmily.zeta.cache.cachesupport.loader.singleflight.SingleFlight;
+import io.github.hyshmily.zeta.cache.cachesupport.loader.singleflight.SingleFlightImpl;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.CompletionException;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Function;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
+import org.slf4j.LoggerFactory;
 
 /**
  * Tests for {@link SingleFlight}, verifying request deduplication, error handling, and inflight tracking.
  */
 class SingleFlightTest {
 
-  private SingleFlight singleFlight;
+  private TestSingleFlight singleFlight;
   private Executor executor;
   private CircuitBreaker disabledBreaker;
 
@@ -50,21 +77,167 @@ class SingleFlightTest {
   void setUp() {
     executor = Executors.newCachedThreadPool();
     disabledBreaker = new CircuitBreakerImpl(new ZetaProperties.CircuitBreaker());
-    singleFlight = new SingleFlightImpl(1000, 10, 5, executor, disabledBreaker);
+    singleFlight = new TestSingleFlight(1000, 10, 5, executor, registryOf(disabledBreaker));
+  }
+
+  /** Production-shaped wiring (see {@code ZetaAutoConfiguration}): a registry whose every shard is {@code breaker}. */
+  private static CircuitBreakerRegistry registryOf(CircuitBreaker breaker) {
+    CircuitBreakerRegistry registry = mock(CircuitBreakerRegistry.class);
+    when(registry.breakerFor(anyString())).thenReturn(breaker);
+    // The aggregate/per-key open queries must observe the shard's real state,
+    // not Mockito's default false — otherwise an open breaker looks closed.
+    when(registry.isAnyDegraded()).thenAnswer(invocation -> breaker.isDegraded());
+    when(registry.isDegraded(anyString())).thenAnswer(invocation -> breaker.isDegraded());
+    return registry;
   }
 
   /**
    * Verifies that a basic load operation returns the value supplied by the loader.
    */
   @Test
-  void load_shouldReturnValue() {
-    Optional<String> result = singleFlight.load("key", () -> "value");
-    assertThat(result).contains("value");
+  void loadOutcome_shouldReturnValue() {
+    LoaderOutcome<String> result = singleFlight.loadOutcome("key", () -> "value");
+    assertThat(result.status()).isEqualTo(LoadStatus.LOADED);
+    assertThat(result.value()).isEqualTo("value");
+  }
+
+  /**
+   * The caller-runs contract behind {@code @Cacheable(sync = true)}: the elected
+   * leader executes the reader on the thread that called, not on the executor.
+   */
+  @Test
+  void loadOutcomeCallerRuns_shouldExecuteReaderOnCallingThread() {
+    Thread caller = Thread.currentThread();
+    AtomicReference<Thread> loaderThread = new AtomicReference<>();
+
+    LoaderOutcome<String> outcome = singleFlight.loadOutcomeCallerRuns(
+      "key",
+      () -> {
+        loaderThread.set(Thread.currentThread());
+        return "value";
+      },
+      null
+    );
+
+    assertThat(outcome.status()).isEqualTo(LoadStatus.LOADED);
+    assertThat(outcome.value()).isEqualTo("value");
+    assertThat(loaderThread.get()).isSameAs(caller);
+  }
+
+  /**
+   * Same-key dedup must survive the caller-runs mode: a concurrent follower
+   * joins the leader's future instead of running a second reader, even though
+   * the leader is executing on its own (non-pool) thread.
+   */
+  @Test
+  void loadOutcomeCallerRuns_shouldMergeConcurrentFollowerOntoLeader() throws Exception {
+    AtomicInteger calls = new AtomicInteger();
+    CountDownLatch started = new CountDownLatch(1);
+    CountDownLatch release = new CountDownLatch(1);
+    ExecutorService leaderPool = Executors.newSingleThreadExecutor();
+    try {
+      Future<LoaderOutcome<String>> leader = leaderPool.submit(() ->
+        singleFlight.loadOutcomeCallerRuns(
+          "key",
+          () -> {
+            calls.incrementAndGet();
+            started.countDown();
+            try {
+              release.await(5, TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+              Thread.currentThread().interrupt();
+            }
+            return "value";
+          },
+          null
+        )
+      );
+      assertThat(started.await(5, TimeUnit.SECONDS)).isTrue();
+
+      LoaderOutcome<String> follower = singleFlight.loadOutcomeCallerRuns(
+        "key",
+        () -> {
+          calls.incrementAndGet();
+          return "other";
+        },
+        null
+      );
+
+      release.countDown();
+      assertThat(follower.status()).isEqualTo(LoadStatus.LOADED);
+      assertThat(follower.value()).isEqualTo("value");
+      assertThat(leader.get(5, TimeUnit.SECONDS).value()).isEqualTo("value");
+      assertThat(calls).hasValue(1);
+    } finally {
+      leaderPool.shutdownNow();
+    }
+  }
+
+  /**
+   * A same-key call from inside a caller-runs reader must fail fast: without the
+   * running-thread guard it would join a future only this call can complete.
+   */
+  @Test
+  void loadOutcomeCallerRuns_shouldRejectSameKeyReentry() {
+    LoaderOutcome<String> outcome = singleFlight.loadOutcomeCallerRuns(
+      "key",
+      () -> singleFlight.loadOutcomeCallerRuns("key", () -> "inner", null).value(),
+      null
+    );
+
+    assertThat(outcome.status()).isEqualTo(LoadStatus.FAILED);
+    assertThat(outcome.cause()).isInstanceOf(IllegalStateException.class).hasMessageContaining("re-entrant");
+  }
+
+  /**
+   * The same guard covers the executor path: the reader's thread is the one that
+   * would otherwise block until the load budget expires.
+   */
+  @Test
+  void loadOutcome_shouldRejectSameKeyReentryOnExecutorThread() {
+    LoaderOutcome<String> outcome = singleFlight.loadOutcome("key", () ->
+      singleFlight.loadOutcome("key", () -> "inner").value()
+    );
+
+    assertThat(outcome.status()).isEqualTo(LoadStatus.FAILED);
+    assertThat(outcome.cause()).isInstanceOf(IllegalStateException.class).hasMessageContaining("re-entrant");
+  }
+
+  /**
+   * A failed caller-runs load evicts its future, so the next read retries
+   * instead of replaying the failure for the dedup TTL.
+   */
+  @Test
+  void loadOutcomeCallerRuns_shouldEvictFailureForRetry() {
+    AtomicInteger calls = new AtomicInteger();
+
+    LoaderOutcome<String> failed = singleFlight.loadOutcomeCallerRuns(
+      "key",
+      () -> {
+        calls.incrementAndGet();
+        throw new IllegalStateException("boom");
+      },
+      null
+    );
+    assertThat(failed.status()).isEqualTo(LoadStatus.FAILED);
+    assertThat(failed.cause()).isInstanceOf(IllegalStateException.class);
+
+    LoaderOutcome<String> retry = singleFlight.loadOutcomeCallerRuns(
+      "key",
+      () -> {
+        calls.incrementAndGet();
+        return "ok";
+      },
+      null
+    );
+    assertThat(retry.status()).isEqualTo(LoadStatus.LOADED);
+    assertThat(retry.value()).isEqualTo("ok");
+    assertThat(calls).hasValue(2);
   }
 
   /**
    * Verifies that concurrent requests for the same key are deduplicated so the loader executes only once (or fewer
-   * times than the request count).
+   * times than the request add).
    */
   @Test
   void load_shouldDeduplicateConcurrentRequests() throws InterruptedException {
@@ -73,7 +246,7 @@ class SingleFlightTest {
 
     for (int i = 0; i < 5; i++) {
       executor.execute(() -> {
-        singleFlight.load("key", () -> {
+        singleFlight.loadOutcome("key", () -> {
           counter.incrementAndGet();
           try {
             Thread.sleep(100);
@@ -94,33 +267,31 @@ class SingleFlightTest {
    * Verifies that a supplier exception propagates through SingleFlight.
    */
   @Test
-  void load_shouldPropagateSupplierException() {
-    assertThatThrownBy(() ->
-      singleFlight.load("key", () -> {
-        throw new RuntimeException("fail");
-      })
-    )
-      .isInstanceOf(RuntimeException.class)
-      .hasMessage("fail");
+  void loadOutcome_shouldCaptureSupplierException() {
+    LoaderOutcome<String> outcome = singleFlight.loadOutcome("key", () -> {
+      throw new RuntimeException("fail");
+    });
+    assertThat(outcome.status()).isEqualTo(LoadStatus.FAILED);
+    assertThat(outcome.cause()).isInstanceOf(RuntimeException.class).hasMessage("fail");
   }
 
   /**
    * Verifies that a supplier returning null results in an empty Optional.
    */
   @Test
-  void load_shouldReturnEmptyOnNullSupplier() {
-    Optional<String> result = singleFlight.load("key", () -> null);
-    assertThat(result).isEmpty();
+  void loadOutcome_shouldReturnSourceEmptyOnNullSupplier() {
+    LoaderOutcome<String> result = singleFlight.loadOutcome("key", () -> null);
+    assertThat(result.status()).isEqualTo(LoadStatus.SOURCE_EMPTY);
   }
 
   /**
    * Verifies that the estimated inflight request size is never negative.
    */
   @Test
-  void estimatedInflightSize_shouldBeNonNegative() {
-    assertThat(singleFlight.estimatedInflightSize()).isNotNegative();
-    singleFlight.load("k1", () -> "v1");
-    assertThat(singleFlight.estimatedInflightSize()).isGreaterThanOrEqualTo(0);
+  void estimatedInFlightSize_shouldBeNonNegative() {
+    assertThat(singleFlight.estimatedInFlightSize()).isNotNegative();
+    singleFlight.loadOutcome("k1", () -> "v1");
+    assertThat(singleFlight.estimatedInFlightSize()).isGreaterThanOrEqualTo(0);
   }
 
   // ── New tests ──
@@ -134,7 +305,7 @@ class SingleFlightTest {
     CountDownLatch latch = new CountDownLatch(2);
 
     executor.execute(() -> {
-      singleFlight.load("key1", () -> {
+      singleFlight.loadOutcome("key1", () -> {
         counter.incrementAndGet();
         return "v1";
       });
@@ -142,7 +313,7 @@ class SingleFlightTest {
     });
 
     executor.execute(() -> {
-      singleFlight.load("key2", () -> {
+      singleFlight.loadOutcome("key2", () -> {
         counter.incrementAndGet();
         return "v2";
       });
@@ -154,22 +325,25 @@ class SingleFlightTest {
   }
 
   /**
-   * Verifies that after the dedup TTL expires, a subsequent load for the same key executes the supplier again.
+   * Verifies that after the dedup retention window expires, a subsequent load for the same key executes the
+   * supplier again. The retention window is {@code max(ttlSec, timeoutSeconds + 1)} — see
+   * {@link #completedFutureOutlivesConfiguredTtlWhenTtlIsShorterThanTimeout()}.
    */
   @Test
   void load_withTTLExpiry_shouldAllowNewLoadAfterExpiry() throws InterruptedException {
-    SingleFlight shortTtl = new SingleFlightImpl(1000, 1, 5, executor, disabledBreaker);
+    // ttl 2s > timeout 1s: the configured ttl is the retention window here.
+    TestSingleFlight shortTtl = new TestSingleFlight(1000, 2, 1, executor, registryOf(disabledBreaker));
     AtomicInteger counter = new AtomicInteger(0);
 
-    shortTtl.load("key", () -> {
+    shortTtl.loadOutcome("key", () -> {
       counter.incrementAndGet();
       return "first";
     });
     assertThat(counter.get()).isEqualTo(1);
 
-    Thread.sleep(1100);
+    Thread.sleep(2100);
 
-    shortTtl.load("key", () -> {
+    shortTtl.loadOutcome("key", () -> {
       counter.incrementAndGet();
       return "second";
     });
@@ -182,7 +356,7 @@ class SingleFlightTest {
    */
   @Test
   void load_withMaxInflight_shouldLimit() throws InterruptedException {
-    SingleFlight limited = new SingleFlightImpl(1, 10, 5, executor, disabledBreaker);
+    TestSingleFlight limited = new TestSingleFlight(1, 10, 5, executor, registryOf(disabledBreaker));
     AtomicInteger callCounter = new AtomicInteger(0);
     CountDownLatch startLatch = new CountDownLatch(1);
     CountDownLatch doneLatch = new CountDownLatch(5);
@@ -194,7 +368,7 @@ class SingleFlightTest {
         } catch (InterruptedException e) {
           Thread.currentThread().interrupt();
         }
-        limited.load("k" + callCounter.incrementAndGet(), () -> {
+        limited.loadOutcome("k" + callCounter.incrementAndGet(), () -> {
           try {
             Thread.sleep(300);
           } catch (InterruptedException e) {
@@ -208,7 +382,7 @@ class SingleFlightTest {
 
     startLatch.countDown();
     assertThat(doneLatch.await(10, TimeUnit.SECONDS)).isTrue();
-    assertThat(limited.estimatedInflightSize()).isLessThanOrEqualTo(2L);
+    assertThat(limited.estimatedInFlightSize()).isLessThanOrEqualTo(2L);
   }
 
   /**
@@ -227,7 +401,7 @@ class SingleFlightTest {
       } catch (InterruptedException e) {
         Thread.currentThread().interrupt();
       }
-      result1.set(singleFlight.load("keyA", () -> "valueA").orElse(null));
+      result1.set(singleFlight.loadOutcome("keyA", () -> "valueA").value());
       doneLatch.countDown();
     });
 
@@ -237,7 +411,7 @@ class SingleFlightTest {
       } catch (InterruptedException e) {
         Thread.currentThread().interrupt();
       }
-      result2.set(singleFlight.load("keyB", () -> "valueB").orElse(null));
+      result2.set(singleFlight.loadOutcome("keyB", () -> "valueB").value());
       doneLatch.countDown();
     });
 
@@ -252,15 +426,11 @@ class SingleFlightTest {
    * size drops to zero.
    */
   @Test
-  void estimatedInflightSize_shouldReturnZeroAfterAllComplete() throws InterruptedException {
-    try {
-      singleFlight.load("to-evict", () -> {
-        throw new RuntimeException("fail");
-      });
-    } catch (RuntimeException e) {
-      // expected — exception invalidates the entry
-    }
-    assertThat(singleFlight.estimatedInflightSize()).isZero();
+  void estimatedInFlightSize_shouldReturnZeroAfterAllComplete() throws InterruptedException {
+    singleFlight.loadOutcome("to-evict", () -> {
+      throw new RuntimeException("fail");
+    });
+    assertThat(singleFlight.estimatedInFlightSize()).isZero();
   }
 
   /**
@@ -268,8 +438,8 @@ class SingleFlightTest {
    */
   @Test
   void load_withTimeout_shouldReturnEmpty() {
-    SingleFlight shortTimeout = new SingleFlightImpl(1000, 10, 1, executor, disabledBreaker);
-    Optional<String> result = shortTimeout.load("timeout-key", () -> {
+    TestSingleFlight shortTimeout = new TestSingleFlight(1000, 10, 1, executor, registryOf(disabledBreaker));
+    LoaderOutcome<String> result = shortTimeout.loadOutcome("timeout-key", () -> {
       try {
         Thread.sleep(5000);
       } catch (InterruptedException e) {
@@ -277,7 +447,7 @@ class SingleFlightTest {
       }
       return "too-late";
     });
-    assertThat(result).isEmpty();
+    assertThat(result.status()).isEqualTo(LoadStatus.SUPPRESSED_TIMEOUT);
   }
 
   /**
@@ -292,12 +462,12 @@ class SingleFlightTest {
   void timeoutInterrupt_shouldNotPoisonReusedPoolThread() throws InterruptedException {
     ExecutorService singleThread = Executors.newSingleThreadExecutor();
     try {
-      SingleFlight shortTimeout = new SingleFlightImpl(1000, 10, 1, singleThread, disabledBreaker);
+      TestSingleFlight shortTimeout = new TestSingleFlight(1000, 10, 1, singleThread, registryOf(disabledBreaker));
       CountDownLatch slowTaskDone = new CountDownLatch(1);
 
       // Task A: interrupted by the 1s timeout, re-applies the interrupt flag,
       // then finishes late.
-      shortTimeout.load("poison-key", () -> {
+      shortTimeout.loadOutcome("poison-key", () -> {
         try {
           Thread.sleep(3000);
         } catch (InterruptedException e) {
@@ -332,22 +502,18 @@ class SingleFlightTest {
   @Test
   void load_afterException_shouldRetryAndSucceed() {
     // First call fails with exception — cache entry is invalidated
-    try {
-      singleFlight.load("retry-key", () -> {
-        throw new RuntimeException("first-fail");
-      });
-    } catch (RuntimeException e) {
-      // expected
-    }
+    singleFlight.loadOutcome("retry-key", () -> {
+      throw new RuntimeException("first-fail");
+    });
 
     // Subsequent call should create a new future and succeed
-    Optional<String> result = singleFlight.load("retry-key", () -> "success");
-    assertThat(result).contains("success");
+    LoaderOutcome<String> result = singleFlight.loadOutcome("retry-key", () -> "success");
+    assertThat(result.value()).isEqualTo("success");
   }
 
   /**
    * Verifies that concurrent calls for the same key invoke the supplier exactly once
-   * (strict dedup count verification).
+   * (strict dedup add verification).
    */
   @Test
   void load_shouldInvokeSupplierExactlyOnceForConcurrentCalls() throws InterruptedException {
@@ -362,7 +528,7 @@ class SingleFlightTest {
         } catch (InterruptedException e) {
           Thread.currentThread().interrupt();
         }
-        singleFlight.load("dedup-key", () -> {
+        singleFlight.loadOutcome("dedup-key", () -> {
           counter.incrementAndGet();
           try {
             Thread.sleep(200);
@@ -386,27 +552,23 @@ class SingleFlightTest {
    */
   @Test
   void load_afterTimeout_shouldRetrySupplier() throws InterruptedException {
-    SingleFlight shortTimeout = new SingleFlightImpl(1000, 10, 1, executor, disabledBreaker);
+    TestSingleFlight shortTimeout = new TestSingleFlight(1000, 10, 1, executor, registryOf(disabledBreaker));
 
     // First load times out
-    try {
-      shortTimeout.load("slow-key", () -> {
-        try {
-          Thread.sleep(3000);
-        } catch (InterruptedException e) {
-          Thread.currentThread().interrupt();
-        }
-        return "slow-value";
-      });
-    } catch (RuntimeException e) {
-      // expected
-    }
+    shortTimeout.loadOutcome("slow-key", () -> {
+      try {
+        Thread.sleep(3000);
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+      }
+      return "slow-value";
+    });
 
     // Give the timeout processing time to complete
     Thread.sleep(100);
 
     // Second load should retry (entry was invalidated)
-    assertThat(shortTimeout.load("slow-key", () -> "fast-value")).contains("fast-value");
+    assertThat(shortTimeout.loadOutcome("slow-key", () -> "fast-value").value()).isEqualTo("fast-value");
   }
 
   /**
@@ -414,9 +576,9 @@ class SingleFlightTest {
    */
   @Test
   void load_withHighInflight_shouldLogWarning() {
-    SingleFlight smallPool = new SingleFlightImpl(5, 10, 5, executor, disabledBreaker);
-    java.util.stream.IntStream.range(0, 10).forEach(idx -> smallPool.load("k" + idx, () -> "v" + idx));
-    assertThat(smallPool.estimatedInflightSize()).isNotNegative();
+    TestSingleFlight smallPool = new TestSingleFlight(5, 10, 5, executor, registryOf(disabledBreaker));
+    java.util.stream.IntStream.range(0, 10).forEach(idx -> smallPool.loadOutcome("k" + idx, () -> "v" + idx));
+    assertThat(smallPool.estimatedInFlightSize()).isNotNegative();
   }
 
   /**
@@ -424,12 +586,12 @@ class SingleFlightTest {
    * the exception propagates through SingleFlight.
    */
   @Test
-  void load_withInterruptedExceptionCause_shouldPropagate() {
-    assertThatThrownBy(() ->
-      singleFlight.load("interrupt-key", () -> {
-        throw new RuntimeException(new InterruptedException("simulated"));
-      })
-    ).isInstanceOf(RuntimeException.class);
+  void loadOutcome_withInterruptedExceptionCause_shouldCaptureFailure() {
+    LoaderOutcome<String> outcome = singleFlight.loadOutcome("interrupt-key", () -> {
+      throw new RuntimeException(new InterruptedException("simulated"));
+    });
+    assertThat(outcome.status()).isEqualTo(LoadStatus.FAILED);
+    assertThat(outcome.cause()).hasCauseInstanceOf(InterruptedException.class);
   }
 
   /**
@@ -438,25 +600,21 @@ class SingleFlightTest {
    */
   @Test
   void load_afterInterruptedException_shouldRetry() {
-    try {
-      singleFlight.load("retry-key", () -> {
-        throw new RuntimeException(new InterruptedException("simulated"));
-      });
-    } catch (RuntimeException e) {
-      // expected
-    }
+    singleFlight.loadOutcome("retry-key", () -> {
+      throw new RuntimeException(new InterruptedException("simulated"));
+    });
 
-    Optional<String> result = singleFlight.load("retry-key", () -> "success");
-    assertThat(result).contains("success");
+    LoaderOutcome<String> result = singleFlight.loadOutcome("retry-key", () -> "success");
+    assertThat(result.value()).isEqualTo("success");
   }
 
   @Test
-  void load_withErrorCause_shouldPropagate() {
-    assertThatThrownBy(() ->
-      singleFlight.load("error-key", () -> {
-        throw new Error("simulated-error");
-      })
-    ).isInstanceOf(Error.class);
+  void loadOutcome_withErrorCause_shouldCaptureError() {
+    LoaderOutcome<String> outcome = singleFlight.loadOutcome("error-key", () -> {
+      throw new Error("simulated-error");
+    });
+    assertThat(outcome.status()).isEqualTo(LoadStatus.FAILED);
+    assertThat(outcome.cause()).isInstanceOf(Error.class).hasMessage("simulated-error");
   }
 
   @Test
@@ -466,9 +624,9 @@ class SingleFlightTest {
     cfg.setFailThreshold(0.1);
     cfg.setRequestVolumeThreshold(1);
     CircuitBreakerImpl breaker = new CircuitBreakerImpl(cfg);
-    breaker.onFailure();
-    SingleFlight sf = new SingleFlightImpl(1000, 10, 5, executor, breaker);
-    assertThat(sf.load("key", () -> "val")).isEmpty();
+    breaker.onFailure(new RuntimeException("trip"), CircuitBreaker.STAMP_CLOSED);
+    TestSingleFlight sf = new TestSingleFlight(1000, 10, 5, executor, registryOf(breaker));
+    assertThat(sf.loadOutcome("key", () -> "val").status()).isEqualTo(LoadStatus.SUPPRESSED_BREAKER);
     assertThat(sf.isBreakerOpen()).isTrue();
   }
 
@@ -480,7 +638,7 @@ class SingleFlightTest {
    */
   @Test
   void loadCollection_shouldReturnAllKeys() {
-    Map<String, Optional<String>> result = singleFlight.load(List.of("a", "b", "c"), key -> "val-" + key);
+    Map<String, Optional<String>> result = loadAll(singleFlight, List.of("a", "b", "c"), key -> "val-" + key);
     assertThat(result)
       .hasSize(3)
       .containsEntry("a", Optional.of("val-a"))
@@ -494,7 +652,7 @@ class SingleFlightTest {
    */
   @Test
   void loadCollection_withEmptyInput_shouldReturnEmptyMap() {
-    Map<String, Optional<String>> result = singleFlight.load(List.of(), key -> {
+    Map<String, Optional<String>> result = loadAll(singleFlight, List.of(), key -> {
       throw new AssertionError("reader must not be called");
     });
     assertThat(result).isEmpty();
@@ -511,10 +669,10 @@ class SingleFlightTest {
     cfg.setFailThreshold(0.1);
     cfg.setRequestVolumeThreshold(1);
     CircuitBreakerImpl breaker = new CircuitBreakerImpl(cfg);
-    breaker.onFailure();
-    SingleFlight sf = new SingleFlightImpl(1000, 10, 5, executor, breaker);
+    breaker.onFailure(new RuntimeException("trip"), CircuitBreaker.STAMP_CLOSED);
+    TestSingleFlight sf = new TestSingleFlight(1000, 10, 5, executor, registryOf(breaker));
 
-    Map<String, Optional<String>> result = sf.load(List.of("x", "y"), key -> "val");
+    Map<String, Optional<String>> result = loadAll(sf, List.of("x", "y"), key -> "val");
     assertThat(result).hasSize(2).containsEntry("x", Optional.empty()).containsEntry("y", Optional.empty());
     assertThat(sf.isBreakerOpen()).isTrue();
   }
@@ -526,7 +684,7 @@ class SingleFlightTest {
    */
   @Test
   void loadCollection_onReaderException_shouldReturnEmptyForKey() {
-    Map<String, Optional<String>> result = singleFlight.load(List.of("fail-key"), key -> {
+    Map<String, Optional<String>> result = loadAll(singleFlight, List.of("fail-key"), key -> {
       throw new RuntimeException("batch-fail");
     });
     assertThat(result).hasSize(1).containsEntry("fail-key", Optional.empty());
@@ -538,7 +696,7 @@ class SingleFlightTest {
    */
   @Test
   void loadCollection_withOneKeyFailing_shouldReturnAllKeys() {
-    Map<String, Optional<String>> result = singleFlight.load(List.of("a", "fail", "c"), key -> {
+    Map<String, Optional<String>> result = loadAll(singleFlight, List.of("a", "fail", "c"), key -> {
       if ("fail".equals(key)) {
         throw new RuntimeException("intentional failure");
       }
@@ -556,17 +714,15 @@ class SingleFlightTest {
    * reader failure to the caller instead of swallowing it as a miss.
    */
   @Test
-  void loadCollection_failOnError_shouldPropagateReaderFailure() {
+  void loadCollection_readerFailure_shouldPropagate() {
     assertThatThrownBy(() ->
-      singleFlight.load(
-        List.of("a", "fail", "c"),
-        key -> {
+      failFast(
+        singleFlight.loadOutcome(List.of("a", "fail", "c"), key -> {
           if ("fail".equals(key)) {
             throw new RuntimeException("intentional failure");
           }
           return "val-" + key;
-        },
-        true
+        })
       )
     )
       .isInstanceOf(RuntimeException.class)
@@ -578,53 +734,82 @@ class SingleFlightTest {
    * key's dedup future, so a subsequent load retries the reader.
    */
   @Test
-  void loadCollection_failOnError_shouldAllowRetryAfterFailure() {
+  void loadCollection_readerFailure_shouldAllowRetryAfterFailure() {
     assertThatThrownBy(() ->
-      singleFlight.load(
-        List.of("fail-key"),
-        key -> {
+      failFast(
+        singleFlight.loadOutcome(List.of("fail-key"), key -> {
           throw new RuntimeException("intentional failure");
-        },
-        true
+        })
       )
     )
       .isInstanceOf(RuntimeException.class)
       .hasMessage("intentional failure");
 
-    Map<String, Optional<String>> retry = singleFlight.load(List.of("fail-key"), key -> "recovered-" + key, true);
+    Map<String, Optional<String>> retry = loadAll(singleFlight, List.of("fail-key"), key -> "recovered-" + key);
     assertThat(retry).containsEntry("fail-key", Optional.of("recovered-fail-key"));
   }
 
   /**
-   * ADR-0066 contract cleanup: in fail-on-error mode a reader TIMEOUT still
+   * design decisions: version comparison: in fail-on-error mode a reader TIMEOUT
    * resolves to empty (the interface contract) instead of propagating, while any
-   * other reader failure aborts the batch and propagates. The former
-   * implementation had unreachable post-throw code in this branch; this pins the
+   * other reader failure aborts the batch and propagates. The test pins the
    * timeout half of the contract with a short timeout.
    */
   @Test
-  void loadCollection_failOnError_timeout_resolvesToEmptyAndRetries() throws Exception {
+  void loadCollection_timeout_shouldResolveEmptyAndRetry() throws Exception {
     CountDownLatch slowReader = new CountDownLatch(1);
     CircuitBreaker breaker = new CircuitBreakerImpl(new ZetaProperties.CircuitBreaker());
-    SingleFlight shortTimeout = new SingleFlightImpl(1000, 10, 1, executor, breaker); // 1s timeout
+    TestSingleFlight shortTimeout = new TestSingleFlight(1000, 10, 1, executor, registryOf(breaker)); // 1s timeout
 
-    Map<String, Optional<String>> result = shortTimeout.load(
-      List.of("slow", "fast"),
-      key -> {
-        if ("slow".equals(key)) {
-          awaitUninterruptibly(slowReader); // longer than the 1s timeout
-        }
-        return "val-" + key;
-      },
-      true
-    );
+    Map<String, LoaderOutcome<String>> outcomes = shortTimeout.loadOutcome(List.of("slow", "fast"), key -> {
+      if ("slow".equals(key)) {
+        awaitUninterruptibly(slowReader); // longer than the 1s timeout
+      }
+      return "val-" + key;
+    });
 
-    assertThat(result).containsEntry("slow", Optional.empty()).containsEntry("fast", Optional.of("val-fast"));
+    assertThat(outcomes.get("slow").status()).isEqualTo(LoadStatus.SUPPRESSED_TIMEOUT);
+    assertThat(outcomes.get("fast").status()).isEqualTo(LoadStatus.LOADED);
 
     // The timed-out key's dedup future was invalidated: a retry re-runs the reader.
     slowReader.countDown();
-    Map<String, Optional<String>> retry = shortTimeout.load(List.of("slow"), key -> "recovered", true);
-    assertThat(retry).containsEntry("slow", Optional.of("recovered"));
+    assertThat(loadAll(shortTimeout, List.of("slow"), key -> "recovered")).containsEntry(
+      "slow",
+      Optional.of("recovered")
+    );
+  }
+
+  /**
+   * Batch convenience over the explicit-outcome view: every input key is present;
+   * non-LOADED outcomes resolve to empty.
+   */
+  private <T> Map<String, Optional<T>> loadAll(TestSingleFlight sf, List<String> keys, Function<String, T> fn) {
+    Map<String, Optional<T>> out = new java.util.LinkedHashMap<>();
+    sf
+      .loadOutcome(keys, fn)
+      .forEach((k, o) -> out.put(k, o.status() == LoadStatus.LOADED ? Optional.of(o.value()) : Optional.empty()));
+    return out;
+  }
+
+  /**
+   * Apply the caller-side fail-fast policy over per-key outcomes: the first
+   * {@code FAILED} cause propagates in its natural form; the policy lives with
+   * the caller.
+   */
+  private static void failFast(Map<String, LoaderOutcome<String>> outcomes) {
+    for (LoaderOutcome<String> outcome : outcomes.values()) {
+      if (outcome.status() != LoadStatus.FAILED) {
+        continue;
+      }
+      Throwable cause = outcome.cause();
+      if (cause instanceof RuntimeException re) {
+        throw re;
+      }
+      if (cause instanceof Error err) {
+        throw err;
+      }
+      throw new java.util.concurrent.CompletionException(cause);
+    }
   }
 
   /** {@code CountDownLatch.await} that ignores the interrupt flag (used by blocking readers). */
@@ -652,22 +837,441 @@ class SingleFlightTest {
    * invoking the reader or throwing.
    */
   @Test
-  void loadCollection_failOnError_whenBreakerOpen_shouldReturnEmptyForAllKeys() {
+  void loadCollection_breakerOpen_shouldReturnEmptyForAllKeys() {
     ZetaProperties.CircuitBreaker cfg = new ZetaProperties.CircuitBreaker();
     cfg.setEnabled(true);
     cfg.setFailThreshold(0.1);
     cfg.setRequestVolumeThreshold(1);
     CircuitBreakerImpl breaker = new CircuitBreakerImpl(cfg);
-    breaker.onFailure();
-    SingleFlight sf = new SingleFlightImpl(1000, 10, 5, executor, breaker);
+    breaker.onFailure(new RuntimeException("trip"), CircuitBreaker.STAMP_CLOSED);
+    TestSingleFlight sf = new TestSingleFlight(1000, 10, 5, executor, registryOf(breaker));
 
-    Map<String, Optional<String>> result = sf.load(
-      List.of("x", "y"),
-      key -> {
-        throw new AssertionError("reader must not be called");
-      },
-      true
+    Map<String, LoaderOutcome<String>> outcomes = sf.loadOutcome(List.of("x", "y"), key -> {
+      throw new AssertionError("reader must not be called");
+    });
+    assertThat(outcomes)
+      .hasSize(2)
+      .allSatisfy((key, outcome) -> assertThat(outcome.status()).isEqualTo(LoadStatus.SUPPRESSED_BREAKER));
+  }
+
+  // ── Leader-only breaker accounting ──
+
+  /**
+   * One failing load behind N merged waiters records exactly one breaker
+   * admission and one failure: the breaker protects the downstream call, not
+   * the waiting threads. Recording per waiter would let a single downstream
+   * blip behind 30 merged reads trip the whole prefix shard.
+   */
+  @Test
+  void loadOutcome_concurrentWaitersOnSingleFailure_countsBreakerOnce() throws Exception {
+    CircuitBreaker breaker = mock(CircuitBreaker.class);
+    when(breaker.tryAcquireStamp()).thenReturn(CircuitBreaker.STAMP_CLOSED);
+    TestSingleFlight sf = new TestSingleFlight(1000, 10, 5, executor, registryOf(breaker));
+
+    int waiters = 30;
+    CountDownLatch ready = new CountDownLatch(waiters);
+    CountDownLatch go = new CountDownLatch(1);
+    AtomicInteger calls = new AtomicInteger();
+    List<Thread> threads = new ArrayList<>(waiters);
+    List<LoaderOutcome<String>> outcomes = Collections.synchronizedList(new ArrayList<>(waiters));
+    for (int i = 0; i < waiters; i++) {
+      Thread t = new Thread(() -> {
+        ready.countDown();
+        awaitUninterruptibly(go);
+        outcomes.add(
+          sf.loadOutcome("k", () -> {
+            calls.incrementAndGet();
+            try {
+              Thread.sleep(300);
+            } catch (InterruptedException e) {
+              Thread.currentThread().interrupt();
+            }
+            throw new RuntimeException("boom");
+          })
+        );
+      });
+      threads.add(t);
+      t.start();
+    }
+    assertThat(ready.await(10, TimeUnit.SECONDS)).isTrue();
+    go.countDown();
+    for (Thread t : threads) {
+      t.join(15_000);
+    }
+
+    assertThat(calls.get()).isEqualTo(1);
+    assertThat(outcomes).hasSize(waiters);
+    assertThat(outcomes).allMatch(o -> o.status() == LoadStatus.FAILED);
+    verify(breaker, times(1)).tryAcquireStamp();
+    verify(breaker, times(1)).onFailure(any(Throwable.class), eq(CircuitBreaker.STAMP_CLOSED));
+    verify(breaker, times(0)).onSuccess(anyLong());
+  }
+
+  /**
+   * Mirror of the failure case: one shared successful load behind N merged
+   * waiters records exactly one success — a half-open breaker must not close
+   * N times early on a single probe.
+   */
+  @Test
+  void loadOutcome_concurrentWaitersOnSingleSuccess_countsBreakerOnce() throws Exception {
+    CircuitBreaker breaker = mock(CircuitBreaker.class);
+    when(breaker.tryAcquireStamp()).thenReturn(CircuitBreaker.STAMP_CLOSED);
+    TestSingleFlight sf = new TestSingleFlight(1000, 10, 5, executor, registryOf(breaker));
+
+    int waiters = 30;
+    CountDownLatch ready = new CountDownLatch(waiters);
+    CountDownLatch go = new CountDownLatch(1);
+    AtomicInteger calls = new AtomicInteger();
+    List<Thread> threads = new ArrayList<>(waiters);
+    List<LoaderOutcome<String>> outcomes = Collections.synchronizedList(new ArrayList<>(waiters));
+    for (int i = 0; i < waiters; i++) {
+      Thread t = new Thread(() -> {
+        ready.countDown();
+        awaitUninterruptibly(go);
+        outcomes.add(
+          sf.loadOutcome("k", () -> {
+            calls.incrementAndGet();
+            try {
+              Thread.sleep(300);
+            } catch (InterruptedException e) {
+              Thread.currentThread().interrupt();
+            }
+            return "v";
+          })
+        );
+      });
+      threads.add(t);
+      t.start();
+    }
+    assertThat(ready.await(10, TimeUnit.SECONDS)).isTrue();
+    go.countDown();
+    for (Thread t : threads) {
+      t.join(15_000);
+    }
+
+    assertThat(calls.get()).isEqualTo(1);
+    assertThat(outcomes).hasSize(waiters);
+    assertThat(outcomes).allMatch(o -> o.status() == LoadStatus.LOADED && "v".equals(o.value()));
+    verify(breaker, times(1)).tryAcquireStamp();
+    verify(breaker, times(1)).onSuccess(CircuitBreaker.STAMP_CLOSED);
+    verify(breaker, times(0)).onFailure(any(Throwable.class), anyLong());
+  }
+
+  // ═══════════════════════════════════════════════════════════════
+  // Submission failures, cleanup robustness, construction contract
+  // ═══════════════════════════════════════════════════════════════
+  /**
+   * A load's timeout is an <b>execution</b> budget, not a queue deadline.
+   *
+   * <p>With the clock anchored at submission, the tail of a batch submitted to
+   * a small pool was declared timed out before its readers ever ran: every key
+   * whose queue wait alone exceeded the timeout was silently dropped as
+   * {@code SUPPRESSED_TIMEOUT}. The clock now starts when a pool thread picks
+   * up the task, so all ten keys — each reader well inside its own 1s budget —
+   * must load.
+   */
+  @Test
+  void loadOutcome_batchOnSingleThread_eachKeyGetsItsOwnExecutionTimeout() {
+    ExecutorService pool = Executors.newFixedThreadPool(1);
+    try {
+      TestSingleFlight flight = new TestSingleFlight(1000, 10, 1, pool, registryOf(disabledBreaker));
+      List<String> keys = java.util.stream.IntStream.range(0, 10)
+        .mapToObj(i -> "queued-" + i)
+        .toList();
+
+      Map<String, LoaderOutcome<String>> outcomes = flight.loadOutcome(keys, key -> {
+        try {
+          Thread.sleep(200);
+        } catch (InterruptedException e) {
+          Thread.currentThread().interrupt();
+        }
+        return "v-" + key;
+      });
+
+      assertThat(outcomes).hasSize(keys.size());
+      assertThat(outcomes).allSatisfy((key, outcome) -> {
+        assertThat(outcome.status()).as("key %s", key).isEqualTo(LoadStatus.LOADED);
+        assertThat(outcome.value()).isEqualTo("v-" + key);
+      });
+      assertThat(flight.loadTimeoutCount()).isZero();
+    } finally {
+      pool.shutdownNow();
+    }
+  }
+
+  /**
+   * {@code close()} must complete every flight still in the table. A queued task
+   * that {@code shutdownNow} drained never ran, so without this drain its future
+   * would never settle and the caller joining it would block forever.
+   */
+  @Test
+  void close_completesQueuedLoadsAndReleasesWaiters() throws Exception {
+    ExecutorService callers = Executors.newCachedThreadPool();
+    ExecutorService pool = Executors.newFixedThreadPool(1);
+    CountDownLatch submitted = new CountDownLatch(2);
+    Executor counting = task -> {
+      pool.execute(task);
+      submitted.countDown();
+    };
+    TestSingleFlight flight = new TestSingleFlight(1000, 10, 5, counting, registryOf(disabledBreaker));
+    CountDownLatch running = new CountDownLatch(1);
+    CountDownLatch release = new CountDownLatch(1);
+    try {
+      Future<LoaderOutcome<String>> first = callers.submit(() ->
+        flight.loadOutcome("busy", () -> {
+          running.countDown();
+          try {
+            release.await();
+          } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+          }
+          return "v";
+        })
+      );
+      assertThat(running.await(5, TimeUnit.SECONDS)).isTrue();
+
+      Future<LoaderOutcome<String>> queued = callers.submit(() -> flight.loadOutcome("queued", () -> "v"));
+      assertThat(submitted.await(5, TimeUnit.SECONDS)).isTrue();
+
+      flight.close();
+
+      LoaderOutcome<String> outcome = queued.get(5, TimeUnit.SECONDS);
+      assertThat(outcome.status()).isEqualTo(LoadStatus.SUPPRESSED_EXECUTOR);
+
+      release.countDown();
+      first.get(5, TimeUnit.SECONDS);
+    } finally {
+      release.countDown();
+      callers.shutdownNow();
+      pool.shutdownNow();
+    }
+  }
+
+  /**
+   * The batch path must classify a post-close election like the single-key path.
+   * Joining the never-completed CLOSED sentinel would block {@code getAll}
+   * forever during shutdown.
+   */
+  @Test
+  @Timeout(5)
+  void close_suppressesBatchLoadsInsteadOfJoiningTheClosedSentinel() {
+    TestSingleFlight flight = new TestSingleFlight(1000, 10, 5, Runnable::run, registryOf(disabledBreaker));
+    flight.close();
+
+    Map<String, LoaderOutcome<String>> outcomes = flight.loadOutcome(List.of("a", "b"), key -> "v");
+
+    assertThat(outcomes).allSatisfy((key, outcome) ->
+      assertThat(outcome.status()).as("key %s", key).isEqualTo(LoadStatus.SUPPRESSED_EXECUTOR)
     );
-    assertThat(result).hasSize(2).containsEntry("x", Optional.empty()).containsEntry("y", Optional.empty());
+  }
+
+  /**
+   * A submission failure of any kind must release the breaker probe stamp.
+   *
+   * <p>The {@code Executor} is a caller-supplied SPI, so a pool shutting down
+   * can surface any {@link RuntimeException} — or an {@link Error} — from
+   * {@code execute}. The acquired stamp represents a HALF_OPEN probe quota; if
+   * the failed submission does not abandon it, the slot stays reserved and
+   * permanently narrows (or pins) the shard's half-open budget.
+   */
+  @Test
+  void loadOutcome_executorThrowsUnexpectedRuntimeException_shouldReleaseTheProbeStamp() {
+    CircuitBreaker breaker = mock(CircuitBreaker.class);
+    when(breaker.tryAcquireStamp()).thenReturn(5L);
+    Executor hostile = task -> {
+      throw new IllegalStateException("pool is shutting down");
+    };
+    TestSingleFlight flight = new TestSingleFlight(1000, 10, 5, hostile, registryOf(breaker));
+
+    assertThatThrownBy(() -> flight.loadOutcome("k", () -> "v")).isInstanceOf(IllegalStateException.class);
+
+    verify(breaker).onAbandoned(5L);
+    verify(breaker, times(0)).onSuccess(anyLong());
+    verify(breaker, times(0)).onFailure(any(), anyLong());
+  }
+
+  /**
+   * Illegal construction fails at construction. The three bounds are Caffeine's
+   * own requirements and an {@code executor}/{@code registry} of {@code null}
+   * would otherwise surface as an opaque failure inside a production read.
+   */
+  @Test
+  void constructor_shouldRejectIllegalBoundsAndNullCollaborators() {
+    assertThatThrownBy(() -> new TestSingleFlight(0, 10, 5, executor, registryOf(disabledBreaker))).isInstanceOf(
+      IllegalArgumentException.class
+    );
+    assertThatThrownBy(() -> new TestSingleFlight(1000, 0, 5, executor, registryOf(disabledBreaker))).isInstanceOf(
+      IllegalArgumentException.class
+    );
+    assertThatThrownBy(() -> new TestSingleFlight(1000, 10, 0, executor, registryOf(disabledBreaker))).isInstanceOf(
+      IllegalArgumentException.class
+    );
+    assertThatThrownBy(() -> new TestSingleFlight(-1, 10, 5, executor, registryOf(disabledBreaker))).isInstanceOf(
+      IllegalArgumentException.class
+    );
+    assertThatThrownBy(() -> new TestSingleFlight(1000, 10, 5, null, registryOf(disabledBreaker))).isInstanceOf(
+      NullPointerException.class
+    );
+    assertThatThrownBy(() -> new TestSingleFlight(1000, 10, 5, executor, (CircuitBreakerRegistry) null)).isInstanceOf(
+      NullPointerException.class
+    );
+  }
+
+  /**
+   * The high-water line must fire on the submission that <em>crosses</em> the
+   * threshold, not on the next one. It is evaluated during admission, before
+   * this load's own increment, so a load arriving exactly at the threshold read
+   * "not over" and stayed silent while the very act of admitting it pushed the
+   * backlog past the line.
+   */
+  @Test
+  void loadOutcome_admissionCrossingHighWater_shouldLogOnTheCrossingLoad() throws Exception {
+    int maxSize = 5; // threshold = (long) (5 * 0.8) = 4
+    ExecutorService pool = Executors.newFixedThreadPool(8);
+    CollectingAppender appender = new CollectingAppender();
+    ch.qos.logback.classic.Logger logger = ((LoggerContext) LoggerFactory.getILoggerFactory()).getLogger(
+      SingleFlightImpl.class
+    );
+    Level originalLevel = logger.getLevel();
+    logger.setLevel(Level.DEBUG);
+    appender.start();
+    logger.addAppender(appender);
+    try {
+      TestSingleFlight flight = new TestSingleFlight(maxSize, 10, 60, pool, registryOf(disabledBreaker));
+      CountDownLatch release = new CountDownLatch(1);
+      CountDownLatch running = new CountDownLatch(maxSize - 1);
+      for (int i = 0; i < maxSize - 1; i++) {
+        String key = "pending-" + i;
+        new Thread(() ->
+          flight.loadOutcome(key, () -> {
+            running.countDown();
+            awaitUninterruptibly(release);
+            return "v";
+          })
+        )
+          .start();
+      }
+      assertThat(running.await(10, TimeUnit.SECONDS)).as("the backlog is fully in flight").isTrue();
+
+      // This load takes the backlog from (maxSize-1) to maxSize — the crossing.
+      flight.loadOutcome("crossing", () -> "v");
+
+      assertThat(
+        appender.events
+          .stream()
+          .filter(e -> e.getLevel() == Level.DEBUG)
+          .filter(e -> e.getFormattedMessage().contains("in-flight queue is high"))
+          .count()
+      )
+        .as("the crossing admission must log")
+        .isEqualTo(1L);
+      release.countDown();
+    } finally {
+      logger.detachAppender(appender);
+      if (originalLevel != null) {
+        logger.setLevel(originalLevel);
+      }
+      appender.stop();
+      pool.shutdownNow();
+    }
+  }
+
+  /**
+   * A follower that merely joins a failed future must not inherit the
+   * leader's interrupt status: each joining thread keeps its own flag, so one
+   * interrupted load cannot poison every caller that joined it.
+   */
+  @Test
+  void interruptedLeaderDoesNotInterruptFollowers() throws Exception {
+    TestSingleFlight flight = new TestSingleFlight(1000, 10, 5, Runnable::run, registryOf(disabledBreaker));
+    AtomicBoolean leaderFlag = new AtomicBoolean();
+    AtomicBoolean followerFlag = new AtomicBoolean();
+    CountDownLatch leaderInReader = new CountDownLatch(1);
+    CountDownLatch release = new CountDownLatch(1);
+
+    Thread leader = new Thread(
+      () -> {
+        flight.loadOutcomeCallerRuns(
+          "k",
+          () -> {
+            leaderInReader.countDown();
+            try {
+              release.await();
+            } catch (InterruptedException e) {
+              // Throwing cleared the flag; runInline restores it for this thread.
+              Thread.currentThread().interrupt();
+              throw new CompletionException(e);
+            }
+            return "never";
+          },
+          null
+        );
+        leaderFlag.set(Thread.currentThread().isInterrupted());
+      },
+      "sf-leader"
+    );
+
+    Thread follower = new Thread(
+      () -> {
+        flight.loadOutcomeCallerRuns("k", () -> "unused", null);
+        followerFlag.set(Thread.currentThread().isInterrupted());
+      },
+      "sf-follower"
+    );
+
+    leader.start();
+    assertThat(leaderInReader.await(5, TimeUnit.SECONDS)).isTrue();
+    follower.start();
+    awaitParked(follower);
+
+    leader.interrupt();
+    release.countDown();
+    leader.join(5_000);
+    follower.join(5_000);
+
+    assertThat(leaderFlag).as("the reader thread restores its own flag").isTrue();
+    assertThat(followerFlag).as("a joining follower was never interrupted").isFalse();
+  }
+
+  /**
+   * A reader that joins an async client and lets its {@link TimeoutException} escape is a
+   * supplier failure, not the dedup layer's budget timeout: only the bare
+   * {@code TimeoutException} the interaction timeout completes with is a suppression, and
+   * only that counts in the timeout gauge.
+   */
+  @Test
+  void nestedReaderTimeoutIsAFailureNotABudgetTimeout() {
+    TestSingleFlight flight = new TestSingleFlight(1000, 10, 5, Runnable::run, registryOf(disabledBreaker));
+
+    LoaderOutcome<String> outcome = flight.loadOutcome("k", () -> {
+      throw new CompletionException(new ExecutionException(new TimeoutException("slow")));
+    });
+
+    assertThat(outcome.status()).isEqualTo(LoadStatus.FAILED);
+    assertThat(flight.loadTimeoutCount()).isZero();
+  }
+
+  /** Poll until the thread is parked (e.g. inside {@code CompletableFuture.join}). */
+  private static void awaitParked(Thread thread) throws InterruptedException {
+    long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+    while (System.nanoTime() < deadline) {
+      Thread.State state = thread.getState();
+      if (state == Thread.State.WAITING || state == Thread.State.TIMED_WAITING) {
+        return;
+      }
+      Thread.sleep(1L);
+    }
+    throw new AssertionError("thread did not park: " + thread.getState());
+  }
+
+  /** Collects logback events for assertions about WARN emission. */
+  static class CollectingAppender extends AppenderBase<ILoggingEvent> {
+
+    final ConcurrentLinkedQueue<ILoggingEvent> events = new ConcurrentLinkedQueue<>();
+
+    @Override
+    protected void append(ILoggingEvent eventObject) {
+      events.add(eventObject);
+    }
   }
 }

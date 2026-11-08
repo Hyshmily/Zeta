@@ -20,16 +20,19 @@ import static org.assertj.core.api.Assertions.assertThat;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import io.github.hyshmily.zeta.autoconfigure.ZetaProperties;
-import io.github.hyshmily.zeta.cache.codec.CacheCompressor;
-import io.github.hyshmily.zeta.cache.cachesupport.TtlPolicy;
-import io.github.hyshmily.zeta.model.CacheEntry;
+import io.github.hyshmily.zeta.cache.cachesupport.lifecycle.EntryLifecycle;
+import io.github.hyshmily.zeta.cache.cachesupport.lifecycle.EntryLifecycleImpl;
+import io.github.hyshmily.zeta.cache.cachesupport.lifecycle.TtlPolicy;
+import io.github.hyshmily.zeta.cache.cachesupport.raw.CacheEntry;
+import io.github.hyshmily.zeta.cache.cachesupport.raw.EntryDraft;
+import io.github.hyshmily.zeta.cache.cachesupport.raw.VersionedValue;
 import io.github.hyshmily.zeta.model.DecisionStamp;
-import io.github.hyshmily.zeta.model.EntryDraft;
 import io.github.hyshmily.zeta.model.KeyState;
-import io.github.hyshmily.zeta.model.VersionedValue;
+import io.github.hyshmily.zeta.util.TimeSource;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Supplier;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -46,14 +49,21 @@ class DefaultBackgroundRefresherTest {
   private Cache<String, CacheEntry> caffeineCache;
   private ZetaProperties ttlConfig;
   private TtlPolicy ttlPolicy;
+  private EntryLifecycle lifecycle;
 
   @BeforeEach
   void setUp() {
     caffeineCache = Caffeine.newBuilder().maximumSize(100).build();
     ttlConfig = new ZetaProperties();
     Executor executor = Runnable::run;
-    ttlPolicy = new TtlPolicy(ttlConfig, ttlConfig.getTtlJitterRatio());
-    refresher = new DefaultBackgroundRefresher(caffeineCache, executor, ttlPolicy, CacheCompressor.NONE, 10);
+    ttlPolicy = new TtlPolicy(ttlConfig);
+    lifecycle = new EntryLifecycleImpl(caffeineCache, ttlConfig, null);
+    refresher = new DefaultBackgroundRefresher(caffeineCache, executor, lifecycle, 10);
+  }
+
+  @AfterEach
+  void resetClock() {
+    TimeSource.setTimeOffsetForTest(0, 0);
   }
 
   /**
@@ -63,22 +73,17 @@ class DefaultBackgroundRefresherTest {
   void triggerBackgroundRefresh_shouldAcquireAndReleasePermit() {
     caffeineCache.put(
       "key",
-      CacheEntry.builder()
+      EntryDraft.blank(null)
         .value("old")
-        .dataVersion(1)
-        .isVersionDegraded(false)
-        .decisionVersion(0)
-        .hardTtlMs(300_000)
-        .hardExpireAtMs(Long.MAX_VALUE)
-        .softTtlMs(30_000)
-        .softExpireAtMs(System.currentTimeMillis() + 30_000)
+        .version(1)
+        .decision(DecisionStamp.hot(0, null, 0L))
+        .ttl(300_000, 30_000, 300_000, 30_000)
+        .expiryAt(Long.MAX_VALUE, System.currentTimeMillis() + 30_000)
         .keyState(KeyState.HOT)
-        .normalHardTtlMs(300_000)
-        .normalSoftTtlMs(30_000)
         .build()
     );
 
-    refresher.triggerBackgroundRefresh("key", () -> new VersionedValue("newValue", 0L, false), 30_000);
+    refresher.triggerBackgroundRefresh("key", () -> new VersionedValue("newValue", 0L), 30_000);
 
     assertThat(caffeineCache.getIfPresent("key")).isNotNull();
   }
@@ -93,18 +98,13 @@ class DefaultBackgroundRefresherTest {
   void triggerBackgroundRefresh_entryEvictedDuringRefresh_shouldRebuildWithSnapshotHardTtl() {
     caffeineCache.put(
       "key",
-      CacheEntry.builder()
+      EntryDraft.blank(null)
         .value("old")
-        .dataVersion(1)
-        .isVersionDegraded(false)
-        .decisionVersion(0)
-        .hardTtlMs(123_456)
-        .hardExpireAtMs(System.currentTimeMillis() + 123_456)
-        .softTtlMs(30_000)
-        .softExpireAtMs(System.currentTimeMillis() - 1_000)
+        .version(1)
+        .decision(DecisionStamp.hot(0, null, 0L))
+        .ttl(123_456, 30_000, 123_456, 30_000)
+        .expiryAt(System.currentTimeMillis() + 123_456, System.currentTimeMillis() - 1_000)
         .keyState(KeyState.NORMAL)
-        .normalHardTtlMs(123_456)
-        .normalSoftTtlMs(30_000)
         .build()
     );
 
@@ -114,7 +114,7 @@ class DefaultBackgroundRefresherTest {
         // The direct test executor runs the reader right after the snapshot
         // was taken: evicting here reproduces "entry absent at apply time".
         caffeineCache.invalidate("key");
-        return new VersionedValue("fresh", 7L, true);
+        return new VersionedValue("fresh", 7L);
       },
       30_000
     );
@@ -127,22 +127,46 @@ class DefaultBackgroundRefresherTest {
   }
 
   /**
-   * A refresh task that completes before the {@code pendingRefreshes} compute
+   * A refresh task that completes before the {@code refreshes} compute
    * stores it (fast reader, synchronous executor) must not leave a done marker
    * behind: the map is unbounded, so a cold key would otherwise retain the
    * completed marker until its next trigger.
    */
   @Test
   void triggerBackgroundRefresh_fastCompletedTask_shouldNotLeaveDoneMarker() throws Exception {
-    refresher.triggerBackgroundRefresh("key", () -> new VersionedValue("v", 0L, false), 30_000);
+    refresher.triggerBackgroundRefresh("key", () -> new VersionedValue("v", 0L), 30_000);
 
-    java.lang.reflect.Field pending = DefaultBackgroundRefresher.class.getDeclaredField("pendingRefreshes");
+    java.lang.reflect.Field pending = DefaultBackgroundRefresher.class.getDeclaredField("refreshes");
     pending.setAccessible(true);
     @SuppressWarnings("unchecked")
-    java.util.concurrent.ConcurrentMap<String, CompletableFuture<?>> map =
-      (java.util.concurrent.ConcurrentMap<String, CompletableFuture<?>>) pending.get(refresher);
+    java.util.Map<String, ?> map = (java.util.Map<String, ?>) pending.get(refresher);
 
     assertThat(map).isEmpty();
+  }
+
+  /**
+   * A completed refresh frees its key immediately: the synchronous executor
+   * settles the marker before {@code triggerBackgroundRefresh} returns, and the
+   * next call must arm a new task rather than being mistaken for a duplicate.
+   */
+  @Test
+  void triggerBackgroundRefresh_afterSynchronousCompletion_shouldArmAgain() throws Exception {
+    AtomicInteger counter = new AtomicInteger();
+    for (int i = 0; i < 2; i++) {
+      refresher.triggerBackgroundRefresh(
+        "key",
+        () -> {
+          counter.incrementAndGet();
+          return new VersionedValue("v", 0L);
+        },
+        30_000
+      );
+    }
+
+    assertThat(counter.get()).isEqualTo(2);
+    java.lang.reflect.Field pending = DefaultBackgroundRefresher.class.getDeclaredField("refreshes");
+    pending.setAccessible(true);
+    assertThat((java.util.Map<?, ?>) pending.get(refresher)).isEmpty();
   }
 
   /**
@@ -152,18 +176,13 @@ class DefaultBackgroundRefresherTest {
   void triggerBackgroundRefresh_withStaleVersion_shouldDiscardResult() {
     caffeineCache.put(
       "key",
-      CacheEntry.builder()
+      EntryDraft.blank(null)
         .value("original")
-        .dataVersion(5)
-        .isVersionDegraded(false)
-        .decisionVersion(0)
-        .hardTtlMs(300_000)
-        .hardExpireAtMs(Long.MAX_VALUE)
-        .softTtlMs(30_000)
-        .softExpireAtMs(System.currentTimeMillis() + 300_000)
+        .version(5)
+        .decision(DecisionStamp.hot(0, null, 0L))
+        .ttl(300_000, 30_000, 300_000, 30_000)
+        .expiryAt(Long.MAX_VALUE, System.currentTimeMillis() + 300_000)
         .keyState(KeyState.HOT)
-        .normalHardTtlMs(300_000)
-        .normalSoftTtlMs(30_000)
         .build()
     );
 
@@ -178,8 +197,8 @@ class DefaultBackgroundRefresherTest {
             }
             return null;
           });
-        // Unstamped carrier: the legacy L1-internal snapshot guard must discard it.
-        return new VersionedValue("stale-value", 0L, false);
+        // Unknown-stamp carrier: the snapshot guard still discards it.
+        return new VersionedValue("stale-value", 0L);
       },
       30_000
     );
@@ -200,22 +219,17 @@ class DefaultBackgroundRefresherTest {
   void triggerBackgroundRefresh_stampedNoConcurrentWrite_shouldApply() {
     caffeineCache.put(
       "key",
-      CacheEntry.builder()
+      EntryDraft.blank(null)
         .value("original")
-        .dataVersion(5)
-        .isVersionDegraded(false)
-        .decisionVersion(0)
-        .hardTtlMs(300_000)
-        .hardExpireAtMs(System.currentTimeMillis() + 300_000)
-        .softTtlMs(30_000)
-        .softExpireAtMs(System.currentTimeMillis() - 1_000)
+        .version(5)
+        .decision(DecisionStamp.hot(0, null, 0L))
+        .ttl(300_000, 30_000, 300_000, 30_000)
+        .expiryAt(System.currentTimeMillis() + 300_000, System.currentTimeMillis() - 1_000)
         .keyState(KeyState.NORMAL)
-        .normalHardTtlMs(300_000)
-        .normalSoftTtlMs(30_000)
         .build()
     );
 
-    refresher.triggerBackgroundRefresh("key", () -> new VersionedValue("fresh", 5L, true), 30_000);
+    refresher.triggerBackgroundRefresh("key", () -> new VersionedValue("fresh", 5L), 30_000);
 
     CacheEntry entry = (CacheEntry) caffeineCache.getIfPresent("key");
     assertThat(entry).isNotNull();
@@ -233,18 +247,13 @@ class DefaultBackgroundRefresherTest {
   void triggerBackgroundRefresh_stampedConcurrentWrite_shouldDiscard() {
     caffeineCache.put(
       "key",
-      CacheEntry.builder()
+      EntryDraft.blank(null)
         .value("original")
-        .dataVersion(5)
-        .isVersionDegraded(false)
-        .decisionVersion(0)
-        .hardTtlMs(300_000)
-        .hardExpireAtMs(System.currentTimeMillis() + 300_000)
-        .softTtlMs(30_000)
-        .softExpireAtMs(System.currentTimeMillis() - 1_000)
+        .version(5)
+        .decision(DecisionStamp.hot(0, null, 0L))
+        .ttl(300_000, 30_000, 300_000, 30_000)
+        .expiryAt(System.currentTimeMillis() + 300_000, System.currentTimeMillis() - 1_000)
         .keyState(KeyState.NORMAL)
-        .normalHardTtlMs(300_000)
-        .normalSoftTtlMs(30_000)
         .build()
     );
 
@@ -260,7 +269,7 @@ class DefaultBackgroundRefresherTest {
             return null;
           });
         // Stale value, probe taken after the concurrent write.
-        return new VersionedValue("stale-value", 6L, true);
+        return new VersionedValue("stale-value", 6L);
       },
       30_000
     );
@@ -272,36 +281,39 @@ class DefaultBackgroundRefresherTest {
   }
 
   /**
-   * A snapshot-degraded entry with no in-flight write is healed by a stamped
-   * refresh (case 4 of the sync matrix): the normal probe overwrites it. A
-   * degraded write landing in flight instead crosses the boundary and is kept.
+   * A failed refresh must not reopen a retry window that a peer invalidation already closed: the
+   * snapshot identity is unchanged by the invalidation, so only the tombstone guard distinguishes
+   * "same entry" from "same entry the cluster has since condemned".
    */
   @Test
-  void triggerBackgroundRefresh_stampedHealsIdleDegraded_shouldApply() {
+  void triggerBackgroundRefresh_failureDoesNotReopenAWindowClosedByInvalidation() {
+    long now = System.currentTimeMillis();
+    long hardExpireAt = now + 300_000L;
+    long softExpireAt = now - 1_000L;
     caffeineCache.put(
       "key",
-      CacheEntry.builder()
-        .value("original")
-        .dataVersion(Long.MIN_VALUE + 100L)
-        .isVersionDegraded(true)
-        .decisionVersion(0)
-        .hardTtlMs(300_000)
-        .hardExpireAtMs(System.currentTimeMillis() + 300_000)
-        .softTtlMs(30_000)
-        .softExpireAtMs(System.currentTimeMillis() - 1_000)
+      EntryDraft.blank(null)
+        .value("old")
+        .version(1)
+        .ttl(300_000, 30_000, 300_000, 30_000)
+        .expiryAt(hardExpireAt, softExpireAt)
         .keyState(KeyState.NORMAL)
-        .normalHardTtlMs(300_000)
-        .normalSoftTtlMs(30_000)
         .build()
     );
 
-    refresher.triggerBackgroundRefresh("key", () -> new VersionedValue("fresh", 8L, true), 30_000);
+    refresher.triggerBackgroundRefresh(
+      "key",
+      () -> {
+        lifecycle.recordInvalidation("key", 2L);
+        throw new IllegalStateException("source down");
+      },
+      30_000
+    );
 
-    CacheEntry entry = (CacheEntry) caffeineCache.getIfPresent("key");
-    assertThat(entry).isNotNull();
-    assertThat((Object) entry.getValue()).isEqualTo("fresh");
-    assertThat(entry.getDataVersion()).isEqualTo(8L);
-    assertThat(entry.isVersionDegraded()).isFalse();
+    CacheEntry after = (CacheEntry) caffeineCache.getIfPresent("key");
+    assertThat(after).isNotNull();
+    assertThat(after.getSoftExpireAtMs()).isEqualTo(softExpireAt);
+    assertThat(after.getHardExpireAtMs()).isEqualTo(hardExpireAt);
   }
 
   /**
@@ -311,22 +323,17 @@ class DefaultBackgroundRefresherTest {
   @Test
   void triggerBackgroundRefresh_withNullResult_shouldNotUpdateCache() throws InterruptedException {
     Executor asyncExec = Executors.newCachedThreadPool();
-    BackgroundRefresher asyncExpire = new DefaultBackgroundRefresher(caffeineCache, asyncExec, ttlPolicy, CacheCompressor.NONE, 10);
+    BackgroundRefresher asyncExpire = new DefaultBackgroundRefresher(caffeineCache, asyncExec, lifecycle, 10);
 
     caffeineCache.put(
       "key",
-      CacheEntry.builder()
+      EntryDraft.blank(null)
         .value("original")
-        .dataVersion(1)
-        .isVersionDegraded(false)
-        .decisionVersion(0)
-        .hardTtlMs(300_000)
-        .hardExpireAtMs(Long.MAX_VALUE)
-        .softTtlMs(30_000)
-        .softExpireAtMs(System.currentTimeMillis() + 30_000)
+        .version(1)
+        .decision(DecisionStamp.hot(0, null, 0L))
+        .ttl(300_000, 30_000, 300_000, 30_000)
+        .expiryAt(Long.MAX_VALUE, System.currentTimeMillis() + 30_000)
         .keyState(KeyState.HOT)
-        .normalHardTtlMs(300_000)
-        .normalSoftTtlMs(30_000)
         .build()
     );
 
@@ -336,6 +343,10 @@ class DefaultBackgroundRefresherTest {
     CacheEntry entry = (CacheEntry) caffeineCache.getIfPresent("key");
     assertThat(entry).isNotNull();
     assertThat((Object) entry.getValue()).isEqualTo("original");
+    assertThat(entry.getSoftExpireAtMs())
+      .as("a null refresh closes the retry window instead of re-arming every read")
+      .isEqualTo(entry.getHardExpireAtMs());
+    assertThat(lifecycle.ttlPolicy().isSoftExpired(entry)).isFalse();
   }
 
   /**
@@ -345,38 +356,28 @@ class DefaultBackgroundRefresherTest {
   @Test
   void triggerBackgroundRefresh_withExhaustedLimiter_shouldSkip() throws InterruptedException {
     Executor asyncExec = Executors.newCachedThreadPool();
-    BackgroundRefresher limited = new DefaultBackgroundRefresher(caffeineCache, asyncExec, ttlPolicy, CacheCompressor.NONE, 1);
+    BackgroundRefresher limited = new DefaultBackgroundRefresher(caffeineCache, asyncExec, lifecycle, 1);
 
     caffeineCache.put(
       "key1",
-      CacheEntry.builder()
+      EntryDraft.blank(null)
         .value("original1")
-        .dataVersion(1)
-        .isVersionDegraded(false)
-        .decisionVersion(0)
-        .hardTtlMs(300_000)
-        .hardExpireAtMs(Long.MAX_VALUE)
-        .softTtlMs(30_000)
-        .softExpireAtMs(System.currentTimeMillis() + 30_000)
+        .version(1)
+        .decision(DecisionStamp.hot(0, null, 0L))
+        .ttl(300_000, 30_000, 300_000, 30_000)
+        .expiryAt(Long.MAX_VALUE, System.currentTimeMillis() + 30_000)
         .keyState(KeyState.HOT)
-        .normalHardTtlMs(300_000)
-        .normalSoftTtlMs(30_000)
         .build()
     );
     caffeineCache.put(
       "key2",
-      CacheEntry.builder()
+      EntryDraft.blank(null)
         .value("original2")
-        .dataVersion(1)
-        .isVersionDegraded(false)
-        .decisionVersion(0)
-        .hardTtlMs(300_000)
-        .hardExpireAtMs(Long.MAX_VALUE)
-        .softTtlMs(30_000)
-        .softExpireAtMs(System.currentTimeMillis() + 30_000)
+        .version(1)
+        .decision(DecisionStamp.hot(0, null, 0L))
+        .ttl(300_000, 30_000, 300_000, 30_000)
+        .expiryAt(Long.MAX_VALUE, System.currentTimeMillis() + 30_000)
         .keyState(KeyState.HOT)
-        .normalHardTtlMs(300_000)
-        .normalSoftTtlMs(30_000)
         .build()
     );
 
@@ -422,22 +423,17 @@ class DefaultBackgroundRefresherTest {
   @Test
   void triggerBackgroundRefresh_withSameKey_shouldDeduplicate() throws InterruptedException {
     Executor asyncExec = Executors.newCachedThreadPool();
-    BackgroundRefresher asyncExpire = new DefaultBackgroundRefresher(caffeineCache, asyncExec, ttlPolicy, CacheCompressor.NONE, 10);
+    BackgroundRefresher asyncExpire = new DefaultBackgroundRefresher(caffeineCache, asyncExec, lifecycle, 10);
 
     caffeineCache.put(
       "key",
-      CacheEntry.builder()
+      EntryDraft.blank(null)
         .value("original")
-        .dataVersion(1)
-        .isVersionDegraded(false)
-        .decisionVersion(0)
-        .hardTtlMs(300_000)
-        .hardExpireAtMs(Long.MAX_VALUE)
-        .softTtlMs(30_000)
-        .softExpireAtMs(System.currentTimeMillis() + 30_000)
+        .version(1)
+        .decision(DecisionStamp.hot(0, null, 0L))
+        .ttl(300_000, 30_000, 300_000, 30_000)
+        .expiryAt(Long.MAX_VALUE, System.currentTimeMillis() + 30_000)
         .keyState(KeyState.HOT)
-        .normalHardTtlMs(300_000)
-        .normalSoftTtlMs(30_000)
         .build()
     );
 
@@ -459,7 +455,7 @@ class DefaultBackgroundRefresherTest {
       30_000
     );
 
-    // Give first call time to register in pendingRefreshes
+    // Give first call time to register in refreshes
     Thread.sleep(50);
 
     // Second call for same key should be deduped (supplier not invoked)
@@ -482,27 +478,22 @@ class DefaultBackgroundRefresherTest {
    * Verifies that triggerBackgroundRefresh with a supplier error logs the failure
    * and leaves the existing entry intact (fault mode: supplier exception).
    * A permanent entry ({@code hardExpireAtMs == Long.MAX_VALUE}) is never
-   * leased — there is nothing to extend (ADR-0036).
+   * leased — there is nothing to extend (design decisions: expiry and refresh).
    */
   @Test
   void triggerBackgroundRefresh_withSupplierError_shouldPreserveExistingEntry() throws InterruptedException {
     Executor asyncExec = Executors.newCachedThreadPool();
-    BackgroundRefresher asyncExpire = new DefaultBackgroundRefresher(caffeineCache, asyncExec, ttlPolicy, CacheCompressor.NONE, 10);
+    BackgroundRefresher asyncExpire = new DefaultBackgroundRefresher(caffeineCache, asyncExec, lifecycle, 10);
 
     caffeineCache.put(
       "key",
-      CacheEntry.builder()
+      EntryDraft.blank(null)
         .value("original")
-        .dataVersion(1)
-        .isVersionDegraded(false)
-        .decisionVersion(0)
-        .hardTtlMs(300_000)
-        .hardExpireAtMs(Long.MAX_VALUE)
-        .softTtlMs(30_000)
-        .softExpireAtMs(System.currentTimeMillis() + 30_000)
+        .version(1)
+        .decision(DecisionStamp.hot(0, null, 0L))
+        .ttl(300_000, 30_000, 300_000, 30_000)
+        .expiryAt(Long.MAX_VALUE, System.currentTimeMillis() + 30_000)
         .keyState(KeyState.HOT)
-        .normalHardTtlMs(300_000)
-        .normalSoftTtlMs(30_000)
         .build()
     );
 
@@ -529,22 +520,17 @@ class DefaultBackgroundRefresherTest {
   @Test
   void triggerBackgroundRefresh_withEvictedKeyDuringRefresh_shouldNotError() throws InterruptedException {
     Executor asyncExec = Executors.newCachedThreadPool();
-    BackgroundRefresher asyncExpire = new DefaultBackgroundRefresher(caffeineCache, asyncExec, ttlPolicy, CacheCompressor.NONE, 10);
+    BackgroundRefresher asyncExpire = new DefaultBackgroundRefresher(caffeineCache, asyncExec, lifecycle, 10);
 
     caffeineCache.put(
       "key",
-      CacheEntry.builder()
+      EntryDraft.blank(null)
         .value("original")
-        .dataVersion(1)
-        .isVersionDegraded(false)
-        .decisionVersion(0)
-        .hardTtlMs(300_000)
-        .hardExpireAtMs(Long.MAX_VALUE)
-        .softTtlMs(30_000)
-        .softExpireAtMs(System.currentTimeMillis() + 30_000)
+        .version(1)
+        .decision(DecisionStamp.hot(0, null, 0L))
+        .ttl(300_000, 30_000, 300_000, 30_000)
+        .expiryAt(Long.MAX_VALUE, System.currentTimeMillis() + 30_000)
         .keyState(KeyState.HOT)
-        .normalHardTtlMs(300_000)
-        .normalSoftTtlMs(30_000)
         .build()
     );
 
@@ -552,7 +538,7 @@ class DefaultBackgroundRefresherTest {
       "key",
       () -> {
         caffeineCache.invalidate("key");
-        return new VersionedValue("fresh-value", 0L, false);
+        return new VersionedValue("fresh-value", 0L);
       },
       30_000
     );
@@ -576,22 +562,17 @@ class DefaultBackgroundRefresherTest {
     Executor rejectingExecutor = task -> {
       throw new RejectedExecutionException("rejected");
     };
-    BackgroundRefresher rejectingMgr = new DefaultBackgroundRefresher(caffeineCache, rejectingExecutor, ttlPolicy, CacheCompressor.NONE, 10);
+    BackgroundRefresher rejectingMgr = new DefaultBackgroundRefresher(caffeineCache, rejectingExecutor, lifecycle, 10);
 
     caffeineCache.put(
       "key",
-      CacheEntry.builder()
+      EntryDraft.blank(null)
         .value("original")
-        .dataVersion(1)
-        .isVersionDegraded(false)
-        .decisionVersion(0)
-        .hardTtlMs(300_000)
-        .hardExpireAtMs(Long.MAX_VALUE)
-        .softTtlMs(30_000)
-        .softExpireAtMs(System.currentTimeMillis() + 30_000)
+        .version(1)
+        .decision(DecisionStamp.hot(0, null, 0L))
+        .ttl(300_000, 30_000, 300_000, 30_000)
+        .expiryAt(Long.MAX_VALUE, System.currentTimeMillis() + 30_000)
         .keyState(KeyState.HOT)
-        .normalHardTtlMs(300_000)
-        .normalSoftTtlMs(30_000)
         .build()
     );
 
@@ -602,7 +583,7 @@ class DefaultBackgroundRefresherTest {
     assertThat((Object) entry.getValue()).isEqualTo("original");
   }
 
-  // ── Lease-on-Failure (ADR-0036) ───────────────────────────────────
+  // ── Lease-on-Failure (design decisions: expiry and refresh) ───────────────────────────────────
 
   /**
    * Verifies that a failed background refresh leases the existing entry:
@@ -614,7 +595,7 @@ class DefaultBackgroundRefresherTest {
   @Test
   void triggerBackgroundRefresh_withSupplierError_shouldLeaseExistingEntry() throws InterruptedException {
     ExecutorService asyncExec = Executors.newCachedThreadPool();
-    BackgroundRefresher asyncExpire = new DefaultBackgroundRefresher(caffeineCache, asyncExec, ttlPolicy, CacheCompressor.NONE, 10);
+    BackgroundRefresher asyncExpire = new DefaultBackgroundRefresher(caffeineCache, asyncExec, lifecycle, 10);
     try {
       long originalExpire = System.currentTimeMillis() + 300_000;
       caffeineCache.put("key", hotEntry("original", 1, originalExpire));
@@ -634,7 +615,7 @@ class DefaultBackgroundRefresherTest {
       assertThat((Object) entry.getValue()).isEqualTo("original");
       assertThat(entry.getDataVersion()).isEqualTo(1);
       assertThat(entry.getKeyState()).isEqualTo(KeyState.HOT);
-      // Duration fields stay authoritative — only timestamps move (ADR-0036).
+      // Duration fields stay authoritative — only timestamps move (design decisions: expiry and refresh).
       assertThat(entry.getHardTtlMs()).isEqualTo(300_000);
       assertThat(entry.getSoftTtlMs()).isEqualTo(30_000);
       // Never-shorten: remaining (~300s) exceeds the floor, so hard is
@@ -644,8 +625,6 @@ class DefaultBackgroundRefresherTest {
       assertThat(entry.getSoftExpireAtMs()).isLessThan(entry.getHardExpireAtMs());
       // Observability: one granted lease, nothing refused.
       assertThat(asyncExpire.getRefreshFailureLeased()).isEqualTo(1);
-      assertThat(asyncExpire.getLeaseStaleCapped()).isZero();
-      assertThat(asyncExpire.getLeaseSuppressedByClassifier()).isZero();
       assertThat(asyncExpire.leasedStaleness(10)).containsKey("key");
     } finally {
       asyncExec.shutdownNow();
@@ -662,7 +641,7 @@ class DefaultBackgroundRefresherTest {
   void triggerBackgroundRefresh_repeatedFailures_shouldPreserveRemainingBudget() {
     long originalExpire = System.currentTimeMillis() + 600_000;
     caffeineCache.put("key", hotEntry("original", 1, originalExpire));
-    BackgroundRefresher syncExpire = new DefaultBackgroundRefresher(caffeineCache, Runnable::run, ttlPolicy, CacheCompressor.NONE, 10);
+    BackgroundRefresher syncExpire = new DefaultBackgroundRefresher(caffeineCache, Runnable::run, lifecycle, 10);
 
     syncExpire.triggerBackgroundRefresh("key", failingReader(), 30_000);
     long now = System.currentTimeMillis();
@@ -693,7 +672,7 @@ class DefaultBackgroundRefresherTest {
   @Test
   void triggerBackgroundRefresh_shortRemaining_shouldExtendToFloor() {
     caffeineCache.put("key", hotEntry("original", 1, System.currentTimeMillis() + 100_000));
-    BackgroundRefresher syncExpire = new DefaultBackgroundRefresher(caffeineCache, Runnable::run, ttlPolicy, CacheCompressor.NONE, 10);
+    BackgroundRefresher syncExpire = new DefaultBackgroundRefresher(caffeineCache, Runnable::run, lifecycle, 10);
 
     syncExpire.triggerBackgroundRefresh("key", failingReader(), 30_000);
     long now = System.currentTimeMillis();
@@ -713,29 +692,26 @@ class DefaultBackgroundRefresherTest {
   void triggerBackgroundRefresh_tinyHardTtl_shouldAbandonLease() {
     caffeineCache.put(
       "key",
-      CacheEntry.builder()
+      EntryDraft.blank(null)
         .value("original")
-        .dataVersion(1)
-        .isVersionDegraded(false)
-        .decisionVersion(0)
-        .hardTtlMs(30_000)
-        .hardExpireAtMs(System.currentTimeMillis() + 30_000)
-        .softTtlMs(10_000)
-        .softExpireAtMs(System.currentTimeMillis() - 1_000)
+        .version(1)
+        .decision(DecisionStamp.hot(0, null, 0L))
+        .ttl(30_000, 10_000, 30_000, 10_000)
+        .expiryAt(System.currentTimeMillis() + 30_000, System.currentTimeMillis() - 1_000)
         .keyState(KeyState.NORMAL)
-        .normalHardTtlMs(30_000)
-        .normalSoftTtlMs(10_000)
         .build()
     );
     long before = System.currentTimeMillis();
-    BackgroundRefresher syncExpire = new DefaultBackgroundRefresher(caffeineCache, Runnable::run, ttlPolicy, CacheCompressor.NONE, 10);
+    BackgroundRefresher syncExpire = new DefaultBackgroundRefresher(caffeineCache, Runnable::run, lifecycle, 10);
 
     syncExpire.triggerBackgroundRefresh("key", failingReader(), 10_000);
 
     CacheEntry entry = (CacheEntry) caffeineCache.getIfPresent("key");
     assertThat(entry).isNotNull();
-    // Untouched: no extension granted.
+    // Untouched: no extension granted, and the retry window is closed at the
+    // existing hard deadline instead of re-triggering the failing reader on every read.
     assertThat(entry.getHardExpireAtMs()).isLessThanOrEqualTo(before + 30_000);
+    assertThat(entry.getSoftExpireAtMs()).isEqualTo(entry.getHardExpireAtMs());
     assertThat(syncExpire.getRefreshFailureLeased()).isZero();
   }
 
@@ -747,7 +723,7 @@ class DefaultBackgroundRefresherTest {
   @Test
   void triggerBackgroundRefresh_withError_shouldRefuseLeaseByClassifier() {
     caffeineCache.put("key", hotEntry("original", 1, System.currentTimeMillis() + 300_000));
-    BackgroundRefresher syncExpire = new DefaultBackgroundRefresher(caffeineCache, Runnable::run, ttlPolicy, CacheCompressor.NONE, 10);
+    BackgroundRefresher syncExpire = new DefaultBackgroundRefresher(caffeineCache, Runnable::run, lifecycle, 10);
 
     syncExpire.triggerBackgroundRefresh(
       "key",
@@ -760,8 +736,10 @@ class DefaultBackgroundRefresherTest {
     CacheEntry entry = (CacheEntry) caffeineCache.getIfPresent("key");
     assertThat(entry).isNotNull();
     assertThat((Object) entry.getValue()).isEqualTo("original");
+    assertThat(entry.getHardExpireAtMs())
+      .as("a classifier refusal hard-expires instead of serving known-stale data")
+      .isLessThanOrEqualTo(System.currentTimeMillis());
     assertThat(syncExpire.getRefreshFailureLeased()).isZero();
-    assertThat(syncExpire.getLeaseSuppressedByClassifier()).isEqualTo(1);
   }
 
   /**
@@ -770,42 +748,66 @@ class DefaultBackgroundRefresherTest {
    */
   @Test
   void triggerBackgroundRefresh_overAgeEntry_shouldRefuseLeaseByStalenessCap() {
-    int oldBirth = io.github.hyshmily.zeta.util.TimeSource.monotonicSecondsSinceBoot() - 3700;
+    // The staleness cap is measured on the monotonic axis, whose origin is JVM
+    // boot: a fresh test JVM cannot otherwise hold an entry older than 30 min.
+    // Advance the axis so the birth stamp stays positive and genuinely old.
+    TimeSource.setTimeOffsetForTest(0, 3_701_000L);
+    int oldBirth = TimeSource.monotonicSecondsSinceBoot() - 3700;
     caffeineCache.put(
       "key",
-      CacheEntry.builder()
+      EntryDraft.blank(null)
         .value("original")
-        .dataVersion(1)
-        .isVersionDegraded(false)
-        .decisionVersion(0)
-        .hardTtlMs(300_000)
-        .hardExpireAtMs(System.currentTimeMillis() + 300_000)
-        .softTtlMs(30_000)
-        .softExpireAtMs(System.currentTimeMillis() - 1_000)
+        .version(1)
+        .decision(DecisionStamp.hot(0, null, 0L))
+        .ttl(300_000, 30_000, 300_000, 30_000)
+        .expiryAt(System.currentTimeMillis() + 300_000, System.currentTimeMillis() - 1_000)
         .keyState(KeyState.HOT)
-        .normalHardTtlMs(300_000)
-        .normalSoftTtlMs(30_000)
         .birthStampSec(oldBirth)
         .build()
     );
-    BackgroundRefresher syncExpire = new DefaultBackgroundRefresher(caffeineCache, Runnable::run, ttlPolicy, CacheCompressor.NONE, 10);
+    BackgroundRefresher syncExpire = new DefaultBackgroundRefresher(caffeineCache, Runnable::run, lifecycle, 10);
 
     syncExpire.triggerBackgroundRefresh("key", failingReader(), 30_000);
 
     assertThat(syncExpire.getRefreshFailureLeased()).isZero();
-    assertThat(syncExpire.getLeaseStaleCapped()).isEqualTo(1);
     assertThat(syncExpire.leasedStaleness(10)).doesNotContainKey("key");
+    CacheEntry entry = (CacheEntry) caffeineCache.getIfPresent("key");
+    assertThat(entry).isNotNull();
+    assertThat(entry.getSoftExpireAtMs())
+      .as("a capped lease closes the retry window at the hard deadline")
+      .isEqualTo(entry.getHardExpireAtMs());
+  }
+
+  /**
+   * The stale-debt view must keep the OLDEST episodes when more than 1024 keys are
+   * leased: evicting the eldest would hide exactly the debt the view exists to expose.
+   */
+  @Test
+  void leasedEpisodes_atCap_shouldKeepTheOldestAndRefuseNewKeys() {
+    Cache<String, CacheEntry> largeCache = Caffeine.newBuilder().maximumSize(2048).build();
+    EntryLifecycle largeLifecycle = new EntryLifecycleImpl(largeCache, ttlConfig, null);
+    BackgroundRefresher largeRefresher = new DefaultBackgroundRefresher(largeCache, Runnable::run, largeLifecycle, 10);
+    long expireAt = System.currentTimeMillis() + 300_000;
+    for (int i = 0; i < 1025; i++) {
+      String key = "k" + i;
+      largeCache.put(key, hotEntry("v", 1, expireAt));
+      largeRefresher.triggerBackgroundRefresh(key, failingReader(), 30_000);
+    }
+
+    assertThat(largeRefresher.leasedKeyCount()).isEqualTo(1024);
+    assertThat(largeRefresher.leasedStaleness(2000)).containsKey("k0");
+    assertThat(largeRefresher.leasedStaleness(2000)).doesNotContainKey("k1024");
   }
 
   /**
    * Verifies that a version advance landing during the in-flight refresh
    * (a write) suppresses the lease — the guard treats it as a different
-   * logical entry (ADR-0036 identity guard).
+   * logical entry (design decisions: expiry and refresh identity guard).
    */
   @Test
   void triggerBackgroundRefresh_withSupplierError_shouldNotLeaseWhenVersionAdvanced() throws InterruptedException {
     ExecutorService asyncExec = Executors.newCachedThreadPool();
-    BackgroundRefresher asyncExpire = new DefaultBackgroundRefresher(caffeineCache, asyncExec, ttlPolicy, CacheCompressor.NONE, 10);
+    BackgroundRefresher asyncExpire = new DefaultBackgroundRefresher(caffeineCache, asyncExec, lifecycle, 10);
     try {
       long originalExpire = System.currentTimeMillis() + 300_000;
       caffeineCache.put("key", hotEntry("original", 5, originalExpire));
@@ -815,12 +817,12 @@ class DefaultBackgroundRefresherTest {
         () -> {
           caffeineCache
             .asMap()
-          .computeIfPresent("key", (k, existing) -> {
-            if (existing != null) {
-              return EntryDraft.of(existing).version(10).build();
-            }
-            return null;
-          });
+            .computeIfPresent("key", (k, existing) -> {
+              if (existing != null) {
+                return EntryDraft.of(existing).version(10).build();
+              }
+              return null;
+            });
           throw new RuntimeException("refresh-failed");
         },
         30_000
@@ -838,13 +840,13 @@ class DefaultBackgroundRefresherTest {
 
   /**
    * Verifies that an in-flight entry rewrite with fresh TTLs (simulating a
-   * Worker rebroadcast, ADR-0024) suppresses the lease — the new hard expiry
-   * is never shortened (ADR-0036 identity guard on hardExpireAtMs).
+   * Worker rebroadcast, design decisions: state machine) suppresses the lease — the new hard expiry
+   * is never shortened (design decisions: expiry and refresh identity guard on hardExpireAtMs).
    */
   @Test
   void triggerBackgroundRefresh_withSupplierError_shouldNotLeaseWhenEntryRewritten() throws InterruptedException {
-    Executor asyncExec = Executors.newCachedThreadPool();
-    BackgroundRefresher asyncExpire = new DefaultBackgroundRefresher(caffeineCache, asyncExec, ttlPolicy, CacheCompressor.NONE, 10);
+    ExecutorService asyncExec = Executors.newCachedThreadPool();
+    BackgroundRefresher asyncExpire = new DefaultBackgroundRefresher(caffeineCache, asyncExec, lifecycle, 10);
     try {
       long originalExpire = System.currentTimeMillis() + 300_000;
       caffeineCache.put("key", hotEntry("original", 5, originalExpire));
@@ -855,12 +857,16 @@ class DefaultBackgroundRefresherTest {
         () -> {
           caffeineCache
             .asMap()
-          .computeIfPresent("key", (k, existing) -> {
-            if (existing != null) {
-              return EntryDraft.of(existing, ttlPolicy).hardTtl(60_000).hardExpiryAt(rewrittenExpire).build();
-            }
-            return null;
-          });
+            .computeIfPresent("key", (k, existing) -> {
+              if (existing != null) {
+                return EntryDraft.of(existing, ttlPolicy)
+                  .ttl(60_000, existing.getSoftTtlMs())
+                  .hardExpiryAt(rewrittenExpire)
+                  .softExpiryAt(existing.getSoftExpireAtMs())
+                  .build();
+              }
+              return null;
+            });
           throw new RuntimeException("refresh-failed");
         },
         30_000
@@ -871,7 +877,7 @@ class DefaultBackgroundRefresherTest {
       assertThat(entry).isNotNull();
       assertThat(entry.getHardExpireAtMs()).isEqualTo(rewrittenExpire);
     } finally {
-      ((ExecutorService) asyncExec).shutdownNow();
+      asyncExec.shutdownNow();
     }
   }
 
@@ -882,7 +888,7 @@ class DefaultBackgroundRefresherTest {
   @Test
   void triggerBackgroundRefresh_withSupplierError_shouldNotRecreateEvictedEntry() throws InterruptedException {
     Executor asyncExec = Executors.newCachedThreadPool();
-    BackgroundRefresher asyncExpire = new DefaultBackgroundRefresher(caffeineCache, asyncExec, ttlPolicy, CacheCompressor.NONE, 10);
+    BackgroundRefresher asyncExpire = new DefaultBackgroundRefresher(caffeineCache, asyncExec, lifecycle, 10);
     try {
       caffeineCache.put("key", hotEntry("original", 1, System.currentTimeMillis() + 300_000));
 
@@ -908,38 +914,32 @@ class DefaultBackgroundRefresherTest {
    */
   @Test
   void triggerBackgroundRefresh_async_withRefreshTimeoutEnabled_shouldWorkNormally() throws InterruptedException {
-    Executor asyncExec = Executors.newCachedThreadPool();
+    ExecutorService asyncExec = Executors.newCachedThreadPool();
     try {
-      BackgroundRefresher asyncExpire = new DefaultBackgroundRefresher(caffeineCache, asyncExec, ttlPolicy, CacheCompressor.NONE, 10);
+      BackgroundRefresher asyncExpire = new DefaultBackgroundRefresher(caffeineCache, asyncExec, lifecycle, 10);
 
       caffeineCache.put(
         "key",
-        CacheEntry.builder()
+        EntryDraft.blank(null)
           .value("original")
-          .dataVersion(1)
-          .isVersionDegraded(false)
-          .decisionVersion(0)
-          .hardTtlMs(300_000)
-          .hardExpireAtMs(Long.MAX_VALUE)
-          .softTtlMs(30_000)
-          .softExpireAtMs(System.currentTimeMillis() + 30_000)
+          .version(1)
+          .decision(DecisionStamp.hot(0, null, 0L))
+          .ttl(300_000, 30_000, 300_000, 30_000)
+          .expiryAt(Long.MAX_VALUE, System.currentTimeMillis() + 30_000)
           .keyState(KeyState.HOT)
-          .normalHardTtlMs(300_000)
-          .normalSoftTtlMs(30_000)
           .build()
       );
 
-      asyncExpire.triggerBackgroundRefresh("key", () -> new VersionedValue("updated", 0L, false), 30_000);
+      asyncExpire.triggerBackgroundRefresh("key", () -> new VersionedValue("updated", 0L), 30_000);
       Thread.sleep(200);
 
       CacheEntry entry = (CacheEntry) caffeineCache.getIfPresent("key");
       assertThat(entry).isNotNull();
       assertThat((Object) entry.getValue()).isEqualTo("updated");
     } finally {
-      ((java.util.concurrent.ExecutorService) asyncExec).shutdownNow();
+      asyncExec.shutdownNow();
     }
   }
-
 
   private static Supplier<?> failingReader() {
     return () -> {
@@ -947,20 +947,53 @@ class DefaultBackgroundRefresherTest {
     };
   }
 
+  /**
+   * The refresh's own snapshot lookup is internal bookkeeping, not a caller
+   * read: it must not add a cache hit, or every soft-expired read would be
+   * counted twice and the reported hit rate would drift upward with refresh
+   * volume.
+   */
+  @Test
+  void triggerBackgroundRefresh_shouldNotRecordCacheHits() {
+    Cache<String, CacheEntry> statsCache = Caffeine.newBuilder().maximumSize(10).recordStats().build();
+    EntryLifecycle statsLifecycle = new EntryLifecycleImpl(statsCache, ttlConfig, null);
+    BackgroundRefresher statsRefresher = new DefaultBackgroundRefresher(statsCache, Runnable::run, statsLifecycle, 10);
+    statsCache.put("key", hotEntry("old", 1, System.currentTimeMillis() + 300_000));
+
+    long hitsBefore = statsCache.stats().hitCount();
+    statsRefresher.triggerBackgroundRefresh("key", () -> new VersionedValue("fresh", 1L), 30_000);
+
+    assertThat(statsCache.stats().hitCount()).isEqualTo(hitsBefore);
+  }
+
+  @Test
+  void applyRefresh_discardsRebuildWhenInvalidatedDuringRefresh() {
+    String key = "refresh-invalidated";
+    refresher.triggerBackgroundRefresh(
+      key,
+      () -> {
+        // An INVALIDATE / clearAll lands after the value was read but before
+        // the apply. The absent-entry branch is then indistinguishable from a
+        // capacity eviction by structure alone — only the tombstone tells them
+        // apart, and it must win.
+        lifecycle.recordInvalidation(key, 2L);
+        return new VersionedValue("stale", 1L);
+      },
+      30_000L
+    );
+
+    assertThat(caffeineCache.getIfPresent(key)).isNull();
+  }
+
   /** Build a Worker-managed HOT entry with the given value, version and hard expiry. */
   private static CacheEntry hotEntry(Object value, long dataVersion, long hardExpireAtMs) {
-    return CacheEntry.builder()
+    return EntryDraft.blank(null)
       .value(value)
-      .dataVersion(dataVersion)
-      .isVersionDegraded(false)
-      .decisionVersion(1)
-      .hardTtlMs(300_000)
-      .hardExpireAtMs(hardExpireAtMs)
-      .softTtlMs(30_000)
-      .softExpireAtMs(hardExpireAtMs == Long.MAX_VALUE ? System.currentTimeMillis() + 30_000 : hardExpireAtMs)
+      .version(dataVersion)
+      .decision(DecisionStamp.hot(1, null, 0L))
+      .ttl(300_000, 30_000, 300_000, 30_000)
+      .expiryAt(hardExpireAtMs, hardExpireAtMs == Long.MAX_VALUE ? System.currentTimeMillis() + 30_000 : hardExpireAtMs)
       .keyState(KeyState.HOT)
-      .normalHardTtlMs(300_000)
-      .normalSoftTtlMs(30_000)
       .build();
   }
 }

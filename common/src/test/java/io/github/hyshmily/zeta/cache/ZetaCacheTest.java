@@ -18,52 +18,42 @@ package io.github.hyshmily.zeta.cache;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.mockito.AdditionalAnswers.delegatesTo;
 import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import io.github.hyshmily.zeta.Zeta;
-import io.github.hyshmily.zeta.annotation.annotationsupporter.NullValue;
 import io.github.hyshmily.zeta.autoconfigure.ZetaProperties;
-import io.github.hyshmily.zeta.cache.cachesupport.BroadcastBuffer;
-import io.github.hyshmily.zeta.cache.cachesupport.CircuitBreaker;
-import io.github.hyshmily.zeta.cache.cachesupport.EntryLifecycle;
-import io.github.hyshmily.zeta.cache.cachesupport.TtlPolicy;
-import io.github.hyshmily.zeta.cache.cachesupport.LoadStatus;
-import io.github.hyshmily.zeta.cache.cachesupport.LoaderOutcome;
-import io.github.hyshmily.zeta.cache.cachesupport.SingleFlight;
-import io.github.hyshmily.zeta.cache.cachesupport.impl.EntryLifecycleImpl;
-import io.github.hyshmily.zeta.scheduler.BackgroundRefresher;
-import io.github.hyshmily.zeta.scheduler.DefaultBackgroundRefresher;
-import io.github.hyshmily.zeta.cache.cachesupport.impl.SingleFlightImpl;
-import io.github.hyshmily.zeta.cache.codec.CacheCompressor;
-import io.github.hyshmily.zeta.exception.ZetaBlockedException;
-import io.github.hyshmily.zeta.exception.ZetaExceptionHandler;
+import io.github.hyshmily.zeta.cache.cachesupport.circuitbreaker.CircuitBreaker;
+import io.github.hyshmily.zeta.cache.cachesupport.circuitbreaker.CircuitBreakerRegistry;
+import io.github.hyshmily.zeta.cache.cachesupport.lifecycle.EntryLifecycle;
+import io.github.hyshmily.zeta.cache.cachesupport.lifecycle.EntryLifecycleImpl;
+import io.github.hyshmily.zeta.cache.cachesupport.loader.LoadStatus;
+import io.github.hyshmily.zeta.cache.cachesupport.loader.LoaderOutcome;
+import io.github.hyshmily.zeta.cache.cachesupport.loader.singleflight.SingleFlight;
+import io.github.hyshmily.zeta.cache.cachesupport.loader.singleflight.SingleFlightImpl;
+import io.github.hyshmily.zeta.cache.cachesupport.policy.GetPolicy;
+import io.github.hyshmily.zeta.cache.cachesupport.policy.InvalidatePolicy;
+import io.github.hyshmily.zeta.cache.cachesupport.policy.StalePolicy;
+import io.github.hyshmily.zeta.cache.cachesupport.raw.CacheEntry;
+import io.github.hyshmily.zeta.cache.cachesupport.raw.EntryDraft;
+import io.github.hyshmily.zeta.cache.cachesupport.raw.VersionedValue;
 import io.github.hyshmily.zeta.hotkeydetector.HotKeyDetector;
-import io.github.hyshmily.zeta.model.CacheEntry;
-import io.github.hyshmily.zeta.model.ReadPolicy;
+import io.github.hyshmily.zeta.model.DecisionStamp;
 import io.github.hyshmily.zeta.model.KeyState;
-import io.github.hyshmily.zeta.model.StalePolicy;
-import io.github.hyshmily.zeta.model.VersionedValue;
 import io.github.hyshmily.zeta.model.ZetaCacheStats;
 import io.github.hyshmily.zeta.reporting.KeyReporter;
-import io.github.hyshmily.zeta.rule.Rule;
-import io.github.hyshmily.zeta.rule.RuleMatcher;
-import io.github.hyshmily.zeta.rule.Rule.RuleAction;
-import io.github.hyshmily.zeta.rule.impl.RuleMatcherImpl;
-import io.github.hyshmily.zeta.rule.RuleService;
+import io.github.hyshmily.zeta.scheduler.BackgroundRefresher;
+import io.github.hyshmily.zeta.scheduler.DefaultBackgroundRefresher;
 import io.github.hyshmily.zeta.sharding.HealthView;
 import io.github.hyshmily.zeta.sync.local.CacheSyncPublisher;
-import io.github.hyshmily.zeta.util.id.SnowflakeIdGenerator;
-import io.github.hyshmily.zeta.util.version.VersionController;
-import io.github.hyshmily.zeta.util.version.impl.VersionControllerImpl;
-import io.github.hyshmily.zeta.model.EntryDraft;
-import java.util.Arrays;
+import io.github.hyshmily.zeta.sync.local.SyncMessage;
+import io.github.hyshmily.zeta.util.clock.MonotonicStampClock;
+import io.github.hyshmily.zeta.util.clock.StampClock;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executor;
@@ -71,27 +61,29 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Consumer;
 import java.util.function.Supplier;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 /**
- * Tests for {@link HotKeyCache}, covering peek, get, invalidate, and blacklist behaviors.
+ * Tests for {@link HotKeyCache}, covering peek, get, invalidate, and TTL behaviors.
  */
 class ZetaCacheTest {
 
-  private final SnowflakeIdGenerator snowflakeIdGenerator = new SnowflakeIdGenerator(0, 1, 5L, false);
+  private AccessCounter accessCounter;
 
   private HotKeyDetector hotKeyDetector;
   private Cache<String, CacheEntry> caffeineCache;
   private SingleFlight singleFlight;
   private EntryLifecycle entryLifecycle;
-  private RuleMatcher ruleMatcher;
-  private RuleService ruleService;
   private BackgroundRefresher backgroundRefresher;
   private Executor executor;
   private HotKeyCache hotKeyCache;
@@ -108,11 +100,10 @@ class ZetaCacheTest {
     executor = Runnable::run;
     ttlConfig = new ZetaProperties();
     healthView = mock(HealthView.class);
-    entryLifecycle = new EntryLifecycleImpl(caffeineCache, ttlConfig, CacheCompressor.NONE, healthView);
-    ruleMatcher = new RuleMatcherImpl(Optional.empty(), Optional.empty());
-    ruleService = new RuleService(ruleMatcher, ttlConfig);
-    backgroundRefresher = new DefaultBackgroundRefresher(caffeineCache, executor, entryLifecycle.ttlPolicy(), CacheCompressor.NONE, 10);
+    entryLifecycle = new EntryLifecycleImpl(caffeineCache, ttlConfig, healthView);
+    backgroundRefresher = new DefaultBackgroundRefresher(caffeineCache, executor, entryLifecycle, 10);
     scheduler = Executors.newSingleThreadScheduledExecutor();
+    accessCounter = mock(AccessCounter.class);
 
     hotKeyCache = new HotKeyCache(
       hotKeyDetector,
@@ -120,44 +111,105 @@ class ZetaCacheTest {
       singleFlight,
       entryLifecycle,
       backgroundRefresher,
-      executor,
-      new CentralDispatcher(
-        Optional.empty(),
-        Optional.empty(),
-        new BroadcastBuffer(scheduler, Optional.empty(), 500, 2_000, null),
-        hotKeyDetector
-      ),
-      ruleMatcher,
-      new VersionControllerImpl(Optional.empty(), 60, snowflakeIdGenerator),
-      ttlConfig,
-      healthView,
-      CacheCompressor.NONE,
-      null
+      new CentralDispatcher(accessCounter, null, new BroadcastBuffer(scheduler, null, 500, 2_000, null), null),
+      new MonotonicStampClock(1L, MonotonicStampClock.DEFAULT_MAX_FORWARD_DRIFT_MS),
+      healthView
     );
   }
 
   /**
-   * Legacy SingleFlight stub carrier for the ADR-0033 composite-load contract
-   * (kept for the bridge-path tests): the supplier handed to
-   * {@code singleFlight.load} returns a {@link VersionedValue}. Unstamped
-   * (probe withheld) so tests keep exercising the legacy version handling.
-   * Typed as {@code Optional<Object>} so the {@code any()} matcher's
-   * {@code T=Object} inference accepts it. New tests prefer {@link #oc}.
+   * Explicit-outcome stub carrier for the composite-load contract (design decisions: version stamps):
+   * the supplier handed to {@code singleFlight.loadOutcome} returns a
+   * {@link VersionedValue}. The stamp is a real (positive) pre-read stamp:
+   * production loads always allocate one, and an unknown stamp would be
+   * refused by any resident entry.
    */
-  @SuppressWarnings("all")
-  private static Optional<Object> vv(String value) {
-    return (Optional) Optional.of(new VersionedValue(value, 0L, false));
+  @SuppressWarnings("unchecked")
+  private static LoaderOutcome<Object> oc(String value) {
+    return LoaderOutcome.loaded(new VersionedValue(value, 50L));
   }
 
-  /**
-   * Explicit-outcome stub carrier for the ADR-0033 composite-load contract:
-   * the supplier handed to {@code singleFlight.loadOutcome} returns a
-   * {@link VersionedValue}. Unstamped (probe withheld) so tests keep
-   * exercising the legacy version handling.
-   */
-  @SuppressWarnings("all")
-  private static LoaderOutcome<Object> oc(String value) {
-    return LoaderOutcome.loaded(new VersionedValue(value, 0L, false));
+  /** Caller-affine read used by the annotation path: the loader keeps the caller's transaction. */
+  private static GetPolicy callerRuns() {
+    GetPolicy base = GetPolicy.of(0L, 0L, true, StalePolicy.SOFT_REFRESH);
+    return new GetPolicy(base.hardTtlMs(), base.softTtlMs(), base.stalePolicy(), base.report(), true);
+  }
+
+  @Test
+  @DisplayName("putAll stores every key with one contiguous version block")
+  void putAll_storesEveryKeyWithContiguousVersions() {
+    Map<String, Object> entries = new LinkedHashMap<>();
+    entries.put("a", "1");
+    entries.put("b", "2");
+
+    hotKeyCache.putAll(entries, 0L, 0L, false);
+
+    CacheEntry first = caffeineCache.getIfPresent("a");
+    CacheEntry second = caffeineCache.getIfPresent("b");
+    assertThat(first).isNotNull();
+    assertThat(second).isNotNull();
+    assertThat(first.getValue()).isEqualTo("1");
+    assertThat(second.getValue()).isEqualTo("2");
+    assertThat(second.getDataVersion()).isEqualTo(first.getDataVersion() + 1);
+  }
+
+  @Test
+  @DisplayName("putAll inside a transaction stores the batch only after commit")
+  void putAll_insideTransactionStoresAfterCommit() {
+    Map<String, Object> entries = Map.of("a", "1", "b", "2");
+
+    TransactionSynchronizationManager.initSynchronization();
+    try {
+      hotKeyCache.putAll(entries, 0L, 0L, false);
+      assertThat(caffeineCache.getIfPresent("a")).isNull();
+      assertThat(caffeineCache.getIfPresent("b")).isNull();
+
+      TransactionSynchronizationManager.getSynchronizations().forEach(TransactionSynchronization::afterCommit);
+
+      assertThat(caffeineCache.getIfPresent("a")).isNotNull();
+      assertThat(caffeineCache.getIfPresent("b")).isNotNull();
+    } finally {
+      TransactionSynchronizationManager.clear();
+    }
+  }
+
+  @Test
+  @DisplayName("a configured permanent hard TTL resolves to the sync-rejection sentinel")
+  void resolveSyncableHardTtl_mapsConfiguredPermanentToSentinel() {
+    ttlConfig.setHardTtlMs(0L);
+    assertThat(hotKeyCache.resolveSyncableHardTtl(0L)).isEqualTo(Long.MAX_VALUE);
+
+    ttlConfig.setHardTtlMs(300_000L);
+    assertThat(hotKeyCache.resolveSyncableHardTtl(0L)).isEqualTo(300_000L);
+    assertThat(hotKeyCache.resolveSyncableHardTtl(45_000L)).isEqualTo(45_000L);
+  }
+
+  @Test
+  @DisplayName("a caller-affine load inside a transaction is isolated and does not populate L1")
+  void loadInsideTransaction_isIsolatedAndDoesNotPopulateL1() {
+    when(singleFlight.loadIsolated(anyString(), any(), any())).thenAnswer(invocation -> {
+      Supplier<VersionedValue> reader = invocation.getArgument(1);
+      VersionedValue value = reader.get();
+      return value == null ? LoaderOutcome.sourceEmpty() : LoaderOutcome.loaded(value);
+    });
+
+    TransactionSynchronizationManager.initSynchronization();
+    try {
+      String value = hotKeyCache.get("tx-key", () -> "loaded", callerRuns());
+
+      assertThat(value).isEqualTo("loaded");
+      assertThat(caffeineCache.getIfPresent("tx-key"))
+        .as("a transaction may read its own uncommitted writes; the value must not be published")
+        .isNull();
+
+      TransactionSynchronizationManager.getSynchronizations().forEach(TransactionSynchronization::afterCommit);
+
+      assertThat(caffeineCache.getIfPresent("tx-key"))
+        .as("the isolated read registers no deferred store")
+        .isNull();
+    } finally {
+      TransactionSynchronizationManager.clear();
+    }
   }
 
   /**
@@ -167,35 +219,21 @@ class ZetaCacheTest {
   void peek_shouldReturnCachedValue() {
     caffeineCache.put(
       "key1",
-      CacheEntry.builder()
+      EntryDraft.blank(null)
         .value("stored")
-        .dataVersion(1)
-        .isVersionDegraded(false)
-        .decisionVersion(0)
-        .hardTtlMs(300_000)
-        .hardExpireAtMs(Long.MAX_VALUE)
-        .softTtlMs(30_000)
-        .softExpireAtMs(30_000)
+        .version(1)
+        .decision(DecisionStamp.hot(0, null, 0L))
+        .ttl(300_000, 30_000, 300_000, 30_000)
+        .expiryAt(Long.MAX_VALUE, 30_000)
         .keyState(KeyState.HOT)
-        .normalHardTtlMs(300_000)
-        .normalSoftTtlMs(30_000)
         .build()
     );
 
-    assertThat(hotKeyCache.peek("key1")).contains("stored");
+    assertThat((Object) hotKeyCache.peek("key1")).isEqualTo("stored");
   }
 
   /**
-   * Verifies that peek returns empty for null or blank keys.
-   */
-  @Test
-  void peek_shouldReturnEmptyForInvalidKey() {
-    assertThat(hotKeyCache.peek(null)).isEmpty();
-    assertThat(hotKeyCache.peek("")).isEmpty();
-  }
-
-  /**
-   * Decision-Validity demotion end-to-end (ADR-0035): a HOT entry stamped by a
+   * Decision-Validity demotion end-to-end (design decisions: hot state): a HOT entry stamped by a
    * dead Worker is served on the first read, and the entry is reverted in place
    * to NORMAL with the decision stamp cleared and normal TTLs — no reload, no
    * miss, no source dependency.
@@ -205,12 +243,9 @@ class ZetaCacheTest {
     when(healthView.isAlive("w1")).thenReturn(false);
     caffeineCache.put("key1", workerHotEntry("w1", 5L));
 
-    Optional<String> result = hotKeyCache.get(
-      "key1",
-      ReadPolicy.of(() -> "loaded", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH)
-    );
+    String result = hotKeyCache.get("key1", () -> "loaded", GetPolicy.of(0L, 0L, true, StalePolicy.SOFT_REFRESH));
 
-    assertThat(result).contains("stored");
+    assertThat(result).isEqualTo("stored");
     CacheEntry entry = (CacheEntry) caffeineCache.getIfPresent("key1");
     assertThat(entry.getKeyState()).isEqualTo(KeyState.NORMAL);
     assertThat(entry.getDecisionNodeId()).isNull();
@@ -221,21 +256,49 @@ class ZetaCacheTest {
   }
 
   /**
-   * Decision-Validity control (ADR-0035): a HOT entry stamped by a live Worker
+   * A soft-expired Worker-HOT entry under REVALIDATE must be demoted before the blocking reload
+   * writes: otherwise the reload preserves the dead Worker's HOT regime and lease.
+   */
+  @Test
+  void get_revalidateDemotesOrphanedWorkerHotEntryBeforeTheReload() {
+    when(healthView.isAlive("w1")).thenReturn(false);
+    when(singleFlight.load(anyString(), any(), anyBoolean(), any())).thenAnswer(invocation -> {
+      Supplier<VersionedValue> reader = invocation.getArgument(1);
+      @SuppressWarnings("unchecked")
+      Consumer<VersionedValue> commit = invocation.getArgument(3);
+      VersionedValue value = reader.get();
+      if (value != null) {
+        commit.accept(value);
+        return LoaderOutcome.loaded(value);
+      }
+      return LoaderOutcome.sourceEmpty();
+    });
+    caffeineCache.put("key1", softExpiredWorkerHotEntry("w1", 5L));
+
+    String result = hotKeyCache.get("key1", () -> "fresh", GetPolicy.of(0L, 0L, true, StalePolicy.REVALIDATE));
+
+    assertThat(result).isEqualTo("fresh");
+    CacheEntry entry = (CacheEntry) caffeineCache.getIfPresent("key1");
+    assertThat(entry.getKeyState()).isEqualTo(KeyState.NORMAL);
+    assertThat(entry.getDecisionNodeId()).isNull();
+    assertThat(entry.getDecisionVersion()).isZero();
+    assertThat(entry.getValue()).isEqualTo("fresh");
+  }
+
+  /**
+   * Decision-Validity control (design decisions: hot state): a HOT entry stamped by a live Worker
    * with a matching epoch is untouched by the read path.
    */
   @Test
   void get_shouldKeepLiveWorkerHotEntryUnchanged() {
     when(healthView.isAlive("w1")).thenReturn(true);
     when(healthView.epochOf("w1")).thenReturn(5L);
+    when(healthView.isCurrentIncarnation("w1", 5L)).thenReturn(true);
     caffeineCache.put("key1", workerHotEntry("w1", 5L));
 
-    Optional<String> result = hotKeyCache.get(
-      "key1",
-      ReadPolicy.of(() -> "loaded", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH)
-    );
+    String result = hotKeyCache.get("key1", () -> "loaded", GetPolicy.of(0L, 0L, true, StalePolicy.SOFT_REFRESH));
 
-    assertThat(result).contains("stored");
+    assertThat(result).isEqualTo("stored");
     CacheEntry entry = (CacheEntry) caffeineCache.getIfPresent("key1");
     assertThat(entry.getKeyState()).isEqualTo(KeyState.HOT);
     assertThat(entry.getDecisionNodeId()).isEqualTo("w1");
@@ -247,18 +310,13 @@ class ZetaCacheTest {
    * tests seed L1 with entries, never bare values).
    */
   private static CacheEntry plainEntry(Object value) {
-    return CacheEntry.builder()
+    return EntryDraft.blank(null)
       .value(value)
-      .dataVersion(0)
-      .isVersionDegraded(false)
-      .decisionVersion(0)
-      .hardTtlMs(300_000)
-      .hardExpireAtMs(Long.MAX_VALUE)
-      .softTtlMs(0L)
-      .softExpireAtMs(0L)
+      .version(0)
+      .decision(DecisionStamp.hot(0, null, 0L))
+      .ttl(300_000, 0L, 300_000, 0L)
+      .expiryAt(Long.MAX_VALUE, 0L)
       .keyState(KeyState.NORMAL)
-      .normalHardTtlMs(300_000)
-      .normalSoftTtlMs(0L)
       .build();
   }
 
@@ -269,41 +327,30 @@ class ZetaCacheTest {
    */
   private static CacheEntry staleHitEntry(Object value) {
     long now = System.currentTimeMillis();
-    return CacheEntry.builder()
+    return EntryDraft.blank(null)
       .value(value)
-      .dataVersion(0)
-      .isVersionDegraded(false)
-      .decisionVersion(0)
-      .hardTtlMs(300_000)
-      .hardExpireAtMs(now + 300_000)
-      .softTtlMs(30_000)
-      .softExpireAtMs(now - 1_000)
+      .version(0)
+      .decision(DecisionStamp.hot(0, null, 0L))
+      .ttl(300_000, 30_000, 300_000, 30_000)
+      .expiryAt(now + 300_000, now - 1_000)
       .keyState(KeyState.NORMAL)
-      .normalHardTtlMs(300_000)
-      .normalSoftTtlMs(30_000)
       .build();
   }
 
   /** Build a Worker-stamped HOT entry with a 1h HOT TTL and 60s/15s normal baseline. */
-  private static CacheEntry workerHotEntry(String nodeId, long epoch) {    return CacheEntry.builder()
+  private static CacheEntry workerHotEntry(String nodeId, long epoch) {
+    return EntryDraft.blank(null)
       .value("stored")
-      .dataVersion(1)
-      .isVersionDegraded(false)
-      .decisionVersion(42)
-      .decisionNodeId(nodeId)
-      .decisionEpoch(epoch)
-      .hardTtlMs(3_600_000)
-      .hardExpireAtMs(Long.MAX_VALUE)
-      .softTtlMs(300_000)
-      .softExpireAtMs(Long.MAX_VALUE)
+      .version(1)
+      .decision(DecisionStamp.hot(42, nodeId, epoch))
+      .ttl(3_600_000, 300_000, 60_000, 15_000)
+      .expiryAt(Long.MAX_VALUE, Long.MAX_VALUE)
       .keyState(KeyState.HOT)
-      .normalHardTtlMs(60_000)
-      .normalSoftTtlMs(15_000)
       .build();
   }
 
   /**
-   * Decision-Validity demotion on the atomic read-through path (ADR-0035):
+   * Decision-Validity demotion on the atomic read-through path (design decisions: hot state):
    * {@code computeIfAbsent} serves an orphaned Worker-HOT entry and reverts it
    * in place to NORMAL — the compute-in-lock hit branch must not leave the
    * orphaned stamp behind.
@@ -313,12 +360,9 @@ class ZetaCacheTest {
     when(healthView.isAlive("w1")).thenReturn(false);
     caffeineCache.put("key1", workerHotEntry("w1", 5L));
 
-    Optional<String> result = hotKeyCache.computeIfAbsent(
-      "key1",
-      ReadPolicy.of(() -> "loaded", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH)
-    );
+    String result = hotKeyCache.get("key1", () -> "loaded", GetPolicy.of(0L, 0L, true, StalePolicy.SOFT_REFRESH));
 
-    assertThat(result).contains("stored");
+    assertThat(result).isEqualTo("stored");
     CacheEntry entry = (CacheEntry) caffeineCache.getIfPresent("key1");
     assertThat(entry.getKeyState()).isEqualTo(KeyState.NORMAL);
     assertThat(entry.getDecisionNodeId()).isNull();
@@ -334,14 +378,12 @@ class ZetaCacheTest {
   void computeIfAbsent_shouldKeepLiveWorkerHotEntryUnchanged() {
     when(healthView.isAlive("w1")).thenReturn(true);
     when(healthView.epochOf("w1")).thenReturn(5L);
+    when(healthView.isCurrentIncarnation("w1", 5L)).thenReturn(true);
     caffeineCache.put("key1", workerHotEntry("w1", 5L));
 
-    Optional<String> result = hotKeyCache.computeIfAbsent(
-      "key1",
-      ReadPolicy.of(() -> "loaded", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH)
-    );
+    String result = hotKeyCache.get("key1", () -> "loaded", GetPolicy.of(0L, 0L, true, StalePolicy.SOFT_REFRESH));
 
-    assertThat(result).contains("stored");
+    assertThat(result).isEqualTo("stored");
     CacheEntry entry = (CacheEntry) caffeineCache.getIfPresent("key1");
     assertThat(entry.getKeyState()).isEqualTo(KeyState.HOT);
     assertThat(entry.getDecisionNodeId()).isEqualTo("w1");
@@ -354,18 +396,13 @@ class ZetaCacheTest {
   void isHotKey_shouldReturnTrueForHotEntry() {
     caffeineCache.put(
       "hotKey",
-      CacheEntry.builder()
+      EntryDraft.blank(null)
         .value("v")
-        .dataVersion(0)
-        .isVersionDegraded(false)
-        .decisionVersion(0)
-        .hardTtlMs(3_600_000)
-        .hardExpireAtMs(Long.MAX_VALUE)
-        .softTtlMs(300_000)
-        .softExpireAtMs(System.currentTimeMillis() + 300_000)
+        .version(0)
+        .decision(DecisionStamp.hot(0, null, 0L))
+        .ttl(3_600_000, 300_000, 300_000, 30_000)
+        .expiryAt(Long.MAX_VALUE, System.currentTimeMillis() + 300_000)
         .keyState(KeyState.HOT)
-        .normalHardTtlMs(300_000)
-        .normalSoftTtlMs(30_000)
         .build()
     );
 
@@ -379,18 +416,13 @@ class ZetaCacheTest {
   void isHot_shouldReturnFalseForNormalEntry() {
     caffeineCache.put(
       "normalKey",
-      CacheEntry.builder()
+      EntryDraft.blank(null)
         .value("v")
-        .dataVersion(0)
-        .isVersionDegraded(false)
-        .decisionVersion(0)
-        .hardTtlMs(300_000)
-        .hardExpireAtMs(Long.MAX_VALUE)
-        .softTtlMs(30_000)
-        .softExpireAtMs(System.currentTimeMillis() + 30_000)
+        .version(0)
+        .decision(DecisionStamp.hot(0, null, 0L))
+        .ttl(300_000, 30_000, 300_000, 30_000)
+        .expiryAt(Long.MAX_VALUE, System.currentTimeMillis() + 30_000)
         .keyState(KeyState.NORMAL)
-        .normalHardTtlMs(300_000)
-        .normalSoftTtlMs(30_000)
         .build()
     );
 
@@ -401,16 +433,8 @@ class ZetaCacheTest {
    * Verifies that isHot returns false for a key not present in the cache.
    */
   @Test
-  void isZeta_shouldReturnFalseForMissing() {
+  void isHot_shouldReturnFalseForMissing() {
     assertThat(hotKeyCache.isHot("missing")).isFalse();
-  }
-
-  /**
-   * Verifies that isHot returns false for null keys.
-   */
-  @Test
-  void isZeta_shouldReturnFalseForInvalid() {
-    assertThat(hotKeyCache.isHot(null)).isFalse();
   }
 
   /**
@@ -420,8 +444,8 @@ class ZetaCacheTest {
   void get_shouldReturnCachedValueOnHit() {
     caffeineCache.put("key1", plainEntry("rawValue"));
     assertThat(
-      hotKeyCache.get("key1", ReadPolicy.of(() -> "loaded", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH))
-    ).contains("rawValue");
+      (Object) hotKeyCache.get("key1", () -> "loaded", GetPolicy.of(0L, 0L, true, StalePolicy.SOFT_REFRESH))
+    ).isEqualTo("rawValue");
   }
 
   /**
@@ -429,18 +453,15 @@ class ZetaCacheTest {
    */
   @Test
   void get_shouldLoadAndCacheOnMiss() {
-    when(singleFlight.loadOutcome(anyString(), any())).thenReturn(oc("loadedValue"));
+    SingleFlightStubs.stubLoad(singleFlight, oc("loadedValue"));
 
-    Optional<String> result = hotKeyCache.get(
-      "key1",
-      ReadPolicy.of(() -> "loadedValue", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH)
-    );
-    assertThat(result).contains("loadedValue");
+    String result = hotKeyCache.get("key1", () -> "loadedValue", GetPolicy.of(0L, 0L, true, StalePolicy.SOFT_REFRESH));
+    assertThat(result).isEqualTo("loadedValue");
     assertThat(caffeineCache.getIfPresent("key1")).isNotNull();
   }
 
   /**
-   * Lazy TTL contract (ADR-0030 / {@link ReadPolicy}): a plain NORMAL-entry
+   * Lazy TTL contract (design decisions: version stamps / {@link GetPolicy}): a plain NORMAL-entry
    * hit must never evaluate the TTL suppliers. The previous eager resolution
    * at the {@code get} entry ran the (possibly SpEL-backed) suppliers on every
    * hit; the read path now resolves them only when an entry is created,
@@ -452,66 +473,47 @@ class ZetaCacheTest {
     AtomicInteger softEvals = new AtomicInteger();
     caffeineCache.put(
       "key1",
-      CacheEntry.builder()
+      EntryDraft.blank(null)
         .value("stored")
-        .dataVersion(1)
-        .isVersionDegraded(false)
-        .decisionVersion(0)
-        .hardTtlMs(300_000)
-        .hardExpireAtMs(Long.MAX_VALUE)
-        .softTtlMs(30_000)
-        .softExpireAtMs(Long.MAX_VALUE)
+        .version(1)
+        .decision(DecisionStamp.hot(0, null, 0L))
+        .ttl(300_000, 30_000, 300_000, 30_000)
+        .expiryAt(Long.MAX_VALUE, Long.MAX_VALUE)
         .keyState(KeyState.NORMAL)
-        .normalHardTtlMs(300_000)
-        .normalSoftTtlMs(30_000)
         .build()
     );
     when(hotKeyDetector.contains("key1")).thenReturn(false);
 
-    Optional<String> result = hotKeyCache.get(
+    String result = hotKeyCache.get(
       "key1",
-      new ReadPolicy(
-        hardEvals::incrementAndGet,
-        softEvals::incrementAndGet,
-        true,
-        StalePolicy.SOFT_REFRESH,
-        () -> "loaded",
-        true,
-        false
-      )
+      () -> "loaded",
+      new GetPolicy(hardEvals::incrementAndGet, softEvals::incrementAndGet, StalePolicy.SOFT_REFRESH, true, false)
     );
 
-    assertThat(result).contains("stored");
+    assertThat(result).isEqualTo("stored");
     assertThat(hardEvals.get()).isZero();
     assertThat(softEvals.get()).isZero();
   }
 
   /**
-   * At-most-once TTL evaluation on the load path (the {@link ReadPolicy}
+   * At-most-once TTL evaluation on the load path (the {@link GetPolicy}
    * contract): a miss that builds an entry consumes both overrides exactly
    * once, even though the effective and hot-TTL resolutions derive from the
    * same raw override.
    */
   @Test
   void get_shouldEvaluateTtlSuppliersAtMostOnceOnMiss() {
-    when(singleFlight.loadOutcome(anyString(), any())).thenReturn(oc("loadedValue"));
+    SingleFlightStubs.stubLoad(singleFlight, oc("loadedValue"));
     AtomicInteger hardEvals = new AtomicInteger();
     AtomicInteger softEvals = new AtomicInteger();
 
-    Optional<String> result = hotKeyCache.get(
+    String result = hotKeyCache.get(
       "key1",
-      new ReadPolicy(
-        hardEvals::incrementAndGet,
-        softEvals::incrementAndGet,
-        true,
-        StalePolicy.SOFT_REFRESH,
-        () -> "loadedValue",
-        true,
-        false
-      )
+      () -> "loadedValue",
+      new GetPolicy(hardEvals::incrementAndGet, softEvals::incrementAndGet, StalePolicy.SOFT_REFRESH, true, false)
     );
 
-    assertThat(result).contains("loadedValue");
+    assertThat(result).isEqualTo("loadedValue");
     assertThat(hardEvals.get()).isEqualTo(1);
     assertThat(softEvals.get()).isEqualTo(1);
   }
@@ -530,50 +532,27 @@ class ZetaCacheTest {
     when(healthView.isClusterHealthy()).thenReturn(false);
     caffeineCache.put(
       "key1",
-      CacheEntry.builder()
+      EntryDraft.blank(null)
         .value("stale")
-        .dataVersion(1)
-        .isVersionDegraded(false)
-        .decisionVersion(5)
-        .hardTtlMs(300_000)
-        .hardExpireAtMs(Long.MAX_VALUE)
-        .softTtlMs(30_000)
-        .softExpireAtMs(System.currentTimeMillis() - 1000)
+        .version(1)
+        .decision(DecisionStamp.hot(5, null, 0L))
+        .ttl(300_000, 30_000, 300_000, 30_000)
+        .expiryAt(Long.MAX_VALUE, System.currentTimeMillis() - 1000)
         .keyState(KeyState.COOL)
-        .normalHardTtlMs(300_000)
-        .normalSoftTtlMs(30_000)
         .build()
     );
     AtomicInteger hardEvals = new AtomicInteger();
     AtomicInteger softEvals = new AtomicInteger();
 
-    Optional<String> result = hotKeyCache.getWithSoftExpire(
+    String result = hotKeyCache.get(
       "key1",
-      new ReadPolicy(
-        hardEvals::incrementAndGet,
-        softEvals::incrementAndGet,
-        true,
-        StalePolicy.SOFT_REFRESH,
-        () -> "fresh",
-        true,
-        false
-      )
+      () -> "fresh",
+      new GetPolicy(hardEvals::incrementAndGet, softEvals::incrementAndGet, StalePolicy.SOFT_REFRESH, true, false)
     );
 
-    assertThat(result).contains("stale");
+    assertThat(result).isEqualTo("stale");
     assertThat(hardEvals.get()).isEqualTo(1);
     assertThat(softEvals.get()).isEqualTo(1);
-  }
-
-  /**
-   * Verifies that get returns empty for null or blank keys without loading.
-   */
-  @Test
-  void get_shouldReturnEmptyForInvalidKey() {
-    assertThat(
-      hotKeyCache.get(null, ReadPolicy.of(() -> "v", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH))
-    ).isEmpty();
-    assertThat(hotKeyCache.get("", ReadPolicy.of(() -> "v", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH))).isEmpty();
   }
 
   /**
@@ -582,17 +561,8 @@ class ZetaCacheTest {
   @Test
   void invalidate_All_shouldRemoveEntry() {
     caffeineCache.put("key1", plainEntry("value"));
-    hotKeyCache.invalidate("key1", true);
+    hotKeyCache.invalidate("key1", new InvalidatePolicy(InvalidatePolicy.Scope.BOTH, false));
     assertThat(caffeineCache.getIfPresent("key1")).isNull();
-  }
-
-  /**
-   * Verifies that invalidate handles null and blank keys without throwing.
-   */
-  @Test
-  void invalidate_All_shouldHandleInvalidKey() {
-    hotKeyCache.invalidate((String) null, true);
-    hotKeyCache.invalidate("", true);
   }
 
   /**
@@ -602,75 +572,32 @@ class ZetaCacheTest {
   void invalidate_All_shouldRemoveEntries() {
     caffeineCache.put("k1", plainEntry("v1"));
     caffeineCache.put("k2", plainEntry("v2"));
-    hotKeyCache.invalidate(List.of("k1", "k2"), true);
+    hotKeyCache.invalidate(List.of("k1", "k2"), new InvalidatePolicy(InvalidatePolicy.Scope.BOTH, false));
     assertThat(caffeineCache.getIfPresent("k1")).isNull();
     assertThat(caffeineCache.getIfPresent("k2")).isNull();
   }
 
-  /**
-   * Verifies that invalidateAllLocal skips null and blank keys in the input list.
-   */
   @Test
-  void invalidate_All_shouldSkipInvalidKeys() {
-    caffeineCache.put("k1", plainEntry("v1"));
-    hotKeyCache.invalidate(Arrays.asList("k1", null, ""), true);
-    assertThat(caffeineCache.getIfPresent("k1")).isNull();
-  }
+  void execute_shouldPropagateReaderFailureWithoutWritingAnEntry() {
+    SingleFlightStubs.stubLoad(singleFlight, LoaderOutcome.failed(new IllegalStateException("boom")));
 
-  /**
-   * Verifies that get throws ZetaBlockedException for a blacklisted key.
-   */
-  @Test
-  void get_shouldThrowZeta() {
-    ruleService.addBlacklist("secret");
     assertThatThrownBy(() ->
-      hotKeyCache.get("secret", ReadPolicy.of(() -> "db", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH))
-    ).isInstanceOf(ZetaBlockedException.class);
-  }
-
-  /**
-   * Verifies that getWithSoftExpire throws ZetaBlockedException for a blacklisted key.
-   */
-  @Test
-  void getWithSoftExpire_shouldThrowZeta() {
-    ruleService.addBlacklist("secret");
-    assertThatThrownBy(() ->
-      hotKeyCache.getWithSoftExpire("secret", ReadPolicy.of(() -> "db", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH))
-    ).isInstanceOf(ZetaBlockedException.class);
-  }
-
-  @Test
-  void execute_shouldRouteSwallowedExceptionToConfiguredHandler() {
-    when(singleFlight.loadOutcome(anyString(), any())).thenReturn(LoaderOutcome.failed(new IllegalStateException("boom")));
-    AtomicInteger calls = new AtomicInteger();
-    ZetaExceptionHandler.setDefaultExceptionHandler(t -> calls.incrementAndGet());
-    try {
-      assertThat(
-        hotKeyCache.get("key1", ReadPolicy.of(() -> "loaded", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH))
-      ).isEmpty();
-      assertThat(calls.get()).isEqualTo(1);
-    } finally {
-      ZetaExceptionHandler.setDefaultExceptionHandler(null);
-    }
-  }
-
-  // ── failOnError: distinguishing a failing data source from a missing key ──
-
-  @Test
-  void get_withFailOnError_shouldPropagateReaderFailure() {
-    when(singleFlight.loadOutcome(anyString(), any())).thenReturn(LoaderOutcome.failed(new IllegalStateException("boom")));
-
-    assertThatThrownBy(() -> hotKeyCache.get("key1", ReadPolicy.of(() -> "loaded").withFailOnError()))
+      hotKeyCache.get("key1", () -> "loaded", GetPolicy.of(0L, 0L, true, StalePolicy.SOFT_REFRESH))
+    )
       .isInstanceOf(IllegalStateException.class)
       .hasMessage("boom");
     assertThat(caffeineCache.getIfPresent("key1")).isNull();
   }
 
-  @Test
-  void get_default_shouldSwallowReaderFailureAsMiss() {
-    when(singleFlight.loadOutcome(anyString(), any())).thenReturn(LoaderOutcome.failed(new IllegalStateException("boom")));
+  // ── A failing source is never a miss: the cause reaches the caller ──
 
-    assertThat(hotKeyCache.get("key1", ReadPolicy.of(() -> "loaded"))).isEmpty();
+  @Test
+  void get_readerFailure_shouldPropagate() {
+    SingleFlightStubs.stubLoad(singleFlight, LoaderOutcome.failed(new IllegalStateException("boom")));
+
+    assertThatThrownBy(() -> hotKeyCache.get("key1", () -> "loaded", GetPolicy.defaults()))
+      .isInstanceOf(IllegalStateException.class)
+      .hasMessage("boom");
     assertThat(caffeineCache.getIfPresent("key1")).isNull();
   }
 
@@ -685,30 +612,31 @@ class ZetaCacheTest {
    * miss — the next read retries.
    */
   @Test
-  void get_suppressedLoad_shouldNotWriteNullSentinel() {
-    when(singleFlight.loadOutcome(anyString(), any()))
-      .thenReturn(LoaderOutcome.suppressed(LoadStatus.SUPPRESSED_TIMEOUT));
+  void get_suppressedLoad_shouldThrowAndNotWriteNullSentinel() {
+    SingleFlightStubs.stubLoad(singleFlight, LoaderOutcome.suppressed(LoadStatus.SUPPRESSED_TIMEOUT));
     when(singleFlight.isBreakerOpen(anyString())).thenReturn(false);
 
-    assertThat(hotKeyCache.get("key1", ReadPolicy.of(() -> "loaded"))).isEmpty();
-    assertThat(caffeineCache.getIfPresent("key1"))
-      .as("a suppressed load must not pin a negative sentinel")
-      .isNull();
+    assertThatThrownBy(() -> hotKeyCache.get("key1", () -> "loaded", GetPolicy.defaults())).isInstanceOf(
+      io.github.hyshmily.zeta.exception.ZetaSuppressedException.class
+    );
+    assertThat(caffeineCache.getIfPresent("key1")).as("a suppressed load must not pin a negative sentinel").isNull();
   }
 
-  /** Every suppression reason takes the same no-sentinel path. */
+  /** Every suppression reason with a closed breaker surfaces instead of masquerading as a miss. */
   @Test
-  void get_allSuppressionReasons_shouldNotWriteNullSentinel() {
+  void get_allSuppressionReasons_shouldThrowAndNotWriteNullSentinel() {
     for (LoadStatus status : List.of(
       LoadStatus.SUPPRESSED_BREAKER,
       LoadStatus.SUPPRESSED_TIMEOUT,
       LoadStatus.SUPPRESSED_EXECUTOR
     )) {
       caffeineCache.invalidateAll();
-      when(singleFlight.loadOutcome(anyString(), any())).thenReturn(LoaderOutcome.suppressed(status));
+      SingleFlightStubs.stubLoad(singleFlight, LoaderOutcome.suppressed(status));
       when(singleFlight.isBreakerOpen(anyString())).thenReturn(false);
 
-      assertThat(hotKeyCache.get("key1", ReadPolicy.of(() -> "loaded"))).isEmpty();
+      assertThatThrownBy(() -> hotKeyCache.get("key1", () -> "loaded", GetPolicy.defaults()))
+        .as("status %s", status)
+        .isInstanceOf(io.github.hyshmily.zeta.exception.ZetaSuppressedException.class);
       assertThat(caffeineCache.getIfPresent("key1")).as("status %s must not write a sentinel", status).isNull();
     }
   }
@@ -721,73 +649,60 @@ class ZetaCacheTest {
   @Test
   void get_suppressedLoad_withBreakerOpenAndStaleEntry_shouldServeStaleNotSentinel() {
     caffeineCache.put("key1", staleHitEntry("stale"));
-    when(singleFlight.loadOutcome(anyString(), any()))
-      .thenReturn(LoaderOutcome.suppressed(LoadStatus.SUPPRESSED_BREAKER));
+    SingleFlightStubs.stubLoad(singleFlight, LoaderOutcome.suppressed(LoadStatus.SUPPRESSED_BREAKER));
     when(singleFlight.isBreakerOpen(anyString())).thenReturn(true);
 
-    assertThat(hotKeyCache.get("key1", ReadPolicy.of(() -> "loaded", 0L, 0L, true, true, StalePolicy.RETURN)))
-      .contains("stale");
+    assertThat(
+      (Object) hotKeyCache.get("key1", () -> "loaded", GetPolicy.of(0L, 0L, true, StalePolicy.RETURN))
+    ).isEqualTo("stale");
     assertThat(((CacheEntry) caffeineCache.getIfPresent("key1")).getValue())
       .as("the surviving entry must remain the stale value, not a NullValue sentinel")
       .isEqualTo("stale");
   }
 
   /**
-   * The contrast case: the source really answered "absent", so the sentinel
-   * IS correct — penetration protection depends on it.
+   * The contrast case: the source really answered "absent" — under the v2
+   * null contract nothing is written (no sentinel exists), so the miss is a
+   * bare miss and the next read retries the source.
    */
   @Test
-  void get_sourceEmpty_shouldStillWriteNullSentinel() {
-    when(singleFlight.loadOutcome(anyString(), any())).thenReturn(LoaderOutcome.sourceEmpty());
+  void get_sourceEmpty_shouldLeaveNoEntry() {
+    SingleFlightStubs.stubLoad(singleFlight, LoaderOutcome.sourceEmpty());
 
-    assertThat(hotKeyCache.get("key1", ReadPolicy.of(() -> null))).isEmpty();
-    assertThat(((CacheEntry) caffeineCache.getIfPresent("key1")).getValue()).isEqualTo(NullValue.INSTANCE);
+    assertThat((Object) hotKeyCache.get("key1", () -> null, GetPolicy.defaults())).isNull();
+    assertThat(caffeineCache.getIfPresent("key1")).isNull();
   }
 
   @Test
-  void get_withFailOnError_nullResult_shouldStillCacheNullValue() {
-    when(singleFlight.loadOutcome(anyString(), any())).thenReturn(LoaderOutcome.sourceEmpty());
+  void get_emptySource_shouldLeaveNoEntry() {
+    SingleFlightStubs.stubLoad(singleFlight, LoaderOutcome.sourceEmpty());
 
-    assertThat(hotKeyCache.get("key1", ReadPolicy.of(() -> null).withFailOnError())).isEmpty();
-    Object raw = caffeineCache.getIfPresent("key1");
-    assertThat(raw).isNotNull();
-    assertThat(raw).isInstanceOf(CacheEntry.class);
-    assertThat(((CacheEntry) raw).getValue()).isEqualTo(NullValue.INSTANCE);
+    assertThat((Object) hotKeyCache.get("key1", () -> null, GetPolicy.defaults())).isNull();
+    assertThat(caffeineCache.getIfPresent("key1")).isNull();
   }
 
   @Test
-  void computeIfAbsent_withFailOnError_shouldPropagateAndPreserveExistingEntry() {
+  void computeIfAbsent_readerFailure_shouldPropagateAndPreserveExistingEntry() {
     caffeineCache.put(
       "key1",
-      CacheEntry.builder()
+      EntryDraft.blank(null)
         .value("old")
-        .dataVersion(1)
-        .isVersionDegraded(false)
-        .decisionVersion(0)
-        .hardTtlMs(300_000)
-        .hardExpireAtMs(System.currentTimeMillis() + 300_000)
-        .softTtlMs(30_000)
-        .softExpireAtMs(System.currentTimeMillis() - 1000)
+        .version(1)
+        .decision(DecisionStamp.hot(0, null, 0L))
+        .ttl(300_000, 30_000, 300_000, 30_000)
+        .expiryAt(System.currentTimeMillis() + 300_000, System.currentTimeMillis() - 1000)
         .keyState(KeyState.NORMAL)
-        .normalHardTtlMs(300_000)
-        .normalSoftTtlMs(30_000)
         .build()
     );
-    when(singleFlight.loadOutcome(anyString(), any())).thenReturn(LoaderOutcome.failed(new IllegalStateException("boom")));
+    SingleFlightStubs.stubLoad(singleFlight, LoaderOutcome.failed(new IllegalStateException("boom")));
 
     assertThatThrownBy(() ->
-      hotKeyCache.computeIfAbsent(
+      hotKeyCache.get(
         "key1",
-        ReadPolicy.of(
-          () -> {
-            throw new IllegalStateException("boom");
-          },
-          0L,
-          0L,
-          true,
-          true,
-          StalePolicy.REVALIDATE
-        ).withFailOnError()
+        () -> {
+          throw new IllegalStateException("boom");
+        },
+        GetPolicy.of(0L, 0L, true, StalePolicy.REVALIDATE)
       )
     )
       .isInstanceOf(IllegalStateException.class)
@@ -797,9 +712,9 @@ class ZetaCacheTest {
 
   @Test
   void computeIfAbsent_miss_shouldLoadViaSingleFlightAndCacheNormalEntry() {
-    when(singleFlight.loadOutcome(eq("key1"), any())).thenReturn(oc("fresh"));
+    SingleFlightStubs.stubLoad(singleFlight, oc("fresh"));
 
-    assertThat(hotKeyCache.computeIfAbsent("key1", ReadPolicy.of(() -> "fresh"))).contains("fresh");
+    assertThat((Object) hotKeyCache.get("key1", () -> "fresh", GetPolicy.defaults())).isEqualTo("fresh");
 
     Object raw = caffeineCache.getIfPresent("key1");
     assertThat(raw).isInstanceOf(CacheEntry.class);
@@ -807,50 +722,46 @@ class ZetaCacheTest {
     assertThat(((CacheEntry) raw).getKeyState()).isEqualTo(KeyState.NORMAL);
   }
 
+  /**
+   * A genuinely absent reader ({@code null} supplier) resolves a miss to the
+   * documented null answer without entering SingleFlight and without writing an
+   * entry — the pre-load guard that keeps an NPE out of the read path.
+   */
   @Test
-  void computeIfAbsent_nullReader_shouldCacheNullSentinelAndReturnEmpty() {
-    when(singleFlight.loadOutcome(anyString(), any())).thenReturn(LoaderOutcome.sourceEmpty());
-
-    assertThat(hotKeyCache.computeIfAbsent("key1", ReadPolicy.of(() -> null))).isEmpty();
-
-    Object raw = caffeineCache.getIfPresent("key1");
-    assertThat(raw).isInstanceOf(CacheEntry.class);
-    assertThat(((CacheEntry) raw).getValue()).isEqualTo(NullValue.INSTANCE);
+  void get_nullReaderOnMiss_shouldLeaveNoEntryAndReturnNull() {
+    assertThat((Object) hotKeyCache.get("key1", (Supplier<String>) null, GetPolicy.defaults())).isNull();
+    assertThat(caffeineCache.getIfPresent("key1")).isNull();
+    verify(singleFlight, never()).load(anyString(), any(), anyBoolean(), any());
   }
 
   @Test
-  void computeIfAbsent_nullReader_noNullCaching_shouldLeaveNoEntry() {
-    when(singleFlight.loadOutcome(anyString(), any())).thenReturn(LoaderOutcome.sourceEmpty());
+  void get_nullAnswer_noNullCaching_shouldLeaveNoEntry() {
+    SingleFlightStubs.stubLoad(singleFlight, LoaderOutcome.sourceEmpty());
 
     assertThat(
-      hotKeyCache.computeIfAbsent("key1", ReadPolicy.of(() -> null, 0L, 0L, false, true, StalePolicy.SOFT_REFRESH))
-    ).isEmpty();
+      (Object) hotKeyCache.get("key1", () -> null, GetPolicy.of(0L, 0L, true, StalePolicy.SOFT_REFRESH))
+    ).isNull();
     assertThat(caffeineCache.getIfPresent("key1")).isNull();
   }
 
   @Test
-  void computeIfAbsent_revalidate_readerFailure_shouldKeepEntryAndReturnEmpty() {
+  void computeIfAbsent_revalidate_readerFailure_shouldKeepEntryAndPropagate() {
     caffeineCache.put(
       "key1",
-      CacheEntry.builder()
+      EntryDraft.blank(null)
         .value("stale")
-        .dataVersion(1)
-        .isVersionDegraded(false)
-        .decisionVersion(0)
-        .hardTtlMs(300_000)
-        .hardExpireAtMs(System.currentTimeMillis() + 300_000)
-        .softTtlMs(30_000)
-        .softExpireAtMs(System.currentTimeMillis() - 1000)
+        .version(1)
+        .decision(DecisionStamp.hot(0, null, 0L))
+        .ttl(300_000, 30_000, 300_000, 30_000)
+        .expiryAt(System.currentTimeMillis() + 300_000, System.currentTimeMillis() - 1000)
         .keyState(KeyState.NORMAL)
-        .normalHardTtlMs(300_000)
-        .normalSoftTtlMs(30_000)
         .build()
     );
-    when(singleFlight.loadOutcome(anyString(), any())).thenReturn(LoaderOutcome.failed(new IllegalStateException("boom")));
+    SingleFlightStubs.stubLoad(singleFlight, LoaderOutcome.failed(new IllegalStateException("boom")));
 
-    assertThat(
-      hotKeyCache.computeIfAbsent("key1", ReadPolicy.of(() -> "fresh", 0L, 0L, true, true, StalePolicy.REVALIDATE))
-    ).isEmpty();
+    assertThatThrownBy(() -> hotKeyCache.get("key1", () -> "fresh", GetPolicy.of(0L, 0L, true, StalePolicy.REVALIDATE)))
+      .isInstanceOf(IllegalStateException.class)
+      .hasMessage("boom");
 
     // The soft-expired entry is kept in L1: it powers the circuit-breaker
     // fallback and lets the next call retry after the failed load.
@@ -863,141 +774,130 @@ class ZetaCacheTest {
   void computeIfAbsent_revalidate_circuitBreakerOpen_shouldServeStaleEntry() {
     caffeineCache.put(
       "key1",
-      CacheEntry.builder()
+      EntryDraft.blank(null)
         .value("stale")
-        .dataVersion(1)
-        .isVersionDegraded(false)
-        .decisionVersion(0)
-        .hardTtlMs(300_000)
-        .hardExpireAtMs(System.currentTimeMillis() + 300_000)
-        .softTtlMs(30_000)
-        .softExpireAtMs(System.currentTimeMillis() - 1000)
+        .version(1)
+        .decision(DecisionStamp.hot(0, null, 0L))
+        .ttl(300_000, 30_000, 300_000, 30_000)
+        .expiryAt(System.currentTimeMillis() + 300_000, System.currentTimeMillis() - 1000)
         .keyState(KeyState.NORMAL)
-        .normalHardTtlMs(300_000)
-        .normalSoftTtlMs(30_000)
         .build()
     );
     when(singleFlight.isBreakerOpen(anyString())).thenReturn(true);
-    when(singleFlight.loadOutcome(anyString(), any())).thenReturn(LoaderOutcome.sourceEmpty());
+    SingleFlightStubs.stubLoad(singleFlight, LoaderOutcome.sourceEmpty());
 
     assertThat(
-      hotKeyCache.computeIfAbsent("key1", ReadPolicy.of(() -> "fresh", 0L, 0L, true, true, StalePolicy.REVALIDATE))
-    ).contains("stale");
+      (Object) hotKeyCache.get("key1", () -> "fresh", GetPolicy.of(0L, 0L, true, StalePolicy.REVALIDATE))
+    ).isEqualTo("stale");
   }
 
   /**
-   * Regression (issue 25): when a soft-expired REVALIDATE entry crosses its hard TTL while
-   * the load is in flight (source failing), the CB-open stale fallback must refuse to serve
-   * it — the hard TTL contract is not bypassed. The kept entry must also NOT be overwritten
-   * with a fabricated NullValue sentinel (the source never answered null).
+   * A soft-expired REVALIDATE entry that crosses its hard TTL while the load is in flight
+   * (source failing) is never served by the CB-open stale fallback — the hard TTL contract
+   * is not bypassed. The kept entry is also not overwritten with a fabricated NullValue
+   * sentinel (the source never answered null).
+   *
+   * <p>The refused entry is evicted on the spot — and its dedup slot forgotten with it
+   * (design decisions: dedup lifecycle) — instead of lingering until the next read of that key.
+   * The stale fallback is the one path that inspects the entry with no reader behind it, so
+   * it is also the natural cleanup point; leaving it resident let a retained completed future
+   * replay the expired value onto the next miss and re-cache it under fresh TTLs.
    */
   @Test
   void computeIfAbsent_revalidate_circuitBreakerOpen_hardExpiredDuringLoad_shouldReturnEmpty() throws Exception {
     caffeineCache.put(
       "key1",
-      CacheEntry.builder()
+      EntryDraft.blank(null)
         .value("old")
-        .dataVersion(1)
-        .isVersionDegraded(false)
-        .decisionVersion(0)
-        .hardTtlMs(300_000)
-        .hardExpireAtMs(System.currentTimeMillis() + 300)
-        .softTtlMs(30_000)
-        .softExpireAtMs(System.currentTimeMillis() - 1000)
+        .version(1)
+        .decision(DecisionStamp.hot(0, null, 0L))
+        .ttl(300_000, 30_000, 300_000, 30_000)
+        .expiryAt(System.currentTimeMillis() + 300, System.currentTimeMillis() - 1000)
         .keyState(KeyState.NORMAL)
-        .normalHardTtlMs(300_000)
-        .normalSoftTtlMs(30_000)
         .build()
     );
     CountDownLatch releaseLoad = new CountDownLatch(1);
     when(singleFlight.isBreakerOpen(anyString())).thenReturn(true);
-    when(singleFlight.loadOutcome(anyString(), any())).thenAnswer(inv -> {
+    when(singleFlight.load(anyString(), any(), anyBoolean(), any())).thenAnswer(inv -> {
       releaseLoad.await();
       return LoaderOutcome.sourceEmpty();
     });
 
-    CompletableFuture<Optional<String>> future = CompletableFuture.supplyAsync(() ->
-      hotKeyCache.computeIfAbsent("key1", ReadPolicy.of(() -> "fresh", 0L, 0L, true, true, StalePolicy.REVALIDATE))
+    CompletableFuture<String> future = CompletableFuture.supplyAsync(() ->
+      hotKeyCache.get("key1", () -> "fresh", GetPolicy.of(0L, 0L, true, StalePolicy.REVALIDATE))
     );
 
     Thread.sleep(500); // let the kept entry cross its hard expiry while the load is blocked
     releaseLoad.countDown();
-    Optional<String> result = future.get(5, TimeUnit.SECONDS);
+    String result = future.get(5, TimeUnit.SECONDS);
 
-    assertThat(result).isEmpty();
-    Object raw = caffeineCache.getIfPresent("key1");
-    assertThat(raw).isInstanceOf(CacheEntry.class);
-    assertThat(((CacheEntry) raw).getValue()).isEqualTo("old");
+    assertThat(result).isNull();
+    assertThat(caffeineCache.getIfPresent("key1"))
+      .as("the hard-expired entry is evicted — neither served nor sentinelized, nor left to linger")
+      .isNull();
   }
 
   /**
-   * Regression (issue 25): same as the sibling test, but for the load-throws path
-   * (computeInLock catch block) — a kept entry that crosses its hard TTL during a
-   * failing load must not be served as stale either.
+   * The same hard-TTL property on the load-throws path (computeInLock catch block):
+   * a kept entry that crosses its hard TTL during a failing load is not served as
+   * stale either, and the refused entry is evicted on the spot (see the sibling test
+   * for the rationale).
    */
   @Test
   void computeIfAbsent_revalidate_circuitBreakerOpen_hardExpiredDuringThrowingLoad_shouldReturnEmpty()
     throws Exception {
     caffeineCache.put(
       "key1",
-      CacheEntry.builder()
+      EntryDraft.blank(null)
         .value("old")
-        .dataVersion(1)
-        .isVersionDegraded(false)
-        .decisionVersion(0)
-        .hardTtlMs(300_000)
-        .hardExpireAtMs(System.currentTimeMillis() + 300)
-        .softTtlMs(30_000)
-        .softExpireAtMs(System.currentTimeMillis() - 1000)
+        .version(1)
+        .decision(DecisionStamp.hot(0, null, 0L))
+        .ttl(300_000, 30_000, 300_000, 30_000)
+        .expiryAt(System.currentTimeMillis() + 300, System.currentTimeMillis() - 1000)
         .keyState(KeyState.NORMAL)
-        .normalHardTtlMs(300_000)
-        .normalSoftTtlMs(30_000)
         .build()
     );
     CountDownLatch releaseLoad = new CountDownLatch(1);
     when(singleFlight.isBreakerOpen(anyString())).thenReturn(true);
-    when(singleFlight.loadOutcome(anyString(), any())).thenAnswer(inv -> {
+    when(singleFlight.load(anyString(), any(), anyBoolean(), any())).thenAnswer(inv -> {
       releaseLoad.await();
       return LoaderOutcome.failed(new IllegalStateException("boom"));
     });
 
-    CompletableFuture<Optional<String>> future = CompletableFuture.supplyAsync(() ->
-      hotKeyCache.computeIfAbsent("key1", ReadPolicy.of(() -> "fresh", 0L, 0L, true, true, StalePolicy.REVALIDATE))
+    CompletableFuture<String> future = CompletableFuture.supplyAsync(() ->
+      hotKeyCache.get("key1", () -> "fresh", GetPolicy.of(0L, 0L, true, StalePolicy.REVALIDATE))
     );
 
     Thread.sleep(500); // let the kept entry cross its hard expiry while the load is blocked
     releaseLoad.countDown();
-    Optional<String> result = future.get(5, TimeUnit.SECONDS);
+    String result = future.get(5, TimeUnit.SECONDS);
 
-    assertThat(result).isEmpty();
-    Object raw = caffeineCache.getIfPresent("key1");
-    assertThat(raw).isInstanceOf(CacheEntry.class);
-    assertThat(((CacheEntry) raw).getValue()).isEqualTo("old");
+    assertThat(result).isNull();
+    assertThat(caffeineCache.getIfPresent("key1"))
+      .as("the hard-expired entry is evicted — neither served nor sentinelized, nor left to linger")
+      .isNull();
   }
 
   @Test
-  void computeIfAbsent_hardExpired_readerFailure_shouldRemoveEntryAndReturnEmpty() {
+  void computeIfAbsent_hardExpired_readerFailure_shouldRemoveEntryAndPropagate() {
     caffeineCache.put(
       "key1",
-      CacheEntry.builder()
+      EntryDraft.blank(null)
         .value("old")
-        .dataVersion(1)
-        .isVersionDegraded(false)
-        .decisionVersion(0)
-        .hardTtlMs(300_000)
-        .hardExpireAtMs(System.currentTimeMillis() - 1000)
-        .softTtlMs(30_000)
-        .softExpireAtMs(System.currentTimeMillis() - 1000)
+        .version(1)
+        .decision(DecisionStamp.hot(0, null, 0L))
+        .ttl(300_000, 30_000, 300_000, 30_000)
+        .expiryAt(System.currentTimeMillis() - 1000, System.currentTimeMillis() - 1000)
         .keyState(KeyState.NORMAL)
-        .normalHardTtlMs(300_000)
-        .normalSoftTtlMs(30_000)
         .build()
     );
-    when(singleFlight.loadOutcome(anyString(), any())).thenReturn(LoaderOutcome.failed(new IllegalStateException("boom")));
+    SingleFlightStubs.stubLoad(singleFlight, LoaderOutcome.failed(new IllegalStateException("boom")));
 
     // Aligned with the get() path: hard-expired entries are removed on a
-    // failed reload — they are never served as stale.
-    assertThat(hotKeyCache.computeIfAbsent("key1", ReadPolicy.of(() -> "fresh"))).isEmpty();
+    // failed reload — they are never served as stale — and the failure propagates.
+    assertThatThrownBy(() -> hotKeyCache.get("key1", () -> "fresh", GetPolicy.defaults()))
+      .isInstanceOf(IllegalStateException.class)
+      .hasMessage("boom");
     assertThat(caffeineCache.getIfPresent("key1")).isNull();
   }
 
@@ -1006,7 +906,8 @@ class ZetaCacheTest {
     AtomicInteger hardEvals = new AtomicInteger();
     AtomicInteger softEvals = new AtomicInteger();
 
-    ReadPolicy policy = new ReadPolicy(
+    Supplier<String> policyReader = () -> "fresh";
+    GetPolicy policy = new GetPolicy(
       () -> {
         hardEvals.incrementAndGet();
         return 100_000L;
@@ -1015,22 +916,20 @@ class ZetaCacheTest {
         softEvals.incrementAndGet();
         return 10_000L;
       },
-      true,
       StalePolicy.SOFT_REFRESH,
-      () -> "fresh",
       true,
       false
     );
 
-    when(singleFlight.loadOutcome(anyString(), any())).thenReturn(oc("fresh"));
+    SingleFlightStubs.stubLoad(singleFlight, oc("fresh"));
 
     // Miss: TTL suppliers are evaluated exactly once (entry creation).
-    assertThat(hotKeyCache.computeIfAbsent("key1", policy)).contains("fresh");
+    assertThat((Object) hotKeyCache.get("key1", policyReader, policy)).isEqualTo("fresh");
     assertThat(hardEvals.get()).isEqualTo(1);
     assertThat(softEvals.get()).isEqualTo(1);
 
-    // Plain NORMAL hit: suppliers must NOT be evaluated again (ADR-0023).
-    assertThat(hotKeyCache.computeIfAbsent("key1", policy)).contains("fresh");
+    // Plain NORMAL hit: suppliers must NOT be evaluated again (design decisions: spring integration).
+    assertThat((Object) hotKeyCache.get("key1", policyReader, policy)).isEqualTo("fresh");
     assertThat(hardEvals.get()).isEqualTo(1);
     assertThat(softEvals.get()).isEqualTo(1);
   }
@@ -1039,20 +938,13 @@ class ZetaCacheTest {
   void computeIfAbsent_softRefresh_shouldServeStaleAndTriggerBackgroundRefresh() {
     caffeineCache.put(
       "key1",
-      CacheEntry.builder()
+      EntryDraft.blank(null)
         .value("stale")
-        .dataVersion(1)
-        .isVersionDegraded(false)
-        .decisionVersion(0)
-        .hardTtlMs(300_000)
-        .hardExpireAtMs(Long.MAX_VALUE)
-        .softTtlMs(30_000)
-        // 10s in the past: comfortably beyond TimeSource's ~5ms cached-clock
-        // staleness so the soft-expire branch is taken deterministically.
-        .softExpireAtMs(System.currentTimeMillis() - 10_000)
+        .version(1)
+        .decision(DecisionStamp.hot(0, null, 0L))
+        .ttl(300_000, 30_000, 300_000, 30_000)
+        .expiryAt(Long.MAX_VALUE, System.currentTimeMillis() - 10_000)
         .keyState(KeyState.HOT)
-        .normalHardTtlMs(300_000)
-        .normalSoftTtlMs(30_000)
         .build()
     );
 
@@ -1060,8 +952,8 @@ class ZetaCacheTest {
     // background refresh runs on the (synchronous test) executor, replacing
     // the entry with the fresh value before the call returns.
     assertThat(
-      hotKeyCache.computeIfAbsent("key1", ReadPolicy.of(() -> "fresh", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH))
-    ).contains("stale");
+      (Object) hotKeyCache.get("key1", () -> "fresh", GetPolicy.of(0L, 0L, true, StalePolicy.SOFT_REFRESH))
+    ).isEqualTo("stale");
 
     Object raw = caffeineCache.getIfPresent("key1");
     assertThat(raw).isInstanceOf(CacheEntry.class);
@@ -1072,26 +964,20 @@ class ZetaCacheTest {
   void computeIfAbsent_softRefresh_shouldRefreshCoolEntryAndDowngradeToNormal() {
     caffeineCache.put(
       "key1",
-      CacheEntry.builder()
+      EntryDraft.blank(null)
         .value("stale")
-        .dataVersion(1)
-        .isVersionDegraded(false)
-        .decisionVersion(5)
-        .hardTtlMs(300_000)
-        .hardExpireAtMs(Long.MAX_VALUE)
-        .softTtlMs(30_000)
-        .softExpireAtMs(System.currentTimeMillis() - 10_000)
+        .version(1)
+        .decision(DecisionStamp.hot(5, null, 0L))
+        .ttl(300_000, 30_000, 300_000, 5000)
+        .expiryAt(Long.MAX_VALUE, System.currentTimeMillis() - 10_000)
         .keyState(KeyState.COOL)
-        .normalHardTtlMs(300_000)
-        .normalSoftTtlMs(5000)
         .build()
     );
 
-    // COOL entries are proactively refreshed on the annotation path too; the
-    // successful refresh downgrades the entry to NORMAL.
+    // A soft-refresh reload of a COOL entry also downgrades it to NORMAL.
     assertThat(
-      hotKeyCache.computeIfAbsent("key1", ReadPolicy.of(() -> "fresh", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH))
-    ).contains("stale");
+      (Object) hotKeyCache.get("key1", () -> "fresh", GetPolicy.of(0L, 0L, true, StalePolicy.SOFT_REFRESH))
+    ).isEqualTo("stale");
 
     CacheEntry after = (CacheEntry) caffeineCache.getIfPresent("key1");
     assertThat(after.getValue()).isEqualTo("fresh");
@@ -1102,25 +988,22 @@ class ZetaCacheTest {
   void computeIfAbsent_softRefresh_coolEntryWithNullReader_shouldNotRefreshAndReturnValue() {
     caffeineCache.put(
       "key1",
-      CacheEntry.builder()
+      EntryDraft.blank(null)
         .value("stale")
-        .dataVersion(1)
-        .isVersionDegraded(false)
-        .decisionVersion(5)
-        .hardTtlMs(300_000)
-        .hardExpireAtMs(Long.MAX_VALUE)
-        .softTtlMs(30_000)
-        .softExpireAtMs(System.currentTimeMillis() - 10_000)
+        .version(1)
+        .decision(DecisionStamp.hot(5, null, 0L))
+        .ttl(300_000, 30_000, 300_000, 5000)
+        .expiryAt(Long.MAX_VALUE, System.currentTimeMillis() - 10_000)
         .keyState(KeyState.COOL)
-        .normalHardTtlMs(300_000)
-        .normalSoftTtlMs(5000)
         .build()
     );
 
     // Convenience policy without a reader: the background refresh must be
     // skipped (no NPE on supplyAsync(null)), the stale value served, and the
     // entry left untouched.
-    assertThat(hotKeyCache.computeIfAbsent("key1", ReadPolicy.of(0L, 0L))).contains("stale");
+    assertThat(
+      (Object) hotKeyCache.get("key1", (Supplier<String>) null, GetPolicy.of(0L, 0L, true, StalePolicy.SOFT_REFRESH))
+    ).isEqualTo("stale");
 
     CacheEntry after = (CacheEntry) caffeineCache.getIfPresent("key1");
     assertThat(after.getValue()).isEqualTo("stale");
@@ -1131,22 +1014,19 @@ class ZetaCacheTest {
   void getWithSoftExpire_softRefresh_coolEntryWithNullReader_shouldNotRefreshAndReturnValue() {
     caffeineCache.put(
       "key",
-      CacheEntry.builder()
+      EntryDraft.blank(null)
         .value("stale")
-        .dataVersion(1)
-        .isVersionDegraded(false)
-        .decisionVersion(5)
-        .hardTtlMs(300_000)
-        .hardExpireAtMs(Long.MAX_VALUE)
-        .softTtlMs(30_000)
-        .softExpireAtMs(System.currentTimeMillis() - 10_000)
+        .version(1)
+        .decision(DecisionStamp.hot(5, null, 0L))
+        .ttl(300_000, 30_000, 300_000, 5000)
+        .expiryAt(Long.MAX_VALUE, System.currentTimeMillis() - 10_000)
         .keyState(KeyState.COOL)
-        .normalHardTtlMs(300_000)
-        .normalSoftTtlMs(5000)
         .build()
     );
 
-    assertThat(hotKeyCache.getWithSoftExpire("key", ReadPolicy.of(0L, 0L))).contains("stale");
+    assertThat(
+      (Object) hotKeyCache.get("key", (Supplier<String>) null, GetPolicy.of(0L, 0L, true, StalePolicy.SOFT_REFRESH))
+    ).isEqualTo("stale");
 
     CacheEntry after = (CacheEntry) caffeineCache.getIfPresent("key");
     assertThat(after.getValue()).isEqualTo("stale");
@@ -1154,104 +1034,36 @@ class ZetaCacheTest {
   }
 
   @Test
-  void computeIfAbsent_nullSentinelHit_shouldReturnEmptyWithoutInvokingReader() {
-    caffeineCache.put(
-      "key1",
-      CacheEntry.builder()
-        .value(NullValue.INSTANCE)
-        .dataVersion(1)
-        .isVersionDegraded(false)
-        .decisionVersion(0)
-        .hardTtlMs(10_000)
-        .hardExpireAtMs(System.currentTimeMillis() + 10_000)
-        .softTtlMs(0L)
-        .softExpireAtMs(0L)
-        .keyState(KeyState.NORMAL)
-        .normalHardTtlMs(10_000)
-        .normalSoftTtlMs(0L)
-        .build()
-    );
-
-    assertThat(hotKeyCache.computeIfAbsent("key1", ReadPolicy.of(() -> "should-not-load"))).isEmpty();
-    verify(singleFlight, never()).loadOutcome(anyString(), any());
-  }
-
-  /**
-   * Executor-aware sentinel regression: a {@code NullValue} sentinel hit in
-   * {@code computeIfAbsent} must neither arm a background refresh nor promote
-   * the sentinel to HOT. Sentinels carry {@code softExpireAtMs = 0} which
-   * {@code isSoftExpired} reports as expired, so without the in-compute guard
-   * the SOFT_REFRESH branch would re-invoke the loader on every sentinel hit,
-   * and the promotion branch would extend the null block to the hot hard TTL.
-   * The setUp executor is synchronous ({@code Runnable::run}), so an armed
-   * refresh would have run the reader and replaced the entry before the call
-   * returned — the reader counter and the stored entry are the observables.
-   */
-  @Test
-  void computeIfAbsent_nullSentinelHit_shouldNotArmRefreshOrPromoteSentinel() {
-    caffeineCache.put(
-      "key1",
-      CacheEntry.builder()
-        .value(NullValue.INSTANCE)
-        .dataVersion(1)
-        .isVersionDegraded(false)
-        .decisionVersion(0)
-        .hardTtlMs(10_000)
-        .hardExpireAtMs(System.currentTimeMillis() + 10_000)
-        .softTtlMs(0L)
-        .softExpireAtMs(0L)
-        .keyState(KeyState.NORMAL)
-        .normalHardTtlMs(10_000)
-        .normalSoftTtlMs(0L)
-        .build()
-    );
-    // TopK membership: makes the promotion branch reachable for this entry.
-    when(hotKeyDetector.contains("key1")).thenReturn(true);
-    AtomicInteger readerCalls = new AtomicInteger();
-
-    assertThat(
-      hotKeyCache.computeIfAbsent(
-        "key1",
-        ReadPolicy.of(
-          () -> {
-            readerCalls.incrementAndGet();
-            return "should-not-load";
-          },
-          0L,
-          0L,
-          true,
-          true,
-          StalePolicy.SOFT_REFRESH
-        )
-      )
-    ).isEmpty();
-
-    assertThat(readerCalls.get()).isZero();
-    CacheEntry entry = (CacheEntry) caffeineCache.getIfPresent("key1");
-    assertThat((Object) entry.getValue()).isEqualTo(NullValue.INSTANCE);
-    assertThat(entry.getKeyState()).isEqualTo(KeyState.NORMAL);
-  }
-
-  @Test
-  void getAll_withFailOnError_shouldPropagateReaderFailure() {
-    when(singleFlight.loadOutcome(any(Iterable.class), any())).thenReturn(
+  void getAll_perKeyFailure_shouldPropagateAfterProcessingTheBatch() {
+    SingleFlightStubs.stubBatchLoad(
+      singleFlight,
       Map.of("a", LoaderOutcome.failed(new IllegalStateException("boom")), "b", LoaderOutcome.loaded((Object) "v"))
     );
 
-    assertThatThrownBy(() -> hotKeyCache.get(List.of("a", "b"), k -> "v", 0L, 0L, true, true, true, StalePolicy.SOFT_REFRESH))
+    assertThatThrownBy(() ->
+      hotKeyCache.get(List.of("a", "b"), k -> "v", GetPolicy.of(0L, 0L, true, StalePolicy.SOFT_REFRESH))
+    )
       .isInstanceOf(IllegalStateException.class)
       .hasMessage("boom");
   }
 
   @Test
-  void getAll_default_shouldSwallowPerKeyFailure() {
-    when(singleFlight.loadOutcome(any(Iterable.class), any())).thenReturn(
-      Map.of("a", LoaderOutcome.loaded((Object) "v"), "b", LoaderOutcome.sourceEmpty())
+  void getAll_perKeyFailure_shouldThrowWithoutReturningPartialResults() {
+    SingleFlightStubs.stubBatchLoad(
+      singleFlight,
+      Map.of(
+        "a",
+        LoaderOutcome.loaded((Object) new VersionedValue("v", 1L)),
+        "b",
+        LoaderOutcome.failed(new IllegalStateException("boom"))
+      )
     );
 
-    Map<String, Optional<String>> result = hotKeyCache.get(List.of("a", "b"), k -> "v", 0L, 0L, true, false, true, StalePolicy.SOFT_REFRESH);
-
-    assertThat(result).containsEntry("a", Optional.of("v")).containsEntry("b", Optional.empty());
+    assertThatThrownBy(() ->
+      hotKeyCache.get(List.of("a", "b"), k -> "v", GetPolicy.of(0L, 0L, true, StalePolicy.SOFT_REFRESH))
+    )
+      .isInstanceOf(IllegalStateException.class)
+      .hasMessage("boom");
   }
 
   /**
@@ -1260,12 +1072,12 @@ class ZetaCacheTest {
   @Test
   void getWithSoftExpire_whenDisabled_shouldFallbackToGet() {
     ZetaProperties props = new ZetaProperties();
-    props.setDefaultSoftTtlMs(0);
-    props.setDefaultHotSoftTtlMs(0);
-    EntryLifecycleImpl noSoft = new EntryLifecycleImpl(caffeineCache, props, CacheCompressor.NONE, null);
-    BackgroundRefresher noSoftRefresh = new DefaultBackgroundRefresher(caffeineCache, executor, noSoft.ttlPolicy(), CacheCompressor.NONE, 10);
+    props.setSoftTtlMs(0);
+    props.setHotSoftTtlMs(0);
+    EntryLifecycleImpl noSoft = new EntryLifecycleImpl(caffeineCache, props, null);
+    BackgroundRefresher noSoftRefresh = new DefaultBackgroundRefresher(caffeineCache, executor, noSoft, 10);
 
-    when(singleFlight.loadOutcome(anyString(), any())).thenReturn(oc("loaded"));
+    SingleFlightStubs.stubLoad(singleFlight, oc("loaded"));
 
     HotKeyCache cache = new HotKeyCache(
       hotKeyDetector,
@@ -1273,24 +1085,19 @@ class ZetaCacheTest {
       singleFlight,
       noSoft,
       noSoftRefresh,
-      executor,
       new CentralDispatcher(
-        Optional.empty(),
-        Optional.empty(),
-        new BroadcastBuffer(scheduler, Optional.empty(), 500, 2_000, null),
-        hotKeyDetector
+        new AccessCounter(hotKeyDetector, null, scheduler, 50L, AccessCounter.DEFAULT_DETECTOR_INTERVAL_MS),
+        null,
+        new BroadcastBuffer(scheduler, null, 500, 2_000, null),
+        null
       ),
-      new RuleMatcherImpl(Optional.empty(), Optional.empty()),
-      new VersionControllerImpl(Optional.empty(), 60, snowflakeIdGenerator),
-      props,
-      mock(HealthView.class),
-      CacheCompressor.NONE,
-      null
+      new MonotonicStampClock(1L, MonotonicStampClock.DEFAULT_MAX_FORWARD_DRIFT_MS),
+      mock(HealthView.class)
     );
 
     assertThat(
-      cache.getWithSoftExpire("key", ReadPolicy.of(() -> "loaded", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH))
-    ).contains("loaded");
+      (Object) cache.get("key", () -> "loaded", GetPolicy.of(0L, 0L, true, StalePolicy.SOFT_REFRESH))
+    ).isEqualTo("loaded");
   }
 
   /**
@@ -1300,27 +1107,19 @@ class ZetaCacheTest {
   void getWithSoftExpire_notExpired_shouldReturnCachedValue() {
     caffeineCache.put(
       "key",
-      CacheEntry.builder()
+      EntryDraft.blank(null)
         .value("cached")
-        .dataVersion(1)
-        .isVersionDegraded(false)
-        .decisionVersion(0)
-        .hardTtlMs(300_000)
-        .hardExpireAtMs(Long.MAX_VALUE)
-        .softTtlMs(30_000)
-        .softExpireAtMs(System.currentTimeMillis() + 60_000)
+        .version(1)
+        .decision(DecisionStamp.hot(0, null, 0L))
+        .ttl(300_000, 30_000, 300_000, 30_000)
+        .expiryAt(Long.MAX_VALUE, System.currentTimeMillis() + 60_000)
         .keyState(KeyState.HOT)
-        .normalHardTtlMs(300_000)
-        .normalSoftTtlMs(30_000)
         .build()
     );
 
     assertThat(
-      hotKeyCache.getWithSoftExpire(
-        "key",
-        ReadPolicy.of(() -> "should-not-load", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH)
-      )
-    ).contains("cached");
+      (Object) hotKeyCache.get("key", () -> "should-not-load", GetPolicy.of(0L, 0L, true, StalePolicy.SOFT_REFRESH))
+    ).isEqualTo("cached");
   }
 
   /**
@@ -1331,34 +1130,20 @@ class ZetaCacheTest {
   void getWithSoftExpire_expired_shouldReturnStaleAndTriggerRefresh() {
     caffeineCache.put(
       "key",
-      CacheEntry.builder()
+      EntryDraft.blank(null)
         .value("stale")
-        .dataVersion(1)
-        .isVersionDegraded(false)
-        .decisionVersion(0)
-        .hardTtlMs(300_000)
-        .hardExpireAtMs(Long.MAX_VALUE)
-        .softTtlMs(30_000)
-        .softExpireAtMs(System.currentTimeMillis() - 1)
+        .version(1)
+        .decision(DecisionStamp.hot(0, null, 0L))
+        .ttl(300_000, 30_000, 300_000, 30_000)
+        .expiryAt(Long.MAX_VALUE, System.currentTimeMillis() - 1)
         .keyState(KeyState.HOT)
-        .normalHardTtlMs(300_000)
-        .normalSoftTtlMs(30_000)
         .build()
     );
 
     // Should return stale value immediately (stale-while-revalidate)
     assertThat(
-      hotKeyCache.getWithSoftExpire("key", ReadPolicy.of(() -> "fresh", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH))
-    ).contains("stale");
-  }
-
-  /**
-   * Verifies that peek throws ZetaBlockedException when the key matches a blacklist rule.
-   */
-  @Test
-  void peek_withBlacklistedKey_shouldThrow() {
-    ruleService.addBlacklist("secret");
-    assertThatThrownBy(() -> hotKeyCache.peek("secret")).isInstanceOf(ZetaBlockedException.class);
+      (Object) hotKeyCache.get("key", () -> "fresh", GetPolicy.of(0L, 0L, true, StalePolicy.SOFT_REFRESH))
+    ).isEqualTo("stale");
   }
 
   /**
@@ -1367,7 +1152,7 @@ class ZetaCacheTest {
   @Test
   void peek_shouldReturnCachedEntryValue() {
     caffeineCache.put("raw", plainEntry("rawValue"));
-    assertThat(hotKeyCache.peek("raw")).contains("rawValue");
+    assertThat((Object) hotKeyCache.peek("raw")).isEqualTo("rawValue");
   }
 
   /**
@@ -1378,18 +1163,13 @@ class ZetaCacheTest {
   void isHot_withExpiredEntry_shouldReturnFalse() {
     caffeineCache.put(
       "expired",
-      CacheEntry.builder()
+      EntryDraft.blank(null)
         .value("v")
-        .dataVersion(0)
-        .isVersionDegraded(false)
-        .decisionVersion(0)
-        .hardTtlMs(1)
-        .hardExpireAtMs(1)
-        .softTtlMs(0)
-        .softExpireAtMs(0)
+        .version(0)
+        .decision(DecisionStamp.hot(0, null, 0L))
+        .ttl(1, 0, 300_000, 30_000)
+        .expiryAt(1, 0)
         .keyState(KeyState.HOT)
-        .normalHardTtlMs(300_000)
-        .normalSoftTtlMs(30_000)
         .build()
     );
 
@@ -1401,41 +1181,9 @@ class ZetaCacheTest {
    */
   @Test
   void putThrough_shouldWriteThroughAndCache() {
-    hotKeyCache.putThrough("key1", "newValue", () -> {}, 0L, 0L, true);
+    hotKeyCache.putThrough("key1", "newValue", 0L, 0L);
 
-    assertThat(hotKeyCache.peek("key1")).contains("newValue");
-  }
-
-  /**
-   * Verifies that putThrough throws ZetaBlockedException when the key is blacklisted.
-   */
-  @Test
-  void putThrough_withBlacklistedKey_shouldThrow() {
-    ruleService.addBlacklist("secret");
-    assertThatThrownBy(() -> hotKeyCache.putThrough("secret", "value", () -> {}, 0L, 0L, true))
-      .isInstanceOf(ZetaBlockedException.class)
-      .hasFieldOrPropertyWithValue("cacheKey", "secret");
-  }
-
-  /**
-   * Verifies that putThrough silently returns for invalid (null/blank) keys.
-   */
-  @Test
-  void putThrough_withInvalidKey_shouldSkip() {
-    hotKeyCache.putThrough(null, "value", () -> {}, 0L, 0L, true);
-    hotKeyCache.putThrough("", "value", () -> {}, 0L, 0L, true);
-    // No exception — silent skip
-  }
-
-  /**
-   * Verifies that putThrough caches a null value using the NullValue sentinel,
-   * which is transparently unwrapped to empty on peek.
-   */
-  @Test
-  void putThrough_withNullValue_shouldUseNullValueSentinel() {
-    hotKeyCache.putThrough("null-key", null, () -> {}, 0L, 0L, true);
-
-    assertThat(hotKeyCache.peek("null-key")).isEmpty();
+    assertThat((Object) hotKeyCache.peek("key1")).isEqualTo("newValue");
   }
 
   /**
@@ -1457,323 +1205,29 @@ class ZetaCacheTest {
       singleFlight,
       entryLifecycle,
       backgroundRefresher,
-      executor,
       new CentralDispatcher(
-        Optional.empty(),
-        Optional.of(publisher),
-        new BroadcastBuffer(rejecting, Optional.of(publisher), 500, 2_000, null),
-        hotKeyDetector
+        new AccessCounter(hotKeyDetector, null, scheduler, 50L, AccessCounter.DEFAULT_DETECTOR_INTERVAL_MS),
+        publisher,
+        new BroadcastBuffer(rejecting, publisher, 500, 2_000, null),
+        null
       ),
-      new RuleMatcherImpl(Optional.empty(), Optional.empty()),
-      new VersionControllerImpl(Optional.empty(), 60, snowflakeIdGenerator),
-      new ZetaProperties(),
-      mock(HealthView.class),
-      CacheCompressor.NONE,
-      null
+      new MonotonicStampClock(1L, MonotonicStampClock.DEFAULT_MAX_FORWARD_DRIFT_MS),
+      mock(HealthView.class)
     );
 
-    assertThatCode(() -> cache.putThrough("key1", "newValue", () -> {}, 0L, 0L, true)).doesNotThrowAnyException();
-    assertThat(cache.peek("key1")).contains("newValue");
-    verify(publisher).broadcastRefresh(eq("key1"), anyLong(), anyBoolean());
+    assertThatCode(() -> cache.putThrough("key1", "newValue", 0L, 0L)).doesNotThrowAnyException();
+    assertThat((Object) cache.peek("key1")).isEqualTo("newValue");
+    verify(publisher).broadcastRefresh(eq("key1"), anyLong());
   }
 
-  /**
-   * Degraded-fallback path (version controller fails after the writer ran):
-   * the L1 is updated with a degraded version, and a caller that opted OUT of
-   * broadcasting gets no REFRESH broadcast — the same opt-out contract as the
-   * success path.
-   */
+  /** Verifies that a local immediate clear — {@code clearAll(Scope.LOCAL, immediate)} — clears every entry. */
   @Test
-  void putThrough_degradedFallback_optOut_shouldNotBroadcast() {
-    VersionController failing = mock(VersionController.class);
-    when(failing.nextVersion("key1")).thenThrow(new IllegalStateException("redis down"));
-    when(failing.fallbackVersion()).thenReturn(new VersionController.VersionResult(-100L, true));
-
-    CacheSyncPublisher publisher = mock(CacheSyncPublisher.class);
-    BroadcastBuffer buffer = new BroadcastBuffer(scheduler, Optional.of(publisher), 500, 2_000, null);
-    HotKeyCache cache = new HotKeyCache(
-      hotKeyDetector,
-      caffeineCache,
-      singleFlight,
-      entryLifecycle,
-      backgroundRefresher,
-      executor,
-      new CentralDispatcher(Optional.empty(), Optional.of(publisher), buffer, hotKeyDetector),
-      new RuleMatcherImpl(Optional.empty(), Optional.empty()),
-      failing,
-      ttlConfig,
-      mock(HealthView.class),
-      CacheCompressor.NONE,
-      null
-    );
-
-    cache.putThrough("key1", "degradedValue", () -> {}, 0L, 0L, false);
-
-    // The degraded local update still lands (coherence with the mutation).
-    assertThat(cache.peek("key1")).contains("degradedValue");
-    buffer.flush();
-    verify(publisher, never()).broadcastRefresh(anyString(), anyLong(), anyBoolean());
-  }
-
-  /** Control: the same degraded path with broadcast opted in sends the degraded REFRESH. */
-  @Test
-  void putThrough_degradedFallback_optIn_shouldBroadcastDegradedVersion() {
-    VersionController failing = mock(VersionController.class);
-    when(failing.nextVersion("key1")).thenThrow(new IllegalStateException("redis down"));
-    when(failing.fallbackVersion()).thenReturn(new VersionController.VersionResult(-100L, true));
-
-    CacheSyncPublisher publisher = mock(CacheSyncPublisher.class);
-    BroadcastBuffer buffer = new BroadcastBuffer(scheduler, Optional.of(publisher), 500, 2_000, null);
-    HotKeyCache cache = new HotKeyCache(
-      hotKeyDetector,
-      caffeineCache,
-      singleFlight,
-      entryLifecycle,
-      backgroundRefresher,
-      executor,
-      new CentralDispatcher(Optional.empty(), Optional.of(publisher), buffer, hotKeyDetector),
-      new RuleMatcherImpl(Optional.empty(), Optional.empty()),
-      failing,
-      ttlConfig,
-      mock(HealthView.class),
-      CacheCompressor.NONE,
-      null
-    );
-
-    cache.putThrough("key1", "degradedValue", () -> {}, 0L, 0L, true);
-
-    assertThat(cache.peek("key1")).contains("degradedValue");
-    buffer.flush();
-    verify(publisher).broadcastRefresh(eq("key1"), eq(-100L), eq(true));
-  }
-
-  /**
-   * Verifies that invalidateAfterPut with a failed mutation does NOT invalidate
-   * the cache entry and propagates the failure (fault mode: writer exception).
-   */
-  @Test
-  void invalidateAfterPutAll() {
-    caffeineCache.put("key1", plainEntry("original"));
-    assertThatThrownBy(() -> hotKeyCache.invalidateAfterPut(
-      "key1",
-      () -> {
-        throw new RuntimeException("db-fail");
-      },
-      true
-    )).isInstanceOf(RuntimeException.class);
-
-    assertThat(hotKeyCache.peek("key1")).contains("original");
-  }
-
-  /**
-   * Verifies that invalidateAfterPut throws ZetaBlockedException when the key is blacklisted.
-   */
-  @Test
-  void invalidateAfterPut_All_withBlacklistedKey_shouldThrow() {
-    ruleService.addBlacklist("secret");
-    assertThatThrownBy(() -> hotKeyCache.invalidateAfterPut("secret", () -> {}, true))
-      .isInstanceOf(ZetaBlockedException.class)
-      .hasFieldOrPropertyWithValue("cacheKey", "secret");
-  }
-
-  /**
-   * Verifies that invalidateAfterPut silently returns for invalid (null/blank) keys.
-   */
-  @Test
-  void invalidateAfterPut_All_withInvalidKey_shouldSkip() {
-    caffeineCache.put("k", plainEntry("v"));
-    hotKeyCache.invalidateAfterPut(null, () -> {}, true);
-    hotKeyCache.invalidateAfterPut("", () -> {}, true);
-    // Entry untouched
-    assertThat(hotKeyCache.peek("k")).contains("v");
-  }
-
-  /**
-   * Verifies that batch invalidateAfterPut runs all mutations, and a failing
-   * mutation skips only its own key.
-   */
-  @Test
-  void invalidateAfterPut_batch_shouldRunAllMutations() {
-    caffeineCache.put("k1", plainEntry("v1"));
-    caffeineCache.put("k2", plainEntry("v2"));
-    caffeineCache.put("k3", plainEntry("v3"));
-
-    hotKeyCache.invalidateAfterPut(
-      Map.of(
-        "k1",
-        () -> {},
-        "k2",
-        () -> {
-          throw new RuntimeException("fail");
-        },
-        "k3",
-        () -> {}
-      ),
-      true
-    );
-
-    assertThat(caffeineCache.getIfPresent("k1")).isNull();
-    assertThat(caffeineCache.getIfPresent("k3")).isNull();
-    // k2 mutation failed, entry preserved
-    assertThat(caffeineCache.getIfPresent("k2").getValue()).isEqualTo("v2");
-  }
-
-  /**
-   * Verifies that addBlacklist with an invalid key is silently skipped.
-   */
-  @Test
-  void addBlacklist_withInvalidKey_shouldSkip() {
-    ruleService.addBlacklist((String) null);
-    ruleService.addBlacklist("");
-    assertThat(ruleService.getAllRules()).isEmpty();
-  }
-
-  /**
-   * Verifies that addWhitelist with an invalid key is silently skipped.
-   */
-  @Test
-  void addWhitelist_withInvalidKey_shouldSkip() {
-    ruleService.addWhitelist((String) null);
-    ruleService.addWhitelist("");
-    assertThat(ruleService.getAllRules()).isEmpty();
-  }
-
-  /**
-   * Verifies that isBlacklisted returns true for a blacklisted key.
-   */
-  @Test
-  void isBlacklisted_shouldReturnTrue() {
-    ruleService.addBlacklist("secret");
-    assertThat(ruleService.isBlacklisted("secret")).isTrue();
-    assertThat(ruleService.isBlacklisted("other")).isFalse();
-  }
-
-  /**
-   * Verifies that isWhitelisted returns true for a whitelisted key.
-   */
-  @Test
-  void isWhitelisted_shouldReturnTrue() {
-    ruleService.addWhitelist("allowed");
-    assertThat(ruleService.isWhitelisted("allowed")).isTrue();
-    assertThat(ruleService.isWhitelisted("other")).isFalse();
-  }
-
-  /**
-   * Verifies that unBlacklist removes a blacklist rule.
-   */
-  @Test
-  void unBlacklist_shouldRemoveRule() {
-    ruleService.addBlacklist("secret");
-    assertThat(ruleService.isBlacklisted("secret")).isTrue();
-    ruleService.removeBlacklist("secret");
-    assertThat(ruleService.isBlacklisted("secret")).isFalse();
-  }
-
-  /**
-   * Verifies that unBlacklist with an invalid key is silently skipped.
-   */
-  @Test
-  void unBlacklist_withInvalidKey_shouldSkip() {
-    ruleService.addBlacklist("secret");
-    ruleService.removeBlacklist((String) null);
-    ruleService.removeBlacklist("");
-    assertThat(ruleService.isBlacklisted("secret")).isTrue();
-  }
-
-  /**
-   * Verifies that unWhitelist removes a whitelist rule.
-   */
-  @Test
-  void unWhitelist_shouldRemoveRule() {
-    ruleService.addWhitelist("allowed");
-    assertThat(ruleService.isWhitelisted("allowed")).isTrue();
-    ruleService.removeWhitelist("allowed");
-    assertThat(ruleService.isWhitelisted("allowed")).isFalse();
-  }
-
-  /**
-   * Verifies that evaluateRule returns the expected action for blacklisted keys.
-   */
-  @Test
-  void evaluateRule_shouldReturnBlockForBlacklistedKey() {
-    ruleService.addBlacklist("secret");
-    assertThat(ruleService.evaluateRule("secret")).isEqualTo(RuleAction.BLOCK);
-    assertThat(ruleService.evaluateRule("other")).isEqualTo(RuleAction.ALLOW);
-  }
-
-  /**
-   * Verifies that getAllRules returns the current set of rules.
-   */
-  @Test
-  void getAllRules_shouldReturnCurrentRules() {
-    ruleService.addBlacklist("key1");
-    ruleService.addBlacklist("key2");
-    assertThat(ruleService.getAllRules()).hasSize(2);
-  }
-
-  /**
-   * Verifies that clearAllRules removes all rules.
-   */
-  @Test
-  void clearAllRules_shouldRemoveAllRules() {
-    ruleService.addBlacklist("key1");
-    ruleService.addBlacklist("key2");
-    assertThat(ruleService.getAllRules()).hasSize(2);
-    ruleService.clearAllRules();
-    assertThat(ruleService.getAllRules()).isEmpty();
-  }
-
-  /**
-   * Verifies that estimatedSizeOfKeysCount returns a positive count for cached entries.
-   */
-  @Test
-  void estimatedSize_shouldReturnEstimate() {
-    caffeineCache.put("k1", plainEntry("v1"));
-    assertThat(hotKeyCache.estimatedSize()).isPositive();
-  }
-
-  /**
-   * Verifies that invalidateAllLocal (no-arg) clears all cache entries (emergency flush).
-   */
-  @Test
-  void invalidate_All_noArg_shouldClear() {
+  void clear_localImmediate_shouldClearEveryEntry() {
     caffeineCache.put("k1", plainEntry("v1"));
     caffeineCache.put("k2", plainEntry("v2"));
     assertThat(caffeineCache.estimatedSize()).isPositive();
-    hotKeyCache.invalidateAllLocal();
+    hotKeyCache.clear(new InvalidatePolicy(InvalidatePolicy.Scope.LOCAL, true));
     assertThat(caffeineCache.estimatedSize()).isZero();
-  }
-
-  /**
-   * Verifies that getWithSoftExpire with an ALLOW_NO_REPORT rule does not reportToWorker
-   * and returns the cached value normally.
-   */
-  @Test
-  void getWithSoftExpire_withNoReportRule_shouldReturnCached() {
-    ruleService.addWhitelist("no-reportToWorker");
-    caffeineCache.put(
-      "no-reportToWorker",
-      CacheEntry.builder()
-        .value("v")
-        .dataVersion(1)
-        .isVersionDegraded(false)
-        .decisionVersion(0)
-        .hardTtlMs(300_000)
-        .hardExpireAtMs(Long.MAX_VALUE)
-        .softTtlMs(30_000)
-        .softExpireAtMs(System.currentTimeMillis() + 60_000)
-        .keyState(KeyState.HOT)
-        .normalHardTtlMs(300_000)
-        .normalSoftTtlMs(30_000)
-        .build()
-    );
-
-    assertThat(
-      hotKeyCache.getWithSoftExpire(
-        "no-reportToWorker",
-        ReadPolicy.of(() -> "fresh", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH)
-      )
-    ).contains("v");
   }
 
   // ── get with logically expired entry ──
@@ -1782,25 +1236,20 @@ class ZetaCacheTest {
   void get_withLogicallyExpiredEntry_shouldReload() {
     caffeineCache.put(
       "expired",
-      CacheEntry.builder()
+      EntryDraft.blank(null)
         .value("stale")
-        .dataVersion(1)
-        .isVersionDegraded(false)
-        .decisionVersion(0)
-        .hardTtlMs(1)
-        .hardExpireAtMs(1)
-        .softTtlMs(0)
-        .softExpireAtMs(0)
+        .version(1)
+        .decision(DecisionStamp.hot(0, null, 0L))
+        .ttl(1, 0, 300_000, 30_000)
+        .expiryAt(1, 0)
         .keyState(KeyState.NORMAL)
-        .normalHardTtlMs(300_000)
-        .normalSoftTtlMs(30_000)
         .build()
     );
-    when(singleFlight.loadOutcome(anyString(), any())).thenReturn(oc("fresh"));
+    SingleFlightStubs.stubLoad(singleFlight, oc("fresh"));
 
     assertThat(
-      hotKeyCache.get("expired", ReadPolicy.of(() -> "fresh", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH))
-    ).contains("fresh");
+      (Object) hotKeyCache.get("expired", () -> "fresh", GetPolicy.of(0L, 0L, true, StalePolicy.SOFT_REFRESH))
+    ).isEqualTo("fresh");
   }
 
   // ── get with StalePolicy.REVALIDATE: caller policy wired through the hit path ──
@@ -1816,25 +1265,21 @@ class ZetaCacheTest {
   void get_revalidate_softExpiredEntry_shouldReloadViaLoader() {
     caffeineCache.put(
       "key1",
-      CacheEntry.builder()
+      EntryDraft.blank(null)
         .value("stale")
-        .dataVersion(1)
-        .isVersionDegraded(false)
-        .decisionVersion(0)
-        .hardTtlMs(300_000)
-        .hardExpireAtMs(System.currentTimeMillis() + 300_000)
-        .softTtlMs(30_000)
-        .softExpireAtMs(System.currentTimeMillis() - 10_000)
+        .version(1)
+        .decision(DecisionStamp.hot(0, null, 0L))
+        .ttl(300_000, 30_000, 300_000, 30_000)
+        .expiryAt(System.currentTimeMillis() + 300_000, System.currentTimeMillis() - 10_000)
         .keyState(KeyState.NORMAL)
-        .normalHardTtlMs(300_000)
-        .normalSoftTtlMs(30_000)
         .build()
     );
-    when(singleFlight.loadOutcome(eq("key1"), any())).thenReturn(oc("fresh"));
+    SingleFlightStubs.stubLoad(singleFlight, oc("fresh"));
 
-    assertThat(hotKeyCache.get("key1", ReadPolicy.of(() -> "fresh", 0L, 0L, true, true, StalePolicy.REVALIDATE)))
-      .contains("fresh");
-    verify(singleFlight, times(1)).loadOutcome(eq("key1"), any());
+    assertThat(
+      (Object) hotKeyCache.get("key1", () -> "fresh", GetPolicy.of(0L, 0L, true, StalePolicy.REVALIDATE))
+    ).isEqualTo("fresh");
+    verify(singleFlight, times(1)).load(eq("key1"), any(), anyBoolean(), any());
     assertThat(((CacheEntry) caffeineCache.getIfPresent("key1")).getValue()).isEqualTo("fresh");
   }
 
@@ -1843,68 +1288,21 @@ class ZetaCacheTest {
   void get_return_softExpiredEntry_shouldServeStaleWithoutReload() {
     caffeineCache.put(
       "key1",
-      CacheEntry.builder()
+      EntryDraft.blank(null)
         .value("stale")
-        .dataVersion(1)
-        .isVersionDegraded(false)
-        .decisionVersion(0)
-        .hardTtlMs(300_000)
-        .hardExpireAtMs(System.currentTimeMillis() + 300_000)
-        .softTtlMs(30_000)
-        .softExpireAtMs(System.currentTimeMillis() - 10_000)
+        .version(1)
+        .decision(DecisionStamp.hot(0, null, 0L))
+        .ttl(300_000, 30_000, 300_000, 30_000)
+        .expiryAt(System.currentTimeMillis() + 300_000, System.currentTimeMillis() - 10_000)
         .keyState(KeyState.NORMAL)
-        .normalHardTtlMs(300_000)
-        .normalSoftTtlMs(30_000)
         .build()
     );
 
-    assertThat(hotKeyCache.get("key1", ReadPolicy.of(() -> "fresh", 0L, 0L, true, true, StalePolicy.RETURN)))
-      .contains("stale");
-    verify(singleFlight, never()).loadOutcome(anyString(), any());
+    assertThat(
+      (Object) hotKeyCache.get("key1", () -> "fresh", GetPolicy.of(0L, 0L, true, StalePolicy.RETURN))
+    ).isEqualTo("stale");
+    verify(singleFlight, never()).load(anyString(), any(), anyBoolean(), any());
     assertThat(((CacheEntry) caffeineCache.getIfPresent("key1")).getValue()).isEqualTo("stale");
-  }
-
-  /**
-   * REVALIDATE must keep the sentinel's penetration protection: sentinels
-   * carry {@code softExpireAtMs = 0} (always reported soft-expired) and must
-   * not be dropped-and-reloaded by the REVALIDATE branch.
-   */
-  @Test
-  void get_revalidate_nullSentinelHit_shouldKeepPenetrationProtection() {
-    caffeineCache.put(
-      "key1",
-      CacheEntry.builder()
-        .value(NullValue.INSTANCE)
-        .dataVersion(1)
-        .isVersionDegraded(false)
-        .decisionVersion(0)
-        .hardTtlMs(10_000)
-        .hardExpireAtMs(System.currentTimeMillis() + 10_000)
-        .softTtlMs(0L)
-        .softExpireAtMs(0L)
-        .keyState(KeyState.NORMAL)
-        .normalHardTtlMs(10_000)
-        .normalSoftTtlMs(0L)
-        .build()
-    );
-    when(singleFlight.loadOutcome(anyString(), any())).thenReturn(oc("loaded"));
-
-    assertThat(hotKeyCache.get("key1", ReadPolicy.of(() -> "loaded", 0L, 0L, true, true, StalePolicy.REVALIDATE)))
-      .isEmpty();
-    verify(singleFlight, never()).loadOutcome(anyString(), any());
-    assertThat(((CacheEntry) caffeineCache.getIfPresent("key1")).getValue()).isEqualTo(NullValue.INSTANCE);
-  }
-
-  // ── getWithSoftExpire: invalid key ──
-
-  @Test
-  void getWithSoftExpire_withInvalidKey_shouldReturnEmpty() {
-    assertThat(
-      hotKeyCache.getWithSoftExpire(null, ReadPolicy.of(() -> "v", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH))
-    ).isEmpty();
-    assertThat(
-      hotKeyCache.getWithSoftExpire("", ReadPolicy.of(() -> "v", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH))
-    ).isEmpty();
   }
 
   // ── getWithSoftExpire: expired entry triggers reload ──
@@ -1913,52 +1311,31 @@ class ZetaCacheTest {
   void getWithSoftExpire_withExpiredEntry_shouldReloadViaLoadAndCache() {
     caffeineCache.put(
       "expired",
-      CacheEntry.builder()
+      EntryDraft.blank(null)
         .value("stale")
-        .dataVersion(1)
-        .isVersionDegraded(false)
-        .decisionVersion(0)
-        .hardTtlMs(1)
-        .hardExpireAtMs(1)
-        .softTtlMs(0)
-        .softExpireAtMs(0)
+        .version(1)
+        .decision(DecisionStamp.hot(0, null, 0L))
+        .ttl(1, 0, 300_000, 30_000)
+        .expiryAt(1, 0)
         .keyState(KeyState.NORMAL)
-        .normalHardTtlMs(300_000)
-        .normalSoftTtlMs(30_000)
         .build()
     );
-    when(singleFlight.loadOutcome(anyString(), any())).thenReturn(oc("fresh"));
+    SingleFlightStubs.stubLoad(singleFlight, oc("fresh"));
 
     assertThat(
-      hotKeyCache.getWithSoftExpire(
-        "expired",
-        ReadPolicy.of(() -> "fresh", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH)
-      )
-    ).contains("fresh");
+      (Object) hotKeyCache.get("expired", () -> "fresh", GetPolicy.of(0L, 0L, true, StalePolicy.SOFT_REFRESH))
+    ).isEqualTo("fresh");
   }
 
   // ── getWithSoftExpire: cache miss (no entry) triggers loadAndCache ──
 
   @Test
   void getWithSoftExpire_withCacheMiss_shouldLoad() {
-    when(singleFlight.loadOutcome(anyString(), any())).thenReturn(oc("loaded"));
+    SingleFlightStubs.stubLoad(singleFlight, oc("loaded"));
 
     assertThat(
-      hotKeyCache.getWithSoftExpire(
-        "missing",
-        ReadPolicy.of(() -> "loaded", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH)
-      )
-    ).contains("loaded");
-  }
-
-  // ── unWhitelist with invalid key ──
-
-  @Test
-  void unWhitelist_withInvalidKey_shouldSkip() {
-    ruleService.addWhitelist("allowed");
-    ruleService.removeWhitelist((String) null);
-    ruleService.removeWhitelist("");
-    assertThat(ruleService.isWhitelisted("allowed")).isTrue();
+      (Object) hotKeyCache.get("missing", () -> "loaded", GetPolicy.of(0L, 0L, true, StalePolicy.SOFT_REFRESH))
+    ).isEqualTo("loaded");
   }
 
   // ── getWithSoftExpire with NORMAL entry (no soft TTL) ──
@@ -1967,8 +1344,8 @@ class ZetaCacheTest {
   void getWithSoftExpire_withNormalEntryNoSoftTtl_returnsCached() {
     caffeineCache.put("raw", plainEntry("bare-string"));
     assertThat(
-      hotKeyCache.getWithSoftExpire("raw", ReadPolicy.of(() -> "fresh", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH))
-    ).contains("bare-string");
+      (Object) hotKeyCache.get("raw", () -> "fresh", GetPolicy.of(0L, 0L, true, StalePolicy.SOFT_REFRESH))
+    ).isEqualTo("bare-string");
   }
 
   // ── getWithSoftExpire with NORMAL entry and soft expired ──
@@ -1977,47 +1354,32 @@ class ZetaCacheTest {
   void getWithSoftExpire_withNormalEntrySoftExpired_shouldReturnStale() {
     caffeineCache.put(
       "normal",
-      CacheEntry.builder()
+      EntryDraft.blank(null)
         .value("stale")
-        .dataVersion(1)
-        .isVersionDegraded(false)
-        .decisionVersion(0)
-        .hardTtlMs(300_000)
-        .hardExpireAtMs(Long.MAX_VALUE)
-        .softTtlMs(30_000)
-        .softExpireAtMs(System.currentTimeMillis() - 1000)
+        .version(1)
+        .decision(DecisionStamp.hot(0, null, 0L))
+        .ttl(300_000, 30_000, 300_000, 30_000)
+        .expiryAt(Long.MAX_VALUE, System.currentTimeMillis() - 1000)
         .keyState(KeyState.NORMAL)
-        .normalHardTtlMs(300_000)
-        .normalSoftTtlMs(30_000)
         .build()
     );
 
-    Optional<String> result = hotKeyCache.getWithSoftExpire(
-      "normal",
-      ReadPolicy.of(() -> "fresh", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH)
-    );
+    String result = hotKeyCache.get("normal", () -> "fresh", GetPolicy.of(0L, 0L, true, StalePolicy.SOFT_REFRESH));
 
-    assertThat(result).contains("stale");
+    assertThat(result).isEqualTo("stale");
   }
 
   // ── getWithSoftExpire REVALIDATE: worker-managed keep-and-renew ──
 
   /** Build a Worker-stamped COOL entry whose soft TTL has expired. */
   private static CacheEntry workerCoolSoftExpiredEntry() {
-    return CacheEntry.builder()
+    return EntryDraft.blank(null)
       .value("stored")
-      .dataVersion(1)
-      .isVersionDegraded(false)
-      .decisionVersion(5)
-      .decisionNodeId("w1")
-      .decisionEpoch(7)
-      .hardTtlMs(300_000)
-      .hardExpireAtMs(System.currentTimeMillis() + 300_000)
-      .softTtlMs(30_000)
-      .softExpireAtMs(System.currentTimeMillis() - 10_000)
+      .version(1)
+      .decision(DecisionStamp.hot(5, "w1", 7))
+      .ttl(300_000, 30_000, 300_000, 30_000)
+      .expiryAt(System.currentTimeMillis() + 300_000, System.currentTimeMillis() - 10_000)
       .keyState(KeyState.COOL)
-      .normalHardTtlMs(300_000)
-      .normalSoftTtlMs(30_000)
       .build();
   }
 
@@ -2031,16 +1393,18 @@ class ZetaCacheTest {
   @Test
   void getWithSoftExpire_revalidate_workerManagedCoolEntry_shouldKeepAndRenewWithoutReloadRate() {
     caffeineCache.put("key1", workerCoolSoftExpiredEntry());
-    when(singleFlight.loadOutcome(eq("key1"), any())).thenReturn(oc("fresh"));
+    SingleFlightStubs.stubLoad(singleFlight, oc("fresh"));
 
     // First read: the kept entry's reload re-invokes the loader once; the
     // fresh value serves this caller while the Worker-managed entry survives.
     assertThat(
-      hotKeyCache.getWithSoftExpire("key1", ReadPolicy.of(() -> "fresh", 0L, 0L, true, true, StalePolicy.REVALIDATE))
-    ).contains("fresh");
+      (Object) hotKeyCache.get("key1", () -> "fresh", GetPolicy.of(0L, 0L, true, StalePolicy.REVALIDATE))
+    ).isEqualTo("fresh");
 
     CacheEntry after = (CacheEntry) caffeineCache.getIfPresent("key1");
-    assertThat((Object) after.getValue()).isEqualTo("stored");
+    // The reload's value replaces the stale one; the Worker's TTL regime and
+    // decision stamp survive (P0-1).
+    assertThat((Object) after.getValue()).isEqualTo("fresh");
     assertThat(after.getKeyState()).isEqualTo(KeyState.COOL);
     assertThat(after.getDecisionNodeId()).isEqualTo("w1");
     assertThat(after.getDecisionVersion()).isEqualTo(5L);
@@ -2048,31 +1412,32 @@ class ZetaCacheTest {
     assertThat(entryLifecycle.ttlPolicy().isSoftExpired(after)).isFalse();
     assertThat(after.getSoftExpireAtMs()).isLessThanOrEqualTo(after.getHardExpireAtMs());
 
-    // Subsequent reads serve the kept entry — the loader is NOT re-invoked.
+    // Subsequent reads serve the renewed entry — the loader is NOT re-invoked.
     assertThat(
-      hotKeyCache.getWithSoftExpire("key1", ReadPolicy.of(() -> "fresh2", 0L, 0L, true, true, StalePolicy.REVALIDATE))
-    ).contains("stored");
-    verify(singleFlight, times(1)).loadOutcome(anyString(), any());
+      (Object) hotKeyCache.get("key1", () -> "fresh2", GetPolicy.of(0L, 0L, true, StalePolicy.REVALIDATE))
+    ).isEqualTo("fresh");
+    verify(singleFlight, times(1)).load(anyString(), any(), anyBoolean(), any());
   }
 
   /**
-   * A null load must not erase a Worker decision: the {@code NullValue}
-   * sentinel written over the kept entry carries the existing entry's decision
-   * stamp so {@code decisionVersion} stays comparable for later broadcasts.
+   * A null load must not erase a Worker decision: under the v2 null contract
+   * nothing is written over the kept entry, so the entry (and its decision
+   * stamp) survives untouched for later decisionVersion ordering.
    */
   @Test
-  void get_revalidate_workerManagedEntry_nullLoad_shouldPreserveDecisionStampOnSentinel() {
+  void get_revalidate_workerManagedEntry_nullLoad_shouldPreserveKeptEntry() {
     caffeineCache.put("key1", workerCoolSoftExpiredEntry());
-    when(singleFlight.loadOutcome(eq("key1"), any())).thenReturn(LoaderOutcome.sourceEmpty());
+    SingleFlightStubs.stubLoad(singleFlight, LoaderOutcome.sourceEmpty());
 
-    assertThat(hotKeyCache.get("key1", ReadPolicy.of(() -> null, 0L, 0L, true, true, StalePolicy.REVALIDATE)))
-      .isEmpty();
+    assertThat(
+      (Object) hotKeyCache.get("key1", () -> null, GetPolicy.of(0L, 0L, true, StalePolicy.REVALIDATE))
+    ).isNull();
 
-    CacheEntry sentinel = (CacheEntry) caffeineCache.getIfPresent("key1");
-    assertThat((Object) sentinel.getValue()).isEqualTo(NullValue.INSTANCE);
-    assertThat(sentinel.getDecisionNodeId()).isEqualTo("w1");
-    assertThat(sentinel.getDecisionVersion()).isEqualTo(5L);
-    assertThat(sentinel.getDecisionEpoch()).isEqualTo(7L);
+    CacheEntry kept = (CacheEntry) caffeineCache.getIfPresent("key1");
+    assertThat((Object) kept.getValue()).isEqualTo("stored");
+    assertThat(kept.getDecisionNodeId()).isEqualTo("w1");
+    assertThat(kept.getDecisionVersion()).isEqualTo(5L);
+    assertThat(kept.getDecisionEpoch()).isEqualTo(7L);
   }
 
   // ── putLocal ──
@@ -2080,7 +1445,7 @@ class ZetaCacheTest {
   @Test
   void putLocal_shouldCacheValue() {
     hotKeyCache.putLocal("k", "v", 0L, 0L);
-    assertThat(hotKeyCache.peek("k")).contains("v");
+    assertThat((Object) hotKeyCache.peek("k")).isEqualTo("v");
   }
 
   @Test
@@ -2100,34 +1465,16 @@ class ZetaCacheTest {
   }
 
   @Test
-  void putLocal_withBlacklistedKey_shouldThrow() {
-    ruleService.addBlacklist("secret");
-    assertThatThrownBy(() -> hotKeyCache.putLocal("secret", "v", 0L, 0L)).isInstanceOf(ZetaBlockedException.class);
-  }
-
-  @Test
-  void putLocal_withInvalidKey_shouldSkip() {
-    hotKeyCache.putLocal(null, "v", 0L, 0L);
-    hotKeyCache.putLocal("", "v", 0L, 0L);
-    assertThat(hotKeyCache.estimatedSize()).isZero();
-  }
-
-  @Test
   void putLocal_shouldPreserveExistingMetadata() {
     caffeineCache.put(
       "k",
-      CacheEntry.builder()
+      EntryDraft.blank(null)
         .value("old")
-        .dataVersion(42)
-        .isVersionDegraded(false)
-        .decisionVersion(7)
-        .hardTtlMs(300_000)
-        .hardExpireAtMs(Long.MAX_VALUE)
-        .softTtlMs(30_000)
-        .softExpireAtMs(System.currentTimeMillis() + 60_000)
+        .version(42)
+        .decision(DecisionStamp.hot(7, null, 0L))
+        .ttl(300_000, 30_000, 300_000, 30_000)
+        .expiryAt(Long.MAX_VALUE, System.currentTimeMillis() + 60_000)
         .keyState(KeyState.HOT)
-        .normalHardTtlMs(300_000)
-        .normalSoftTtlMs(30_000)
         .build()
     );
 
@@ -2135,7 +1482,9 @@ class ZetaCacheTest {
 
     CacheEntry entry = (CacheEntry) caffeineCache.getIfPresent("k");
     assertThat(entry.getValue()).isEqualTo("new");
-    assertThat(entry.getDataVersion()).isEqualTo(42);
+    // A local write carries a fresh stamp (design decisions: version stamps I4); the rest of the
+    // metadata is preserved.
+    assertThat(entry.getDataVersion()).isGreaterThan(42L);
     assertThat(entry.getDecisionVersion()).isEqualTo(7);
     assertThat(entry.getKeyState()).isEqualTo(KeyState.HOT);
   }
@@ -2146,22 +1495,15 @@ class ZetaCacheTest {
   void invalidateLocal_shouldRemoveEntries() {
     caffeineCache.put("k1", plainEntry("v1"));
     caffeineCache.put("k2", plainEntry("v2"));
-    hotKeyCache.invalidate(List.of("k1", "k2"), true);
+    hotKeyCache.invalidate(List.of("k1", "k2"), new InvalidatePolicy(InvalidatePolicy.Scope.BOTH, false));
     assertThat(caffeineCache.getIfPresent("k1")).isNull();
     assertThat(caffeineCache.getIfPresent("k2")).isNull();
   }
 
   @Test
-  void invalidateLocal_withInvalidKeys_shouldSkipInvalid() {
-    caffeineCache.put("k1", plainEntry("v1"));
-    hotKeyCache.invalidate(Arrays.asList("k1", null, ""), true);
-    assertThat(caffeineCache.getIfPresent("k1")).isNull();
-  }
-
-  @Test
   void invalidateLocal_withEmptyCollection_shouldSkip() {
     caffeineCache.put("k1", plainEntry("v1"));
-    hotKeyCache.invalidate(List.of(), true);
+    hotKeyCache.invalidate(List.of(), new InvalidatePolicy(InvalidatePolicy.Scope.BOTH, false));
     assertThat(caffeineCache.getIfPresent("k1")).isNotNull();
   }
 
@@ -2175,69 +1517,7 @@ class ZetaCacheTest {
     assertThat(stats.estimatedSize()).isPositive();
   }
 
-  // ── localKeysWithPrefix / snapshotValues (StatsAdmin surface) ──
-
-  @Test
-  void localKeysWithPrefix_shouldReturnOnlyMatchingKeys() {
-    caffeineCache.put("test::a", plainEntry("1"));
-    caffeineCache.put("test::b", plainEntry("2"));
-    caffeineCache.put("other::c", plainEntry("3"));
-    assertThat(hotKeyCache.localKeysWithPrefix("test::")).containsExactlyInAnyOrder("test::a", "test::b");
-  }
-
-  @Test
-  void snapshotValues_shouldUnwrapEntriesAndKeepNullSentinels() {
-    caffeineCache.put("plain", plainEntry("v"));
-    caffeineCache.put(
-      "nullkey",
-      CacheEntry.builder()
-        .value(NullValue.INSTANCE)
-        .dataVersion(1)
-        .isVersionDegraded(false)
-        .decisionVersion(0)
-        .hardTtlMs(10_000)
-        .hardExpireAtMs(System.currentTimeMillis() + 10_000)
-        .softTtlMs(0L)
-        .softExpireAtMs(0L)
-        .keyState(KeyState.NORMAL)
-        .normalHardTtlMs(10_000)
-        .normalSoftTtlMs(0L)
-        .build()
-    );
-    Map<String, Object> snap = hotKeyCache.snapshotValues(100);
-    assertThat(snap).containsEntry("plain", "v");
-    // A cached-null sentinel appears as a null value — and must not throw
-    // (the previous collector-based implementation NPE'd on the first one).
-    assertThat(snap).containsKey("nullkey");
-    assertThat(snap.get("nullkey")).isNull();
-  }
-
-  @Test
-  void snapshotValues_nonPositiveLimit_shouldReturnEmpty() {
-    caffeineCache.put("plain", plainEntry("v"));
-    assertThat(hotKeyCache.snapshotValues(0)).isEmpty();
-    assertThat(hotKeyCache.snapshotValues(-1)).isEmpty();
-  }
-
-  // ── invalidateAfterPut success path ──
-
-  @Test
-  void invalidateAfterPutAllOnSuccess() {
-    caffeineCache.put("key1", plainEntry("original"));
-    hotKeyCache.invalidateAfterPut("key1", () -> {}, true);
-    assertThat(caffeineCache.getIfPresent("key1")).isNull();
-  }
-
   // ── get with ALLOW_NO_REPORT ──
-
-  @Test
-  void get_withNoReportRule_shouldReturnCached() {
-    ruleService.addWhitelist("no-reportToWorker");
-    caffeineCache.put("no-reportToWorker", plainEntry("v"));
-    assertThat(
-      hotKeyCache.get("no-reportToWorker", ReadPolicy.of(() -> "fresh", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH))
-    ).contains("v");
-  }
 
   // ── getWithSoftExpire with TTL override ──
 
@@ -2245,46 +1525,29 @@ class ZetaCacheTest {
   void getWithSoftExpire_withSoftTtlOverride_shouldReturnCached() {
     caffeineCache.put(
       "key",
-      CacheEntry.builder()
+      EntryDraft.blank(null)
         .value("cached")
-        .dataVersion(1)
-        .isVersionDegraded(false)
-        .decisionVersion(0)
-        .hardTtlMs(300_000)
-        .hardExpireAtMs(Long.MAX_VALUE)
-        .softTtlMs(30_000)
-        .softExpireAtMs(System.currentTimeMillis() + 60_000)
+        .version(1)
+        .decision(DecisionStamp.hot(0, null, 0L))
+        .ttl(300_000, 30_000, 300_000, 30_000)
+        .expiryAt(Long.MAX_VALUE, System.currentTimeMillis() + 60_000)
         .keyState(KeyState.HOT)
-        .normalHardTtlMs(300_000)
-        .normalSoftTtlMs(30_000)
         .build()
     );
     assertThat(
-      hotKeyCache.getWithSoftExpire(
-        "key",
-        ReadPolicy.of(() -> "fresh", 0L, 500L, true, true, StalePolicy.SOFT_REFRESH)
-      )
-    ).contains("cached");
+      (Object) hotKeyCache.get("key", () -> "fresh", GetPolicy.of(0L, 500L, true, StalePolicy.SOFT_REFRESH))
+    ).isEqualTo("cached");
   }
 
   // ── putThrough with TTL overrides ──
 
   @Test
   void putThrough_withTtlOverrides_shouldCacheWithCustomTtl() {
-    hotKeyCache.putThrough("key1", "v", () -> {}, 50000L, 5000L, true);
+    hotKeyCache.putThrough("key1", "v", 50000L, 5000L);
     CacheEntry raw = caffeineCache.getIfPresent("key1");
     assertThat(raw).isNotNull();
     assertThat(raw.getHardTtlMs()).isEqualTo(50000L);
     assertThat(raw.getSoftTtlMs()).isEqualTo(5000L);
-  }
-
-  // ── invalidateAllLocal(Collection) with all-invalid keys ──
-
-  @Test
-  void invalidate_All_collection_whenInvalid_shouldSkip() {
-    caffeineCache.put("k1", plainEntry("v1"));
-    hotKeyCache.invalidate(Arrays.asList(null, ""), true);
-    assertThat(caffeineCache.getIfPresent("k1")).isNotNull();
   }
 
   // ── getWithSoftExpire with hard/soft TTL overrides ──
@@ -2293,44 +1556,21 @@ class ZetaCacheTest {
   void getWithSoftExpire_withBothTtlOverrides_shouldReturnCached() {
     caffeineCache.put(
       "key",
-      CacheEntry.builder()
+      EntryDraft.blank(null)
         .value("cached")
-        .dataVersion(1)
-        .isVersionDegraded(false)
-        .decisionVersion(0)
-        .hardTtlMs(300_000)
-        .hardExpireAtMs(Long.MAX_VALUE)
-        .softTtlMs(30_000)
-        .softExpireAtMs(System.currentTimeMillis() + 60_000)
+        .version(1)
+        .decision(DecisionStamp.hot(0, null, 0L))
+        .ttl(300_000, 30_000, 300_000, 30_000)
+        .expiryAt(Long.MAX_VALUE, System.currentTimeMillis() + 60_000)
         .keyState(KeyState.HOT)
-        .normalHardTtlMs(300_000)
-        .normalSoftTtlMs(30_000)
         .build()
     );
     assertThat(
-      hotKeyCache.getWithSoftExpire(
-        "key",
-        ReadPolicy.of(() -> "fresh", 10000L, 500L, true, true, StalePolicy.SOFT_REFRESH)
-      )
-    ).contains("cached");
+      (Object) hotKeyCache.get("key", () -> "fresh", GetPolicy.of(10000L, 500L, true, StalePolicy.SOFT_REFRESH))
+    ).isEqualTo("cached");
   }
 
   // ── broadcastAllLocalRulesManually (no publisher) ──
-
-  @Test
-  @DisplayName("broadcastAllLocalRulesManually should not throw with no publisher")
-  void broadcastAllLocalRulesManually_shouldNotThrow() {
-    ruleService.broadcastAllLocalRulesManually();
-  }
-
-  // ── invalidateAfterPut with no existing entry ──
-
-  @Test
-  @DisplayName("invalidateAfterPut on clean key should not throw")
-  void invalidateAfterPut_All_withNoExistingEntry_shouldWork() {
-    hotKeyCache.invalidateAfterPut("key1", () -> {}, true);
-    assertThat(caffeineCache.getIfPresent("key1")).isNull();
-  }
 
   // ── Hot path detection and promotion ──
 
@@ -2338,7 +1578,7 @@ class ZetaCacheTest {
   @DisplayName("Hot path detection and promotion")
   class HotPathTest {
 
-    private final SnowflakeIdGenerator snowflakeIdGenerator = new SnowflakeIdGenerator(0, 1, 5L, false);
+    private AccessCounter accessCounter;
 
     private HotKeyDetector hotKeyDetector;
     private Cache<String, CacheEntry> caffeineCache;
@@ -2351,7 +1591,6 @@ class ZetaCacheTest {
     private BroadcastBuffer broadcastBuffer;
     private HealthView healthView;
     private KeyReporter reporter;
-    private RuleService ruleService;
 
     @BeforeEach
     void setUp() {
@@ -2360,10 +1599,8 @@ class ZetaCacheTest {
       singleFlight = mock(SingleFlight.class);
       executor = Runnable::run;
       ZetaProperties ttlConfig = new ZetaProperties();
-      entryLifecycle = new EntryLifecycleImpl(caffeineCache, ttlConfig, CacheCompressor.NONE, null);
-      backgroundRefresher = new DefaultBackgroundRefresher(caffeineCache, executor, entryLifecycle.ttlPolicy(), CacheCompressor.NONE, 10);
-      RuleMatcher hotPathMatcher = new RuleMatcherImpl(Optional.empty(), Optional.empty());
-      ruleService = new RuleService(hotPathMatcher, ttlConfig);
+      entryLifecycle = new EntryLifecycleImpl(caffeineCache, ttlConfig, null);
+      backgroundRefresher = new DefaultBackgroundRefresher(caffeineCache, executor, entryLifecycle, 10);
       publisher = mock(CacheSyncPublisher.class);
       broadcastBuffer = new BroadcastBuffer(
         Executors.newSingleThreadScheduledExecutor(r -> {
@@ -2371,8 +1608,11 @@ class ZetaCacheTest {
           t.setDaemon(true);
           return t;
         }),
-        Optional.of(publisher)
-      , 500, 2_000, null);
+        publisher,
+        500,
+        2_000,
+        null
+      );
       healthView = mock(HealthView.class);
       reporter = mock(KeyReporter.class);
       hotKeyCache = new HotKeyCache(
@@ -2381,29 +1621,41 @@ class ZetaCacheTest {
         singleFlight,
         entryLifecycle,
         backgroundRefresher,
-        executor,
-        new CentralDispatcher(Optional.of(reporter), Optional.of(publisher), broadcastBuffer, hotKeyDetector),
-        hotPathMatcher,
-        new VersionControllerImpl(Optional.empty(), 60, snowflakeIdGenerator),
-        ttlConfig,
-        healthView,
-        CacheCompressor.NONE,
-        null
+        new CentralDispatcher(
+          new AccessCounter(hotKeyDetector, reporter, scheduler, 50L, AccessCounter.DEFAULT_DETECTOR_INTERVAL_MS),
+          publisher,
+          broadcastBuffer,
+          null
+        ),
+        new MonotonicStampClock(1L, MonotonicStampClock.DEFAULT_MAX_FORWARD_DRIFT_MS),
+        healthView
       );
+    }
+
+    /**
+     * The admission sink the engine registered on the detector — production's
+     * TopK admission event. NORMAL promotion left the read path (design
+     * decisions: hot state), so a test that wants a HOT entry fires one event
+     * here and then runs the maintenance tick, exactly like
+     * {@code ZetaSchedulingConfiguration} does every 500 ms.
+     *
+     * @return the sink the engine handed to the sketch
+     */
+    private Consumer<String> admissionSink() {
+      ArgumentCaptor<Consumer<String>> sink = ArgumentCaptor.forClass(Consumer.class);
+      verify(hotKeyDetector, atLeastOnce()).setAdmittedSink(sink.capture());
+      return sink.getValue();
     }
 
     @Test
     @DisplayName("loadAndCache should promote key to HOT when detected as hot")
     void loadAndCache_shouldPromoteHotKey() {
       when(hotKeyDetector.contains("key1")).thenReturn(true);
-      when(singleFlight.loadOutcome(eq("key1"), any())).thenReturn(oc("value"));
+      SingleFlightStubs.stubLoad(singleFlight, oc("value"));
 
-      Optional<String> result = hotKeyCache.get(
-        "key1",
-        ReadPolicy.of(() -> "value", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH)
-      );
+      String result = hotKeyCache.get("key1", () -> "value", GetPolicy.of(0L, 0L, true, StalePolicy.SOFT_REFRESH));
 
-      assertThat(result).contains("value");
+      assertThat(result).isEqualTo("value");
       Object raw = caffeineCache.getIfPresent("key1");
       assertThat(raw).isInstanceOf(CacheEntry.class);
       CacheEntry entry = (CacheEntry) raw;
@@ -2411,28 +1663,23 @@ class ZetaCacheTest {
     }
 
     @Test
-    @DisplayName("promoteIfNeeded should skip the TopK sketch probe for steady-state HOT hits")
-    void promoteIfNeeded_shouldSkipSketchProbeForSteadyStateHot() {
+    @DisplayName("a steady-state HOT hit should skip the TopK sketch probe")
+    void hotHit_shouldSkipSketchProbeForSteadyStateHot() {
       caffeineCache.put(
         "key1",
-        CacheEntry.builder()
+        EntryDraft.blank(null)
           .value("v")
-          .dataVersion(1)
-          .isVersionDegraded(false)
-          .decisionVersion(0)
-          .hardTtlMs(300_000)
-          .hardExpireAtMs(Long.MAX_VALUE)
-          .softTtlMs(30_000)
-          .softExpireAtMs(System.currentTimeMillis() + 60_000)
+          .version(1)
+          .decision(DecisionStamp.hot(0, null, 0L))
+          .ttl(300_000, 30_000, 300_000, 30_000)
+          .expiryAt(Long.MAX_VALUE, System.currentTimeMillis() + 60_000)
           .keyState(KeyState.HOT)
-          .normalHardTtlMs(300_000)
-          .normalSoftTtlMs(30_000)
           .build()
       );
 
       assertThat(
-        hotKeyCache.get("key1", ReadPolicy.of(() -> "loaded", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH))
-      ).contains("v");
+        (Object) hotKeyCache.get("key1", () -> "loaded", GetPolicy.of(0L, 0L, true, StalePolicy.SOFT_REFRESH))
+      ).isEqualTo("v");
 
       // Guard order: the entry-state check runs before the sketch probe, so a
       // HOT entry (never promotable) pays no probe on its hottest path.
@@ -2442,71 +1689,68 @@ class ZetaCacheTest {
     }
 
     @Test
-    @DisplayName("promoteIfNeeded should still probe NORMAL entries before promoting")
-    void promoteIfNeeded_shouldStillProbeNormalEntries() {
+    @DisplayName("a NORMAL hit pays no sketch probe: promotion is not a read-path concern")
+    void hotHit_shouldStillProbeNormalEntries() {
       caffeineCache.put(
         "key1",
-        CacheEntry.builder()
+        EntryDraft.blank(null)
           .value("v")
-          .dataVersion(1)
-          .isVersionDegraded(false)
-          .decisionVersion(0)
-          .hardTtlMs(300_000)
-          .hardExpireAtMs(Long.MAX_VALUE)
-          .softTtlMs(30_000)
-          .softExpireAtMs(System.currentTimeMillis() + 60_000)
+          .version(1)
+          .decision(DecisionStamp.hot(0, null, 0L))
+          .ttl(300_000, 30_000, 300_000, 30_000)
+          .expiryAt(Long.MAX_VALUE, System.currentTimeMillis() + 60_000)
           .keyState(KeyState.NORMAL)
-          .normalHardTtlMs(300_000)
-          .normalSoftTtlMs(30_000)
           .build()
       );
       when(hotKeyDetector.contains("key1")).thenReturn(true);
 
-      hotKeyCache.get("key1", ReadPolicy.of(() -> "loaded", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH));
+      hotKeyCache.get("key1", () -> "loaded", GetPolicy.of(0L, 0L, true, StalePolicy.SOFT_REFRESH));
 
-      // The reorder must not starve promotable entries of their probe.
-      verify(hotKeyDetector, atLeastOnce()).contains("key1");
+      // The read path only re-verifies Worker demotion and the degraded-COOL
+      // branch: a NORMAL hit must not pay a sketch probe there (design
+      // decisions: hot state — promotion is event-driven, off the read path).
+      verify(hotKeyDetector, never()).contains("key1");
       CacheEntry entry = (CacheEntry) caffeineCache.getIfPresent("key1");
-      assertThat(entry.getKeyState()).isEqualTo(KeyState.HOT);
+      assertThat(entry.getKeyState()).isEqualTo(KeyState.NORMAL);
     }
 
     @Test
     @DisplayName("loadAndCache should preserve Worker-managed HOT entry")
     void loadAndCache_shouldPreserveWorkerManagedEntry() {
       when(hotKeyDetector.contains("key1")).thenReturn(false);
-      when(singleFlight.loadOutcome(eq("key1"), any())).thenAnswer(invocation -> {
+      when(singleFlight.load(eq("key1"), any(), anyBoolean(), any())).thenAnswer(invocation -> {
         Supplier<?> reader = invocation.getArgument(1);
         caffeineCache.put(
           "key1",
-          CacheEntry.builder()
+          EntryDraft.blank(null)
             .value("workerValue")
-            .dataVersion(100)
-            .isVersionDegraded(false)
-            .decisionVersion(42)
-            .hardTtlMs(3_600_000)
-            .hardExpireAtMs(Long.MAX_VALUE)
-            .softTtlMs(300_000)
-            .softExpireAtMs(Long.MAX_VALUE)
+            .version(100)
+            .decision(DecisionStamp.hot(42, null, 0L))
+            .ttl(3_600_000, 300_000, 300_000, 30_000)
+            .expiryAt(Long.MAX_VALUE, Long.MAX_VALUE)
             .keyState(KeyState.HOT)
-            .normalHardTtlMs(300_000)
-            .normalSoftTtlMs(30_000)
             .build()
         );
         Object v = reader.get();
+        if (v != null) {
+          java.util.function.Consumer<Object> commit = invocation.getArgument(3);
+          commit.accept(v);
+        }
         return v == null ? LoaderOutcome.sourceEmpty() : LoaderOutcome.loaded(v);
       });
 
-      Optional<String> result = hotKeyCache.get(
-        "key1",
-        ReadPolicy.of(() -> "newValue", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH)
-      );
+      String result = hotKeyCache.get("key1", () -> "newValue", GetPolicy.of(0L, 0L, true, StalePolicy.SOFT_REFRESH));
 
-      assertThat(result).contains("newValue");
+      assertThat(result).isEqualTo("newValue");
       Object raw = caffeineCache.getIfPresent("key1");
       assertThat(raw).isInstanceOf(CacheEntry.class);
       CacheEntry entry = (CacheEntry) raw;
-      assertThat(entry.getKeyState()).isEqualTo(KeyState.HOT);
-      assertThat(entry.getValue()).isEqualTo("workerValue");
+      assertThat(entry.getKeyState()).as("the Worker's HOT regime survives the load").isEqualTo(KeyState.HOT);
+      assertThat(entry.getHardTtlMs()).as("the Worker-granted TTL survives the load").isEqualTo(3_600_000);
+      // P0-1: a load that wins the resident guard replaces the value — keeping the
+      // HOT TTL but dropping the freshly loaded value pinned stale data for the
+      // whole Worker-granted lease.
+      assertThat(entry.getValue()).isEqualTo("newValue");
     }
 
     @Test
@@ -2514,22 +1758,17 @@ class ZetaCacheTest {
     void getWithSoftExpire_shouldRefreshCoolEntryAndDowngradeToNormal() {
       caffeineCache.put(
         "key",
-        CacheEntry.builder()
+        EntryDraft.blank(null)
           .value("stale")
-          .dataVersion(1)
-          .isVersionDegraded(false)
-          .decisionVersion(5)
-          .hardTtlMs(300_000)
-          .hardExpireAtMs(Long.MAX_VALUE)
-          .softTtlMs(30_000)
-          .softExpireAtMs(System.currentTimeMillis() - 1000)
+          .version(1)
+          .decision(DecisionStamp.hot(5, null, 0L))
+          .ttl(300_000, 30_000, 300_000, 5000)
+          .expiryAt(Long.MAX_VALUE, System.currentTimeMillis() - 1000)
           .keyState(KeyState.COOL)
-          .normalHardTtlMs(300_000)
-          .normalSoftTtlMs(5000)
           .build()
       );
 
-      hotKeyCache.getWithSoftExpire("key", ReadPolicy.of(() -> "fresh", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH));
+      hotKeyCache.get("key", () -> "fresh", GetPolicy.of(0L, 0L, true, StalePolicy.SOFT_REFRESH));
 
       // COOL entries are refreshed; the successful refresh downgrades the
       // entry to NORMAL (local activity regains the ordinary lifecycle).
@@ -2544,25 +1783,17 @@ class ZetaCacheTest {
     void getWithSoftExpire_shouldUseHotSoftTtlOverride() {
       caffeineCache.put(
         "key",
-        CacheEntry.builder()
+        EntryDraft.blank(null)
           .value("stale")
-          .dataVersion(1)
-          .isVersionDegraded(false)
-          .decisionVersion(5)
-          .hardTtlMs(3_600_000)
-          .hardExpireAtMs(Long.MAX_VALUE)
-          .softTtlMs(300_000)
-          .softExpireAtMs(System.currentTimeMillis() - 1000)
+          .version(1)
+          .decision(DecisionStamp.hot(5, null, 0L))
+          .ttl(3_600_000, 300_000, 300_000, 30_000)
+          .expiryAt(Long.MAX_VALUE, System.currentTimeMillis() - 1000)
           .keyState(KeyState.HOT)
-          .normalHardTtlMs(300_000)
-          .normalSoftTtlMs(30_000)
           .build()
       );
 
-      hotKeyCache.getWithSoftExpire(
-        "key",
-        ReadPolicy.of(() -> "fresh", 0L, 9999L, true, true, StalePolicy.SOFT_REFRESH)
-      );
+      hotKeyCache.get("key", () -> "fresh", GetPolicy.of(0L, 9999L, true, StalePolicy.SOFT_REFRESH));
 
       CacheEntry after = (CacheEntry) caffeineCache.getIfPresent("key");
       assertThat(after.getValue()).isEqualTo("fresh");
@@ -2570,32 +1801,101 @@ class ZetaCacheTest {
     }
 
     @Test
-    @DisplayName("promoteLocalHotkeyIfNeeded should promote NORMAL to HOT")
+    @DisplayName("an admission event promotes the resident NORMAL entry on the maintenance tick")
     void promoteLocalHotkeyIfNeeded_shouldPromoteNormalToHot() {
       caffeineCache.put(
         "key1",
-        CacheEntry.builder()
+        EntryDraft.blank(null)
           .value("v")
-          .dataVersion(1)
-          .isVersionDegraded(false)
-          .decisionVersion(0)
-          .hardTtlMs(300_000)
-          .hardExpireAtMs(Long.MAX_VALUE)
-          .softTtlMs(30_000)
-          .softExpireAtMs(System.currentTimeMillis() + 60_000)
+          .version(1)
+          .decision(DecisionStamp.hot(0, null, 0L))
+          .ttl(300_000, 30_000, 300_000, 30_000)
+          .expiryAt(Long.MAX_VALUE, System.currentTimeMillis() + 60_000)
           .keyState(KeyState.NORMAL)
-          .normalHardTtlMs(300_000)
-          .normalSoftTtlMs(30_000)
           .build()
       );
       when(hotKeyDetector.contains("key1")).thenReturn(true);
 
-      hotKeyCache.get("key1", ReadPolicy.of(() -> "loaded", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH));
+      // NORMAL promotion left the read path: the admission event queues the key
+      // and the maintenance tick performs the rewrite (design decisions: hot state).
+      admissionSink().accept("key1");
+      assertThat(hotKeyCache.promoteAdmitted()).as("one entry transitioned to HOT").isEqualTo(1);
 
       Object raw = caffeineCache.getIfPresent("key1");
       assertThat(raw).isInstanceOf(CacheEntry.class);
       CacheEntry entry = (CacheEntry) raw;
       assertThat(entry.getKeyState()).isEqualTo(KeyState.HOT);
+      assertThat(entry.getHardTtlMs()).isEqualTo(entryLifecycle.ttlPolicy().effectiveHotHardTtlMs());
+    }
+
+    @Test
+    @DisplayName("an admission tick removes a logically expired resident instead of promoting it")
+    void promoteAdmitted_shouldRemoveExpiredResident() {
+      caffeineCache.put(
+        "key1",
+        EntryDraft.blank(null)
+          .value("v")
+          .version(1)
+          .decision(DecisionStamp.hot(0, null, 0L))
+          .ttl(300_000, 30_000, 300_000, 30_000)
+          .expiryAt(System.currentTimeMillis() - 60_000, 0L)
+          .keyState(KeyState.NORMAL)
+          .build()
+      );
+      when(hotKeyDetector.contains("key1")).thenReturn(true);
+
+      admissionSink().accept("key1");
+
+      assertThat(hotKeyCache.promoteAdmitted()).as("an expired entry is not a promotion").isZero();
+      assertThat(caffeineCache.getIfPresent("key1")).as("the expired resident is removed").isNull();
+    }
+
+    @Test
+    @DisplayName("the lock-free pre-check still lets an expired HOT resident reach the removal")
+    void promoteAdmitted_shouldRemoveExpiredHotResident() {
+      caffeineCache.put(
+        "key1",
+        EntryDraft.blank(null)
+          .value("v")
+          .version(1)
+          .decision(DecisionStamp.hot(5, "w1", 0L))
+          .ttl(3_600_000, 300_000, 300_000, 30_000)
+          .expiryAt(System.currentTimeMillis() - 60_000, 0L)
+          .keyState(KeyState.HOT)
+          .build()
+      );
+      when(hotKeyDetector.contains("key1")).thenReturn(true);
+
+      admissionSink().accept("key1");
+
+      assertThat(hotKeyCache.promoteAdmitted()).as("an expired entry is not a promotion").isZero();
+      assertThat(caffeineCache.getIfPresent("key1"))
+        .as("a non-promotable state must not bypass the expired-resident removal")
+        .isNull();
+    }
+
+    @Test
+    @DisplayName("an admission tick keeps a resident's longer normal TTL baseline")
+    void promoteAdmitted_shouldKeepLongerNormalTtlBaseline() {
+      caffeineCache.put(
+        "key1",
+        EntryDraft.blank(null)
+          .value("v")
+          .version(1)
+          .decision(DecisionStamp.hot(0, null, 0L))
+          .ttl(7_200_000, 600_000, 7_200_000, 600_000)
+          .keyState(KeyState.NORMAL)
+          .build()
+      );
+      when(hotKeyDetector.contains("key1")).thenReturn(true);
+
+      admissionSink().accept("key1");
+      assertThat(hotKeyCache.promoteAdmitted()).as("one entry transitioned to HOT").isEqualTo(1);
+
+      CacheEntry entry = (CacheEntry) caffeineCache.getIfPresent("key1");
+      assertThat(entry.getKeyState()).isEqualTo(KeyState.HOT);
+      assertThat(entry.getHardTtlMs()).as("the explicit 2h baseline outlives the 1h hot default").isEqualTo(7_200_000L);
+      assertThat(entry.getSoftTtlMs()).isEqualTo(600_000L);
     }
 
     @Test
@@ -2603,24 +1903,19 @@ class ZetaCacheTest {
     void promoteLocalHotkeyIfNeeded_shouldPromoteCoolWhenClusterUnhealthy() {
       caffeineCache.put(
         "key1",
-        CacheEntry.builder()
+        EntryDraft.blank(null)
           .value("v")
-          .dataVersion(1)
-          .isVersionDegraded(false)
-          .decisionVersion(5)
-          .hardTtlMs(300_000)
-          .hardExpireAtMs(Long.MAX_VALUE)
-          .softTtlMs(30_000)
-          .softExpireAtMs(System.currentTimeMillis() + 60_000)
+          .version(1)
+          .decision(DecisionStamp.hot(5, null, 0L))
+          .ttl(300_000, 30_000, 300_000, 30_000)
+          .expiryAt(Long.MAX_VALUE, System.currentTimeMillis() + 60_000)
           .keyState(KeyState.COOL)
-          .normalHardTtlMs(300_000)
-          .normalSoftTtlMs(30_000)
           .build()
       );
       when(hotKeyDetector.contains("key1")).thenReturn(true);
       when(healthView.isClusterHealthy()).thenReturn(false);
 
-      hotKeyCache.get("key1", ReadPolicy.of(() -> "loaded", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH));
+      hotKeyCache.get("key1", () -> "loaded", GetPolicy.of(0L, 0L, true, StalePolicy.SOFT_REFRESH));
 
       Object raw = caffeineCache.getIfPresent("key1");
       assertThat(raw).isInstanceOf(CacheEntry.class);
@@ -2633,24 +1928,19 @@ class ZetaCacheTest {
     void promoteLocalHotkeyIfNeeded_shouldNotPromoteCoolWhenClusterHealthy() {
       caffeineCache.put(
         "key1",
-        CacheEntry.builder()
+        EntryDraft.blank(null)
           .value("v")
-          .dataVersion(1)
-          .isVersionDegraded(false)
-          .decisionVersion(5)
-          .hardTtlMs(300_000)
-          .hardExpireAtMs(Long.MAX_VALUE)
-          .softTtlMs(30_000)
-          .softExpireAtMs(System.currentTimeMillis() + 60_000)
+          .version(1)
+          .decision(DecisionStamp.hot(5, null, 0L))
+          .ttl(300_000, 30_000, 300_000, 30_000)
+          .expiryAt(Long.MAX_VALUE, System.currentTimeMillis() + 60_000)
           .keyState(KeyState.COOL)
-          .normalHardTtlMs(300_000)
-          .normalSoftTtlMs(30_000)
           .build()
       );
       when(hotKeyDetector.contains("key1")).thenReturn(true);
       when(healthView.isClusterHealthy()).thenReturn(true);
 
-      hotKeyCache.get("key1", ReadPolicy.of(() -> "loaded", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH));
+      hotKeyCache.get("key1", () -> "loaded", GetPolicy.of(0L, 0L, true, StalePolicy.SOFT_REFRESH));
 
       Object raw = caffeineCache.getIfPresent("key1");
       assertThat(raw).isInstanceOf(CacheEntry.class);
@@ -2663,25 +1953,20 @@ class ZetaCacheTest {
     void processLocalHotkeyIfNeeded_shouldSkipPromoteForNonMemberNormal() {
       caffeineCache.put(
         "key1",
-        CacheEntry.builder()
+        EntryDraft.blank(null)
           .value("v")
-          .dataVersion(1)
-          .isVersionDegraded(false)
-          .decisionVersion(0)
-          .hardTtlMs(300_000)
-          .hardExpireAtMs(Long.MAX_VALUE)
-          .softTtlMs(30_000)
-          .softExpireAtMs(System.currentTimeMillis() + 60_000)
+          .version(1)
+          .decision(DecisionStamp.hot(0, null, 0L))
+          .ttl(300_000, 30_000, 300_000, 30_000)
+          .expiryAt(Long.MAX_VALUE, System.currentTimeMillis() + 60_000)
           .keyState(KeyState.NORMAL)
-          .normalHardTtlMs(300_000)
-          .normalSoftTtlMs(30_000)
           .build()
       );
       when(hotKeyDetector.contains("key1")).thenReturn(false);
 
       assertThat(
-        hotKeyCache.get("key1", ReadPolicy.of(() -> "loaded", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH))
-      ).contains("v");
+        (Object) hotKeyCache.get("key1", () -> "loaded", GetPolicy.of(0L, 0L, true, StalePolicy.SOFT_REFRESH))
+      ).isEqualTo("v");
 
       CacheEntry entry = (CacheEntry) caffeineCache.getIfPresent("key1");
       assertThat(entry.getKeyState()).isEqualTo(KeyState.NORMAL);
@@ -2689,65 +1974,60 @@ class ZetaCacheTest {
     }
 
     @Test
-    @DisplayName("promote should NOT promote when TopK membership revoked between pre-check and compute (TOCTOU guard)")
-    void promote_shouldNotPromoteWhenMembershipRevokedBetweenPreCheckAndCompute() {
+    @DisplayName("an admission event for a key no longer in the TopK does not promote")
+    void promoteAdmitted_shouldSkipNonMember() {
       caffeineCache.put(
         "key1",
-        CacheEntry.builder()
+        EntryDraft.blank(null)
           .value("v")
-          .dataVersion(1)
-          .isVersionDegraded(false)
-          .decisionVersion(0)
-          .hardTtlMs(300_000)
-          .hardExpireAtMs(Long.MAX_VALUE)
-          .softTtlMs(30_000)
-          .softExpireAtMs(System.currentTimeMillis() + 60_000)
+          .version(1)
+          .decision(DecisionStamp.hot(0, null, 0L))
+          .ttl(300_000, 30_000, 300_000, 30_000)
+          .expiryAt(Long.MAX_VALUE, System.currentTimeMillis() + 60_000)
           .keyState(KeyState.NORMAL)
-          .normalHardTtlMs(300_000)
-          .normalSoftTtlMs(30_000)
           .build()
       );
-      // First contains() = lock-free pre-check (passes), second = TOCTOU guard inside compute (fails)
-      when(hotKeyDetector.contains("key1")).thenReturn(true, false);
+      // The drain samples TopK membership before the atomic rewrite; a key
+      // expelled between admission and this tick is not promoted.
+      when(hotKeyDetector.contains("key1")).thenReturn(false);
 
-      hotKeyCache.get("key1", ReadPolicy.of(() -> "loaded", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH));
+      admissionSink().accept("key1");
+      assertThat(hotKeyCache.promoteAdmitted()).isZero();
 
       CacheEntry entry = (CacheEntry) caffeineCache.getIfPresent("key1");
       assertThat(entry.getKeyState()).isEqualTo(KeyState.NORMAL);
     }
 
     @Test
-    @DisplayName("promote should preserve a concurrently-replaced entry instead of deleting it")
+    @DisplayName("promote must preserve a Worker entry that replaced the resident one before the tick")
     void promote_shouldPreserveEntryReplacedDuringProcessing() {
       caffeineCache.put(
         "key1",
-        CacheEntry.builder()
+        EntryDraft.blank(null)
           .value("v")
-          .dataVersion(1)
-          .isVersionDegraded(false)
-          .decisionVersion(0)
-          .hardTtlMs(300_000)
-          .hardExpireAtMs(Long.MAX_VALUE)
-          .softTtlMs(30_000)
-          .softExpireAtMs(System.currentTimeMillis() + 60_000)
+          .version(1)
+          .decision(DecisionStamp.hot(0, null, 0L))
+          .ttl(300_000, 30_000, 300_000, 30_000)
+          .expiryAt(Long.MAX_VALUE, System.currentTimeMillis() + 60_000)
           .keyState(KeyState.NORMAL)
-          .normalHardTtlMs(300_000)
-          .normalSoftTtlMs(30_000)
           .build()
       );
-      // Simulate a concurrent load replacing the entry with a fresh NORMAL
-      // entry between the lock-free pre-check and the promote compute (F1:
-      // bare writes are unrepresentable — the race is entry-vs-entry now).
-      when(hotKeyDetector.contains(anyString())).thenAnswer(invocation -> {
-        caffeineCache.put("key1", plainEntry("concurrent"));
+      // A Worker broadcast lands between the admission event and the maintenance
+      // tick: the drain's membership probe installs it, and the lock-free
+      // promotable-state pre-check must then leave it alone — its TTL regime is
+      // the Worker's.
+      when(hotKeyDetector.contains("key1")).thenAnswer(invocation -> {
+        caffeineCache.put("key1", workerHotEntry("w1", 3));
         return true;
       });
 
-      assertThat(
-        hotKeyCache.get("key1", ReadPolicy.of(() -> "loaded", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH))
-      ).contains("v");
+      admissionSink().accept("key1");
+      assertThat(hotKeyCache.promoteAdmitted()).as("a Worker-managed entry is never locally promoted").isZero();
 
-      assertThat(caffeineCache.getIfPresent("key1").getValue()).isEqualTo("concurrent");
+      CacheEntry kept = (CacheEntry) caffeineCache.getIfPresent("key1");
+      assertThat(kept.getValue()).as("the replacement survives the promotion attempt").isEqualTo("stored");
+      assertThat(kept.getKeyState()).isEqualTo(KeyState.HOT);
+      assertThat(kept.getDecisionNodeId()).isEqualTo("w1");
     }
 
     @Test
@@ -2755,82 +2035,101 @@ class ZetaCacheTest {
     void buildPutThroughEntry_shouldPreserveWorkerManagedState() {
       caffeineCache.put(
         "key1",
-        CacheEntry.builder()
+        EntryDraft.blank(null)
           .value("old")
-          .dataVersion(1)
-          .isVersionDegraded(false)
-          .decisionVersion(5)
-          .hardTtlMs(3_600_000)
-          .hardExpireAtMs(Long.MAX_VALUE)
-          .softTtlMs(300_000)
-          .softExpireAtMs(Long.MAX_VALUE)
+          .version(1)
+          .decision(DecisionStamp.hot(5, null, 0L))
+          .ttl(3_600_000, 300_000, 300_000, 30_000)
+          .expiryAt(Long.MAX_VALUE, Long.MAX_VALUE)
           .keyState(KeyState.HOT)
-          .normalHardTtlMs(300_000)
-          .normalSoftTtlMs(30_000)
           .build()
       );
 
-      hotKeyCache.putThrough("key1", "newValue", () -> {}, 0L, 0L, true);
+      hotKeyCache.putThrough("key1", "newValue", 0L, 0L);
 
       CacheEntry entry = caffeineCache.getIfPresent("key1");
       assertThat(entry).isNotNull();
       assertThat(entry.getKeyState()).isEqualTo(KeyState.HOT);
-      // Normal path (non-Redis fallback within nextVersion) still respects version guard;
-      // the degraded fallback rewrite keeps the same guard (forceUpdate=false, ADR-0066).
-      assertThat(entry.getValue()).isEqualTo("old");
+      // A local write at a strictly newer stamp is authoritative; the Worker
+      // decision metadata and TTL regime survive.
+      assertThat(entry.getValue()).isEqualTo("newValue");
     }
 
     @Test
     @DisplayName("invalidate should send when publisher present")
     void invalidate_shouldBroadcastWhenPublisherPresent() {
-      hotKeyCache.invalidate("key1", true);
+      hotKeyCache.invalidate("key1", new InvalidatePolicy(InvalidatePolicy.Scope.BOTH, false));
 
-      verify(publisher).broadcastLocalInvalidate(eq("key1"), anyLong(), eq(true));
+      verify(publisher).broadcastLocalInvalidate(eq("key1"), anyLong());
     }
 
     @Test
-    @DisplayName("invalidateAllLocal should send per-key versioned invalidates when publisher present")
+    @DisplayName("invalidateAllLocal should send one batched INVALIDATE carrying per-key versions")
     void invalidateAll_shouldBroadcastWhenPublisherPresent() {
-      hotKeyCache.invalidate(List.of("key1", "key2"), true);
+      hotKeyCache.invalidate(List.of("key1", "key2"), new InvalidatePolicy(InvalidatePolicy.Scope.BOTH, false));
 
-      // ADR-0066: the batch path now sends the same per-key versioned INVALIDATE
-      // messages as the single-key path (the unversioned INVALIDATE_ALL broadcast
-      // could not be ordered against a newer REFRESH on the same key).
-      verify(publisher).broadcastLocalInvalidate(eq("key1"), anyLong(), eq(true));
-      verify(publisher).broadcastLocalInvalidate(eq("key2"), anyLong(), eq(true));
-      verify(publisher, never()).broadcastLocalInvalidateAll(anyList());
+      // design decisions: invalidation: the batch path sends one INVALIDATE_BATCH chunk carrying the
+      // per-key versioned entries (design decisions: version comparison's per-key ordering preserved).
+      org.mockito.ArgumentCaptor<List<SyncMessage.Entry>> batch = org.mockito.ArgumentCaptor.forClass(
+        (Class) List.class
+      );
+      verify(publisher).broadcastInvalidateBatch(batch.capture());
+      assertThat(batch.getValue()).extracting(SyncMessage.Entry::key).containsExactlyInAnyOrder("key1", "key2");
+      assertThat(batch.getValue()).allMatch(e -> e.version() > 0);
     }
 
     @Test
     @DisplayName("putThrough should send refresh when publisher present")
     void putThrough_shouldBroadcastWhenPublisherPresent() {
-      hotKeyCache.putThrough("key1", "value", () -> {}, 0L, 0L, true);
+      hotKeyCache.putThrough("key1", "value", 0L, 0L);
 
       broadcastBuffer.flush();
-      verify(publisher).broadcastRefresh(eq("key1"), anyLong(), eq(true));
+      verify(publisher).broadcastRefresh(eq("key1"), anyLong());
     }
 
+    /**
+     * A synced refresh is a version-stamped write on the sync plane: its loaded
+     * value travels in a buffered value-carrying PUT (design decisions: sync messages), the same
+     * message path as {@code putThrough} — not the pre-0098 value-less REFRESH.
+     * The PUT carries the refresher's value so peers apply it without reloading.
+     */
     @Test
-    @DisplayName("invalidateAfterPut should send when publisher present")
-    void invalidateAfterPut_shouldBroadcastWhenPublisherPresent() {
-      hotKeyCache.invalidateAfterPut("key1", () -> {}, true);
+    @DisplayName("refresh(sync=true) buffers a value-carrying PUT with the loaded value")
+    void refresh_syncTrue_buffersValueCarryingPut() {
+      byte[] payload = "refreshed-payload".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+      when(publisher.serializePutPayload("refreshed")).thenReturn(payload);
 
-      verify(publisher).broadcastLocalInvalidate(eq("key1"), anyLong(), eq(true));
+      hotKeyCache.refresh("key1", () -> "refreshed", 0L, 0L, true);
+
+      assertThat((Object) hotKeyCache.peek("key1")).isEqualTo("refreshed");
+      verify(publisher).serializePutPayload("refreshed");
+      broadcastBuffer.flush();
+      verify(publisher).broadcastPut(eq("key1"), anyLong(), same(payload));
+      verify(publisher, never()).broadcastRefresh(anyString(), anyLong());
     }
 
+    /**
+     * With {@code sync = false} a refresh is a pure local apply: it still bumps
+     * its own version and loads, but never reaches the dispatcher/publisher.
+     */
     @Test
-    @DisplayName("broadcastAllLocalRulesManually should delegate without throwing")
-    void broadcastAllLocalRulesManually_shouldDelegate() {
-      ruleService.broadcastAllLocalRulesManually();
+    @DisplayName("refresh(sync=false) applies locally without any broadcast")
+    void refresh_syncFalse_appliesLocallyWithoutBroadcast() {
+      hotKeyCache.refresh("key2", () -> "local-only", 0L, 0L, false);
+
+      assertThat((Object) hotKeyCache.peek("key2")).isEqualTo("local-only");
+      verify(publisher, never()).serializePutPayload(any());
+      verify(publisher, never()).broadcastPut(anyString(), anyLong(), any());
+      verify(publisher, never()).broadcastRefresh(anyString(), anyLong());
     }
 
     @Test
     @DisplayName("get with TTL overrides should use them in loadAndCache")
     void get_shouldUseTtlOverrides() {
-      when(singleFlight.loadOutcome(anyString(), any())).thenReturn(oc("value"));
+      SingleFlightStubs.stubLoad(singleFlight, oc("value"));
       when(hotKeyDetector.contains("key1")).thenReturn(false);
 
-      hotKeyCache.get("key1", ReadPolicy.of(() -> "value", 50000L, 5000L, true, true, StalePolicy.SOFT_REFRESH));
+      hotKeyCache.get("key1", () -> "value", GetPolicy.of(50000L, 5000L, true, StalePolicy.SOFT_REFRESH));
 
       Object raw = caffeineCache.getIfPresent("key1");
       assertThat(raw).isInstanceOf(CacheEntry.class);
@@ -2845,22 +2144,17 @@ class ZetaCacheTest {
     void getWithSoftExpire_coolEntry_shouldTriggerRefresh() {
       caffeineCache.put(
         "key",
-        CacheEntry.builder()
+        EntryDraft.blank(null)
           .value("stale")
-          .dataVersion(1)
-          .isVersionDegraded(false)
-          .decisionVersion(5)
-          .hardTtlMs(300_000)
-          .hardExpireAtMs(Long.MAX_VALUE)
-          .softTtlMs(30_000)
-          .softExpireAtMs(System.currentTimeMillis() - 1000)
+          .version(1)
+          .decision(DecisionStamp.hot(5, null, 0L))
+          .ttl(300_000, 30_000, 300_000, 30_000)
+          .expiryAt(Long.MAX_VALUE, System.currentTimeMillis() - 1000)
           .keyState(KeyState.COOL)
-          .normalHardTtlMs(300_000)
-          .normalSoftTtlMs(30_000)
           .build()
       );
 
-      hotKeyCache.getWithSoftExpire("key", ReadPolicy.of(() -> "fresh", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH));
+      hotKeyCache.get("key", () -> "fresh", GetPolicy.of(0L, 0L, true, StalePolicy.SOFT_REFRESH));
 
       // COOL entries are proactively refreshed; the success downgrades the
       // entry to NORMAL (value and soft-expiry timestamp updated).
@@ -2875,23 +2169,18 @@ class ZetaCacheTest {
     void getWithSoftExpire_coolEntryWithZeroSoft_shouldRefresh() {
       caffeineCache.put(
         "key",
-        CacheEntry.builder()
+        EntryDraft.blank(null)
           .value("stale")
-          .dataVersion(1)
-          .isVersionDegraded(false)
-          .decisionVersion(5)
-          .hardTtlMs(300_000)
-          .hardExpireAtMs(Long.MAX_VALUE)
-          .softTtlMs(0)
-          .softExpireAtMs(System.currentTimeMillis() - 1000)
+          .version(1)
+          .decision(DecisionStamp.hot(5, null, 0L))
+          .ttl(300_000, 0, 300_000, 0)
+          .expiryAt(Long.MAX_VALUE, System.currentTimeMillis() - 1000)
           .keyState(KeyState.COOL)
-          .normalHardTtlMs(300_000)
-          .normalSoftTtlMs(0)
           .build()
       );
-      when(singleFlight.loadOutcome(anyString(), any())).thenReturn(oc("fresh"));
+      SingleFlightStubs.stubLoad(singleFlight, oc("fresh"));
 
-      hotKeyCache.getWithSoftExpire("key", ReadPolicy.of(() -> "fresh", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH));
+      hotKeyCache.get("key", () -> "fresh", GetPolicy.of(0L, 0L, true, StalePolicy.SOFT_REFRESH));
 
       CacheEntry after = (CacheEntry) caffeineCache.getIfPresent("key");
       assertThat(after.getValue()).isEqualTo("fresh");
@@ -2901,10 +2190,10 @@ class ZetaCacheTest {
     @Test
     @DisplayName("get with TTL overrides and hot detection uses TTL overrides in hot path")
     void get_withTtlOverridesAndHotDetection_usesTtlOverrides() {
-      when(singleFlight.loadOutcome(anyString(), any())).thenReturn(oc("hot-value"));
+      SingleFlightStubs.stubLoad(singleFlight, oc("hot-value"));
       when(hotKeyDetector.contains("key1")).thenReturn(true);
 
-      hotKeyCache.get("key1", ReadPolicy.of(() -> "hot-value", 80000L, 8000L, true, true, StalePolicy.SOFT_REFRESH));
+      hotKeyCache.get("key1", () -> "hot-value", GetPolicy.of(80000L, 8000L, true, StalePolicy.SOFT_REFRESH));
 
       Object raw = caffeineCache.getIfPresent("key1");
       assertThat(raw).isInstanceOf(CacheEntry.class);
@@ -2915,56 +2204,23 @@ class ZetaCacheTest {
     }
 
     @Test
-    @DisplayName("get with ALLOW_NO_REPORT and hot detection skips reportToWorker")
-    void get_withAllowNoReportAndHotDetection_skipsReport() {
-      ruleService.addWhitelist("noreport-hot");
-      when(singleFlight.loadOutcome(eq("noreport-hot"), any())).thenReturn(oc("value"));
-      when(hotKeyDetector.contains("noreport-hot")).thenReturn(true);
-
-      hotKeyCache.get("noreport-hot", ReadPolicy.of(() -> "value", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH));
-
-      Object raw = caffeineCache.getIfPresent("noreport-hot");
-      assertThat(raw).isInstanceOf(CacheEntry.class);
-      assertThat(((CacheEntry) raw).getValue()).isEqualTo("value");
-    }
-
-    @Test
-    @DisplayName("get with ALLOW_NO_REPORT and no hot detection skips reportToWorker")
-    void get_withAllowNoReportAndNoHotDetection_skipsReport() {
-      ruleService.addWhitelist("noreport-normal");
-      when(singleFlight.loadOutcome(eq("noreport-normal"), any())).thenReturn(oc("value"));
-      when(hotKeyDetector.contains("noreport-normal")).thenReturn(false);
-
-      hotKeyCache.get("noreport-normal", ReadPolicy.of(() -> "value", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH));
-
-      Object raw = caffeineCache.getIfPresent("noreport-normal");
-      assertThat(raw).isInstanceOf(CacheEntry.class);
-      assertThat(((CacheEntry) raw).getKeyState()).isEqualTo(KeyState.NORMAL);
-    }
-
-    @Test
     @DisplayName("processLocalHotkeyIfNeeded should NOT extend HOT entry past 75% TTL — hard TTL is the bound")
     void processLocalHotkeyIfNeeded_shouldNotExtendHotExpiry() {
       long originalExpireAt = System.currentTimeMillis() + 5_000;
       caffeineCache.put(
         "key1",
-        CacheEntry.builder()
+        EntryDraft.blank(null)
           .value("v")
-          .dataVersion(1)
-          .isVersionDegraded(false)
-          .decisionVersion(5)
-          .hardTtlMs(60_000)
-          .hardExpireAtMs(originalExpireAt)
-          .softTtlMs(30_000)
-          .softExpireAtMs(System.currentTimeMillis() + 60_000)
+          .version(1)
+          .decision(DecisionStamp.hot(5, null, 0L))
+          .ttl(60_000, 30_000, 300_000, 30_000)
+          .expiryAt(originalExpireAt, System.currentTimeMillis() + 60_000)
           .keyState(KeyState.HOT)
-          .normalHardTtlMs(300_000)
-          .normalSoftTtlMs(30_000)
           .build()
       );
       when(hotKeyDetector.contains("key1")).thenReturn(true);
 
-      hotKeyCache.get("key1", ReadPolicy.of(() -> "loaded", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH));
+      hotKeyCache.get("key1", () -> "loaded", GetPolicy.of(0L, 0L, true, StalePolicy.SOFT_REFRESH));
 
       CacheEntry entry = (CacheEntry) caffeineCache.getIfPresent("key1");
       assertThat(entry.getHardExpireAtMs()).isEqualTo(originalExpireAt);
@@ -2972,27 +2228,22 @@ class ZetaCacheTest {
 
     @Test
     @DisplayName("processLocalHotkeyIfNeeded should NOT extend HOT entry when within first 25%")
-    void processLocalHotkeyIfNeeded_shouldNotExtendWithinFirstHalf() {
+    void processLocalHotkeyIfNeeded_shouldNotExtendWithinFirst25Percent() {
       long futureExpireAt = System.currentTimeMillis() + 120_000;
       caffeineCache.put(
         "key1",
-        CacheEntry.builder()
+        EntryDraft.blank(null)
           .value("v")
-          .dataVersion(1)
-          .isVersionDegraded(false)
-          .decisionVersion(5)
-          .hardTtlMs(120_000)
-          .hardExpireAtMs(futureExpireAt)
-          .softTtlMs(30_000)
-          .softExpireAtMs(System.currentTimeMillis() + 60_000)
+          .version(1)
+          .decision(DecisionStamp.hot(5, null, 0L))
+          .ttl(120_000, 30_000, 300_000, 30_000)
+          .expiryAt(futureExpireAt, System.currentTimeMillis() + 60_000)
           .keyState(KeyState.HOT)
-          .normalHardTtlMs(300_000)
-          .normalSoftTtlMs(30_000)
           .build()
       );
       when(hotKeyDetector.contains("key1")).thenReturn(true);
 
-      hotKeyCache.get("key1", ReadPolicy.of(() -> "loaded", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH));
+      hotKeyCache.get("key1", () -> "loaded", GetPolicy.of(0L, 0L, true, StalePolicy.SOFT_REFRESH));
 
       CacheEntry entry = (CacheEntry) caffeineCache.getIfPresent("key1");
       assertThat(entry.getHardExpireAtMs()).isEqualTo(futureExpireAt);
@@ -3003,23 +2254,18 @@ class ZetaCacheTest {
     void processLocalHotkeyIfNeeded_shouldNotExtendMaxValueExpiry() {
       caffeineCache.put(
         "key1",
-        CacheEntry.builder()
+        EntryDraft.blank(null)
           .value("v")
-          .dataVersion(1)
-          .isVersionDegraded(false)
-          .decisionVersion(5)
-          .hardTtlMs(60_000)
-          .hardExpireAtMs(Long.MAX_VALUE)
-          .softTtlMs(30_000)
-          .softExpireAtMs(System.currentTimeMillis() + 60_000)
+          .version(1)
+          .decision(DecisionStamp.hot(5, null, 0L))
+          .ttl(60_000, 30_000, 300_000, 30_000)
+          .expiryAt(Long.MAX_VALUE, System.currentTimeMillis() + 60_000)
           .keyState(KeyState.HOT)
-          .normalHardTtlMs(300_000)
-          .normalSoftTtlMs(30_000)
           .build()
       );
       when(hotKeyDetector.contains("key1")).thenReturn(true);
 
-      hotKeyCache.get("key1", ReadPolicy.of(() -> "loaded", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH));
+      hotKeyCache.get("key1", () -> "loaded", GetPolicy.of(0L, 0L, true, StalePolicy.SOFT_REFRESH));
 
       CacheEntry entry = (CacheEntry) caffeineCache.getIfPresent("key1");
       assertThat(entry.getHardExpireAtMs()).isEqualTo(Long.MAX_VALUE);
@@ -3029,69 +2275,35 @@ class ZetaCacheTest {
     @DisplayName("loadAndCache preserves Worker-managed entry in hot path")
     void loadAndCache_withWorkerManagedEntryInHotPath_preservesIt() {
       when(hotKeyDetector.contains("key1")).thenReturn(true);
-      when(singleFlight.loadOutcome(eq("key1"), any())).thenAnswer(invocation -> {
+      when(singleFlight.load(eq("key1"), any(), anyBoolean(), any())).thenAnswer(invocation -> {
         Supplier<?> reader = invocation.getArgument(1);
         caffeineCache.put(
           "key1",
-          CacheEntry.builder()
+          EntryDraft.blank(null)
             .value("workerValue")
-            .dataVersion(100)
-            .isVersionDegraded(false)
-            .decisionVersion(42)
-            .hardTtlMs(3_600_000)
-            .hardExpireAtMs(Long.MAX_VALUE)
-            .softTtlMs(300_000)
-            .softExpireAtMs(Long.MAX_VALUE)
+            .version(100)
+            .decision(DecisionStamp.hot(42, null, 0L))
+            .ttl(3_600_000, 300_000, 300_000, 30_000)
+            .expiryAt(Long.MAX_VALUE, Long.MAX_VALUE)
             .keyState(KeyState.HOT)
-            .normalHardTtlMs(300_000)
-            .normalSoftTtlMs(30_000)
             .build()
         );
         Object v = reader.get();
+        if (v != null) {
+          java.util.function.Consumer<Object> commit = invocation.getArgument(3);
+          commit.accept(v);
+        }
         return v == null ? LoaderOutcome.sourceEmpty() : LoaderOutcome.loaded(v);
       });
 
-      Optional<String> result = hotKeyCache.get(
-        "key1",
-        ReadPolicy.of(() -> "newValue", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH)
-      );
+      String result = hotKeyCache.get("key1", () -> "newValue", GetPolicy.of(0L, 0L, true, StalePolicy.SOFT_REFRESH));
 
-      assertThat(result).contains("newValue");
+      assertThat(result).isEqualTo("newValue");
       Object raw = caffeineCache.getIfPresent("key1");
       assertThat(raw).isInstanceOf(CacheEntry.class);
       CacheEntry entry = (CacheEntry) raw;
-      assertThat(entry.getValue()).isEqualTo("workerValue");
-    }
-
-    /**
-     * peekAndTag on a whitelisted key keeps the detection half (the whitelist
-     * semantics are "detect without reporting", never "ignore") while the
-     * Worker report is skipped — the exact behavior
-     * {@code TagMode.DETECT_ONLY} selects.
-     */
-    @Test
-    @DisplayName("peekAndTag on a whitelisted key detects without reporting")
-    void peekAndTag_whitelistedKey_detectsWithoutReporting() {
-      ruleService.addWhitelist("wl::key");
-      caffeineCache.put(
-        "wl::key",
-        CacheEntry.builder()
-          .value("stored")
-          .dataVersion(1)
-          .isVersionDegraded(false)
-          .decisionVersion(0)
-          .hardTtlMs(300_000)
-          .hardExpireAtMs(Long.MAX_VALUE)
-          .softTtlMs(30_000)
-          .softExpireAtMs(Long.MAX_VALUE)
-          .keyState(KeyState.HOT)
-          .build()
-      );
-
-      assertThat(hotKeyCache.peekAndTag("wl::key")).isEqualTo("stored");
-
-      verify(hotKeyDetector).add("wl::key");
-      verify(reporter, never()).reportToWorker("wl::key");
+      assertThat(entry.getKeyState()).isEqualTo(KeyState.HOT);
+      assertThat(entry.getValue()).as("the freshly loaded value wins, the HOT regime stays").isEqualTo("newValue");
     }
   }
 
@@ -3101,24 +2313,17 @@ class ZetaCacheTest {
   void putThrough_withExistingEntry_shouldPreserveDecisionMetadata() {
     caffeineCache.put(
       "key1",
-      CacheEntry.builder()
+      EntryDraft.blank(null)
         .value("oldValue")
-        .dataVersion(Long.MIN_VALUE)
-        .isVersionDegraded(true)
-        .decisionVersion(42)
-        .decisionNodeId("worker-1")
-        .decisionEpoch(7)
-        .hardTtlMs(300_000)
-        .hardExpireAtMs(Long.MAX_VALUE)
-        .softTtlMs(30_000)
-        .softExpireAtMs(System.currentTimeMillis() + 60_000)
+        .version(Long.MIN_VALUE)
+        .decision(DecisionStamp.hot(42, "worker-1", 7))
+        .ttl(300_000, 30_000, 300_000, 30_000)
+        .expiryAt(Long.MAX_VALUE, System.currentTimeMillis() + 60_000)
         .keyState(KeyState.HOT)
-        .normalHardTtlMs(300_000)
-        .normalSoftTtlMs(30_000)
         .build()
     );
 
-    hotKeyCache.putThrough("key1", "newValue", () -> {}, 0L, 0L, true);
+    hotKeyCache.putThrough("key1", "newValue", 0L, 0L);
 
     Object raw = caffeineCache.getIfPresent("key1");
     assertThat(raw).isInstanceOf(CacheEntry.class);
@@ -3133,22 +2338,17 @@ class ZetaCacheTest {
   void putThrough_withWorkerManagedEntry_shouldPreserveNormalTtls() {
     caffeineCache.put(
       "key1",
-      CacheEntry.builder()
+      EntryDraft.blank(null)
         .value("old")
-        .dataVersion(Long.MIN_VALUE)
-        .isVersionDegraded(true)
-        .decisionVersion(0)
-        .hardTtlMs(300_000)
-        .hardExpireAtMs(Long.MAX_VALUE)
-        .softTtlMs(30_000)
-        .softExpireAtMs(System.currentTimeMillis() + 60_000)
+        .version(Long.MIN_VALUE)
+        .decision(DecisionStamp.hot(0, null, 0L))
+        .ttl(300_000, 30_000, 777_777, 77_777)
+        .expiryAt(Long.MAX_VALUE, System.currentTimeMillis() + 60_000)
         .keyState(KeyState.HOT)
-        .normalHardTtlMs(777_777)
-        .normalSoftTtlMs(77_777)
         .build()
     );
 
-    hotKeyCache.putThrough("key1", "newValue", () -> {}, 50000L, 5000L, true);
+    hotKeyCache.putThrough("key1", "newValue", 50000L, 5000L);
 
     Object raw = caffeineCache.getIfPresent("key1");
     assertThat(raw).isInstanceOf(CacheEntry.class);
@@ -3161,22 +2361,17 @@ class ZetaCacheTest {
   void putThrough_withExistingEntryAndHigherDataVersion_shouldSkip() {
     caffeineCache.put(
       "key1",
-      CacheEntry.builder()
+      EntryDraft.blank(null)
         .value("original")
-        .dataVersion(Long.MAX_VALUE)
-        .isVersionDegraded(false)
-        .decisionVersion(0)
-        .hardTtlMs(300_000)
-        .hardExpireAtMs(Long.MAX_VALUE)
-        .softTtlMs(30_000)
-        .softExpireAtMs(System.currentTimeMillis() + 60_000)
+        .version(Long.MAX_VALUE)
+        .decision(DecisionStamp.hot(0, null, 0L))
+        .ttl(300_000, 30_000, 300_000, 30_000)
+        .expiryAt(Long.MAX_VALUE, System.currentTimeMillis() + 60_000)
         .keyState(KeyState.HOT)
-        .normalHardTtlMs(300_000)
-        .normalSoftTtlMs(30_000)
         .build()
     );
 
-    hotKeyCache.putThrough("key1", "newValue", () -> {}, 0L, 0L, true);
+    hotKeyCache.putThrough("key1", "newValue", 0L, 0L);
 
     Object raw = caffeineCache.getIfPresent("key1");
     assertThat(raw).isInstanceOf(CacheEntry.class);
@@ -3184,150 +2379,44 @@ class ZetaCacheTest {
     assertThat(entry.getValue()).isEqualTo("original");
   }
 
-  // ── Batch null-sentinel penetration protection (single-key parity) ──
-
   /**
-   * Batch null-sentinel parity (cache-penetration protection): a batch
-   * {@code get} over a key holding a valid {@link NullValue} sentinel serves an
-   * empty value <b>without</b> invoking the reader or SingleFlight — the batch
-   * loop used to treat the sentinel as a miss and reload it on every call,
-   * unlike the single-key {@code get} contract.
+   * Keys are used as passed by the caller (key即传即用): a key containing
+   * {@code ?} is a distinct physical key and is never truncated.
    */
   @Test
-  void getAll_sentinelHit_shouldServeEmptyWithoutReload() {
-    AtomicInteger readerCalls = new AtomicInteger();
-    caffeineCache.put("sentinel", nullSentinelEntry());
-    caffeineCache.put("hit", plainEntry("rawHit"));
-
-    Map<String, Optional<String>> results = hotKeyCache.get(
-      List.of("sentinel", "hit"),
-      key -> {
-        readerCalls.incrementAndGet();
-        return "loaded";
-      },
-      0L,
-      0L,
-      false,
-      false,
-      true,
-      StalePolicy.SOFT_REFRESH
-    );
-
-    assertThat(results.get("sentinel")).isEmpty();
-    assertThat(results.get("hit")).contains("rawHit");
-    assertThat(readerCalls.get()).isZero();
-    verifyNoInteractions(singleFlight);
-  }
-
-  /**
-   * Batch null-sentinel parity for {@code getWithSoftExpire}: same contract as
-   * the batch {@code get} — a sentinel hit is served empty without a reload.
-   */
-  @Test
-  void getAllWithSoftExpire_sentinelHit_shouldServeEmptyWithoutReload() {
-    AtomicInteger readerCalls = new AtomicInteger();
-    caffeineCache.put("sentinel", nullSentinelEntry());
-    caffeineCache.put("hit", plainEntry("rawHit"));
-
-    Map<String, Optional<String>> results = hotKeyCache.getWithSoftExpire(
-      List.of("sentinel", "hit"),
-      key -> {
-        readerCalls.incrementAndGet();
-        return "loaded";
-      },
-      0L,
-      0L,
-      false,
-      false,
-      true,
-      StalePolicy.SOFT_REFRESH
-    );
-
-    assertThat(results.get("sentinel")).isEmpty();
-    assertThat(results.get("hit")).contains("rawHit");
-    assertThat(readerCalls.get()).isZero();
-    verifyNoInteractions(singleFlight);
-  }
-
-  /**
-   * A valid {@link NullValue} sentinel entry within its hard TTL (shape shared
-   * with {@code computeIfAbsent_nullSentinelHit_shouldReturnEmptyWithoutInvokingReader}).
-   */
-  private static CacheEntry nullSentinelEntry() {
-    return CacheEntry.builder()
-      .value(NullValue.INSTANCE)
-      .dataVersion(1)
-      .isVersionDegraded(false)
-      .decisionVersion(0)
-      .hardTtlMs(10_000)
-      .hardExpireAtMs(System.currentTimeMillis() + 10_000)
-      .softTtlMs(0L)
-      .softExpireAtMs(0L)
-      .keyState(KeyState.NORMAL)
-      .normalHardTtlMs(10_000)
-      .normalSoftTtlMs(0L)
-      .build();
-  }
-
-  /**
-   * Contract parity with {@code get}: a {@link ZetaBlockedException} raised on
-   * the load path (a blocked reader surfaced through SingleFlight, or the
-   * post-load BLOCK re-check) propagates out of {@code computeIfAbsent} even
-   * with {@code failOnError = false} — the computeInLock catch used to swallow
-   * it into an empty result.
-   */
-  @Test
-  void computeIfAbsent_blockedKeyOnLoad_shouldPropagateZetaBlockedException() {
-    when(singleFlight.loadOutcome(anyString(), any())).thenReturn(LoaderOutcome.failed(new ZetaBlockedException("test", "key1")));
-
-    assertThatThrownBy(() ->
-      hotKeyCache.computeIfAbsent("key1", ReadPolicy.of(() -> "loaded", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH))
-    ).isInstanceOf(ZetaBlockedException.class);
-  }
-
-  /**
-   * {@code recordAccess} normalizes like every other entry point: with query stripping
-   * enabled, recording {@code "a?x=1"} counts the same key identity ({@code "a"})
-   * that {@code get("a")} sees — previously the un-normalized key reached the
-   * detector and split the count.
-   */
-  @Test
-  void tag_shouldNormalizeKeyWhenStripQueryEnabled() {
-    ttlConfig.getCacheKey().setStripQuery(true);
-
+  void tag_shouldUseKeyAsIs_queryStringIsDistinctKey() {
     hotKeyCache.recordAccess("a?x=1");
     hotKeyCache.recordAccess("b?y=2", Zeta.TagMode.RECORD);
 
-    verify(hotKeyDetector).add("a");
-    verify(hotKeyDetector).add("b");
-    verify(hotKeyDetector, never()).add("a?x=1");
-    verify(hotKeyDetector, never()).add("b?y=2");
+    // design decisions: access counting: one merged add per read into the shared counter.
+    verify(accessCounter).record("a?x=1", Zeta.TagMode.RECORD);
+    verify(accessCounter).record("b?y=2", Zeta.TagMode.RECORD);
+    verify(accessCounter, never()).add("a");
+    verify(accessCounter, never()).add("b");
   }
 
   /**
    * REVALIDATE on a soft-expired Worker-managed entry keeps the entry (and its
-   * decision stamp) in L1 while still serving a freshly loaded value — the
-   * former drop-and-reload rebuilt the entry locally without Worker metadata,
-   * diverging from computeInLock's REVALIDATE and loadCacheEntry's
-   * Worker-managed guard. Keep-and-renew: the kept entry's soft expiry is
+   * decision stamp) in L1 while still serving a freshly loaded value; rebuilding
+   * the entry locally would drop the Worker metadata and diverge from
+   * computeInLock's REVALIDATE and loadCacheEntry's Worker-managed guard.
+   * Keep-and-renew: the kept entry's soft expiry is
    * renewed (within the untouched hard TTL) so the loader is not re-invoked
    * at read rate — COOL entries never rebroadcast, and HOT entries only get
-   * renewal from the Worker on the ADR-0024 cadence.
+   * renewal from the Worker on the cadence (design decisions: state machine).
    */
   @Test
   void getWithSoftExpire_revalidateOnSoftExpiredWorkerHotEntry_shouldKeepEntryAndDecisionStamp() {
     when(healthView.isAlive("w1")).thenReturn(true);
     when(healthView.epochOf("w1")).thenReturn(5L);
+    when(healthView.isCurrentIncarnation("w1", 5L)).thenReturn(true);
     CacheEntry hotEntry = softExpiredWorkerHotEntry("w1", 5L);
     caffeineCache.put("key1", hotEntry);
-    when(singleFlight.loadOutcome(anyString(), any())).thenReturn(oc("loadedValue"));
+    SingleFlightStubs.stubLoad(singleFlight, oc("loadedValue"));
 
-    Optional<String> result = hotKeyCache.getWithSoftExpire(
-      "key1",
-      ReadPolicy.of(() -> "loadedValue", 0L, 0L, true, true, StalePolicy.REVALIDATE)
-    );
+    String result = hotKeyCache.get("key1", () -> "loadedValue", GetPolicy.of(0L, 0L, true, StalePolicy.REVALIDATE));
 
-    assertThat(result).contains("loadedValue");
+    assertThat(result).isEqualTo("loadedValue");
     CacheEntry kept = (CacheEntry) caffeineCache.getIfPresent("key1");
     assertThat(kept.getDecisionNodeId()).isEqualTo("w1");
     assertThat(kept.getKeyState()).isEqualTo(KeyState.HOT);
@@ -3339,150 +2428,70 @@ class ZetaCacheTest {
     assertThat(kept).isNotSameAs(hotEntry);
   }
 
-  // ── peekAndTag: the annotation-path peek (single lookup + single rule evaluation) ──
-
-  /**
-   * A served hit (value) tags the detector — the annotation path's "every read
-   * triggers detection" invariant delivered in the merged peekAndTag form.
-   */
-  @Test
-  void peekAndTag_hit_returnsValueAndTagsDetector() {
-    caffeineCache.put(
-      "key1",
-      CacheEntry.builder()
-        .value("stored")
-        .dataVersion(1)
-        .isVersionDegraded(false)
-        .decisionVersion(0)
-        .hardTtlMs(300_000)
-        .hardExpireAtMs(Long.MAX_VALUE)
-        .softTtlMs(30_000)
-        .softExpireAtMs(Long.MAX_VALUE)
-        .keyState(KeyState.HOT)
-        .build()
-    );
-
-    assertThat(hotKeyCache.peekAndTag("key1")).isEqualTo("stored");
-    verify(hotKeyDetector).add("key1");
-  }
-
-  /** A NORMAL entry value is served as-is and still counted. */
-  @Test
-  void peekAndTag_normalValue_servedAndTagged() {
-    caffeineCache.put("raw1", plainEntry("plain"));
-
-    assertThat(hotKeyCache.peekAndTag("raw1")).isEqualTo("plain");
-    verify(hotKeyDetector).add("raw1");
-  }
-
-  /** A true miss does neither detection nor reporting. */
-  @Test
-  void peekAndTag_miss_doesNotTag() {
-    assertThat(hotKeyCache.peekAndTag("absent")).isNull();
-    verify(hotKeyDetector, never()).add("absent");
-  }
-
-  /** A cached-null sentinel hit returns the sentinel itself and is still counted. */
-  @Test
-  void peekAndTag_nullSentinel_returnsSentinelAndTags() {
-    caffeineCache.put(
-      "nk",
-      CacheEntry.builder()
-        .value(NullValue.INSTANCE)
-        .dataVersion(1)
-        .isVersionDegraded(false)
-        .decisionVersion(0)
-        .hardTtlMs(300_000)
-        .hardExpireAtMs(Long.MAX_VALUE)
-        .softTtlMs(30_000)
-        .softExpireAtMs(Long.MAX_VALUE)
-        .keyState(KeyState.NORMAL)
-        .build()
-    );
-
-    assertThat(hotKeyCache.peekAndTag("nk")).isSameAs(NullValue.INSTANCE);
-    verify(hotKeyDetector).add("nk");
-  }
-
-  /** A blocked key throws via preGuard — before any lookup or tagging. */
-  @Test
-  void peekAndTag_blockedKey_throwsAndDoesNotTag() {
-    ruleService.addBlacklist("blk");
-    caffeineCache.put("blk", plainEntry("v"));
-
-    assertThatThrownBy(() -> hotKeyCache.peekAndTag("blk")).isInstanceOf(ZetaBlockedException.class);
-    verify(hotKeyDetector, never()).add("blk");
-  }
-
   /** A Worker-stamped HOT entry whose soft TTL has passed while the hard TTL is still valid. */
   private static CacheEntry softExpiredWorkerHotEntry(String nodeId, long epoch) {
-    return CacheEntry.builder()
+    return EntryDraft.blank(null)
       .value("stored")
-      .dataVersion(1)
-      .isVersionDegraded(false)
-      .decisionVersion(42)
-      .decisionNodeId(nodeId)
-      .decisionEpoch(epoch)
-      .hardTtlMs(3_600_000)
-      .hardExpireAtMs(Long.MAX_VALUE)
-      .softTtlMs(300_000)
-      .softExpireAtMs(1L)
+      .version(1)
+      .decision(DecisionStamp.hot(42, nodeId, epoch))
+      .ttl(3_600_000, 300_000, 60_000, 15_000)
+      .expiryAt(Long.MAX_VALUE, 1L)
       .keyState(KeyState.HOT)
-      .normalHardTtlMs(60_000)
-      .normalSoftTtlMs(15_000)
       .build();
   }
 
   /**
    * Write/invalidation → dedup-cache coherence and load-path version guards
-   * (ADR-0067). Uses a REAL {@link SingleFlightImpl} so the completed-future
-   * reuse window (ADR-0002) is exercised end-to-end against the invalidation
+   * (design decisions: dedup lifecycle). Uses a REAL {@link SingleFlightImpl} so the completed-future
+   * reuse window (design decisions: dedup lifecycle) is exercised end-to-end against the invalidation
    * and write paths.
    */
   @Nested
-  @DisplayName("Dedup coherence and load guards (ADR-0067)")
+  @DisplayName("Dedup coherence and load guards (design decisions: dedup lifecycle)")
   class DedupCoherenceTest {
 
     private HotKeyCache realFlightCache;
     private Cache<String, CacheEntry> realFlightL1;
-    private VersionController versionController;
+    private StampClock stampClock;
 
     @BeforeEach
     void setUp() {
       realFlightL1 = Caffeine.newBuilder().maximumSize(100).build();
       CircuitBreaker breaker = mock(CircuitBreaker.class);
       when(breaker.isOpen()).thenReturn(false);
-      when(breaker.allowRequest()).thenReturn(true);
-      SingleFlight realSingleFlight = new SingleFlightImpl(1000, 5, 5, Runnable::run, breaker);
-      versionController = mock(VersionController.class);
-      // Default probe: withheld (unstamped). Tests re-stub per scenario.
-      when(versionController.currentVersion(anyString())).thenReturn(Optional.empty());
-      when(versionController.nextVersion(anyString())).thenReturn(new VersionController.VersionResult(4L, false));
+      when(breaker.tryAcquireStamp()).thenReturn(CircuitBreaker.STAMP_CLOSED);
+      // Registry-based construction path (see ZetaAutoConfiguration): every key's shard is the mock.
+      CircuitBreakerRegistry breakerRegistry = mock(CircuitBreakerRegistry.class);
+      when(breakerRegistry.breakerFor(anyString())).thenReturn(breaker);
+      SingleFlight realSingleFlight = new SingleFlightImpl(1000, 5, 5, Runnable::run, breakerRegistry);
+      stampClock = mock(StampClock.class);
+      // Monotone per call: a load that began first holds the lower stamp.
+      AtomicLong stampSequence = new AtomicLong(3L);
+      when(stampClock.nextStamp()).thenAnswer(inv -> stampSequence.incrementAndGet());
+      when(stampClock.nextStamps(org.mockito.ArgumentMatchers.anyInt())).thenAnswer(inv -> {
+        int n = inv.getArgument(0);
+        return stampSequence.addAndGet(n) - n + 1;
+      });
 
       realFlightCache = new HotKeyCache(
         hotKeyDetector,
         realFlightL1,
         realSingleFlight,
-        new EntryLifecycleImpl(realFlightL1, ttlConfig, CacheCompressor.NONE, healthView),
+        new EntryLifecycleImpl(realFlightL1, ttlConfig, healthView),
         new DefaultBackgroundRefresher(
           realFlightL1,
           Runnable::run,
-          new TtlPolicy(ttlConfig, ttlConfig.getTtlJitterRatio()),
-          CacheCompressor.NONE,
-          10),
-        Runnable::run,
-        new CentralDispatcher(
-          Optional.empty(),
-          Optional.empty(),
-          new BroadcastBuffer(scheduler, Optional.empty(), 500, 2_000, null),
-          hotKeyDetector
+          new EntryLifecycleImpl(realFlightL1, ttlConfig, healthView),
+          10
         ),
-        new RuleMatcherImpl(Optional.empty(), Optional.empty()),
-        versionController,
-        ttlConfig,
-        healthView,
-        CacheCompressor.NONE,
-        null
+        new CentralDispatcher(
+          new AccessCounter(hotKeyDetector, null, scheduler, 50L, AccessCounter.DEFAULT_DETECTOR_INTERVAL_MS),
+          null,
+          new BroadcastBuffer(scheduler, null, 500, 2_000, null),
+          null
+        ),
+        stampClock,
+        healthView
       );
     }
 
@@ -3494,24 +2503,34 @@ class ZetaCacheTest {
     @Test
     void putThrough_invalidatesDedupEntry_postWriteMissRereadsSource() {
       AtomicInteger readerCalls = new AtomicInteger();
-      assertThat(realFlightCache.get("k", ReadPolicy.of(() -> {
-        readerCalls.incrementAndGet();
-        return "A";
-      }, 0L, 0L, true, true, StalePolicy.SOFT_REFRESH))).contains("A");
+      assertThat(
+        (Object) realFlightCache.get(
+          "k",
+          () -> {
+            readerCalls.incrementAndGet();
+            return "A";
+          },
+          GetPolicy.of(0L, 0L, true, StalePolicy.SOFT_REFRESH)
+        )
+      ).isEqualTo("A");
 
-      realFlightCache.putThrough("k", "B", () -> {}, 0, 0, true);
-      assertThat(realFlightCache.peek("k")).contains("B");
+      realFlightCache.putThrough("k", "B", 0, 0);
+      assertThat((Object) realFlightCache.peek("k")).isEqualTo("B");
 
       // Simulate the L1 loss the dedup replay would ride on: an eviction, a
-      // peer INVALIDATE, or (pre-ADR-0067) the sender's own REFRESH drop.
+      // peer INVALIDATE, or (pre-design decisions: dedup lifecycle) the sender's own REFRESH drop.
       realFlightL1.invalidate("k");
 
-      Optional<String> after = realFlightCache.get("k", ReadPolicy.of(() -> {
-        readerCalls.incrementAndGet();
-        return "B-fresh";
-      }, 0L, 0L, true, true, StalePolicy.SOFT_REFRESH));
+      String after = realFlightCache.get(
+        "k",
+        () -> {
+          readerCalls.incrementAndGet();
+          return "B-fresh";
+        },
+        GetPolicy.of(0L, 0L, true, StalePolicy.SOFT_REFRESH)
+      );
 
-      assertThat(after).contains("B-fresh");
+      assertThat(after).isEqualTo("B-fresh");
       assertThat(readerCalls.get()).as("the post-write miss must re-invoke the reader").isEqualTo(2);
     }
 
@@ -3519,79 +2538,97 @@ class ZetaCacheTest {
     @Test
     void invalidate_invalidatesDedupEntry_nextMissRereadsSource() {
       AtomicInteger readerCalls = new AtomicInteger();
-      assertThat(realFlightCache.get("k", ReadPolicy.of(() -> {
-        readerCalls.incrementAndGet();
-        return "A";
-      }, 0L, 0L, true, true, StalePolicy.SOFT_REFRESH))).contains("A");
+      assertThat(
+        (Object) realFlightCache.get(
+          "k",
+          () -> {
+            readerCalls.incrementAndGet();
+            return "A";
+          },
+          GetPolicy.of(0L, 0L, true, StalePolicy.SOFT_REFRESH)
+        )
+      ).isEqualTo("A");
 
-      realFlightCache.invalidate("k", false);
+      realFlightCache.invalidate("k", new InvalidatePolicy(InvalidatePolicy.Scope.LOCAL, false));
 
-      Optional<String> after = realFlightCache.get("k", ReadPolicy.of(() -> {
-        readerCalls.incrementAndGet();
-        return "fresh";
-      }, 0L, 0L, true, true, StalePolicy.SOFT_REFRESH));
+      String after = realFlightCache.get(
+        "k",
+        () -> {
+          readerCalls.incrementAndGet();
+          return "fresh";
+        },
+        GetPolicy.of(0L, 0L, true, StalePolicy.SOFT_REFRESH)
+      );
 
-      assertThat(after).contains("fresh");
+      assertThat(after).isEqualTo("fresh");
       assertThat(readerCalls.get()).isEqualTo(2);
     }
 
     /**
      * The load-path version guard: a load whose reader raced a concurrent
-     * putThrough (read pre-commit, ADR-0033 probe stamped post-INCR at the
+     * putThrough (read pre-commit, design decisions: version stamps probe stamped post-INCR at the
      * same version) must not regress L1 — the write's value survives.
      */
     @Test
     void stampedLoad_notNewerThanExisting_refusesToRegressConcurrentWrite() {
-      when(versionController.currentVersion("k")).thenReturn(Optional.of(4L));
-
-      Optional<String> served = realFlightCache.get("k", ReadPolicy.of(() -> {
-        // Concurrent write landing mid-load, before the load's own probe.
-        realFlightCache.putThrough("k", "B", () -> {}, 0, 0, false);
-        return "A-old";
-      }, 0L, 0L, true, true, StalePolicy.SOFT_REFRESH));
+      String served = realFlightCache.get(
+        "k",
+        () -> {
+          // Concurrent write landing mid-load, before the load's own probe.
+          realFlightCache.putThrough("k", "B", 0, 0);
+          return "A-old";
+        },
+        GetPolicy.of(0L, 0L, true, StalePolicy.SOFT_REFRESH)
+      );
 
       // The caller still sees what its reader loaded (the read raced the
       // commit), but L1 must hold the write's value, not the stale reload.
-      assertThat(served).contains("A-old");
+      assertThat(served).isEqualTo("A-old");
       CacheEntry kept = (CacheEntry) realFlightL1.getIfPresent("k");
-      assertThat(kept.getDataVersion()).isEqualTo(4L);
+      assertThat(kept.getDataVersion()).isEqualTo(5L);
       assertThat(kept.getValue()).isEqualTo("B");
     }
 
     /**
-     * A null load replaces a Worker-managed entry that landed mid-load — the
-     * source's null answer is authoritative for the VALUE — but the decision
-     * stamp is carried into the sentinel (the pinned stamp-preservation
-     * semantics): state NORMAL, short null TTL, stamp intact for later
-     * decisionVersion ordering.
+     * A null load must leave a Worker-managed entry that landed mid-load
+     * completely untouched: the v2 null contract writes nothing (no sentinel
+     * exists), so the Worker's value, decision stamp and dataVersion survive.
      */
     @Test
-    void nullLoad_replacesWorkerManagedEntry_preservingDecisionStamp() {
-      when(versionController.currentVersion("k")).thenReturn(Optional.of(6L));
+    void nullLoad_shouldLeaveWorkerManagedEntryUntouched() {
+      String served = realFlightCache.get(
+        "k",
+        () -> {
+          realFlightL1.put("k", workerHotEntry("w1", 1L));
+          return null;
+        },
+        GetPolicy.of(0L, 0L, true, StalePolicy.SOFT_REFRESH)
+      );
 
-      Optional<String> served = realFlightCache.get("k", ReadPolicy.of(() -> {
-        realFlightL1.put("k", workerHotEntry("w1", 1L));
-        return null;
-      }, 0L, 0L, true, true, StalePolicy.SOFT_REFRESH));
-
-      assertThat(served).isEmpty();
-      CacheEntry sentinel = (CacheEntry) realFlightL1.getIfPresent("k");
-      assertThat(sentinel.getValue()).isEqualTo(NullValue.INSTANCE);
-      assertThat(sentinel.getKeyState()).isEqualTo(KeyState.NORMAL);
-      assertThat(sentinel.getDecisionNodeId()).isEqualTo("w1");
-      assertThat(sentinel.getDecisionEpoch()).isEqualTo(1L);
-      assertThat(sentinel.getDataVersion()).isEqualTo(6L);
+      assertThat(served).isNull();
+      // Null answer writes nothing: the Worker-managed entry survives intact.
+      CacheEntry kept = (CacheEntry) realFlightL1.getIfPresent("k");
+      assertThat(kept.getValue()).isEqualTo("stored");
+      assertThat(kept.getKeyState()).isEqualTo(KeyState.HOT);
+      assertThat(kept.getDecisionNodeId()).isEqualTo("w1");
+      assertThat(kept.getDecisionEpoch()).isEqualTo(1L);
+      // v2 null contract: the null answer wrote nothing — the Worker entry's
+      // own dataVersion (1) is untouched, and the probed version (6) is not
+      // stamped onto it by a load that produced no value.
+      assertThat(kept.getDataVersion()).isEqualTo(1L);
     }
 
     /** A null load at the same version must not clobber an existing normal entry. */
     @Test
     void nullLoad_doesNotClobberSameVersionEntry() {
-      when(versionController.currentVersion("k")).thenReturn(Optional.of(4L));
-
-      realFlightCache.get("k", ReadPolicy.of(() -> {
-        realFlightL1.put("k", normalEntry(4L));
-        return null;
-      }, 0L, 0L, true, true, StalePolicy.SOFT_REFRESH));
+      realFlightCache.get(
+        "k",
+        () -> {
+          realFlightL1.put("k", normalEntry(4L));
+          return null;
+        },
+        GetPolicy.of(0L, 0L, true, StalePolicy.SOFT_REFRESH)
+      );
 
       CacheEntry kept = (CacheEntry) realFlightL1.getIfPresent("k");
       assertThat(kept.getValue()).isEqualTo("v");
@@ -3601,45 +2638,50 @@ class ZetaCacheTest {
     /** An unstamped (fail-open) null load carries no version authority: it never replaces an entry. */
     @Test
     void unstampedNullLoad_doesNotReplaceExistingEntry() {
-      realFlightCache.get("k", ReadPolicy.of(() -> {
-        realFlightL1.put("k", normalEntry(3L));
-        return null;
-      }, 0L, 0L, true, true, StalePolicy.SOFT_REFRESH));
+      realFlightCache.get(
+        "k",
+        () -> {
+          realFlightL1.put("k", normalEntry(3L));
+          return null;
+        },
+        GetPolicy.of(0L, 0L, true, StalePolicy.SOFT_REFRESH)
+      );
 
       CacheEntry kept = (CacheEntry) realFlightL1.getIfPresent("k");
       assertThat(kept.getValue()).isEqualTo("v");
       assertThat(kept.getDataVersion()).isEqualTo(3L);
     }
 
-    /** A null load probed strictly newer than the entry replaces it with a stamped sentinel. */
+    /**
+     * A null load whose probe is strictly newer than the resident entry still
+     * writes nothing (no sentinel exists in v2): the older normal entry stays.
+     */
     @Test
-    void nullLoad_probedNewer_replacesOlderEntryWithSentinel() {
-      when(versionController.currentVersion("k")).thenReturn(Optional.of(4L));
+    void nullLoad_probedNewer_shouldLeaveEntryUntouched() {
+      realFlightCache.get(
+        "k",
+        () -> {
+          realFlightL1.put("k", normalEntry(3L));
+          return null;
+        },
+        GetPolicy.of(0L, 0L, true, StalePolicy.SOFT_REFRESH)
+      );
 
-      realFlightCache.get("k", ReadPolicy.of(() -> {
-        realFlightL1.put("k", normalEntry(3L));
-        return null;
-      }, 0L, 0L, true, true, StalePolicy.SOFT_REFRESH));
-
-      CacheEntry sentinel = (CacheEntry) realFlightL1.getIfPresent("k");
-      assertThat(sentinel.getValue()).isEqualTo(NullValue.INSTANCE);
-      assertThat(sentinel.getDataVersion()).isEqualTo(4L);
-      assertThat(sentinel.getKeyState()).isEqualTo(KeyState.NORMAL);
+      // Null answer writes nothing (no sentinel exists): the older entry stays.
+      CacheEntry kept = (CacheEntry) realFlightL1.getIfPresent("k");
+      assertThat(kept.getValue()).isEqualTo("v");
+      assertThat(kept.getDataVersion()).isEqualTo(3L);
+      assertThat(kept.getKeyState()).isEqualTo(KeyState.NORMAL);
     }
 
     private static CacheEntry normalEntry(long dataVersion) {
-      return CacheEntry.builder()
+      return EntryDraft.blank(null)
         .value("v")
-        .dataVersion(dataVersion)
-        .isVersionDegraded(false)
-        .decisionVersion(0)
-        .hardTtlMs(300_000)
-        .hardExpireAtMs(Long.MAX_VALUE)
-        .softTtlMs(0)
-        .softExpireAtMs(0)
+        .version(dataVersion)
+        .decision(DecisionStamp.hot(0, null, 0L))
+        .ttl(300_000, 0, 300_000, 0)
+        .expiryAt(Long.MAX_VALUE, 0)
         .keyState(KeyState.NORMAL)
-        .normalHardTtlMs(300_000)
-        .normalSoftTtlMs(0)
         .build();
     }
   }

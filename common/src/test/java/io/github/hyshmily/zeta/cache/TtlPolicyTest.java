@@ -18,24 +18,28 @@ package io.github.hyshmily.zeta.cache;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import io.github.hyshmily.zeta.autoconfigure.ZetaProperties;
-import io.github.hyshmily.zeta.cache.cachesupport.TtlPolicy;
-import io.github.hyshmily.zeta.model.CacheEntry;
+import io.github.hyshmily.zeta.cache.cachesupport.lifecycle.EntryLifecycle;
+import io.github.hyshmily.zeta.cache.cachesupport.lifecycle.TtlPolicy;
+import io.github.hyshmily.zeta.cache.cachesupport.raw.CacheEntry;
+import io.github.hyshmily.zeta.cache.cachesupport.raw.EntryDraft;
+import io.github.hyshmily.zeta.model.DecisionStamp;
 import io.github.hyshmily.zeta.model.KeyState;
 import io.github.hyshmily.zeta.util.TimeSource;
-import io.github.hyshmily.zeta.model.EntryDraft;
+import java.util.HashSet;
+import java.util.Set;
 import java.util.stream.Stream;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 /**
  * Tests for {@link TtlPolicy} — the pure TTL/expiry policy module behind
- * {@link io.github.hyshmily.zeta.cache.cachesupport.EntryLifecycle}.
+ * {@link EntryLifecycle}.
  *
  * <p>Covers every stateless lifecycle computation: resolve (override vs
- * default), compute (absolute expire timestamps), getEffective (configured
- * defaults), timestamp conversion with jitter, expiry predicates, and the
- * entry-level TTL transforms. No Caffeine cache required — the policy is
- * tested directly through its own interface.
+ * default), effective (configured values), timestamp conversion to absolute
+ * expire instants with jitter, expiry predicates, and the entry-level TTL
+ * transforms. No Caffeine cache required — the policy is tested directly
+ * through its own interface.
  */
 class TtlPolicyTest {
 
@@ -45,63 +49,98 @@ class TtlPolicyTest {
   @BeforeEach
   void setUp() {
     ttlConfig = new ZetaProperties();
-    ttlPolicy = new TtlPolicy(ttlConfig, ttlConfig.getTtlJitterRatio());
+    ttlPolicy = new TtlPolicy(ttlConfig);
   }
 
   /**
-   * Verifies that computeHardExpireAt with a positive TTL returns a timestamp in the future.
+   * Verifies that a positive hard-TTL override wins over the configured default.
    */
   @Test
-  void computeHardExpireAt_withPositiveTtl_shouldReturnFutureTimestamp() {
-    long expireAt = ttlPolicy.computeHardExpireAt(1000);
-    assertThat(expireAt).isGreaterThan(System.currentTimeMillis());
+  void resolveEffectiveHardTtl_withPositiveOverride_shouldUseOverride() {
+    assertThat(ttlPolicy.resolveEffectiveHardTtl(120_000)).isEqualTo(120_000);
   }
 
   /**
-   * Verifies that computeHardExpireAt falls back to the default TTL when the given value is zero.
+   * Verifies that a non-positive hard-TTL override falls back to the configured default.
    */
   @Test
-  void computeHardExpireAt_withZeroTtl_shouldFallbackToDefault() {
-    long expireAt = ttlPolicy.computeHardExpireAt(0);
-    assertThat(expireAt).isGreaterThan(System.currentTimeMillis());
+  void resolveEffectiveHardTtl_withNonPositiveOverride_shouldFallbackToDefault() {
+    assertThat(ttlPolicy.resolveEffectiveHardTtl(0)).isEqualTo(ttlPolicy.effectiveHardTtlMs());
+    assertThat(ttlPolicy.resolveEffectiveHardTtl(-1)).isEqualTo(ttlPolicy.effectiveHardTtlMs());
   }
 
   /**
-   * Verifies that getEffectiveHardTtlMs returns the configured default hard TTL value.
+   * A permanent hot policy is the floor even when the entry arrived with a finite normal TTL:
+   * promotion must not turn permanent into finite.
    */
   @Test
-  void getEffectiveHardTtlMs_shouldReturnConfigValue() {
-    assertThat(ttlPolicy.getEffectiveHardTtlMs()).isEqualTo(300_000L);
+  void resolveEffectiveHotHard_permanentHotDefaultWinsOverFiniteNormalTtl() {
+    ttlConfig.setHotHardTtlMs(0L);
+    TtlPolicy policy = new TtlPolicy(ttlConfig);
+
+    assertThat(policy.resolveEffectiveHotHard(120_000L)).isZero();
+    assertThat(policy.resolveEffectiveHotHard(Long.MAX_VALUE)).isZero();
   }
 
   /**
-   * Verifies that getEffectiveHotHardTtlMs returns the configured hot-key hard TTL value.
+   * A permanent normal TTL survives promotion: the hot default is a floor, never a cap.
    */
   @Test
-  void getEffectiveHotHardTtlMs_shouldReturnConfigValue() {
-    assertThat(ttlPolicy.getEffectiveHotHardTtlMs()).isEqualTo(3_600_000L);
+  void resolveEffectiveHotHard_permanentNormalTtlSurvivesPromotion() {
+    ttlConfig.setHardTtlMs(0L);
+    ttlConfig.setHotHardTtlMs(3_600_000L);
+    TtlPolicy policy = new TtlPolicy(ttlConfig);
+
+    assertThat(policy.resolveEffectiveHotHard(0L)).isZero();
   }
 
   /**
-   * Verifies that getEffectiveSoftTtlMs returns the configured default soft TTL value.
+   * A disabled hot soft TTL stays disabled through promotion; a normal soft window must not
+   * re-enable it.
    */
   @Test
-  void getEffectiveSoftTtlMs_shouldReturnConfigValue() {
-    assertThat(ttlPolicy.getEffectiveSoftTtlMs()).isEqualTo(30_000L);
+  void resolveEffectiveHotSoft_disabledHotDefaultWinsOverFiniteNormalSoftTtl() {
+    ttlConfig.setHotSoftTtlMs(0L);
+    TtlPolicy policy = new TtlPolicy(ttlConfig);
+
+    assertThat(policy.resolveEffectiveHotSoft(30_000L)).isZero();
   }
 
   /**
-   * Verifies that getEffectiveHotSoftTtlMs returns the configured hot-key soft TTL value.
+   * Verifies that effectiveHardTtlMs returns the configured default hard TTL value.
    */
   @Test
-  void getEffectiveHotSoftTtlMs_shouldReturnConfigValue() {
-    assertThat(ttlPolicy.getEffectiveHotSoftTtlMs()).isEqualTo(300_000L);
+  void effectiveHardTtlMs_shouldReturnConfigValue() {
+    assertThat(ttlPolicy.effectiveHardTtlMs()).isEqualTo(300_000L);
   }
 
   /**
-   * Verifies that a missing entry is considered soft-expired (F1 L1 type
-   * closure: slots hold {@link CacheEntry} only — the former non-entry
-   * fallback is gone, absence is the only non-entry shape).
+   * Verifies that effectiveHotHardTtlMs returns the configured hot-key hard TTL value.
+   */
+  @Test
+  void effectiveHotHardTtlMs_shouldReturnConfigValue() {
+    assertThat(ttlPolicy.effectiveHotHardTtlMs()).isEqualTo(3_600_000L);
+  }
+
+  /**
+   * Verifies that effectiveSoftTtlMs returns the configured default soft TTL value.
+   */
+  @Test
+  void effectiveSoftTtlMs_shouldReturnConfigValue() {
+    assertThat(ttlPolicy.effectiveSoftTtlMs()).isEqualTo(30_000L);
+  }
+
+  /**
+   * Verifies that effectiveHotSoftTtlMs returns the configured hot-key soft TTL value.
+   */
+  @Test
+  void effectiveHotSoftTtlMs_shouldReturnConfigValue() {
+    assertThat(ttlPolicy.effectiveHotSoftTtlMs()).isEqualTo(300_000L);
+  }
+
+  /**
+   * A missing entry is soft-expired: L1 slots hold {@link CacheEntry} only, so absence is the
+   * only non-entry shape.
    */
   @Test
   void isSoftExpired_shouldReturnTrueForMissingEntry() {
@@ -109,107 +148,65 @@ class TtlPolicyTest {
   }
 
   /**
-   * Verifies that computeHardExpireAt with zero falls back to default and returns a future timestamp.
+   * Verifies that a positive soft-TTL override wins over the configured default.
    */
   @Test
-  void computeHardExpireAt_withZero_shouldFallbackAndReturnFuture() {
-    long result = ttlPolicy.computeHardExpireAt(0);
-    assertThat(result).isGreaterThan(System.currentTimeMillis());
+  void resolveEffectiveSoftTtl_withPositiveOverride_shouldUseOverride() {
+    assertThat(ttlPolicy.resolveEffectiveSoftTtl(60_000)).isEqualTo(60_000);
   }
 
   /**
-   * Verifies that computeHardExpireAt with a negative TTL falls back to default and returns a future timestamp.
+   * Verifies that a non-positive soft-TTL override falls back to the configured default.
    */
   @Test
-  void computeHardExpireAt_withNegative_shouldFallbackAndReturnFuture() {
-    long result = ttlPolicy.computeHardExpireAt(-1);
-    assertThat(result).isGreaterThan(System.currentTimeMillis());
+  void resolveEffectiveSoftTtl_withNonPositiveOverride_shouldFallbackToDefault() {
+    assertThat(ttlPolicy.resolveEffectiveSoftTtl(0)).isEqualTo(ttlPolicy.effectiveSoftTtlMs());
+    assertThat(ttlPolicy.resolveEffectiveSoftTtl(-1)).isEqualTo(ttlPolicy.effectiveSoftTtlMs());
   }
 
   /**
-   * Verifies that computeHardExpireAt with Long.MAX_VALUE passes it through unchanged.
+   * Verifies that Long.MAX_VALUE (permanent entry) passes through the hard-TTL
+   * timestamp conversion unchanged.
    */
   @Test
-  void computeHardExpireAt_withMaxValue_shouldPassthrough() {
-    assertThat(ttlPolicy.computeHardExpireAt(Long.MAX_VALUE)).isEqualTo(Long.MAX_VALUE);
+  void hardExpireAt_withMaxValue_shouldPassthrough() {
+    assertThat(ttlPolicy.hardExpireAt(Long.MAX_VALUE)).isEqualTo(Long.MAX_VALUE);
   }
 
   /**
-   * Verifies that computeHardExpireAt with a positive TTL returns a future timestamp.
+   * Verifies that a disabled (0) configured soft TTL resolves to zero — the
+   * documented "soft-expire off" value.
    */
   @Test
-  void computeHardExpireAt_withPositive_shouldReturnFuture() {
-    long result = ttlPolicy.computeHardExpireAt(1000);
-    assertThat(result).isGreaterThan(System.currentTimeMillis());
+  void resolveEffectiveSoftTtl_withDisabledConfig_shouldReturnZero() {
+    ttlConfig.setSoftTtlMs(0);
+    ttlConfig.setHotSoftTtlMs(0);
+    TtlPolicy disabled = new TtlPolicy(ttlConfig);
+    assertThat(disabled.effectiveSoftTtlMs()).isZero();
+    assertThat(disabled.resolveEffectiveSoftTtl(0)).isZero();
+    assertThat(disabled.softExpireAt(disabled.resolveEffectiveSoftTtl(0))).isZero();
   }
 
   /**
-   * Verifies that computeSoftExpireAt returns zero when soft-expire is disabled.
-   */
-  @Test
-  void computeSoftExpireAt_withDisabledConfig_shouldReturnMaxValue() {
-    ttlConfig.setDefaultSoftTtlMs(0);
-    ttlConfig.setDefaultHotSoftTtlMs(0);
-    TtlPolicy disabled = new TtlPolicy(ttlConfig, ttlConfig.getTtlJitterRatio());
-    assertThat(disabled.computeSoftExpireAt(0)).isZero();
-  }
-
-  /**
-   * Verifies that computeHardExpireAt produces a positive timestamp within a reasonable range.
+   * Verifies that the hard-TTL timestamp conversion produces a positive timestamp within a
+   * reasonable range.
    */
   @Test
   void hardExpireAt_producesPositiveTimestamp() {
-    long hard = ttlPolicy.computeHardExpireAt(5_000);
+    long hard = ttlPolicy.hardExpireAt(5_000);
     assertThat(hard).isGreaterThan(System.currentTimeMillis());
     assertThat(hard).isLessThan(System.currentTimeMillis() + 60_000);
   }
 
   /**
-   * Verifies that computeSoftExpireAt produces a positive timestamp within a reasonable range.
+   * Verifies that the soft-TTL timestamp conversion produces a positive timestamp within a
+   * reasonable range.
    */
   @Test
   void softExpireAt_producesPositiveTimestamp() {
-    long soft = ttlPolicy.computeSoftExpireAt(5_000);
+    long soft = ttlPolicy.softExpireAt(5_000);
     assertThat(soft).isGreaterThan(System.currentTimeMillis());
     assertThat(soft).isLessThan(System.currentTimeMillis() + 60_000);
-  }
-
-  /**
-   * Verifies that computeHotHardExpireAt produces a positive future timestamp.
-   */
-  @Test
-  void hotHardExpireAt_producesPositiveTimestamp() {
-    long hot = ttlPolicy.computeHotHardExpireAt();
-    assertThat(hot).isGreaterThan(System.currentTimeMillis());
-  }
-
-  /**
-   * Verifies that computeHotHardExpireAt returns Long.MAX_VALUE when hot hard TTL is disabled (0).
-   * This covers toHardExpireTimestamp when hardTtlMs <= 0.
-   */
-  @Test
-  void computeHotHardExpireAt_withDisabledHotHardTtl_shouldReturnMaxValue() {
-    ttlConfig.setDefaultHotHardTtlMs(0);
-    assertThat(ttlPolicy.computeHotHardExpireAt()).isEqualTo(Long.MAX_VALUE);
-  }
-
-  /**
-   * Verifies that computeHotSoftExpireAt produces a positive future timestamp.
-   */
-  @Test
-  void hotSoftExpireAt_producesPositiveTimestamp() {
-    long hot = ttlPolicy.computeHotSoftExpireAt();
-    assertThat(hot).isGreaterThan(System.currentTimeMillis());
-  }
-
-  /**
-   * Verifies that computeHotSoftExpireAt returns 0 when hot soft TTL is disabled (0).
-   * This covers the toSoftExpireTimestamp branch when softTtlMs <= 0.
-   */
-  @Test
-  void computeHotSoftExpireAt_withZeroHotSoftTtl_shouldReturnZero() {
-    ttlConfig.setDefaultHotSoftTtlMs(0);
-    assertThat(ttlPolicy.computeHotSoftExpireAt()).isZero();
   }
 
   /**
@@ -218,18 +215,13 @@ class TtlPolicyTest {
    */
   @Test
   void isSoftExpired_withExpiredEntry_shouldReturnTrue() {
-    CacheEntry entry = CacheEntry.builder()
+    CacheEntry entry = EntryDraft.blank(null)
       .value("v")
-      .dataVersion(1)
-      .isVersionDegraded(false)
-      .decisionVersion(0)
-      .hardTtlMs(300_000)
-      .hardExpireAtMs(Long.MAX_VALUE)
-      .softTtlMs(30_000)
-      .softExpireAtMs(1L)
+      .version(1)
+      .decision(DecisionStamp.hot(0, null, 0L))
+      .ttl(300_000, 30_000, 300_000, 30_000)
+      .expiryAt(Long.MAX_VALUE, 1L)
       .keyState(KeyState.HOT)
-      .normalHardTtlMs(300_000)
-      .normalSoftTtlMs(30_000)
       .build();
     assertThat(ttlPolicy.isSoftExpired(entry)).isTrue();
   }
@@ -240,63 +232,52 @@ class TtlPolicyTest {
    */
   @Test
   void isSoftExpired_withMaxValue_shouldReturnFalse() {
-    CacheEntry entry = CacheEntry.builder()
+    CacheEntry entry = EntryDraft.blank(null)
       .value("v")
-      .dataVersion(1)
-      .isVersionDegraded(false)
-      .decisionVersion(0)
-      .hardTtlMs(300_000)
-      .hardExpireAtMs(Long.MAX_VALUE)
-      .softTtlMs(Long.MAX_VALUE)
-      .softExpireAtMs(Long.MAX_VALUE)
+      .version(1)
+      .decision(DecisionStamp.hot(0, null, 0L))
+      .ttl(300_000, Long.MAX_VALUE, 300_000, 30_000)
+      .expiryAt(Long.MAX_VALUE, Long.MAX_VALUE)
       .keyState(KeyState.HOT)
-      .normalHardTtlMs(300_000)
-      .normalSoftTtlMs(30_000)
       .build();
     assertThat(ttlPolicy.isSoftExpired(entry)).isFalse();
   }
 
   /**
-   * Verifies that isSoftExpired with softExpireAtMs=0 returns false — zero is
-   * the documented "disabled" value of toSoftExpireTimestamp, and a disabled
-   * soft TTL never reads as stale (the former "zero = immediately expired"
-   * reading armed a background refresh on every hit and never healed).
+   * {@code softExpireAtMs == 0} is the documented "disabled" value: a disabled soft TTL never
+   * reads as stale, so it cannot arm a background refresh on every hit.
    */
   @Test
   void isSoftExpired_withZeroExpireAt_shouldReturnFalse() {
-    CacheEntry entry = CacheEntry.builder()
+    CacheEntry entry = EntryDraft.blank(null)
       .value("v")
-      .dataVersion(1)
-      .isVersionDegraded(false)
-      .decisionVersion(0)
-      .hardTtlMs(300_000)
-      .hardExpireAtMs(Long.MAX_VALUE)
-      .softTtlMs(0)
-      .softExpireAtMs(0)
+      .version(1)
+      .decision(DecisionStamp.hot(0, null, 0L))
+      .ttl(300_000, 0, 300_000, 30_000)
+      .expiryAt(Long.MAX_VALUE, 0)
       .keyState(KeyState.HOT)
-      .normalHardTtlMs(300_000)
-      .normalSoftTtlMs(30_000)
       .build();
     assertThat(ttlPolicy.isSoftExpired(entry)).isFalse();
   }
 
   /**
-   * Verifies that computeSoftExpireAt passes Long.MAX_VALUE through unchanged.
+   * Verifies that Long.MAX_VALUE (soft-expire disabled) passes through the soft-TTL
+   * timestamp conversion unchanged.
    */
   @Test
-  void computeSoftExpireAt_withMaxValue_shouldPassthrough() {
-    assertThat(ttlPolicy.computeSoftExpireAt(Long.MAX_VALUE)).isEqualTo(Long.MAX_VALUE);
+  void softExpireAt_withMaxValue_shouldPassthrough() {
+    assertThat(ttlPolicy.softExpireAt(Long.MAX_VALUE)).isEqualTo(Long.MAX_VALUE);
   }
 
   /**
    * Verifies that custom ratio (0.5 = ±50%) produces jitter within the configured range.
    */
   @Test
-  void toHardExpireTimestamp_withCustomRatio_shouldJitterWithinRange() {
+  void hardExpireAt_withCustomRatio_shouldJitterWithinRange() {
     ttlConfig.setTtlJitterRatio(0.5);
-    TtlPolicy highJitter = new TtlPolicy(ttlConfig, ttlConfig.getTtlJitterRatio());
+    TtlPolicy highJitter = new TtlPolicy(ttlConfig);
     long ttl = 10_000;
-    Stream.generate(() -> highJitter.computeHardExpireAt(ttl))
+    Stream.generate(() -> highJitter.hardExpireAt(ttl))
       .limit(100)
       .forEach(expireAt -> {
         long diff = expireAt - System.currentTimeMillis();
@@ -308,15 +289,15 @@ class TtlPolicyTest {
    * Verifies that the default jitter is applied and within range for both hard and soft TTL paths.
    */
   @Test
-  void toHardExpireTimestamp_withDefaultJitter_shouldJitterWithinRange() {
+  void hardExpireAt_withDefaultJitter_shouldJitterWithinRange() {
     long ttl = 10_000;
-    Stream.generate(() -> ttlPolicy.computeHardExpireAt(ttl))
+    Stream.generate(() -> ttlPolicy.hardExpireAt(ttl))
       .limit(100)
       .forEach(expireAt -> {
         long diff = expireAt - System.currentTimeMillis();
         assertThat(diff).isBetween(9_000L, 11_000L);
       });
-    Stream.generate(() -> ttlPolicy.computeSoftExpireAt(ttl))
+    Stream.generate(() -> ttlPolicy.softExpireAt(ttl))
       .limit(100)
       .forEach(expireAt -> {
         long diff = expireAt - System.currentTimeMillis();
@@ -325,12 +306,12 @@ class TtlPolicyTest {
   }
 
   /**
-   * Verifies that toHardExpireTimestamp with a custom jitter ratio uses the given ratio.
+   * Verifies that hardExpireAt with a custom jitter ratio uses the given ratio.
    */
   @Test
-  void toHardExpireTimestamp_withCustomRatio_shouldUseGivenRatio() {
+  void hardExpireAt_withCustomRatio_shouldUseGivenRatio() {
     long ttl = 10_000;
-    Stream.generate(() -> ttlPolicy.toHardExpireTimestamp(ttl, 0.5))
+    Stream.generate(() -> ttlPolicy.hardExpireAt(ttl, 0.5))
       .limit(50)
       .forEach(expireAt -> {
         long diff = expireAt - TimeSource.currentTimeMillis();
@@ -339,20 +320,32 @@ class TtlPolicyTest {
   }
 
   /**
-   * Verifies that toHardExpireTimestamp with Long.MAX_VALUE and a custom ratio passes through.
+   * Verifies that hardExpireAt with Long.MAX_VALUE and a custom ratio passes through.
    */
   @Test
-  void toHardExpireTimestamp_withMaxValueAndCustomRatio_shouldPassthrough() {
-    assertThat(ttlPolicy.toHardExpireTimestamp(Long.MAX_VALUE, 0.5)).isEqualTo(Long.MAX_VALUE);
+  void hardExpireAt_withMaxValueAndCustomRatio_shouldPassthrough() {
+    assertThat(ttlPolicy.hardExpireAt(Long.MAX_VALUE, 0.5)).isEqualTo(Long.MAX_VALUE);
   }
 
   /**
-   * Verifies that toSoftExpireTimestamp with a custom jitter ratio uses the given ratio.
+   * Verifies that a zero jitter ratio applies no offset to either expiry path.
    */
   @Test
-  void toSoftExpireTimestamp_withCustomRatio_shouldUseGivenRatio() {
+  void expireTimestamps_withZeroRatio_shouldNotJitter() {
     long ttl = 10_000;
-    Stream.generate(() -> ttlPolicy.toSoftExpireTimestamp(ttl, 0.5))
+    long hardDiff = ttlPolicy.hardExpireAt(ttl, 0.0) - TimeSource.currentTimeMillis();
+    long softDiff = ttlPolicy.softExpireAt(ttl, 0.0) - TimeSource.currentTimeMillis();
+    assertThat(hardDiff).isBetween(ttl, ttl + 100);
+    assertThat(softDiff).isBetween(ttl, ttl + 100);
+  }
+
+  /**
+   * Verifies that softExpireAt with a custom jitter ratio uses the given ratio.
+   */
+  @Test
+  void softExpireAt_withCustomRatio_shouldUseGivenRatio() {
+    long ttl = 10_000;
+    Stream.generate(() -> ttlPolicy.softExpireAt(ttl, 0.5))
       .limit(50)
       .forEach(expireAt -> {
         long diff = expireAt - TimeSource.currentTimeMillis();
@@ -361,100 +354,68 @@ class TtlPolicyTest {
   }
 
   /**
-   * Verifies that toSoftExpireTimestamp with non-positive soft TTL returns zero.
+   * Verifies that softExpireAt with non-positive soft TTL returns zero.
    */
   @Test
-  void toSoftExpireTimestamp_withNonPositiveTtlAndCustomRatio_shouldReturnZero() {
-    assertThat(ttlPolicy.toSoftExpireTimestamp(0, 0.5)).isZero();
-    assertThat(ttlPolicy.toSoftExpireTimestamp(-1, 0.5)).isZero();
+  void softExpireAt_withNonPositiveTtlAndCustomRatio_shouldReturnZero() {
+    assertThat(ttlPolicy.softExpireAt(0, 0.5)).isZero();
+    assertThat(ttlPolicy.softExpireAt(-1, 0.5)).isZero();
   }
 
   /**
-   * Verifies that toSoftExpireTimestamp with Long.MAX_VALUE passes through.
+   * Verifies that softExpireAt with Long.MAX_VALUE passes through.
    */
   @Test
-  void toSoftExpireTimestamp_withMaxValueAndCustomRatio_shouldPassthrough() {
-    assertThat(ttlPolicy.toSoftExpireTimestamp(Long.MAX_VALUE, 0.5)).isEqualTo(Long.MAX_VALUE);
+  void softExpireAt_withMaxValueAndCustomRatio_shouldPassthrough() {
+    assertThat(ttlPolicy.softExpireAt(Long.MAX_VALUE, 0.5)).isEqualTo(Long.MAX_VALUE);
   }
 
-  /**
-   * Verifies that computeNullExpireAt with positive TTL returns a future timestamp.
-   */
-  @Test
-  void computeNullExpireAt_withPositiveTtl_shouldReturnFuture() {
-    assertThat(ttlPolicy.computeNullExpireAt(1_000)).isGreaterThan(TimeSource.currentTimeMillis());
-  }
+  // ── EntryDraft#ttl / softTtl ──────────────
 
   /**
-   * Verifies that computeNullExpireAt with zero TTL falls back to config default.
+   * Verifies that {@code EntryDraft#ttl} updates the hard TTL and expire-at
+   * while the soft side stays pinned and all version/state fields survive.
    */
   @Test
-  void computeNullExpireAt_withZeroTtl_shouldFallbackToConfig() {
-    assertThat(ttlPolicy.computeNullExpireAt(0)).isGreaterThan(TimeSource.currentTimeMillis());
-  }
-
-  /**
-   * Verifies that computeNullExpireAt with Long.MAX_VALUE passes through.
-   */
-  @Test
-  void computeNullExpireAt_withMaxValue_shouldPassthrough() {
-    assertThat(ttlPolicy.computeNullExpireAt(Long.MAX_VALUE)).isEqualTo(Long.MAX_VALUE);
-  }
-
-  // ── applyHardTtl / applySoftTtl / applyNormalTtl ──────────────
-
-  /**
-   * Verifies that applyHardTtl updates the hard TTL and expire-at while
-   * preserving the soft TTL and all version/state fields.
-   */
-  @Test
-  void applyHardTtl_shouldUpdateHardTtlAndPreserveSoftTtl() {
+  void hardTtl_shouldUpdateHardTtlAndPreserveSoftTtl() {
     long now = System.currentTimeMillis();
-    CacheEntry original = CacheEntry.builder()
+    CacheEntry original = EntryDraft.blank(null)
       .value("v")
-      .dataVersion(Long.MIN_VALUE + 10)
-      .isVersionDegraded(true)
-      .decisionVersion(5)
-      .hardTtlMs(60_000)
-      .hardExpireAtMs(now + 60_000)
-      .softTtlMs(30_000)
-      .softExpireAtMs(now + 30_000)
+      .version(10L)
+      .decision(DecisionStamp.hot(5, null, 0L))
+      .ttl(60_000, 30_000, 300_000, 30_000)
+      .expiryAt(now + 60_000, now + 30_000)
       .keyState(KeyState.HOT)
-      .normalHardTtlMs(300_000)
-      .normalSoftTtlMs(30_000)
       .build();
 
-    CacheEntry updated = EntryDraft.of(original, ttlPolicy).hardTtl(120_000).build();
+    CacheEntry updated = EntryDraft.of(original, ttlPolicy)
+      .ttl(120_000, original.getSoftTtlMs())
+      .softExpiryAt(original.getSoftExpireAtMs())
+      .build();
 
     assertThat(updated.getHardTtlMs()).isEqualTo(120_000);
     assertThat(updated.getHardExpireAtMs()).isGreaterThan(original.getHardExpireAtMs());
     assertThat(updated.getSoftTtlMs()).isEqualTo(30_000);
     assertThat(updated.getSoftExpireAtMs()).isEqualTo(original.getSoftExpireAtMs());
-    assertThat(updated.getDataVersion()).isEqualTo(Long.MIN_VALUE + 10);
-    assertThat(updated.isVersionDegraded()).isTrue();
+    assertThat(updated.getDataVersion()).isEqualTo(10L);
     assertThat(updated.getDecisionVersion()).isEqualTo(5);
     assertThat(updated.getKeyState()).isEqualTo(KeyState.HOT);
   }
 
   /**
-   * Verifies that applySoftTtl updates the soft TTL and expire-at while
-   * preserving the hard TTL and all version/state fields.
+   * Verifies that {@code EntryDraft#softTtl} updates the soft TTL and expire-at
+   * while preserving the hard TTL and all version/state fields.
    */
   @Test
-  void applySoftTtl_shouldUpdateSoftTtlAndPreserveHardTtl() {
+  void softTtl_shouldUpdateSoftTtlAndPreserveHardTtl() {
     long now = System.currentTimeMillis();
-    CacheEntry original = CacheEntry.builder()
+    CacheEntry original = EntryDraft.blank(null)
       .value("v")
-      .dataVersion(Long.MIN_VALUE + 10)
-      .isVersionDegraded(true)
-      .decisionVersion(5)
-      .hardTtlMs(60_000)
-      .hardExpireAtMs(now + 60_000)
-      .softTtlMs(30_000)
-      .softExpireAtMs(now + 30_000)
+      .version(10L)
+      .decision(DecisionStamp.hot(5, null, 0L))
+      .ttl(60_000, 30_000, 300_000, 30_000)
+      .expiryAt(now + 60_000, now + 30_000)
       .keyState(KeyState.HOT)
-      .normalHardTtlMs(300_000)
-      .normalSoftTtlMs(30_000)
       .build();
 
     CacheEntry updated = EntryDraft.of(original, ttlPolicy).softTtl(120_000).build();
@@ -463,37 +424,123 @@ class TtlPolicyTest {
     assertThat(updated.getSoftExpireAtMs()).isGreaterThan(original.getSoftExpireAtMs());
     assertThat(updated.getHardTtlMs()).isEqualTo(60_000);
     assertThat(updated.getHardExpireAtMs()).isEqualTo(original.getHardExpireAtMs());
-    assertThat(updated.getDataVersion()).isEqualTo(Long.MIN_VALUE + 10);
+    assertThat(updated.getDataVersion()).isEqualTo(10L);
     assertThat(updated.getKeyState()).isEqualTo(KeyState.HOT);
   }
 
+  // ── Timestamp-threading overloads (single-now hit path) ────────────────
+
+  private static CacheEntry entryWithExpiries(long hardExpireAtMs, long softExpireAtMs) {
+    return EntryDraft.blank(null)
+      .value("v")
+      .version(1)
+      .decision(DecisionStamp.hot(0, null, 0L))
+      .ttl(300_000, 30_000, 300_000, 30_000)
+      .expiryAt(hardExpireAtMs, softExpireAtMs)
+      .keyState(KeyState.NORMAL)
+      .build();
+  }
+
   /**
-   * Verifies that applyNormalTtl updates only the normal TTL fields
-   * (normalHardTtlMs, normalSoftTtlMs), leaving all other fields untouched.
+   * The {@code now} overloads must judge identically to the clock-reading
+   * forms when {@code now} is the current time: same entry, same verdict.
    */
   @Test
-  void applyNormalTtl_shouldUpdateNormalTtlFields() {
-    CacheEntry original = CacheEntry.builder()
-      .value("v")
-      .dataVersion(10)
-      .isVersionDegraded(false)
-      .decisionVersion(5)
-      .hardTtlMs(60_000)
-      .hardExpireAtMs(System.currentTimeMillis() + 60_000)
-      .softTtlMs(30_000)
-      .softExpireAtMs(System.currentTimeMillis() + 30_000)
-      .keyState(KeyState.HOT)
-      .normalHardTtlMs(300_000)
-      .normalSoftTtlMs(30_000)
-      .build();
+  void expiryPredicates_withCurrentNow_shouldAgreeWithClockForms() {
+    long now = TimeSource.currentTimeMillis();
+    CacheEntry fresh = entryWithExpiries(now + 60_000, now + 30_000);
+    CacheEntry stale = entryWithExpiries(now - 1, now - 1);
 
-    CacheEntry updated = EntryDraft.of(original).normalTtl(600_000, 60_000).build();
+    assertThat(ttlPolicy.isLogicallyExpired(fresh, now)).isEqualTo(ttlPolicy.isLogicallyExpired(fresh));
+    assertThat(ttlPolicy.isSoftExpired(fresh, now)).isEqualTo(ttlPolicy.isSoftExpired(fresh));
+    assertThat(ttlPolicy.isLogicallyExpired(stale, now)).isEqualTo(ttlPolicy.isLogicallyExpired(stale));
+    assertThat(ttlPolicy.isSoftExpired(stale, now)).isEqualTo(ttlPolicy.isSoftExpired(stale));
+    assertThat(ttlPolicy.isLogicallyExpired(fresh, now)).isFalse();
+    assertThat(ttlPolicy.isSoftExpired(fresh, now)).isFalse();
+    assertThat(ttlPolicy.isLogicallyExpired(stale, now)).isTrue();
+    assertThat(ttlPolicy.isSoftExpired(stale, now)).isTrue();
+  }
 
-    assertThat(updated.getNormalHardTtlMs()).isEqualTo(600_000);
-    assertThat(updated.getNormalSoftTtlMs()).isEqualTo(60_000);
-    assertThat(updated.getHardTtlMs()).isEqualTo(60_000);
-    assertThat(updated.getSoftTtlMs()).isEqualTo(30_000);
-    assertThat(updated.getDataVersion()).isEqualTo(10);
-    assertThat(updated.getKeyState()).isEqualTo(KeyState.HOT);
+  /**
+   * A single shared {@code now} must govern both predicates: an entry whose
+   * expiries sit strictly after {@code now} reads fresh on both, even if the
+   * wall clock advances past them before the second predicate runs.
+   */
+  @Test
+  void expiryPredicates_withSharedNow_shouldJudgeOneInstant() {
+    long now = TimeSource.currentTimeMillis();
+    CacheEntry entry = entryWithExpiries(now + 30_000, now + 30_000);
+
+    assertThat(ttlPolicy.isLogicallyExpired(entry, now)).isFalse();
+    assertThat(ttlPolicy.isSoftExpired(entry, now)).isFalse();
+    // After both expiries the same sample judges both expired.
+    assertThat(ttlPolicy.isLogicallyExpired(entry, now + 60_000)).isTrue();
+    assertThat(ttlPolicy.isSoftExpired(entry, now + 60_000)).isTrue();
+  }
+
+  /**
+   * Permanent entries ({@code Long.MAX_VALUE}) never expire under either
+   * form; disabled soft TTL ({@code 0}) never reads stale.
+   */
+  @Test
+  void expiryPredicates_withSentinels_shouldHonorDisabledAndPermanent() {
+    long now = TimeSource.currentTimeMillis();
+    CacheEntry permanent = entryWithExpiries(Long.MAX_VALUE, 0);
+
+    assertThat(ttlPolicy.isLogicallyExpired(permanent, now)).isFalse();
+    assertThat(ttlPolicy.isSoftExpired(permanent, now)).isFalse();
+    assertThat(ttlPolicy.isSoftExpired(null, now)).isTrue();
+  }
+
+  /**
+   * The two expiry predicates share one boundary: at the deadline millisecond the
+   * entry is expired, so a hard and a soft deadline in the same millisecond can never
+   * disagree.
+   */
+  @Test
+  void isSoftExpired_atTheDeadline_shouldBeExpired() {
+    long now = TimeSource.currentTimeMillis();
+    CacheEntry entry = entryWithExpiries(now, now);
+
+    assertThat(ttlPolicy.isLogicallyExpired(entry, now)).isTrue();
+    assertThat(ttlPolicy.isSoftExpired(entry, now)).isTrue();
+    assertThat(ttlPolicy.isLogicallyExpired(entry, now - 1)).isFalse();
+    assertThat(ttlPolicy.isSoftExpired(entry, now - 1)).isFalse();
+  }
+
+  /**
+   * A TTL near {@link Long#MAX_VALUE} must saturate: the plain {@code now + ttl}
+   * addition wrapped negative, and both predicates read a negative deadline as
+   * "expired since forever", so the entry died on the write that created it.
+   */
+  @Test
+  void toExpireTimestamp_nearLongMax_shouldSaturateInsteadOfWrapping() {
+    // No jitter: the deadline is exactly the ceiling.
+    assertThat(ttlPolicy.hardExpireAt(Long.MAX_VALUE - 1, 0.0)).isEqualTo(Long.MAX_VALUE);
+    assertThat(ttlPolicy.softExpireAt(Long.MAX_VALUE - 1, 0.0)).isEqualTo(Long.MAX_VALUE);
+
+    // With jitter the ceiling is only approached, but the result must never wrap negative.
+    assertThat(ttlPolicy.hardExpireAt(Long.MAX_VALUE - 1)).isGreaterThan(TimeSource.currentTimeMillis());
+    assertThat(ttlPolicy.softExpireAt(Long.MAX_VALUE - 1)).isGreaterThan(TimeSource.currentTimeMillis());
+
+    // Half of MAX still fits below the ceiling: a real (far-future) timestamp, not MAX.
+    long hard = ttlPolicy.hardExpireAt(Long.MAX_VALUE / 2);
+    assertThat(hard).isPositive().isGreaterThan(TimeSource.currentTimeMillis());
+  }
+
+  /**
+   * Jitter is symmetric and closed on both ends. With a 1 ms base the offsets are
+   * {@code 10 + jitter - clockDrift} for {@code jitter ∈ [-1, 1]}, so both 9 and 11 must
+   * appear.
+   */
+  @Test
+  void computeTtlJitter_withOneMillisecondBase_shouldSpanBothSigns() {
+    Set<Long> offsets = new HashSet<>();
+    for (int i = 0; i < 500; i++) {
+      offsets.add(ttlPolicy.hardExpireAt(10, 0.1) - TimeSource.currentTimeMillis());
+    }
+
+    assertThat(offsets).allMatch(offset -> offset >= 8 && offset <= 11);
+    assertThat(offsets).contains(9L, 11L);
   }
 }

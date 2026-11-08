@@ -15,9 +15,10 @@
  */
 package io.github.hyshmily.zeta.util.executor;
 
-import io.github.hyshmily.zeta.Internal;
 import io.github.hyshmily.zeta.exception.ZetaExceptionHandler;
+import io.github.hyshmily.zeta.util.Internal;
 import java.util.List;
+import java.util.Objects;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
 import lombok.Getter;
@@ -32,7 +33,7 @@ import org.jspecify.annotations.NonNull;
  * favours CPU-bound workloads where queuing is preferred over creating more threads.
  *
  * <p>The executor uses a {@link StandardExecutorQueue} (backed by {@link java.util.concurrent.LinkedTransferQueue})
- * whose {@code offer()} method cooperates with this executor's thread-count tracking to implement the
+ * whose {@code offer()} method cooperates with this executor's thread-add tracking to implement the
  * Tomcat-style policy. A {@code submittedTasksCount} counter limits the total number of in-flight
  * tasks (queued + active) to {@code queueCapacity + maxThreads}.
  *
@@ -44,31 +45,56 @@ import org.jspecify.annotations.NonNull;
  *
  * <p><b>Rejection accounting.</b> The counter is incremented per submission and decremented in
  * {@link #afterExecute} (worker execution) plus on every path where a task is known never to
- * execute. Rejection handlers that return WITHOUT throwing — {@link ThreadPoolExecutor.CallerRunsPolicy}
- * runs the task inline in the submitting thread and discard-style handlers drop it, and neither
- * path reaches {@code afterExecute} — are compensated by an internal accounting wrapper
- * ({@code RejectionAccountingHandler}) installed around the user's handler, so the counter is
- * symmetric for arbitrary handlers. Documented edge cases that are intentionally not detected:
- * {@link ThreadPoolExecutor.DiscardOldestPolicy} purges a QUEUED task that already counted and
- * will never run (a residual +1 leak per purge), and a handler that throws a non-{@link
- * RejectedExecutionException} bypasses the compensation chain entirely.
+ * execute. Rejections raised inside {@link ThreadPoolExecutor#execute} itself (shutdown, or the
+ * offer → addWorker race) land in an internal force-first handler that owns the whole
+ * resolution: when the pool is still running the task is forced into the queue and the add is
+ * kept (the later {@code afterExecute} balances it); once the force fails (shutdown) the user's
+ * handler runs and the internal handler rolls the increment back — a returning handler
+ * ({@link ThreadPoolExecutor.CallerRunsPolicy}, discard-style) decrements on return, a throwing
+ * one (Abort) decrements before propagating its own exception. The over-cap pre-check in
+ * {@link #execute(Runnable)} (past {@code maxSubmittedTaskCount}) calls the user's handler
+ * directly after rolling the increment back. The counter is therefore symmetric for arbitrary
+ * handlers, with the force attempted exactly once per submission.
+ * Documented edge case that is intentionally not detected:
+ * {@link ThreadPoolExecutor.DiscardOldestPolicy} drops a QUEUED task that already counted and
+ * will never run (a residual +1 leak per drop). It bypasses the queue-removal accounting by
+ * calling {@code getQueue().poll()} directly.
  */
 @Internal
 public class StandardThreadExecutor extends ThreadPoolExecutor {
 
+  /**
+   * Records a task removed by {@link #remove(Runnable)} while the pool is shutting down.
+   * {@link ThreadPoolExecutor#execute(Runnable)} only ever calls {@code remove(command)} inside its
+   * {@code !isRunning(recheck) && remove(command)} shutdown recheck, immediately before calling
+   * {@code reject(command)} on the same thread. Keeping the marker off the running path means
+   * normal {@link #execute(Runnable)} and {@link #remove(Runnable)} calls never touch a
+   * {@link ThreadLocal}.
+   */
+  private static final ThreadLocal<Runnable> SHUTDOWN_REMOVED = new ThreadLocal<>();
+
   private final AtomicInteger submittedTasksCount = new AtomicInteger(0);
+
+  /** Configured queue capacity, the fixed half of {@link #maxSubmittedTaskCount}. */
+  private final int queueCapacity;
 
   /**
    * The user-supplied rejection handler (unwrapped). The pool itself always runs
-   * {@code RejectionAccountingHandler}, which delegates here and compensates the
-   * {@code submittedTasksCount} increment when the delegate returns without throwing.
+   * {@code InternalForceQueueHandler}, which resolves the offer → addWorker race via
+   * {@code queue.force} and delegates here only on genuine overload or shutdown.
    * Volatile: replaceable at runtime via {@link #setRejectedExecutionHandler}.
    */
   @SuppressWarnings("java:S3077")
   private volatile RejectedExecutionHandler userHandler;
 
+  /**
+   * Admission ceiling — {@code queueCapacity + maximumPoolSize}. Volatile and
+   * recomputed by {@link #setMaximumPoolSize(int)}: a runtime pool resize must
+   * move the ceiling with the pool, or the executor either over-admits past the
+   * new bound or keeps rejecting under the old one forever.
+   */
   @Getter
-  private final int maxSubmittedTaskCount;
+  private volatile int maxSubmittedTaskCount;
 
   /**
    * Creates a new {@code StandardThreadExecutor}.
@@ -93,49 +119,99 @@ public class StandardThreadExecutor extends ThreadPoolExecutor {
     super(coreThreads, maxThreads, keepAliveTime, unit, new StandardExecutorQueue(), threadFactory, handler);
     ((StandardExecutorQueue) getQueue()).setStandardThreadExecutor(this);
     this.userHandler = handler;
+    this.queueCapacity = queueCapacity;
     this.maxSubmittedTaskCount = queueCapacity + maxThreads;
-    // Install the accounting wrapper only after the counter and handler fields are
+    // Install the force-first handler only after the counter and handler fields are
     // initialized. The executor is not yet published, so no task can be rejected
     // before this line runs.
-    super.setRejectedExecutionHandler(new RejectionAccountingHandler());
+    super.setRejectedExecutionHandler(new InternalForceQueueHandler());
   }
 
   @Override
   public void execute(@NonNull Runnable command) {
-    int count = submittedTasksCount.incrementAndGet();
-    if (count > maxSubmittedTaskCount) {
+    Objects.requireNonNull(command, "command must not be null");
+    if (submittedTasksCount.incrementAndGet() > maxSubmittedTaskCount) {
       submittedTasksCount.decrementAndGet();
-      getRejectedExecutionHandler().rejectedExecution(command, this);
+      userHandler.rejectedExecution(command, this);
       return;
     }
+    // No catch around super.execute: every rejection it can raise is already
+    // fully resolved by the internal force-first handler — the force, the
+    // user-handler delegation, and the counter compensation all happen there,
+    // with the user handler's own exception propagating unchanged.
     try {
       super.execute(command);
-    } catch (RejectedExecutionException rx) {
-      StandardExecutorQueue queue = (StandardExecutorQueue) getQueue();
-      try {
-        if (!queue.force(command)) {
-          submittedTasksCount.decrementAndGet();
-          getRejectedExecutionHandler().rejectedExecution(command, this);
-        }
-      } catch (RejectedExecutionException forceRx) {
-        // The task was never queued and never executed, so afterExecute will never fire:
-        // compensate the increment here. force() throws exactly when the pool is shutting
-        // down (see StandardExecutorQueue#force), the one path where the JDK recheck
-        // (offer -> remove -> reject) also lands in this catch.
-        submittedTasksCount.decrementAndGet();
-        throw forceRx;
+    } finally {
+      // Only the shutdown recheck on this thread can leave a marker: a running
+      // pool never touches the ThreadLocal at all.
+      if (isShutdown()) {
+        SHUTDOWN_REMOVED.remove();
       }
     }
   }
 
   @Override
-  protected void afterExecute(@NonNull Runnable r, Throwable t) {
+  public boolean remove(Runnable task) {
+    // A removed queued task never reaches afterExecute's decrement — balance
+    // the submission increment here, or each external removal permanently
+    // leaks one slot of the admission ceiling (maxSubmittedTaskCount). When the
+    // JDK's shutdown recheck removes the command it is about to reject, the
+    // marker lets the rejection handler skip the second decrement.
+    if (super.remove(task)) {
+      submittedTasksCount.decrementAndGet();
+      if (isShutdown()) {
+        SHUTDOWN_REMOVED.set(task);
+      }
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * Removes cancelled queued futures and compensates their submission increments.
+   *
+   * <p>The JDK's implementation removes through the queue iterator and never calls
+   * {@link #remove(Runnable)}, so without this override every purged cancelled task leaves one
+   * admission slot held forever. The snapshot-then-{@code queue.remove} form counts only a removal
+   * this call actually won; a worker or a concurrent purge that won the race owns the matching
+   * compensation (the worker through {@code afterExecute}).
+   */
+  @Override
+  public void purge() {
+    int removed = 0;
+    BlockingQueue<Runnable> queue = getQueue();
+    for (Runnable task : queue.toArray(new Runnable[0])) {
+      if (task instanceof Future<?> future && future.isCancelled() && queue.remove(task)) {
+        removed++;
+      }
+    }
+    if (removed != 0) {
+      submittedTasksCount.addAndGet(-removed);
+    }
+  }
+
+  /**
+   * Keeps the admission ceiling in sync with a runtime pool resize. The queue
+   * reads {@code getMaximumPoolSize()} from this executor on every
+   * thread-creation decision, so it has no snapshot to refresh.
+   *
+   * @param maximumPoolSize the new maximum pool size
+   * @throws IllegalArgumentException if the size is not positive or below the core size
+   */
+  @Override
+  public void setMaximumPoolSize(int maximumPoolSize) {
+    super.setMaximumPoolSize(maximumPoolSize);
+    this.maxSubmittedTaskCount = queueCapacity + maximumPoolSize;
+  }
+
+  @Override
+  protected void afterExecute(@NonNull Runnable task, Throwable failure) {
     submittedTasksCount.decrementAndGet();
-    if (t != null) {
+    if (failure != null) {
       // Report task failures through the injectable exception-handler chain (WARN log by
-      // default). The throwable is intentionally NOT swallowed: the worker-thread replacement
-      // remains the ThreadPoolExecutor's own responsibility.
-      ZetaExceptionHandler.handleException("StandardThreadExecutor task failed", t);
+      // default). The throwable is reported, then dropped; retiring a worker thread that
+      // escaped a task remains the ThreadPoolExecutor's own responsibility.
+      ZetaExceptionHandler.handleException("StandardThreadExecutor task failed", failure);
     }
   }
 
@@ -144,25 +220,28 @@ public class StandardThreadExecutor extends ThreadPoolExecutor {
    *
    * <p>Tasks returned here never execute, so {@link #afterExecute} never fires for them;
    * their {@code submittedTasksCount} increments are compensated against the drained batch
-   * to keep the counter symmetric across the shutdown paths. The drain performed by
-   * {@link ThreadPoolExecutor#shutdownNow()} is atomic with the STOP transition, so no new
-   * task can slip into the queue after the drained batch is accounted for.
+   * to keep the counter symmetric across the shutdown paths. The drain runs under the
+   * queue lifecycle lock shared with the force path, so a forced task cannot be inserted
+   * between the STOP transition and the drain.
    *
    * @return the list of tasks that never commenced execution
    */
   @Override
   @NonNull
   public List<Runnable> shutdownNow() {
-    List<Runnable> drained = super.shutdownNow();
+    List<Runnable> drained;
+    synchronized (((StandardExecutorQueue) getQueue()).lifecycleLock()) {
+      drained = super.shutdownNow();
+    }
     submittedTasksCount.addAndGet(-drained.size());
     return drained;
   }
 
   /**
-   * Returns the user-supplied rejection handler, not the internal accounting wrapper —
-   * the wrapper is a counter-compensation detail of this class, invisible to callers.
+   * Returns the user-supplied rejection handler, not the internal force-first handler —
+   * the handler is a queue-resolution detail of this class, invisible to callers.
    *
-   * @return the handler passed to the constructor or {@link #setRejectedExecutionHandler}
+   * @return the handler passed to the constructor
    */
   @Override
   public RejectedExecutionHandler getRejectedExecutionHandler() {
@@ -170,38 +249,79 @@ public class StandardThreadExecutor extends ThreadPoolExecutor {
   }
 
   /**
-   * Replaces the user-supplied rejection handler. The internal accounting wrapper stays
-   * installed in the pool (it reads the handler through the volatile field), so the
-   * {@code submittedTasksCount} compensation contract holds for any handler.
+   * Replaces the user-supplied rejection handler while keeping the internal force-first
+   * handler installed on the pool. The pool's own handler owns the force and the
+   * submission-counter compensation; overwriting it would break both.
    *
-   * @param handler the new rejection handler
+   * @param handler the new user handler; must not be {@code null}
    */
   @Override
   public void setRejectedExecutionHandler(@NonNull RejectedExecutionHandler handler) {
-    this.userHandler = handler;
+    this.userHandler = Objects.requireNonNull(handler, "handler must not be null");
   }
 
+  /**
+   * Return the current number of in-flight submissions (queued + executing tasks).
+   *
+   * <p>The counter is conservative between a task body finishing and
+   * {@link #afterExecute} running, so a transient over-add is normal; it
+   * drains back to zero.
+   *
+   * @return the current submitted-task add
+   */
   public int getSubmittedTasksCount() {
     return submittedTasksCount.get();
   }
 
   /**
-   * Wraps the user's rejection handler for the rejections raised inside
+   * Internal rejection handler for rejections raised inside
    * {@link ThreadPoolExecutor#execute(Runnable)} itself (shutdown, or the
-   * offer → addWorker race). When the delegate returns WITHOUT throwing, the task either
-   * ran inline in the submitting thread (CallerRunsPolicy) or was silently dropped
-   * (discard-style policies) — it will never reach a worker's {@code afterExecute}, so
-   * the submit-time increment is compensated here. When the delegate throws, the
-   * increment is intentionally left in place: the exception propagates to
-   * {@link #execute(Runnable)}, whose force() fallback resolves it (task queued →
-   * {@code afterExecute} decrements; rejected → explicit compensation).
+   * offer → addWorker race when {@code poolSize < maxPoolSize}). It owns the
+   * whole rejection resolution — {@link #execute(Runnable)} wraps
+   * {@code super.execute} without a catch — so the force is attempted exactly
+   * once and a throwing user handler propagates its own exception, not a
+   * queue-force substitute.
+   *
+   * <p>When the pool is still running the race is resolved by forcing the task into the
+   * queue: no warning, no exception, no {@code CallerRuns} inline run — the later worker
+   * {@code afterExecute} balances the submit-time increment. The user's handler runs only
+   * once the force has failed (shutdown raced in). The counter is compensated here for
+   * every not-queued outcome: a returning handler (CallerRuns/discard — neither path
+   * reaches {@code afterExecute}) decrements on return, and a throwing one (Abort)
+   * decrements before its original exception propagates. This handler never sees the
+   * over-cap pre-check rejection in {@link #execute(Runnable)}, which calls the user
+   * handler directly after rolling the increment back.
    */
-  private final class RejectionAccountingHandler implements RejectedExecutionHandler {
+  private final class InternalForceQueueHandler implements RejectedExecutionHandler {
 
     @Override
-    public void rejectedExecution(Runnable r, ThreadPoolExecutor executor) {
-      userHandler.rejectedExecution(r, executor);
-      submittedTasksCount.decrementAndGet();
+    public void rejectedExecution(Runnable task, ThreadPoolExecutor pool) {
+      var queue = (StandardExecutorQueue) pool.getQueue();
+      if (queue.force(task)) {
+        return;
+      }
+
+      // The task was never queued and never executed, so afterExecute will never
+      // fire: compensate the increment on EVERY outcome. finally instead of a
+      // catch: a CallerRunsPolicy that runs the task inline can throw an Error
+      // (OOM, StackOverflow, AssertionError), which a catch(RuntimeException) misses
+      // and leaks a slot permanently.
+      //
+      // remove() already decremented the exact task the JDK is now rejecting, so
+      // consume that marker instead of decrementing twice. Clearing it before
+      // user code keeps a CallerRunsPolicy that removes another queued task on
+      // the normal decrement path.
+      boolean alreadyCompensated = SHUTDOWN_REMOVED.get() == task;
+      if (alreadyCompensated) {
+        SHUTDOWN_REMOVED.remove();
+      }
+      try {
+        userHandler.rejectedExecution(task, pool);
+      } finally {
+        if (!alreadyCompensated) {
+          submittedTasksCount.decrementAndGet();
+        }
+      }
     }
   }
 }

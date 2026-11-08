@@ -20,38 +20,44 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import io.github.hyshmily.zeta.autoconfigure.ZetaProperties;
-import io.github.hyshmily.zeta.cache.cachesupport.BroadcastBuffer;
-import io.github.hyshmily.zeta.cache.cachesupport.CircuitBreaker;
-import io.github.hyshmily.zeta.cache.cachesupport.EntryLifecycle;
-import io.github.hyshmily.zeta.cache.cachesupport.SingleFlight;
-import io.github.hyshmily.zeta.cache.cachesupport.impl.EntryLifecycleImpl;
+import io.github.hyshmily.zeta.cache.cachesupport.circuitbreaker.CircuitBreaker;
+import io.github.hyshmily.zeta.cache.cachesupport.circuitbreaker.CircuitBreakerRegistry;
+import io.github.hyshmily.zeta.cache.cachesupport.lifecycle.EntryLifecycle;
+import io.github.hyshmily.zeta.cache.cachesupport.lifecycle.EntryLifecycleImpl;
+import io.github.hyshmily.zeta.cache.cachesupport.loader.singleflight.SingleFlight;
+import io.github.hyshmily.zeta.cache.cachesupport.loader.singleflight.SingleFlightImpl;
+import io.github.hyshmily.zeta.cache.cachesupport.policy.GetPolicy;
+import io.github.hyshmily.zeta.cache.cachesupport.policy.InvalidatePolicy;
+import io.github.hyshmily.zeta.cache.cachesupport.policy.StalePolicy;
+import io.github.hyshmily.zeta.cache.cachesupport.raw.CacheEntry;
+import io.github.hyshmily.zeta.cache.cachesupport.raw.EntryDraft;
+import io.github.hyshmily.zeta.hotkeydetector.HotKeyDetector;
+import io.github.hyshmily.zeta.model.DecisionStamp;
+import io.github.hyshmily.zeta.model.KeyState;
+import io.github.hyshmily.zeta.reporting.KeyReporter;
 import io.github.hyshmily.zeta.scheduler.BackgroundRefresher;
 import io.github.hyshmily.zeta.scheduler.DefaultBackgroundRefresher;
-import io.github.hyshmily.zeta.cache.cachesupport.impl.SingleFlightImpl;
-import io.github.hyshmily.zeta.cache.codec.CacheCompressor;
-import io.github.hyshmily.zeta.hotkeydetector.HotKeyDetector;
-import io.github.hyshmily.zeta.model.CacheEntry;
-import io.github.hyshmily.zeta.model.ReadPolicy;
-import io.github.hyshmily.zeta.model.KeyState;
-import io.github.hyshmily.zeta.model.StalePolicy;
-import io.github.hyshmily.zeta.rule.impl.RuleMatcherImpl;
 import io.github.hyshmily.zeta.sharding.HealthView;
+import io.github.hyshmily.zeta.sync.local.SyncMessage;
 import io.github.hyshmily.zeta.util.TimeSource;
-import io.github.hyshmily.zeta.util.id.SnowflakeIdGenerator;
-import io.github.hyshmily.zeta.util.version.VersionController;
+import io.github.hyshmily.zeta.util.clock.StampClock;
+import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
-import java.util.Optional;
-import java.util.Set;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executor;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -59,15 +65,15 @@ import org.junit.jupiter.api.Test;
 
 /**
  * Regression tests for call-chain conflicts found while tracing the public API
- * end to end (read / write / invalidate / fluent / annotation paths).
+ * end to end (read / write / invalidate / fluent paths).
  *
  * <ul>
  *   <li><b>Writer-side equal-version guard:</b> {@code putThrough}'s local apply
- *       must not skip on an EQUAL version — the reader's ADR-0033 probe can stamp
+ *       must not skip on an EQUAL version — the reader's design decisions: version stamps probe can stamp
  *       pre-write data with the writer's own post-INCR version, and the sender's
- *       self-REFRESH is dropped (ADR-0067), so an equal-version skip pins the stale
+ *       self-REFRESH is dropped (design decisions: dedup lifecycle), so an equal-version skip pins the stale
  *       value on the writer instance until TTL.</li>
- *   <li><b>putLocal dedup invariant (ADR-0067):</b> a completed SingleFlight result
+ *   <li><b>putLocal dedup invariant (design decisions: dedup lifecycle):</b> a completed SingleFlight result
  *       must not outlive the L1 write that obsoletes it — {@code putLocal} is a
  *       local write with no version bump, so the only protection is dedup
  *       invalidation.</li>
@@ -82,35 +88,42 @@ import org.junit.jupiter.api.Test;
  */
 class HotKeyCacheConflictTest {
 
-  private final SnowflakeIdGenerator snowflakeIdGenerator = new SnowflakeIdGenerator(0, 1, 5L, false);
-
   private HotKeyDetector hotKeyDetector;
+  private KeyReporter reporter;
+  private AccessCounter accessCounter;
   private Cache<String, CacheEntry> caffeineCache;
   private CircuitBreaker circuitBreaker;
+  private CircuitBreakerRegistry breakerRegistry;
   private Executor executor;
   private EntryLifecycle entryLifecycle;
   private BackgroundRefresher backgroundRefresher;
   private java.util.concurrent.ScheduledExecutorService scheduler;
   private HealthView healthView;
   private ZetaProperties ttlConfig;
-  private VersionController versionController;
+  private StampClock stampClock;
+  private RecordingDispatcher dispatcher;
 
   @BeforeEach
   void setUp() {
     hotKeyDetector = mock(HotKeyDetector.class);
     when(hotKeyDetector.contains(anyString())).thenReturn(false);
+    reporter = mock(KeyReporter.class);
     caffeineCache = Caffeine.newBuilder().maximumSize(100).build();
     circuitBreaker = mock(CircuitBreaker.class);
-    when(circuitBreaker.allowRequest()).thenReturn(true);
+    when(circuitBreaker.tryAcquireStamp()).thenReturn(CircuitBreaker.STAMP_CLOSED);
     when(circuitBreaker.isOpen()).thenReturn(false);
+    // Registry-based construction path (see ZetaAutoConfiguration): every key's shard is the mock.
+    breakerRegistry = mock(CircuitBreakerRegistry.class);
+    when(breakerRegistry.breakerFor(anyString())).thenReturn(circuitBreaker);
     executor = Runnable::run;
     ttlConfig = new ZetaProperties();
     healthView = mock(HealthView.class);
-    entryLifecycle = new EntryLifecycleImpl(caffeineCache, ttlConfig, CacheCompressor.NONE, healthView);
-    backgroundRefresher = new DefaultBackgroundRefresher(caffeineCache, executor, entryLifecycle.ttlPolicy(), CacheCompressor.NONE, 10);
+    entryLifecycle = new EntryLifecycleImpl(caffeineCache, ttlConfig, healthView);
+    backgroundRefresher = new DefaultBackgroundRefresher(caffeineCache, executor, entryLifecycle, 10);
     scheduler = Executors.newSingleThreadScheduledExecutor();
-    versionController = mock(VersionController.class);
-    when(versionController.isRedisConfigured()).thenReturn(true);
+    accessCounter = mock(AccessCounter.class);
+    stampClock = mock(StampClock.class);
+    dispatcher = new RecordingDispatcher();
   }
 
   @AfterEach
@@ -120,50 +133,59 @@ class HotKeyCacheConflictTest {
 
   /** Build a cache with a REAL SingleFlight (dedup exercised) and the given version controller. */
   private HotKeyCache newCache() {
-    SingleFlight singleFlight = new SingleFlightImpl(10_000, 5, 5, executor, circuitBreaker);
+    return newCache(new TestSingleFlight(10_000, 5, 5, executor, breakerRegistry));
+  }
+
+  private HotKeyCache newCache(SingleFlight singleFlight) {
     return new HotKeyCache(
-        hotKeyDetector,
-        caffeineCache,
-        singleFlight,
-        entryLifecycle,
-        backgroundRefresher,
-        executor,
-        new CentralDispatcher(
-            Optional.empty(),
-            Optional.empty(),
-            new BroadcastBuffer(scheduler, Optional.empty(), 500, 2_000, null),
-            hotKeyDetector),
-        new RuleMatcherImpl(Optional.empty(), Optional.empty()),
-        versionController,
-        ttlConfig,
-        healthView,
-        CacheCompressor.NONE,
-        null);
+      hotKeyDetector,
+      caffeineCache,
+      singleFlight,
+      entryLifecycle,
+      backgroundRefresher,
+      dispatcher,
+      stampClock,
+      healthView
+    );
+  }
+
+  /** The INVALIDATE_BATCH wire entries the cache broadcast (with a null publisher the plain dispatcher drops them). */
+  private final class RecordingDispatcher extends CentralDispatcher {
+
+    private final List<SyncMessage.Entry> invalidatedBatches = new ArrayList<>();
+
+    private RecordingDispatcher() {
+      super(accessCounter, null, new BroadcastBuffer(scheduler, null, 500, 2_000, null), null);
+    }
+
+    @Override
+    public void broadcastInvalidateBatch(List<SyncMessage.Entry> entries) {
+      invalidatedBatches.addAll(entries);
+    }
   }
 
   // ── Writer-side equal-version guard (putThrough vs over-stamped read load) ──
 
   /**
-   * The reader's probe-after-read (ADR-0033) can absorb the writer's own INCR:
+   * The reader's probe-after-read (design decisions: version stamps) can absorb the writer's own INCR:
    * the load stores pre-write data stamped with the version putThrough is about
    * to allocate. The writer's local apply must overwrite an EQUAL version (its
    * value is authoritative at that version) — an equal-version skip pins the
    * stale value on the writer instance, where the self-REFRESH heal is dropped
-   * by the origin filter (ADR-0067).
+   * by the origin filter (design decisions: dedup lifecycle).
    */
   @Test
   @DisplayName("putThrough applies its own write over an equal-version over-stamped load")
   void putThrough_equalVersionOverStamp_appliesOwnWrite() {
-    when(versionController.currentVersion("k")).thenReturn(Optional.of(5L));
-    // The writer's INCR produced 5; the racing reader's probe observed the same 5.
-    when(versionController.nextVersion("k")).thenReturn(new VersionController.VersionResult(5L, false));
+    // The load's pre-read stamp and the writer's stamp are both 5.
+    when(stampClock.nextStamp()).thenReturn(5L);
     HotKeyCache cache = newCache();
 
     // The raced load: pre-write value stamped with the writer's version.
-    cache.get("k", ReadPolicy.of(() -> "old", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH));
+    cache.get("k", () -> "old", GetPolicy.of(0L, 0L, true, StalePolicy.SOFT_REFRESH));
     assertThat(((CacheEntry) caffeineCache.getIfPresent("k")).getValue()).isEqualTo("old");
 
-    cache.putThrough("k", "new", () -> {}, 0L, 0L, true);
+    cache.putThrough("k", "new", 0L, 0L);
 
     assertThat(((CacheEntry) caffeineCache.getIfPresent("k")).getValue()).isEqualTo("new");
   }
@@ -172,22 +194,22 @@ class HotKeyCacheConflictTest {
   @Test
   @DisplayName("putThrough does not overwrite a strictly newer existing entry")
   void putThrough_olderWrite_skipsOnNewerExisting() {
-    when(versionController.nextVersion("k")).thenReturn(new VersionController.VersionResult(5L, false));
+    when(stampClock.nextStamp()).thenReturn(5L);
     HotKeyCache cache = newCache();
     caffeineCache.put("k", normalEntry("fresh", 9L));
 
-    cache.putThrough("k", "old-write", () -> {}, 0L, 0L, true);
+    cache.putThrough("k", "old-write", 0L, 0L);
 
     assertThat(((CacheEntry) caffeineCache.getIfPresent("k")).getValue()).isEqualTo("fresh");
   }
 
-  // ── bump-before-drop ordering (ADR-0086) ──
+  // ── bump-before-drop ordering (design decisions: invalidation) ──
 
   /**
-   * The version must be allocated BEFORE the L1 removal on every invalidation
-   * path, not just the single-key one.
+   * The version must be allocated BEFORE the L1 removal on the single-key path
+   * too — not only on the batch path.
    *
-   * <p>Bumping after the drop reopens the window ADR-0086 closed: a reader that
+   * <p>Bumping after the drop reopens the window design decisions: invalidation closed: a reader that
    * misses after the drop reloads and stamps the value with the still-old version
    * {@code v}, then the INVALIDATE carrying {@code v+1} is skipped by the plain
    * {@code >=} matrix — pinning the stale value for its whole TTL with no
@@ -197,167 +219,115 @@ class HotKeyCacheConflictTest {
    * implementation that drops first and bumps later yields the same final version
    * numbers, so end-state assertions cannot see the difference. If the bump ran
    * first the entry is still in L1; if it ran after the drop, the entry is gone.
+   * The removal itself is asserted as the control for that observation.
    */
   @Test
-  @DisplayName("invalidateAfterPut allocates the version before removing L1")
-  void invalidateAfterPut_singleKey_bumpsBeforeDrop() {
-    AtomicBoolean entryPresentAtBump = new AtomicBoolean(false);
-    when(versionController.nextVersion("k")).thenAnswer(inv -> {
-      entryPresentAtBump.set(caffeineCache.getIfPresent("k") != null);
-      return new VersionController.VersionResult(11L, false);
+  @DisplayName("single-key invalidate allocates its version before dropping the entry")
+  void invalidate_singleKey_bumpsVersionBeforeDropping() {
+    AtomicBoolean residentAtBump = new AtomicBoolean(false);
+    when(stampClock.nextStamp()).thenAnswer(inv -> {
+      residentAtBump.set(caffeineCache.getIfPresent("k") != null);
+      return 21L;
     });
     HotKeyCache cache = newCache();
-    caffeineCache.put("k", normalEntry("v", 10L));
+    caffeineCache.put("k", normalEntry("v", 20L));
 
-    cache.invalidateAfterPut("k", () -> {}, true);
+    cache.invalidate("k", new InvalidatePolicy(InvalidatePolicy.Scope.BOTH, false));
 
-    assertThat(entryPresentAtBump).as("entry must still be in L1 when the version is allocated").isTrue();
-    verify(versionController).nextVersion("k");
-    assertThat(caffeineCache.getIfPresent("k")).isNull();
-  }
-
-  /** Control for the test above: the removal must actually happen. */
-  @Test
-  @DisplayName("invalidateAfterPut still removes the entry")
-  void invalidateAfterPut_singleKey_removesEntry() {
-    when(versionController.nextVersion("k")).thenReturn(new VersionController.VersionResult(11L, false));
-    HotKeyCache cache = newCache();
-    caffeineCache.put("k", normalEntry("v", 10L));
-
-    cache.invalidateAfterPut("k", () -> {}, true);
-
-    assertThat(caffeineCache.getIfPresent("k")).isNull();
+    assertThat(residentAtBump).as("the entry must still be resident when the version is bumped").isTrue();
+    assertThat(caffeineCache.getIfPresent("k")).as("the removal must actually happen").isNull();
+    verify(stampClock).nextStamp();
   }
 
   /**
-   * The batch path must bump every key before dropping any of them. Interleaving
-   * bump-and-drop per key would leave the already-dropped keys on the old version,
+   * The batch path must allocate every version before dropping any of them. Interleaving
+   * allocation and drop per key would leave the already-dropped keys on the old version,
    * re-opening the window for exactly those keys — so both keys must still be
-   * resident at the moment the first bump runs.
+   * resident when the (single, block) reservation runs.
    */
   @Test
   @DisplayName("batch invalidate allocates every version before dropping any entry")
   void invalidate_batch_bumpsAllKeysBeforeDroppingAny() {
-    AtomicBoolean bothKeysResidentAtFirstBump = new AtomicBoolean(false);
-    AtomicBoolean firstBumpSeen = new AtomicBoolean(false);
-    when(versionController.nextVersion(anyString())).thenAnswer(inv -> {
-      if (firstBumpSeen.compareAndSet(false, true)) {
-        bothKeysResidentAtFirstBump.set(
-          caffeineCache.getIfPresent("a") != null && caffeineCache.getIfPresent("b") != null
-        );
-      }
-      return new VersionController.VersionResult(21L, false);
+    AtomicBoolean bothKeysResidentAtReservation = new AtomicBoolean(false);
+    when(stampClock.nextStamps(org.mockito.ArgumentMatchers.anyInt())).thenAnswer(inv -> {
+      bothKeysResidentAtReservation.set(
+        caffeineCache.getIfPresent("a") != null && caffeineCache.getIfPresent("b") != null
+      );
+      return 21L;
     });
     HotKeyCache cache = newCache();
     caffeineCache.put("a", normalEntry("va", 20L));
     caffeineCache.put("b", normalEntry("vb", 20L));
 
-    cache.invalidate(List.of("a", "b"), true);
+    cache.invalidate(List.of("a", "b"), new InvalidatePolicy(InvalidatePolicy.Scope.BOTH, false));
 
-    assertThat(bothKeysResidentAtFirstBump).as("both keys must still be resident at the first bump").isTrue();
-    verify(versionController).nextVersion("a");
-    verify(versionController).nextVersion("b");
+    assertThat(bothKeysResidentAtReservation)
+      .as("both keys must still be resident when the block is reserved")
+      .isTrue();
+    // One block reservation covers the whole wire chunk; the per-key path is gone.
+    verify(stampClock, times(1)).nextStamps(2);
+    verify(stampClock, never()).nextStamp();
     assertThat(caffeineCache.getIfPresent("a")).isNull();
     assertThat(caffeineCache.getIfPresent("b")).isNull();
   }
 
-  /** The map variant must bump after its mutation commits but before its own removal. */
+  /**
+   * A batch invalidation allocates one distinct stamp per key before any drop,
+   * reserved as a single contiguous clock block.
+   *
+   * <p>The stamps come from the node-local clock (design decisions: version stamps), so every key gets
+   * a real, strictly increasing stamp; no key is left without an ordering
+   * value for its INVALIDATE broadcast.
+   */
   @Test
-  @DisplayName("invalidateAfterPut(map) allocates each key's version before removing it")
-  void invalidateAfterPut_map_bumpsBeforeDropPerKey() {
-    AtomicBoolean entryPresentAtBump = new AtomicBoolean(false);
-    AtomicBoolean mutationRanBeforeBump = new AtomicBoolean(false);
-    when(versionController.nextVersion("k")).thenAnswer(inv -> {
-      entryPresentAtBump.set(caffeineCache.getIfPresent("k") != null);
-      return new VersionController.VersionResult(31L, false);
+  @DisplayName("batch invalidate allocates a distinct stamp per key")
+  void invalidate_batch_allocatesAStampPerKey() {
+    long[] seq = { 30L };
+    when(stampClock.nextStamps(org.mockito.ArgumentMatchers.anyInt())).thenAnswer(inv -> {
+      int n = inv.getArgument(0);
+      long base = seq[0];
+      seq[0] += n;
+      return base;
     });
     HotKeyCache cache = newCache();
-    caffeineCache.put("k", normalEntry("v", 30L));
+    List<String> keys = List.of("a", "b", "c", "d", "e");
 
-    cache.invalidateAfterPut(Map.of("k", (Runnable) () -> mutationRanBeforeBump.set(true)), true);
+    cache.invalidate(keys, new InvalidatePolicy(InvalidatePolicy.Scope.BOTH, false));
 
-    assertThat(mutationRanBeforeBump).as("the mutation must commit before the version is allocated").isTrue();
-    assertThat(entryPresentAtBump).as("entry must still be in L1 when the version is allocated").isTrue();
-    verify(versionController).nextVersion("k");
-    assertThat(caffeineCache.getIfPresent("k")).isNull();
+    // One contiguous-block reservation for a chunk that fits the wire batch.
+    verify(stampClock, times(1)).nextStamps(keys.size());
+    // The block went out on the wire as one INVALIDATE_BATCH — base 30, one
+    // entry per key in reservation order.
+    assertThat(dispatcher.invalidatedBatches).hasSize(keys.size());
+    for (int i = 0; i < keys.size(); i++) {
+      assertThat(dispatcher.invalidatedBatches.get(i).key()).isEqualTo(keys.get(i));
+      assertThat(dispatcher.invalidatedBatches.get(i).version()).isEqualTo(30L + i);
+    }
   }
 
   /**
-   * A failed mutation must skip the invalidation entirely — no bump, no removal.
-   * This is the pre-existing contract the bump-in-place refactor must preserve.
+   * With broadcasting disabled nothing reaches a peer, but the local drop still
+   * happens — the local-only invalidation contract
+   * ({@code InvalidatePolicy.localOnly()}).
+   *
+   * <p>A stamp <em>is</em> allocated: it is the local tombstone that stops an
+   * in-flight read from filling the value back (design decisions: invalidation).
+   * It never reaches a peer.
    */
   @Test
-  @DisplayName("invalidateAfterPut skips the bump when the mutation fails")
-  void invalidateAfterPut_mutationFailure_skipsBumpAndDrop() {
+  @DisplayName("local-only invalidate drops the entry and tombstones it without broadcasting")
+  void invalidate_localOnly_dropsWithoutBumpOrBroadcast() {
     HotKeyCache cache = newCache();
-    caffeineCache.put("k", normalEntry("v", 5L));
+    caffeineCache.put("k", normalEntry("v", 20L));
 
-    assertThatThrownBy(() -> cache.invalidateAfterPut("k", () -> {
-      throw new IllegalStateException("mutation failed");
-    }, true)).isInstanceOf(IllegalStateException.class);
+    cache.invalidate("k", new InvalidatePolicy(InvalidatePolicy.Scope.LOCAL, false));
 
-    verify(versionController, never()).nextVersion("k");
-    assertThat(caffeineCache.getIfPresent("k")).isNotNull();
-  }
-
-  /** With broadcasting disabled there is no bump and no send, but the drop still happens. */
-  @Test
-  @DisplayName("invalidateAfterPut without peer broadcast still removes the entry")
-  void invalidateAfterPut_noBroadcast_skipsBumpButDrops() {
-    HotKeyCache cache = newCache();
-    caffeineCache.put("k", normalEntry("v", 5L));
-
-    cache.invalidateAfterPut("k", () -> {}, false);
-
-    verify(versionController, never()).nextVersion("k");
     assertThat(caffeineCache.getIfPresent("k")).isNull();
+    verify(stampClock).nextStamp();
+    assertThat(dispatcher.invalidatedBatches).as("a local-only invalidation never reaches a peer").isEmpty();
   }
 
-  /**
-   * The batch form returns the keys it could not invalidate. It used to be
-   * {@code void}, so a partially applied batch was indistinguishable from a
-   * fully applied one — the caller's only signal was a log line it never read.
-   */
-  @Test
-  @DisplayName("invalidateAfterPut(map) reports the keys it failed to invalidate")
-  void invalidateAfterPut_map_reportsFailedKeys() {
-    HotKeyCache cache = newCache();
-    caffeineCache.put("ok", normalEntry("v", 5L));
-    caffeineCache.put("boom", normalEntry("v", 5L));
-
-    Set<String> failed = cache.invalidateAfterPut(
-      Map.of(
-        "ok", (Runnable) () -> {},
-        "boom", (Runnable) () -> {
-          throw new IllegalStateException("mutation failed");
-        },
-        " ", (Runnable) () -> {}
-      ),
-      false
-    );
-
-    // Order-independent: rejected keys are collected up front, mutation
-    // failures while the batch runs.
-    assertThat(failed).containsExactlyInAnyOrder("boom", " ");
-    assertThat(caffeineCache.getIfPresent("ok")).isNull();
-    assertThat(caffeineCache.getIfPresent("boom")).isNotNull();
-  }
-
-  /** A fully applied batch reports nothing. */
-  @Test
-  @DisplayName("invalidateAfterPut(map) returns an empty set when every key applies")
-  void invalidateAfterPut_map_allApplied_returnsEmpty() {
-    HotKeyCache cache = newCache();
-    caffeineCache.put("a", normalEntry("va", 5L));
-    caffeineCache.put("b", normalEntry("vb", 5L));
-
-    assertThat(cache.invalidateAfterPut(Map.of("a", (Runnable) () -> {}, "b", (Runnable) () -> {}), false)).isEmpty();
-    assertThat(caffeineCache.getIfPresent("a")).isNull();
-    assertThat(caffeineCache.getIfPresent("b")).isNull();
-  }
-
-  // ── putLocal dedup invariant (ADR-0067) ──
-
+  // ── putLocal dedup invariant (design decisions: dedup lifecycle) ──
 
   /**
    * A completed SingleFlight result must not outlive the L1 write that obsoletes
@@ -367,26 +337,25 @@ class HotKeyCacheConflictTest {
   @Test
   @DisplayName("putLocal invalidates the dedup result recorded before it")
   void putLocal_invalidatesDedupResultRecordedBeforeIt() {
-    when(versionController.currentVersion("k")).thenReturn(Optional.of(5L));
+    when(stampClock.nextStamp()).thenReturn(5L);
     HotKeyCache cache = newCache();
 
     // Load and cache — the dedup cache now holds "stale"@5 for the SingleFlight TTL.
-    cache.get("k", ReadPolicy.of(() -> "stale", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH));
+    cache.get("k", () -> "stale", GetPolicy.of(0L, 0L, true, StalePolicy.SOFT_REFRESH));
 
     // L1-only eviction: the dedup result survives (this is the window putLocal must close).
     caffeineCache.invalidate("k");
 
-    // The local write (e.g. @SkipBroadcast @CachePut) obsoletes the recorded load.
+    // The local write (a local-only put, e.g. @ZetaPut(sync = false)) obsoletes the recorded load.
     cache.putLocal("k", "fallback", 0L, 0L);
 
     // The putLocal entry itself is gone (short TTL / eviction) while the dedup TTL lives.
     caffeineCache.invalidate("k");
 
-    Optional<String> result =
-        cache.get("k", ReadPolicy.of(() -> "fresh", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH));
+    String result = cache.get("k", () -> "fresh", GetPolicy.of(0L, 0L, true, StalePolicy.SOFT_REFRESH));
 
     // The reader must be re-invoked — the pre-write "stale" result was invalidated.
-    assertThat(result).contains("fresh");
+    assertThat(result).isEqualTo("fresh");
   }
 
   // ── putLocal on a Worker-managed entry ──
@@ -400,7 +369,7 @@ class HotKeyCacheConflictTest {
   @Test
   @DisplayName("putLocal on a HOT entry keeps the Worker's TTL regime")
   void putLocal_workerManagedEntry_preservesTtlRegime() {
-    when(versionController.nextVersion("k")).thenReturn(new VersionController.VersionResult(5L, false));
+    when(stampClock.nextStamp()).thenReturn(5L);
     HotKeyCache cache = newCache();
     CacheEntry hot = workerHotEntry("w1", 5L);
     caffeineCache.put("k", hot);
@@ -416,7 +385,10 @@ class HotKeyCacheConflictTest {
     assertThat(entry.getHardTtlMs()).isEqualTo(3_600_000L);
     assertThat(entry.getSoftTtlMs()).isEqualTo(300_000L);
     assertThat(entry.getHardExpireAtMs()).isEqualTo(hot.getHardExpireAtMs());
-    assertThat(entry.getSoftExpireAtMs()).isEqualTo(hot.getSoftExpireAtMs());
+    // A value write re-arms the soft window (capped by the hard bound), so a
+    // previously soft-expired HOT entry does not keep forcing background reloads.
+    assertThat(entry.getSoftExpireAtMs()).isLessThanOrEqualTo(entry.getHardExpireAtMs());
+    assertThat(entry.getSoftExpireAtMs()).isGreaterThan(TimeSource.currentTimeMillis() + 250_000L);
   }
 
   // ── NORMAL-entry soft refresh (getWithSoftExpire ≡ computeIfAbsent) ──
@@ -427,7 +399,7 @@ class HotKeyCacheConflictTest {
    * does. {@code registerRefresh} schedules {@code getWithSoftExpire} ticks and
    * documents "every cycle triggers an async refresh" — silently refusing
    * NORMAL entries breaks that contract and the stale-while-revalidate semantics
-   * of {@code zeta.local.default-soft-ttl-ms}.
+   * of {@code zeta.local.soft-ttl-ms}.
    */
   @Test
   @DisplayName("getWithSoftExpire triggers the background refresh for a soft-expired NORMAL entry")
@@ -437,10 +409,9 @@ class HotKeyCacheConflictTest {
     caffeineCache.put("k", softExpiredNormalEntry("v1"));
 
     // The stale value is still served, but the refresh must re-arm and apply.
-    Optional<String> served =
-        cache.getWithSoftExpire("k", ReadPolicy.of(() -> "v2", 60_000L, 30_000L, true, true, StalePolicy.SOFT_REFRESH));
+    String served = cache.get("k", () -> "v2", GetPolicy.of(60_000L, 30_000L, true, StalePolicy.SOFT_REFRESH));
 
-    assertThat(served).contains("v1");
+    assertThat(served).isEqualTo("v1");
     // The inline refresh executor applies the fresh value before the call returns.
     assertThat(((CacheEntry) caffeineCache.getIfPresent("k")).getValue()).isEqualTo("v2");
   }
@@ -458,10 +429,9 @@ class HotKeyCacheConflictTest {
     HotKeyCache cache = newCache();
     caffeineCache.put("k", softExpiredNormalEntry("v1"));
 
-    Optional<String> served =
-        cache.get("k", ReadPolicy.of(() -> "v2", 60_000L, 30_000L, true, true, StalePolicy.SOFT_REFRESH));
+    String served = cache.get("k", () -> "v2", GetPolicy.of(60_000L, 30_000L, true, StalePolicy.SOFT_REFRESH));
 
-    assertThat(served).contains("v1");
+    assertThat(served).isEqualTo("v1");
     // The inline refresh executor applies the fresh value before the call returns.
     assertThat(((CacheEntry) caffeineCache.getIfPresent("k")).getValue()).isEqualTo("v2");
   }
@@ -476,63 +446,205 @@ class HotKeyCacheConflictTest {
     HotKeyCache cache = newCache();
     caffeineCache.put("k", softExpiredNormalEntry("v1"));
 
-    Optional<String> served =
-        cache.get("k", ReadPolicy.of(() -> "v2", 60_000L, 30_000L, true, true, StalePolicy.RETURN));
+    String served = cache.get("k", () -> "v2", GetPolicy.of(60_000L, 30_000L, true, StalePolicy.RETURN));
 
-    assertThat(served).contains("v1");
+    assertThat(served).isEqualTo("v1");
     assertThat(((CacheEntry) caffeineCache.getIfPresent("k")).getValue()).isEqualTo("v1");
   }
 
   /** Build a Worker-stamped HOT entry with a 1h HOT TTL and 60s/15s normal baseline. */
   private static CacheEntry workerHotEntry(String nodeId, long epoch) {
-    return CacheEntry.builder()
-        .value("stored")
-        .dataVersion(1)
-        .isVersionDegraded(false)
-        .decisionVersion(42)
-        .decisionNodeId(nodeId)
-        .decisionEpoch(epoch)
-        .hardTtlMs(3_600_000)
-        .hardExpireAtMs(Long.MAX_VALUE)
-        .softTtlMs(300_000)
-        .softExpireAtMs(Long.MAX_VALUE)
-        .keyState(KeyState.HOT)
-        .normalHardTtlMs(60_000)
-        .normalSoftTtlMs(15_000)
-        .build();
+    return EntryDraft.blank(null)
+      .value("stored")
+      .version(1)
+      .decision(DecisionStamp.hot(42, nodeId, epoch))
+      .ttl(3_600_000, 300_000, 60_000, 15_000)
+      .expiryAt(Long.MAX_VALUE, Long.MAX_VALUE)
+      .keyState(KeyState.HOT)
+      .build();
   }
 
   /** Build a plain NORMAL entry stamped with the given data version. */
   private static CacheEntry normalEntry(String value, long dataVersion) {
-    return CacheEntry.builder()
-        .value(value)
-        .dataVersion(dataVersion)
-        .isVersionDegraded(false)
-        .decisionVersion(0)
-        .hardTtlMs(300_000)
-        .hardExpireAtMs(Long.MAX_VALUE)
-        .softTtlMs(30_000)
-        .softExpireAtMs(Long.MAX_VALUE)
-        .keyState(KeyState.NORMAL)
-        .normalHardTtlMs(300_000)
-        .normalSoftTtlMs(30_000)
-        .build();
+    return EntryDraft.blank(null)
+      .value(value)
+      .version(dataVersion)
+      .decision(DecisionStamp.hot(0, null, 0L))
+      .ttl(300_000, 30_000, 300_000, 30_000)
+      .expiryAt(Long.MAX_VALUE, Long.MAX_VALUE)
+      .keyState(KeyState.NORMAL)
+      .build();
   }
 
   /** Build a soft-expired NORMAL entry: the soft window lapsed, the hard TTL is still valid. */
   private static CacheEntry softExpiredNormalEntry(String value) {
-    return CacheEntry.builder()
-        .value(value)
-        .dataVersion(5)
-        .isVersionDegraded(false)
-        .decisionVersion(0)
-        .hardTtlMs(300_000)
-        .hardExpireAtMs(TimeSource.currentTimeMillis() + 300_000)
-        .softTtlMs(30_000)
-        .softExpireAtMs(TimeSource.currentTimeMillis() - 1)
-        .keyState(KeyState.NORMAL)
-        .normalHardTtlMs(300_000)
-        .normalSoftTtlMs(30_000)
-        .build();
+    return EntryDraft.blank(null)
+      .value(value)
+      .version(5)
+      .decision(DecisionStamp.hot(0, null, 0L))
+      .ttl(300_000, 30_000, 300_000, 30_000)
+      .expiryAt(TimeSource.currentTimeMillis() + 300_000, TimeSource.currentTimeMillis() - 1)
+      .keyState(KeyState.NORMAL)
+      .build();
+  }
+
+  /**
+   * design decisions: dedup lifecycle across an in-flight load: invalidating a key while its reader is
+   * still running must serve the already-waiting callers but must not let the
+   * pre-invalidation value take L1 residency again. The dedup future's removal
+   * is the generation signal; a later read reloads.
+   */
+  @Test
+  @DisplayName("invalidate during an in-flight load serves but does not repopulate L1")
+  void invalidateDuringLoad_doesNotRepopulateL1() throws Exception {
+    when(stampClock.nextStamp()).thenReturn(10L, 11L);
+    ExecutorService loadPool = Executors.newSingleThreadExecutor();
+    ExecutorService caller = Executors.newSingleThreadExecutor();
+    try {
+      HotKeyCache cache = newCache(new TestSingleFlight(1_000, 5, 5, loadPool, breakerRegistry));
+      CountDownLatch entered = new CountDownLatch(1);
+      CountDownLatch release = new CountDownLatch(1);
+      Future<String> inFlight = caller.submit(() ->
+        cache.get(
+          "k",
+          () -> {
+            entered.countDown();
+            try {
+              release.await(5, TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+              Thread.currentThread().interrupt();
+            }
+            return "old";
+          },
+          GetPolicy.defaults()
+        )
+      );
+      assertThat(entered.await(5, TimeUnit.SECONDS)).isTrue();
+
+      cache.invalidate("k", new InvalidatePolicy(InvalidatePolicy.Scope.LOCAL, false));
+      release.countDown();
+      assertThat(inFlight.get(5, TimeUnit.SECONDS)).isEqualTo("old");
+
+      Object servedAfterInvalidate = cache.peek("k");
+      assertThat(servedAfterInvalidate).isNull();
+      AtomicInteger reloads = new AtomicInteger();
+      assertThat(
+        cache.get(
+          "k",
+          () -> {
+            reloads.incrementAndGet();
+            return "new";
+          },
+          GetPolicy.defaults()
+        )
+      ).isEqualTo("new");
+      assertThat(reloads.get()).isEqualTo(1);
+    } finally {
+      caller.shutdownNow();
+      loadPool.shutdownNow();
+    }
+  }
+
+  /**
+   * The batch read submits and releases its pinned dedup futures under the same
+   * key. A mismatch leaves the completed future replayable for its whole dedup
+   * TTL — a post-eviction miss would re-cache the old value without invoking
+   * the reader.
+   */
+  @Test
+  @DisplayName("batch get unpins its dedup future under the submitted key")
+  void batchGet_releasesTicketUnderTheSubmittedKey() {
+    when(stampClock.nextStamp()).thenReturn(1L);
+    TestSingleFlight flight = new TestSingleFlight(1_000, 5, 5, executor, breakerRegistry);
+    HotKeyCache named = new HotKeyCache(
+      hotKeyDetector,
+      caffeineCache,
+      flight,
+      entryLifecycle,
+      backgroundRefresher,
+      new CentralDispatcher(accessCounter, null, new BroadcastBuffer(scheduler, null, 500, 2_000, null), null),
+      stampClock,
+      healthView
+    );
+
+    named.get(List.of("k"), key -> "v", GetPolicy.defaults());
+    assertThat(caffeineCache.getIfPresent("k")).isNotNull();
+
+    // Evict L1, then ask SingleFlight again: a released ticket must re-run the
+    // supplier; a leaked one replays the completed "v" future with no call.
+    caffeineCache.invalidate("k");
+    AtomicInteger loads = new AtomicInteger();
+    flight.loadOutcome("k", () -> {
+      loads.incrementAndGet();
+      return "v2";
+    });
+    assertThat(loads.get()).isEqualTo(1);
+  }
+
+  /**
+   * A namespace clear is version-guarded on the sender too, not an
+   * unconditional {@code invalidateAll}: a write allocated after the clear
+   * stamp must survive locally exactly as it survives on every peer.
+   */
+  @Test
+  @DisplayName("clear removes entries at or below the clear stamp and keeps newer writes")
+  void clear_isVersionGuarded() {
+    when(stampClock.nextStamp()).thenReturn(5L);
+    HotKeyCache cache = newCache();
+    caffeineCache.put("newer", normalEntry("new", 6L));
+    caffeineCache.put("older", normalEntry("old", 4L));
+
+    cache.clear(new InvalidatePolicy(InvalidatePolicy.Scope.BOTH, true));
+
+    assertThat(caffeineCache.getIfPresent("newer")).isNotNull();
+    assertThat(caffeineCache.getIfPresent("older")).isNull();
+  }
+
+  /**
+   * A local-only clear uses the same stamp ceiling as the synced form: a write
+   * allocated after the clear stamp must survive locally, exactly as it survives
+   * on every peer. An unconditional local sweep erased a concurrent write the
+   * cluster kept.
+   */
+  @Test
+  @DisplayName("a local-only clear also keeps writes newer than its stamp")
+  void localClear_isVersionGuarded() {
+    when(stampClock.nextStamp()).thenReturn(5L);
+    HotKeyCache cache = newCache();
+    caffeineCache.put("newer", normalEntry("new", 6L));
+    caffeineCache.put("older", normalEntry("old", 4L));
+
+    cache.clear(new InvalidatePolicy(InvalidatePolicy.Scope.LOCAL, true));
+
+    assertThat(caffeineCache.getIfPresent("newer")).isNotNull();
+    assertThat(caffeineCache.getIfPresent("older")).isNull();
+  }
+
+  /** A whole-table local clear is JVM-wide: it must drop every dedup slot,
+   * including the default namespace's unprefixed keys. */
+  @Test
+  @DisplayName("a local immediate clear drops every dedup future")
+  void clear_localImmediate_dropsAllDedupFutures() {
+    SingleFlight flight = mock(SingleFlight.class);
+    HotKeyCache cache = newCache(flight);
+
+    cache.clear(new InvalidatePolicy(InvalidatePolicy.Scope.LOCAL, true));
+
+    verify(flight).invalidateAll();
+  }
+
+  /** A scoped clear kills only the flights under its prefix: a read that starts
+   * after the clear must not join a pre-clear load, while another namespace's
+   * in-flight load keeps running. */
+  @Test
+  @DisplayName("a prefix clear drops only matching dedup futures")
+  void clearPrefix_dropsOnlyMatchingDedupFutures() {
+    SingleFlight flight = mock(SingleFlight.class);
+    HotKeyCache cache = newCache(flight);
+
+    cache.clearPrefix("scope:", new InvalidatePolicy(InvalidatePolicy.Scope.LOCAL, true));
+
+    verify(flight).invalidatePrefix("scope:");
+    verify(flight, never()).invalidateAll();
   }
 }

@@ -18,22 +18,25 @@ package io.github.hyshmily.zeta.cache;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.when;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.*;
 
 import io.github.hyshmily.zeta.autoconfigure.ZetaProperties;
-import io.github.hyshmily.zeta.cache.cachesupport.CircuitBreaker;
-import io.github.hyshmily.zeta.cache.cachesupport.LoadStatus;
-import io.github.hyshmily.zeta.cache.cachesupport.LoaderOutcome;
-import io.github.hyshmily.zeta.cache.cachesupport.SingleFlight;
-import io.github.hyshmily.zeta.cache.cachesupport.impl.CircuitBreakerImpl;
-import io.github.hyshmily.zeta.cache.cachesupport.impl.SingleFlightImpl;
+import io.github.hyshmily.zeta.cache.cachesupport.circuitbreaker.CircuitBreaker;
+import io.github.hyshmily.zeta.cache.cachesupport.circuitbreaker.CircuitBreakerImpl;
+import io.github.hyshmily.zeta.cache.cachesupport.circuitbreaker.CircuitBreakerRegistry;
+import io.github.hyshmily.zeta.cache.cachesupport.loader.LoadStatus;
+import io.github.hyshmily.zeta.cache.cachesupport.loader.LoaderOutcome;
+import io.github.hyshmily.zeta.cache.cachesupport.loader.singleflight.SingleFlight;
+import io.github.hyshmily.zeta.cache.cachesupport.loader.singleflight.SingleFlightImpl;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -44,33 +47,38 @@ import org.junit.jupiter.api.Test;
  */
 class SingleFlightOutcomeTest {
 
-  private static SingleFlight directFlight() {
-    return new SingleFlightImpl(
-      1000,
-      10,
-      5,
-      Runnable::run,
-      new CircuitBreakerImpl(new ZetaProperties.CircuitBreaker())
-    );
+  private static TestSingleFlight directFlight() {
+    return new TestSingleFlight(1000, 10, 5, Runnable::run, disabledRegistry());
+  }
+
+  /** A registry wired the production way, whose every shard is a disabled (force-closed) breaker. */
+  private static CircuitBreakerRegistry disabledRegistry() {
+    return registryOf(new CircuitBreakerImpl(new ZetaProperties.CircuitBreaker()));
+  }
+
+  /** Production-shaped wiring (see {@code ZetaAutoConfiguration}): a registry whose every shard is {@code breaker}. */
+  private static CircuitBreakerRegistry registryOf(CircuitBreaker breaker) {
+    CircuitBreakerRegistry registry = mock(CircuitBreakerRegistry.class);
+    when(registry.breakerFor(anyString())).thenReturn(breaker);
+    return registry;
   }
 
   @Test
   void loadOutcome_loadedAndSourceEmpty() {
-    SingleFlight sf = directFlight();
+    TestSingleFlight sf = directFlight();
 
     LoaderOutcome<String> loaded = sf.loadOutcome("k1", () -> "v");
     assertThat(loaded.status()).isEqualTo(LoadStatus.LOADED);
     assertThat(loaded.value()).isEqualTo("v");
-    assertThat(loaded.toOptional()).contains("v");
 
     LoaderOutcome<String> empty = sf.loadOutcome("k2", () -> null);
     assertThat(empty.status()).isEqualTo(LoadStatus.SOURCE_EMPTY);
-    assertThat(empty.toOptional()).isEmpty();
+    assertThat(empty.value()).isNull();
   }
 
   @Test
   void loadOutcome_readerFailure_isFailedWithCause() {
-    SingleFlight sf = directFlight();
+    TestSingleFlight sf = directFlight();
     IllegalStateException boom = new IllegalStateException("boom");
 
     LoaderOutcome<String> outcome = sf.loadOutcome("k", () -> {
@@ -79,19 +87,81 @@ class SingleFlightOutcomeTest {
 
     assertThat(outcome.status()).isEqualTo(LoadStatus.FAILED);
     assertThat(outcome.cause()).isSameAs(boom);
-    assertThat(outcome.toOptional()).isEmpty();
+  }
+
+  /**
+   * A reader that submits to a saturated pool of its own throws
+   * {@link RejectedExecutionException}; that is a reader failure, not a suppressed
+   * submission by the dedup layer.
+   */
+  @Test
+  void loadOutcome_readerRejectedExecution_isFailedNotSuppressed() {
+    TestSingleFlight sf = directFlight();
+    RejectedExecutionException rejected = new RejectedExecutionException("reader pool saturated");
+
+    LoaderOutcome<String> outcome = sf.loadOutcome("k", () -> {
+      throw rejected;
+    });
+
+    assertThat(outcome.status()).isEqualTo(LoadStatus.FAILED);
+    assertThat(outcome.cause()).isSameAs(rejected);
+  }
+
+  /** A reader-thrown timeout is a supplier failure, not the dedup layer's own budget timeout. */
+  @Test
+  void loadOutcome_readerTimeout_isFailedNotSuppressed() {
+    TestSingleFlight sf = directFlight();
+    java.util.concurrent.TimeoutException timeout = new java.util.concurrent.TimeoutException("downstream");
+
+    LoaderOutcome<String> outcome = sf.loadOutcome("k", () -> {
+      throw new java.util.concurrent.CompletionException(timeout);
+    });
+
+    assertThat(outcome.status()).isEqualTo(LoadStatus.FAILED);
+    assertThat(outcome.cause()).isSameAs(timeout);
   }
 
   @Test
   void loadOutcome_breakerOpen_isSuppressedBreakerWithoutRunningReader() {
     CircuitBreaker openBreaker = mock(CircuitBreaker.class);
-    when(openBreaker.allowRequest()).thenReturn(false);
+    when(openBreaker.tryAcquireStamp()).thenReturn(CircuitBreaker.STAMP_REJECTED);
     when(openBreaker.isOpen()).thenReturn(true);
-    SingleFlight sf = new SingleFlightImpl(1000, 10, 5, Runnable::run, openBreaker);
+    TestSingleFlight sf = new TestSingleFlight(1000, 10, 5, Runnable::run, registryOf(openBreaker));
 
     LoaderOutcome<String> outcome = sf.loadOutcome("k", () -> {
       throw new AssertionError("reader must not run under an open breaker");
     });
+
+    assertThat(outcome.status()).isEqualTo(LoadStatus.SUPPRESSED_BREAKER);
+  }
+
+  /**
+   * The isolated form runs on the calling thread, commits exactly once and never publishes a
+   * flight; this is the transactional caller's path, where a follower must not observe a value
+   * that may still roll back.
+   */
+  @Test
+  void loadIsolated_runsInlineAndCommitsWithoutPublishingAFlight() {
+    TestSingleFlight sf = directFlight();
+    AtomicInteger commits = new AtomicInteger();
+
+    LoaderOutcome<String> outcome = sf.loadIsolated("k", () -> "v", value -> commits.incrementAndGet());
+
+    assertThat(outcome.status()).isEqualTo(LoadStatus.LOADED);
+    assertThat(outcome.value()).isEqualTo("v");
+    assertThat(commits).hasValue(1);
+    assertThat(sf.estimatedInFlightSize()).isZero();
+  }
+
+  @Test
+  void loadIsolated_rejectedProbe_isSuppressedBreakerWithoutRunningReader() {
+    CircuitBreaker openBreaker = mock(CircuitBreaker.class);
+    when(openBreaker.tryAcquireStamp()).thenReturn(CircuitBreaker.STAMP_REJECTED);
+    TestSingleFlight sf = new TestSingleFlight(1000, 10, 5, Runnable::run, registryOf(openBreaker));
+
+    LoaderOutcome<String> outcome = sf.loadIsolated("k", () -> {
+      throw new AssertionError("reader must not run under an open breaker");
+    }, value -> {});
 
     assertThat(outcome.status()).isEqualTo(LoadStatus.SUPPRESSED_BREAKER);
   }
@@ -101,13 +171,7 @@ class SingleFlightOutcomeTest {
     Executor rejecting = command -> {
       throw new RejectedExecutionException("saturated");
     };
-    SingleFlight sf = new SingleFlightImpl(
-      1000,
-      10,
-      5,
-      rejecting,
-      new CircuitBreakerImpl(new ZetaProperties.CircuitBreaker())
-    );
+    TestSingleFlight sf = new TestSingleFlight(1000, 10, 5, rejecting, disabledRegistry());
 
     LoaderOutcome<String> outcome = sf.loadOutcome("k", () -> "v");
 
@@ -118,13 +182,7 @@ class SingleFlightOutcomeTest {
   void loadOutcome_timeout_isSuppressedTimeout() {
     Executor async = Executors.newCachedThreadPool();
     try {
-      SingleFlight sf = new SingleFlightImpl(
-        1000,
-        10,
-        1,
-        async,
-        new CircuitBreakerImpl(new ZetaProperties.CircuitBreaker())
-      );
+      TestSingleFlight sf = new TestSingleFlight(1000, 10, 1, async, disabledRegistry());
 
       LoaderOutcome<String> outcome = sf.loadOutcome("k", () -> {
         try {
@@ -136,7 +194,7 @@ class SingleFlightOutcomeTest {
       });
 
       assertThat(outcome.status()).isEqualTo(LoadStatus.SUPPRESSED_TIMEOUT);
-      assertThat(sf.getLoadTimeoutCount()).isEqualTo(1);
+      assertThat(sf.loadTimeoutCount()).isEqualTo(1);
     } finally {
       ((ExecutorService) async).shutdownNow();
     }
@@ -144,17 +202,14 @@ class SingleFlightOutcomeTest {
 
   @Test
   void loadOutcome_batch_reportsPerKeyWithoutThrowing() {
-    SingleFlight sf = directFlight();
+    TestSingleFlight sf = directFlight();
 
-    Map<String, LoaderOutcome<String>> outcomes = sf.loadOutcome(
-      List.of("a", "b", "c"),
-      key -> {
-        if (key.equals("b")) {
-          throw new IllegalStateException("boom");
-        }
-        return key.equals("a") ? "v" : null;
+    Map<String, LoaderOutcome<String>> outcomes = sf.loadOutcome(List.of("a", "b", "c"), key -> {
+      if (key.equals("b")) {
+        throw new IllegalStateException("boom");
       }
-    );
+      return key.equals("a") ? "v" : null;
+    });
 
     assertThat(outcomes.get("a").status()).isEqualTo(LoadStatus.LOADED);
     assertThat(outcomes.get("b").status()).isEqualTo(LoadStatus.FAILED);
@@ -165,9 +220,9 @@ class SingleFlightOutcomeTest {
   @Test
   void loadOutcome_batch_breakerOpen_suppressesEveryKey() {
     CircuitBreaker openBreaker = mock(CircuitBreaker.class);
-    when(openBreaker.allowRequest()).thenReturn(false);
+    when(openBreaker.tryAcquireStamp()).thenReturn(CircuitBreaker.STAMP_REJECTED);
     when(openBreaker.isOpen()).thenReturn(true);
-    SingleFlight sf = new SingleFlightImpl(1000, 10, 5, Runnable::run, openBreaker);
+    TestSingleFlight sf = new TestSingleFlight(1000, 10, 5, Runnable::run, registryOf(openBreaker));
 
     Map<String, LoaderOutcome<String>> outcomes = sf.loadOutcome(List.of("a", "b"), k -> "v");
 
@@ -175,42 +230,18 @@ class SingleFlightOutcomeTest {
   }
 
   @Test
-  void load_legacyBridge_rethrowsFailedAndEmptiesSuppressed() {
-    SingleFlight sf = directFlight();
+  void loadOutcome_batchFailure_carriesFirstFailedCause() {
+    TestSingleFlight sf = directFlight();
 
-    assertThatThrownBy(() ->
-      sf.load("k", () -> {
+    Map<String, LoaderOutcome<String>> outcomes = sf.loadOutcome(List.of("a", "b"), k -> {
+      if (k.equals("a")) {
         throw new IllegalStateException("boom");
-      })
-    )
-      .isInstanceOf(IllegalStateException.class)
-      .hasMessage("boom");
-
-    CircuitBreaker openBreaker = mock(CircuitBreaker.class);
-    when(openBreaker.allowRequest()).thenReturn(false);
-    SingleFlight suppressed = new SingleFlightImpl(1000, 10, 5, Runnable::run, openBreaker);
-    assertThat(suppressed.load("k", () -> "v")).isEmpty();
-    assertThat(suppressed.load("k", () -> null)).isEmpty();
-  }
-
-  @Test
-  void load_legacyBatchFailFast_propagatesFirstFailed() {
-    SingleFlight sf = directFlight();
-
-    assertThatThrownBy(() ->
-      sf.load(
-        List.of("a", "b"),
-        k -> {
-          if (k.equals("a")) {
-            throw new IllegalStateException("boom");
-          }
-          return "v";
-        },
-        true
-      )
-    )
-      .isInstanceOf(IllegalStateException.class)
-      .hasMessage("boom");
+      }
+      return "v";
+    });
+    assertThat(outcomes.get("a").status()).isEqualTo(LoadStatus.FAILED);
+    assertThat(outcomes.get("a").cause()).hasMessage("boom");
+    assertThat(outcomes.get("b").status()).isEqualTo(LoadStatus.LOADED);
   }
 
   @Test
@@ -218,9 +249,51 @@ class SingleFlightOutcomeTest {
     assertThatThrownBy(() -> LoaderOutcome.loaded(null)).isInstanceOf(IllegalArgumentException.class);
     assertThatThrownBy(() -> LoaderOutcome.failed(null)).isInstanceOf(IllegalArgumentException.class);
     assertThatThrownBy(() -> LoaderOutcome.suppressed(LoadStatus.LOADED)).isInstanceOf(IllegalArgumentException.class);
-    assertThatThrownBy(() -> new LoaderOutcome<>("v", LoadStatus.FAILED, null))
-      .isInstanceOf(IllegalArgumentException.class);
-    assertThat(suppressedWithCause().isSuppressed()).isTrue();
+    assertThatThrownBy(() -> new LoaderOutcome<>("v", LoadStatus.FAILED, null)).isInstanceOf(
+      IllegalArgumentException.class
+    );
+    assertThatThrownBy(() -> new LoaderOutcome<>("v", LoadStatus.FAILED, new RuntimeException("boom"))).isInstanceOf(
+      IllegalArgumentException.class
+    );
+    assertThat(LoadStatus.SUPPRESSED_BREAKER.isSuppressed()).isTrue();
+    assertThat(LoadStatus.FAILED.isSuppressed()).isFalse();
+    assertThat(suppressedWithCause().status()).isEqualTo(LoadStatus.SUPPRESSED_TIMEOUT);
+  }
+
+  /**
+   * Duplicate keys in one batch must elect exactly once: the reader runs a
+   * single time for the duplicated key, one stamped breaker admission is
+   * consumed and settled, and the key produces a single outcome entry.
+   *
+   * <p>Regression for the {@code putIfAbsent}-eager-evaluation defect: the
+   * previous batch loop ran {@code elect} for every duplicate (method
+   * arguments are evaluated before {@code putIfAbsent} can deduplicate), so
+   * in the window where the first election's future had already failed out of
+   * the dedup cache, the discarded second election consumed a second
+   * {@code HALF_OPEN} probe stamp that was never settled — a permanently
+   * leaked probe slot. {@code computeIfAbsent} never elects twice.
+   */
+  @Test
+  void loadOutcome_duplicateKeys_electExactlyOnce() {
+    CircuitBreaker breaker = mock(CircuitBreaker.class);
+    when(breaker.tryAcquireStamp()).thenReturn(1L);
+    TestSingleFlight sf = new TestSingleFlight(1000, 10, 5, Runnable::run, registryOf(breaker));
+
+    AtomicInteger readerCalls = new AtomicInteger();
+    Map<String, LoaderOutcome<String>> outcomes = sf.loadOutcome(
+      List.of("dup", "dup", "dup"),
+      k -> "v" + readerCalls.incrementAndGet()
+    );
+
+    assertThat(outcomes).containsOnlyKeys("dup");
+    assertThat(outcomes.get("dup").status()).isEqualTo(LoadStatus.LOADED);
+    assertThat(outcomes.get("dup").value()).isEqualTo("v1");
+    assertThat(readerCalls.get()).isEqualTo(1);
+    verify(breaker, times(1)).tryAcquireStamp();
+    // The single consumed admission was settled exactly once (leader-only).
+    verify(breaker, times(1)).onSuccess(1L);
+    verify(breaker, never()).onFailure(any(Throwable.class), anyLong());
+    verify(breaker, never()).onAbandoned(anyLong());
   }
 
   private static LoaderOutcome<String> suppressedWithCause() {
