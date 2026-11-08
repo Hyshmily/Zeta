@@ -15,248 +15,103 @@
  */
 package io.github.hyshmily.zeta.reporting;
 
-import io.github.hyshmily.zeta.hotkeydetector.doublebuffer.WaveCounter;
+import io.github.hyshmily.zeta.reporting.impl.ReportFeedLoop;
+import java.util.Map;
+import org.jspecify.annotations.Nullable;
 
 /**
- * Periodically aggregates per-key access counts and publishes them
- * to the Worker via {@link ReportPublisher}.
+ * Publishes per-key access-add batches to the Worker via {@link ReportPublisher}.
  *
- * <p>Uses a {@link WaveCounter} as a temporary counter store.
- * Burst absorption and backpressure are provided by a bounded
- * {@link java.util.concurrent.LinkedBlockingQueue} between the flush callback and the
- * RabbitMQ publisher.
+ * <p>The read path counts once in the shared {@code AccessCounter}, whose tide delivers
+ * merged batches to {@link #publishBatch(Map, long)}; the reporter owns routing, batching
+ * and the feed-loop cadence tuner (design decisions: reporting).
  */
 public interface KeyReporter {
   /**
-   * Record one access for the given cache key.
+   * Publish one flushed counting batch: group the counts by target Worker (consistent-hash
+   * routing) and enqueue one batch per target for asynchronous publishing.
    *
-   * @param cacheKey the accessed key
+   * <p>The only path the cadence tuner samples, because it is the only one that knows the
+   * window its counts accumulated over. Called on the access counter's tide deliverer
+   * (single-threaded); the map must not be retained or mutated. Failures are logged inside
+   * the implementation, never propagated.
+   *
+   * @param keyCounts merged per-key access counts since the last tide (never {@code null};
+   *                  possibly empty)
+   * @param windowMs  measured monotonic window the counts accumulated over, in ms (positive)
    */
-  @SuppressWarnings("all")
-  void reportToWorker(String cacheKey);
+  void publishBatch(Map<String, Long> keyCounts, long windowMs);
 
   /**
-   * Start the periodic flush scheduler and the reportToWorker dispatcher.
-   * Idempotent — subsequent calls are silently ignored.
+   * Publish a single out-of-band report that is not a tide flush
+   * ({@code TagMode.REPORT_ONLY}): route and enqueue it exactly like a batch, but never
+   * sample it into the cadence tuner — a one-key report says nothing about how many keys a
+   * flush window would accumulate.
+   *
+   * @param keyCounts per-key counts to publish (never {@code null}; possibly empty)
    */
+  void publishDirect(Map<String, Long> keyCounts);
+
+  /** Start the dispatcher. Idempotent. */
   void start();
 
-  /**
-   * Gracefully shut down the reportToWorker dispatcher.
-   * Idempotent — safe to call multiple times.
-   */
+  /** Gracefully shut the dispatcher down. Idempotent. */
   void stop();
 
   /**
-   * Return the current number of batches waiting in the dispatcher work queue.
+   * Dispatcher counters, or {@code null} before {@link #start()}.
    *
-   * @return queue depth, or {@code -1} if the dispatcher has not been started
+   * @return the current counters, or {@code null} when the dispatcher is not running
    */
-  int dispatcherDepth();
+  @Nullable
+  DispatcherStats dispatcherStats();
 
   /**
-   * Return the maximum capacity of the dispatcher work queue.
+   * Routing-drop counters, or {@code null} before {@link #start()}. These cover the keys that
+   * never reached the dispatcher: unroutable keys, no-alive-Worker drops and batches refused
+   * by the queue or the shared flush offer budget.
    *
-   * @return queue capacity, or {@code -1} if the dispatcher has not been started
+   * @return the routing counters, or {@code null} when the reporter has not started
    */
-  int dispatcherCapacity();
-
-  /**
-   * Return the total number of batches discarded by the consumer — this
-   * counter <b>conflates two discard causes</b>: batches whose target Worker
-   * was no longer alive at consumption time, and batches that waited longer
-   * than 5 seconds in the dispatcher queue (staleness expiry). The two
-   * halves are exposed separately by {@link #dispatcherExpiredDeadTarget()}
-   * and {@link #dispatcherExpiredStale()}; this sum is kept for metric
-   * continuity.
-   *
-   * @return total expired count since startup, or {@code -1} if the dispatcher has not been started
-   */
-  long dispatcherExpired();
-
-  /**
-   * Return the total number of discarded batches whose target Worker was no
-   * longer alive at consumption time (the worker-partition stall signal
-   * behind {@code zeta.stall.worker_partition.stopped}).
-   *
-   * <p>
-   * Default {@code -1} (not tracked) so third-party implementations compiled
-   * against earlier releases stay source- and binary-compatible; the built-in
-   * dispatcher-backed reporter overrides this with the real counter.
-   *
-   * @return total dead-target discard count since startup, or {@code -1} if
-   *         not tracked or the dispatcher has not been started
-   */
-  default long dispatcherExpiredDeadTarget() {
-    return -1;
+  default @Nullable RoutingStats routingStats() {
+    return null;
   }
 
   /**
-   * Return the total number of batches discarded because they waited longer
-   * than 5 seconds in the dispatcher queue (staleness expiry under
-   * backpressure — the report-backpressure stall signal).
+   * A point-in-time read of the routing-drop counters.
    *
-   * <p>
-   * Default {@code -1} (not tracked) so third-party implementations compiled
-   * against earlier releases stay source- and binary-compatible; the built-in
-   * dispatcher-backed reporter overrides this with the real counter.
-   *
-   * @return total stale-discard count since startup, or {@code -1} if not
-   *         tracked or the dispatcher has not been started
+   * @param unroutableKeys keys whose target could not be resolved, or whose target had no epoch
+   * @param workerDeadKeys keys dropped because no Worker was alive
+   * @param refusedKeys    keys in batches the queue or shared offer budget refused
    */
-  default long dispatcherExpiredStale() {
-    return -1;
+  record RoutingStats(long unroutableKeys, long workerDeadKeys, long refusedKeys) {}
+
+  /**
+   * The flush-cadence tuner, or {@code null} when the tuner is off.
+   *
+   * @return the feed loop, or {@code null}
+   */
+  @Nullable
+  ReportFeedLoop feedLoop();
+
+  /**
+   * Number of unique keys with pending access counts. The reservoir lives in the shared
+   * access counter, so a reporter that owns none answers {@code 0}.
+   *
+   * @return the pending key count, or {@code 0} when not tracked here
+   */
+  default long pendingKeyCount() {
+    return 0L;
   }
 
   /**
-   * Return the total number of batches rejected because the dispatcher queue was full.
+   * A point-in-time read of the dispatcher's counters.
    *
-   * @return total dropped count since startup, or {@code -1} if the dispatcher has not been started
+   * @param depth             batches waiting in the work queue
+   * @param expiredDeadTarget batches discarded because their target Worker was no longer alive
+   * @param expiredStale      batches discarded because they waited past the staleness bound
+   * @param dropped           batches refused after the offer: the queue stayed full past the
+   *                          offer timeout, or the batch was withdrawn during shutdown
    */
-  long dispatcherDropped();
-
-  /**
-   * Return the approximate number of unique keys currently buffered.
-   *
-   * @return estimated number of unique keys with pending access counts
-   */
-  long getPendingKeyCount();
-
-  /**
-   * Return the total number of flush cycles permitted by the BBR rate limiter.
-   *
-   * @return total passed count, or {@code -1} if BBR is disabled
-   */
-  long bbrPassed();
-
-  /**
-   * Return the total number of flush cycles dropped by the BBR rate limiter.
-   *
-   * @return total dropped count, or {@code -1} if BBR is disabled
-   */
-  long bbrDropped();
-
-  /**
-   * Return the current number of in-flight batches tracked by the BBR rate limiter.
-   *
-   * @return current in-flight count, or {@code -1} if BBR is disabled
-   */
-  long bbrInFlight();
-
-  /**
-   * Return the BBR-computed maximum concurrency budget (max in-flight).
-   *
-   * @return computed max in-flight, or {@code -1} if BBR is disabled
-   */
-  long bbrMaxInFlight();
-
-  /**
-   * Return the current damped budget baseline of the BBR rate limiter — the
-   * slow-moving budget that tracks the Little-Law estimate through a direction
-   * gate and step-size decay (kernel {@code wb->dirty_ratelimit} analog).
-   *
-   * <p>Compare with {@link #bbrMaxInFlight()}: the budget is the baseline scaled
-   * by the CPU-derated position ratio, so the two curves together show how much
-   * of the current budget comes from measured throughput versus position/CPU
-   * pressure.
-   *
-   * <p>
-   * Default {@code -1} (not tracked) so third-party implementations compiled
-   * against earlier releases stay source- and binary-compatible.
-   *
-   * @return current damped baseline, or {@code -1} if not tracked or BBR is disabled
-   */
-  default long bbrBalancedInFlight() {
-    return -1;
-  }
-
-  /**
-   * Return the sliding-window max pass per bucket feeding the Little-Law
-   * estimate (the maxPass half of {@code maxPass × minRt}).
-   *
-   * <p>
-   * Reads lazily smooth/decay the cached maxPass estimate (kernel-style
-   * decay-on-read), so scrape frequency is a minor input to the estimate
-   * trajectory — same caveat as {@link #bbrMaxInFlight()}.
-   *
-   * @return current sliding-window max pass, or {@code -1} if not tracked or BBR is disabled
-   */
-  default long bbrMaxPass() {
-    return -1;
-  }
-
-  /**
-   * Return the sliding-window min average RT in ms feeding the Little-Law
-   * estimate (the minRt half of {@code maxPass × minRt}). Plotted next to
-   * {@link #bbrMaxInFlight()}, this is the curve that reveals publisher-path
-   * queue pollution before enabling PROBE_RTT-style probing.
-   *
-   * <p>
-   * Reads lazily smooth the cached minRt estimate (decay-on-read, see
-   * {@link #bbrMaxPass()}).
-   *
-   * @return current sliding-window min RT in ms, or {@code -1} if not tracked or BBR is disabled
-   */
-  default long bbrMinRt() {
-    return -1;
-  }
-
-  /**
-   * Return the cumulative number of downstream-yield steps applied to the
-   * damped baseline (kernel {@code bbr_lt_bw} sampling: two consecutive
-   * baseline intervals with saturation-caused consumer drops lower the
-   * baseline by 1/8 per step). A rising curve means the report pipeline's
-   * downstream (RabbitMQ / Worker) is persistently quota-limited.
-   *
-   * @return cumulative yield step count, or {@code -1} if not tracked or BBR is disabled
-   */
-  default long bbrYielded() {
-    return -1;
-  }
-
-  /**
-   * Whether the ADR-0078 feed-loop interval tuner is configured for the flush
-   * cadence ({@code zeta.local.report-interval-tuning} != off).
-   *
-   * @return {@code true} when the tuner exists (shadow or apply mode)
-   */
-  default boolean feedLoopEnabled() {
-    return false;
-  }
-
-  /**
-   * Return the feed-loop's current base flush interval in ms — in shadow mode
-   * this is the trajectory the tuner <em>would</em> apply (kernel
-   * {@code damon_feed_loop_next_input} output), in apply mode the live
-   * WaveCounter tide base.
-   *
-   * @return current base interval, or {@code -1} if the tuner is disabled
-   */
-  default long feedLoopIntervalMs() {
-    return -1;
-  }
-
-  /**
-   * Return the last feed-loop score in basis points of the goal — the
-   * two-window-averaged batch size against
-   * {@code zeta.local.report-interval-target-batch} ({@code 10000} == on
-   * target).
-   *
-   * @return last score in bp, or {@code -1} if the tuner is disabled or no
-   *         flush has been sampled yet
-   */
-  default long feedLoopScoreBp() {
-    return -1;
-  }
-
-  /**
-   * Return the last two-window-averaged batch size (distinct keys per
-   * completed flush) the tuner scored.
-   *
-   * @return last averaged batch size, or {@code -1} if the tuner is disabled
-   *         or no flush has been sampled yet
-   */
-  default long feedLoopBatchSize() {
-    return -1;
-  }
+  record DispatcherStats(int depth, long expiredDeadTarget, long expiredStale, long dropped) {}
 }

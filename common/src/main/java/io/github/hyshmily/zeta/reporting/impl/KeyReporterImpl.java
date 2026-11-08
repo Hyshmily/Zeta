@@ -15,954 +15,665 @@
  */
 package io.github.hyshmily.zeta.reporting.impl;
 
-import static io.github.hyshmily.zeta.constants.ZetaConstants.TOPK_INCR;
-import static io.github.hyshmily.zeta.util.TimeSource.currentTimeMillis;
-
-import io.github.hyshmily.zeta.Internal;
-import io.github.hyshmily.zeta.hotkeydetector.doublebuffer.WaveCounter;
-import io.github.hyshmily.zeta.reporting.BbrRateLimiter;
-import io.github.hyshmily.zeta.reporting.BbrRateLimiter.ConsumerDropCause;
+import com.google.errorprone.annotations.concurrent.GuardedBy;
 import io.github.hyshmily.zeta.reporting.KeyReporter;
 import io.github.hyshmily.zeta.reporting.ReportMessage;
 import io.github.hyshmily.zeta.reporting.ReportPublisher;
+import io.github.hyshmily.zeta.sharding.ConsistentHashRing;
 import io.github.hyshmily.zeta.sharding.HealthView;
-import io.github.hyshmily.zeta.sharding.RingManager;
-import io.github.hyshmily.zeta.util.LogThrottle;
-import io.github.hyshmily.zeta.util.ZetaThreadFactory;
-import io.github.hyshmily.zeta.util.id.SnowflakeIdGenerator;
-import java.util.*;
+import io.github.hyshmily.zeta.util.Internal;
+import io.github.hyshmily.zeta.util.TimeSource;
+import io.github.hyshmily.zeta.util.executor.ZetaThreadFactory;
+import java.util.HashMap;
+import java.util.Iterator;
+import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Consumer;
 import java.util.function.Predicate;
-import lombok.Getter;
 import lombok.Setter;
 import lombok.extern.slf4j.Slf4j;
+import org.jspecify.annotations.Nullable;
 
 /**
- * Periodically aggregates per-key access counts and publishes them
- * to the Worker via {@link ReportPublisher}.
+ * Publishes per-key access-add batches to the Worker via {@link ReportPublisher}.
  *
- * <p>Uses a {@link WaveCounter} as a temporary counter store; hot keys
- * aggregate in zero-contention local maps while cold keys write directly,
- * and the shared snapshot is flushed to the appropriate shard at a fixed
- * interval.</p>
- *
- * <p>Keys are routed via the {@link RingManager} consistent-hash ring, ensuring the
- * same key always maps to the same Worker node even as the cluster scales.
- * The RingManager also tracks Worker liveness via heartbeat, so dead shards are
- * automatically excluded from routing.
- *
- * <p>Burst absorption and backpressure are provided by a bounded
- * {@link LinkedBlockingQueue} between the flush callback and the
- * RabbitMQ publisher.  When the queue is full, {@code onFlush()} drops
- * batches after a configurable timeout.
- *
- * <p>When a {@link io.github.hyshmily.zeta.reporting.BbrRateLimiter} is configured, each flush cycle is submitted
- * to the BBR for admission control.  If the pipeline is saturated (high CPU
- * and/or excessive in-flight batches), the flushed batch is dropped and
- * the counts are lost — at most one {@code reportIntervalMs} window.
+ * <p>One producer call runs three stages, each with exactly one owner (design decisions:
+ * reporting):
+ * <ol>
+ *   <li><b>Admission</b> on the caller's thread ({@code publishBatch}/{@code publishDirect}):
+ *       empty batch, no alive Worker; at most one ring reconcile.</li>
+ *   <li><b>Routing</b> on the same thread: consistent-hash the counts into per-target
+ *       batches and offer each to the bounded dispatcher queue, whose offer is the only
+ *       backpressure.</li>
+ *   <li><b>Publishing</b> on the consumer threads: one batch per thread, synchronously,
+ *       with a scheduler-armed interrupt as the timeout.</li>
+ * </ol>
  */
 @Slf4j
 @Internal
 public class KeyReporterImpl implements KeyReporter {
 
-  /**
-   * Maximum distinct cold keys per delivery cycle, wired as the WaveCounter's
-   * soft reservoir cap (load-bearing: bounds burst memory; already-tracked
-   * keys keep counting past it).
-   */
-  private static final int MAX_BUFFER_SIZE = 100_000;
-
-  /** Retained for the WaveCounter constructor's API-compat slot — ignored (no eager-swap in this design). */
-  private static final double EAGER_SWAP_RATIO = 0.8;
-
-  /** Double-buffered counter aggregating per-key access counts between flushes. */
-  private final WaveCounter reportWaveCounter;
-
-  /** Publishes aggregated reports to RabbitMQ. */
   private final ReportPublisher reportPublisher;
-
-  /** Scheduler for the periodic flush loop. */
-  @Getter
-  private final ScheduledExecutorService scheduler;
-
-  /** Fixed delay between reportToWorker flushes in milliseconds. */
-  private final long reportIntervalMs;
-  /** Name of this application instance, included in reportToWorker messages. */
-  private final String appName;
-  /** Maximum capacity of the dispatcher work queue. */
-  private final int queueCapacity;
-  /** Timeout (ms) for offering a batch to the dispatcher queue before dropping. */
   private final int queueOfferTimeoutMs;
-  /** Number of consumer threads draining the dispatcher queue. */
-  private final int consumerCount;
-  /** Consistent-hashing ring manager for Worker node routing. */
-  private final RingManager ringManager;
-  /** Cluster health view for filtering dead Workers. */
+  private final ConsistentHashRing ring;
   private final HealthView healthView;
+  private final int queueCapacity;
+  private final int consumerCount;
+  private final String appName;
 
-  private final SnowflakeIdGenerator snowflakeIdGenerator;
-  /** Dedicated single-thread executor for O(keys × log vnodes) routing computation. */
-  private final ExecutorService routingExecutor;
-
-  private volatile int lastNodeCount = -1;
-
-  /** Optional BBR adaptive rate limiter; null disables BBR gating. */
-  @Setter
-  @SuppressWarnings("java:S3077") // BBR is thread-safe
-  private volatile BbrRateLimiter bbrRateLimiter;
-
-  /**
-   * Optional ADR-0078 feed-loop tuner for the flush cadence
-   * ({@code zeta.local.report-interval-tuning}); null disables adaptation and
-   * the WaveCounter tide base stays at the configured
-   * {@code report-interval-ms}. In shadow mode the tuner computes and exposes
-   * the trajectory without applying it; in apply mode each completed flush
-   * moves the tide base via {@link WaveCounter#adjustDeliverIntervalMs(long)}.
-   */
+  /** Optional flush-cadence tuner; {@code null} keeps the configured interval. */
   @Setter
   private volatile ReportFeedLoop intervalFeedLoop;
 
-  /** Cumulative counter of report batches silently dropped because no Workers were alive. */
-  private final AtomicLong workerDeadDropCounter = new AtomicLong();
-  /** Cumulative counter of keys dropped because routeNode returned null (ring inconsistency window). */
+  /** Where the tuner applies a computed tide interval (the access counter registers here). */
+  @Setter
+  private volatile Consumer<Long> cadenceAdjuster;
+
+  /** Keys dropped because {@code locateNode} returned null or the target had no epoch. */
   private final AtomicLong unroutableDropCounter = new AtomicLong();
+  /** Keys dropped because no Worker was alive. */
+  private final AtomicLong workerDeadDropCounter = new AtomicLong();
+  /** Keys dropped because the dispatcher refused the batch (queue full, or shutting down). */
+  private final AtomicLong droppedCounter = new AtomicLong();
 
-  /**
-   * Rate-limits the "no alive Worker" WARN to one per window. The flush callback runs on the
-   * shared scheduler every {@code reportIntervalMs} (default 50ms), so an unthrottled WARN
-   * would flood the log ~20×/s for the whole duration of a Worker outage.
-   */
-  private final LogThrottle noWorkerLogThrottle = LogThrottle.perDefaultWindow();
-
-  /**
-   * Rate-limits the routing-failure ERROR to the standard 10s window
-   * ({@link LogThrottle#DEFAULT_WINDOW_MS}) used across the codebase
-   * (e.g. BroadcastBuffer flush failures).
-   */
-  private final LogThrottle routingFailureLogThrottle = LogThrottle.perDefaultWindow();
-
-  /** Rate-limits the routing-executor rejection WARN (ADR-0037 one-per-window convention). */
-  private final LogThrottle routingDropLogThrottle = LogThrottle.perDefaultWindow();
-
-  /** Rate-limits the unroutable-key DEBUG line (ADR-0037 one-per-window convention). */
-  private final LogThrottle unroutableLogThrottle = LogThrottle.perDefaultWindow();
-
-  /** Rate-limits the dispatcher queue-full WARN (ADR-0037 one-per-window convention). */
-  private final LogThrottle dispatcherDropLogThrottle = LogThrottle.perDefaultWindow();
-
-  /** Guards start() idempotency. */
-  private final AtomicBoolean started = new AtomicBoolean(false);
-  /** The reportToWorker dispatcher instance; created on start(). */
-  private ReportDispatcher dispatcher;
-
-  private static final int ROUTING_QUEUE_CAPACITY = 8;
-
-  /** Record the number of routing tasks dropped due to queue overflow. */
-  private final AtomicLong routingDropCounter = new AtomicLong(0);
-
-  /**
-   * Count one displaced routing batch and surface it as a rate-limited WARN.
-   * The counter keeps the real cumulative total for metrics — it is never
-   * reset (ADR-0037 one-per-window convention).
-   */
-  private void noteRoutingDrop() {
-    long dropped = routingDropCounter.incrementAndGet();
-    if (routingDropLogThrottle.tryAcquire()) {
-      log.warn("routing queue full, dropping oldest report batch; totalDropped={}", dropped);
-    }
+  /** Reporter lifecycle; a failed start is retryable and a stopped reporter is final. */
+  private enum State {
+    NEW,
+    STARTING,
+    RUNNING,
+    FAILED,
+    STOPPED,
   }
 
-  /* Records whether the last error during publish has been logged.*/
-  private final AtomicBoolean lastPublishErrorLogged = new AtomicBoolean(false);
+  private final AtomicReference<State> state = new AtomicReference<>(State.NEW);
+
+  /** The dispatcher; created on {@link #start()}. */
+  private volatile @Nullable Dispatcher dispatcher;
 
   /**
-   * Creates a new reporter that periodically flushes access counts to RabbitMQ.
-   *
-   * @param reportPublisher     the publisher used to send reportToWorker messages to RabbitMQ
-   * @param scheduler           the scheduler for periodic flush cycles
-   * @param reportIntervalMs    fixed delay between consecutive flushes in milliseconds
-   * @param appName             name of this application instance, included in reportToWorker messages
-   * @param queueCapacity       maximum capacity of the dispatcher work queue
-   * @param queueOfferTimeoutMs timeout for offering a batch to the dispatcher queue before dropping
-   * @param consumerCount       number of consumer threads draining the dispatcher queue
-   * @param ringManager         consistent-hashing ring manager for Worker node routing
-   * @param healthView          cluster health view for filtering dead Workers
+   * @param reportPublisher     publisher used to send report messages
+   * @param appName             this application instance's name, stamped on every message
+   * @param queueCapacity       dispatcher work-queue capacity
+   * @param queueOfferTimeoutMs how long a routed batch waits for queue space
+   * @param consumerCount       threads draining the queue
+   * @param ring                consistent-hash ring for Worker routing
+   * @param healthView          cluster health view (liveness and epoch)
    */
-  @SuppressWarnings("java:S107") // too many constructor args, but all are required for proper initialization
   public KeyReporterImpl(
     ReportPublisher reportPublisher,
-    ScheduledExecutorService scheduler,
-    long reportIntervalMs,
     String appName,
     int queueCapacity,
     int queueOfferTimeoutMs,
     int consumerCount,
-    RingManager ringManager,
-    HealthView healthView,
-    SnowflakeIdGenerator snowflakeIdGenerator
+    ConsistentHashRing ring,
+    HealthView healthView
   ) {
-    this.reportPublisher = reportPublisher;
-    this.scheduler = scheduler;
-    this.reportIntervalMs = reportIntervalMs;
+    this.ring = ring;
     this.appName = appName;
-    this.queueCapacity = queueCapacity;
-    this.queueOfferTimeoutMs = queueOfferTimeoutMs;
-    this.consumerCount = consumerCount;
-    this.ringManager = ringManager;
     this.healthView = healthView;
-    this.snowflakeIdGenerator = snowflakeIdGenerator;
-    this.routingExecutor = new ThreadPoolExecutor(
-      1,
-      1,
-      0L,
-      TimeUnit.MILLISECONDS,
-      new ArrayBlockingQueue<>(ROUTING_QUEUE_CAPACITY),
-      new ZetaThreadFactory("zeta-report-routing"),
-      (r, executor) -> {
-        // Drop-OLDEST, not newest: the queue holds whole flush batches and
-        // the producer is single-threaded (one WaveCounter tide deliverer per
-        // reporter — see onFlush), so freeing one slot guarantees the
-        // resubmit below is accepted. The freshest signal always wins; the
-        // displaced (stalest) batch is counted, never silently lost.
-        // Precondition: single-producer submit. A second producer would need
-        // an offer-retry loop here.
-        // Rejected alternative: merge-not-drop (fold the new counts into an
-        // overflow map for the next routing pass) — strictly better signal,
-        // but adds shared mutable state plus an O(keys) merge on the
-        // scheduler thread for a loss the Worker's sliding window already
-        // tolerates (one 50ms window, self-healed by the next tide).
-        if (executor.getQueue().poll() == null) {
-          // Lost a shutdown race (stop() drained the queue concurrently) —
-          // there is no slot to free, drop the new batch.
-          noteRoutingDrop();
-          return;
-        }
-        noteRoutingDrop();
-        try {
-          executor.execute(r);
-        } catch (RejectedExecutionException e) {
-          // Shutdown raced the resubmit — drop the new batch too.
-          noteRoutingDrop();
-        }
-      }
-    );
-    this.reportWaveCounter = new WaveCounter(
-      this::onFlush,
-      MAX_BUFFER_SIZE,
-      reportIntervalMs,
-      EAGER_SWAP_RATIO,
-      scheduler,
-      reportIntervalMs
-    );
+    this.queueCapacity = queueCapacity;
+    this.consumerCount = consumerCount;
+    this.reportPublisher = reportPublisher;
+    this.queueOfferTimeoutMs = queueOfferTimeoutMs;
   }
 
-  /**
-   * A batch of key-count mappings destined for a single Worker target.
-   *
-   * @param target    the Worker nodeId for this batch
-   * @param timestamp wall-clock ms when the batch was assembled
-   * @param counts    non-zero per-key counts accumulated since the last flush
-   */
-  record ShardBatch(String target, long timestamp, Map<String, Long> counts) {}
-
-  /**
-   * Record one access for the given cache key.
-   *
-   * <p>Idempotent per-key local counter increment.  The counter is stored in
-   * a routed {@link WaveCounter} and flushed periodically to the
-   * configured Workers.
-   *
-   * @param cacheKey the accessed key
-   */
-  @Override
-  public void reportToWorker(String cacheKey) {
-    reportWaveCounter.count(cacheKey, TOPK_INCR);
-  }
-
-  /**
-   * Start the periodic flush scheduler and the reportToWorker dispatcher.
-   * Idempotent — subsequent calls are silently ignored.
-   *
-   * <p>The flush callback drains the {@link WaveCounter}, groups entries by
-   * target (shard index or nodeId), and enqueues them.  Actual publishing
-   * to RabbitMQ runs on dedicated consumer threads, decoupling the flush
-   * callback from network I/O.
-   */
   @Override
   public void start() {
-    if (!started.compareAndSet(false, true)) {
-      log.debug("KeyReporterImpl already started, skip");
-      return;
+    for (;;) {
+      State current = state.get();
+      if (current == State.RUNNING || current == State.STARTING) {
+        log.debug("KeyReporterImpl already started, skip");
+        return;
+      }
+      if (current == State.STOPPED) {
+        log.debug("KeyReporterImpl is stopped; start() ignored");
+        return;
+      }
+      if (state.compareAndSet(current, State.STARTING)) {
+        break;
+      }
     }
+
+    Dispatcher created = null;
     try {
-      dispatcher = new ReportDispatcher();
-      dispatcher.start();
-
-      reportWaveCounter.afterPropertiesSet();
-
+      created = new Dispatcher();
+      created.start();
+      // Publish the dispatcher before RUNNING: a stop() that observes RUNNING
+      // must be able to find and close it. A stop() that wins the CAS below
+      // closes this instance; the failed CAS then only clears the reference.
+      dispatcher = created;
+      if (!state.compareAndSet(State.STARTING, State.RUNNING)) {
+        dispatcher = null;
+        created.shutdown();
+        return;
+      }
+      ReportFeedLoop feedLoop = intervalFeedLoop;
       log.info(
-        "KeyReporterImpl started: appName={}, intervalMs={}, queueCapacity={}, consumers={}",
+        "KeyReporterImpl started: appName={}, cadence={}, queueCapacity={}, consumers={}",
         appName,
-        reportIntervalMs,
+        feedLoop == null ? "fixed" : "feed-loop/" + feedLoop.mode() + " seed=" + feedLoop.intervalMs() + "ms",
         queueCapacity,
-        dispatcher.consumerCount()
+        consumerCount
       );
-    } catch (Exception e) {
+    } catch (Throwable t) {
+      dispatcher = null;
+      if (created != null) {
+        created.shutdown();
+      }
+      // A concurrent stop() owns the final state: never overwrite STOPPED with
+      // FAILED and accidentally make the reporter restartable.
+      state.compareAndSet(State.STARTING, State.FAILED);
       log.error(
         "Failed to start KeyReporterImpl; per-key counts will not be flushed to Worker. " +
-          "Application continues but Worker hot-key detection will be blind to this instance.",
-        e
+          "Application continues but Worker hot-key detection will be blind to this instance. " +
+          "start() may be retried.",
+        t
       );
     }
   }
 
-  /**
-   * Gracefully shut down the reporter.
-   *
-   * <p>Stops the periodic flush loop (via {@code WaveCounter.destroy()}), so no
-   * further flush cycles are driven after this call. Then interrupts the
-   * routing executor and all dispatcher consumer threads and waits for them to
-   * finish (2-second timeout per pool). Any batches remaining in the work
-   * queue are discarded. This method is typically registered as the Spring
-   * bean {@code destroyMethod}.
-   *
-   * <p>After shutdown, the reporter no longer publishes reports.
-   *
-   * <p>Idempotent — safe to call multiple times.
-   */
   @Override
-  @SuppressWarnings("all")
   public void stop() {
-    reportWaveCounter.destroy();
-    routingExecutor.shutdownNow();
-    try {
-      routingExecutor.awaitTermination(1, TimeUnit.SECONDS);
-    } catch (InterruptedException e) {
-      log.warn("Interrupted while waiting for routingExecutor to terminate");
-      Thread.currentThread().interrupt();
-    }
-    if (dispatcher != null) {
-      dispatcher.shutdown();
-    }
-  }
-
-  /**
-   * Callback invoked by the {@link WaveCounter} on each scheduled flush.
-   * Groups the drained key-count map by target Worker via consistent-hash
-   * routing and enqueues one {@link ShardBatch} per target.
-   *
-   * <p>When BBR rate limiting is active, the batch is dropped if the
-   * limiter rejects the cycle.  Because the double-buffer has already
-   * drained the counts, at most one {@code reportIntervalMs} window of
-   * counts is lost — an acceptable trade-off for the simpler and more
-   * predictable double-buffer design.
-   *
-   * <p>If no Workers are alive, the batch is silently discarded.
-   */
-  @SuppressWarnings("all")
-  private void onFlush(Map<String, Long> keyCounts) {
-    if (keyCounts.isEmpty()) {
+    State current = state.getAndSet(State.STOPPED);
+    if (current == State.STOPPED) {
       return;
     }
 
+    Dispatcher dispatcherToStop = dispatcher;
+    if (dispatcherToStop != null) {
+      dispatcherToStop.shutdown();
+    }
+  }
+
+  @Override
+  public void publishBatch(Map<String, Long> counts, long windowMs) {
+    if (state.get() != State.RUNNING) {
+      return;
+    }
     try {
-      // One alive-set materialisation per flush: the reconcile's returned snapshot
-      // doubles as the routing liveness source, so it is consistent with the ring
-      // that was just rebuilt (a second getAliveWorkerIds() here raced the first).
-      Set<String> aliveNodes = ringManager.reconcileFromHealthView(healthView);
-      if (aliveNodes.isEmpty()) {
-        long total = workerDeadDropCounter.addAndGet(keyCounts.size());
-        if (noWorkerLogThrottle.tryAcquire()) {
-          log.warn(
-            "No alive Worker nodes for routing; dropping {} keys in this flush (cumulative: {})",
-            keyCounts.size(),
-            total
-          );
-        }
+      // An empty window is a measured zero arrival rate, not a censored cycle: the
+      // reporter did flush, nothing arrived. It must feed the cadence tuner or SHADOW
+      // can never predict an idle ON deployment and ON never backs off to maxInterval.
+      // A non-empty cycle with no alive Worker returns below without sampling.
+      if (counts.isEmpty()) {
+        sampleFeedLoop(0, windowMs);
         return;
       }
 
-      BbrRateLimiter limiter = bbrRateLimiter;
-      if (limiter != null) {
-        int currentCount = ringManager.nodeCount();
-        if (currentCount != lastNodeCount) {
-          lastNodeCount = currentCount;
-          limiter.setMinInFlight(currentCount);
-        }
-        if (!limiter.tryAcquire()) {
-          limiter.onGateDrop();
-          return;
-        }
+      Admission admission = admit(counts);
+      if (admission == null) {
+        return;
       }
 
-      // ADR-0078: sample the completed flush into the feed-loop interval
-      // tuner. The censored cycles above return earlier — empty snapshot, no
-      // alive Worker, BBR gate drop — so the loop learns only from flushes
-      // that actually reached the routing stage (the kernel sampler has no
-      // such censoring; this is the Zeta-specific addition). Shadow mode
-      // computes and exposes only; apply mode moves the WaveCounter tide
-      // base, which takes effect at the NEXT scheduled tide (one fire of lag
-      // — the batch just flushed accumulated under the previous base).
-      ReportFeedLoop feedLoop = intervalFeedLoop;
-      if (feedLoop != null) {
-        long next = feedLoop.onFlushCompleted(keyCounts.size());
-        if (feedLoop.mode() == ReportFeedLoop.Mode.ON) {
-          reportWaveCounter.adjustDeliverIntervalMs(next);
-        }
-      }
-
-      // Defer O(keys × log vnodes) routing computation to dedicated executor
-      // so the shared scheduler thread is not starved (SystemLoadMonitor, decay, etc.)
-      long now = currentTimeMillis();
-      routingExecutor.submit(() -> {
-        try {
-          routeAndEnqueue(keyCounts, aliveNodes, now, limiter);
-        } catch (Exception e) {
-          // The submitted lambda's Future is discarded, so an uncaught exception
-          // here would previously vanish silently — a recurring failure (e.g.
-          // routeNode throwing) killed every flush's routing with no log and no
-          // counter, and ALL reporting went dark. Count every key of the batch
-          // as unroutable and surface the failure as a rate-limited ERROR.
-          long dropped = unroutableDropCounter.addAndGet(keyCounts.size());
-          if (routingFailureLogThrottle.tryAcquire()) {
-            log.error(
-              "Routing failed for a flush batch of {} keys; all keys dropped (cumulativeUnroutable={})",
-              keyCounts.size(),
-              dropped,
-              e
-            );
-          }
-        }
-      });
+      sampleFeedLoop(counts.size(), windowMs);
+      routeAndEnqueue(counts, admission);
     } catch (Exception e) {
       log.error("Flush callback failed", e);
     }
   }
 
+  @Override
+  public void publishDirect(Map<String, Long> counts) {
+    try {
+      Admission admission = admit(counts);
+      if (admission != null) {
+        routeAndEnqueue(counts, admission);
+      }
+    } catch (Exception e) {
+      log.error("Direct report failed", e);
+    }
+  }
+
   /**
-   * Route keys to Worker targets and enqueue the resulting batches.
-   * Runs on {@link #routingExecutor} — off the shared scheduler thread.
+   * The admission gates: empty batch, no alive Worker.
+   *
+   * @return the routing inputs, or {@code null} when this cycle is dropped
    */
-  @SuppressWarnings("all")
-  private void routeAndEnqueue(Map<String, Long> keyCounts, Set<String> aliveNodes, long now, BbrRateLimiter limiter) {
+  @Nullable
+  private Admission admit(Map<String, Long> counts) {
+    // publishBatch handles an empty window before this point (it is a zero-rate sample,
+    // not an admission decision); this guard remains for publishDirect.
+    if (counts.isEmpty() || state.get() != State.RUNNING) {
+      return null;
+    }
+
+    // One reconcile per flush. The alive set and epochs are captured from that reconcile;
+    // per-key routing reads the ring's current published snapshot. A concurrent rebuild can
+    // therefore route a key to a node absent from this capture, and the key is dropped as
+    // unroutable rather than re-based onto an epoch it was never counted under.
+    Set<String> aliveNodes = ring.rebuildIfPossible(healthView);
+    if (aliveNodes.isEmpty()) {
+      long total = workerDeadDropCounter.addAndGet(counts.size());
+      log.warn(
+        "No alive Worker nodes for routing; dropping {} keys in this flush (cumulative: {})",
+        counts.size(),
+        total
+      );
+      return null;
+    }
+
+    // Capture the incarnation with the ring snapshot the batch is routed on. The fused
+    // liveness+epoch probe rejects a Worker that restarted into a cold start between the
+    // alive-set snapshot and this read: its accumulated counts must not be stamped with the
+    // new incarnation before it is ready to serve.
+    Map<String, Long> epochs = new HashMap<>(Math.max(1, aliveNodes.size() * 2));
+    for (String node : aliveNodes) {
+      long epoch = healthView.epochOf(node);
+      if (epoch != HealthView.UNKNOWN_EPOCH && healthView.isCurrentIncarnation(node, epoch)) {
+        epochs.put(node, epoch);
+      }
+    }
+    return new Admission(TimeSource.currentTimeMillis(), Map.copyOf(epochs));
+  }
+
+  /**
+   * Feeds a completed flush to the cadence tuner. Empty snapshots are sampled at rate zero
+   * (a flush happened and nothing arrived); a non-empty no-alive-Worker cycle returns before
+   * this point, so the loop never learns from a censored delivery. Control-path failures never
+   * cost a report.
+   */
+  private void sampleFeedLoop(int batchSize, long windowMs) {
+    ReportFeedLoop feedLoop = intervalFeedLoop;
+    if (feedLoop == null) {
+      return;
+    }
+    try {
+      ReportFeedLoop.State state = feedLoop.onFlushCompleted(batchSize, windowMs);
+      Consumer<Long> adjuster = cadenceAdjuster;
+      if (feedLoop.mode() == ReportFeedLoop.Mode.ON && adjuster != null) {
+        adjuster.accept(state.intervalMs());
+      }
+    } catch (RuntimeException e) {
+      log.debug("feed-loop sample failed; flush proceeds at the unchanged cadence", e);
+    }
+  }
+
+  /**
+   * Routes the flush's keys to their Worker targets and offers one batch per target to the
+   * dispatcher queue. The comparison predicate is built once per flush, not once per key.
+   */
+  private void routeAndEnqueue(Map<String, Long> counts, Admission admission) {
+    Dispatcher current = dispatcher;
+    if (current == null) {
+      return;
+    }
+
+    long timestamp = admission.timestamp();
+    long enqueuedAt = TimeSource.monotonicMillis();
+    // Route only to nodes whose epoch this admission captured. The ring can be rebuilt by a
+    // concurrent heartbeat between the reconcile and this pass; the current snapshot's new owner
+    // has no captured epoch, and walking past it to a captured node keeps the counts instead of
+    // dropping the key as unroutable.
+    Predicate<String> admittedTarget = admission.epochs()::containsKey;
     Map<String, Map<String, Long>> sharded = new HashMap<>();
-    // One predicate per batch — the per-key routeNode(key, Set) overload would
-    // allocate a capturing lambda for every key of every flush.
-    Predicate<String> isAlive = aliveNodes::contains;
-    keyCounts.forEach((key, val) -> {
-      if (val > 0) {
-        String target = ringManager.routeNode(key, isAlive);
-        if (target != null) {
-          sharded.computeIfAbsent(target, t -> new HashMap<>()).put(key, val);
-        } else {
-          long dropped = unroutableDropCounter.incrementAndGet();
-          if (unroutableLogThrottle.tryAcquire()) {
-            log.debug("routeNode returned null for key={}, cumulativeUnroutable={}", key, dropped);
-          }
-        }
+    for (Map.Entry<String, Long> entry : counts.entrySet()) {
+      long count = entry.getValue();
+      if (count <= 0) {
+        continue;
       }
-    });
-    sharded.forEach((target, counts) -> {
-      if (!dispatcher.enqueue(new ShardBatch(target, now, counts))) {
-        long dropped = dispatcher.dropped();
-        if (dispatcherDropLogThrottle.tryAcquire()) {
-          log.warn(
-            "reportToWorker queue full, dropped target={} keys={}, depth={}/{}, cumulativeDrops={}",
-            target,
-            counts.size(),
-            dispatcher.depth(),
-            queueCapacity,
-            dropped
-          );
+
+      String target;
+      try {
+        target = ring.locateNode(entry.getKey(), admittedTarget);
+        if (target == null) {
+          noteUnroutable(entry.getKey(), 1, "locateNode returned null");
+          continue;
         }
-      } else if (limiter != null) {
-        limiter.onEnqueue();
+      } catch (RuntimeException e) {
+        // One bad key must not discard the whole flush: count it, keep routing.
+        noteUnroutable(entry.getKey(), 1, "locateNode failed: " + e.getMessage());
+        continue;
       }
-    });
+
+      sharded.computeIfAbsent(target, t -> new HashMap<>()).put(entry.getKey(), count);
+    }
+
+    // The offer timeout is one budget for the whole flush, not one per routed target.
+    // A broker stall with N alive Workers would otherwise block the tide thread for
+    // N × queueOfferTimeoutMs and delay the local sketch merge behind it.
+    long deadlineNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(queueOfferTimeoutMs);
+    Iterator<Map.Entry<String, Map<String, Long>>> targets = sharded.entrySet().iterator();
+    while (targets.hasNext()) {
+      Map.Entry<String, Map<String, Long>> entry = targets.next();
+      String target = entry.getKey();
+      Map<String, Long> countsForTarget = entry.getValue();
+      // Reports are addressed to an incarnation captured with the routing snapshot: a
+      // batch routed while the Worker was this epoch must never be re-based onto a new
+      // one after a restart.
+      Long targetEpoch = admission.epochs().get(target);
+      if (targetEpoch == null) {
+        noteUnroutable(target, countsForTarget.size(), "no epoch for routed target");
+        continue;
+      }
+
+      long remainingNanos = deadlineNanos - System.nanoTime();
+      if (remainingNanos <= 0) {
+        long remainingKeys = countsForTarget.size();
+        int remainingTargets = 1;
+        while (targets.hasNext()) {
+          remainingKeys += targets.next().getValue().size();
+          remainingTargets++;
+        }
+        long dropped = droppedCounter.addAndGet(remainingKeys);
+        current.recordDropped(remainingTargets);
+        log.debug(
+          "report flush offer budget exhausted, dropped {} keys across remaining targets, depth={}/{}, " +
+            "cumulativeDrops={}",
+          remainingKeys,
+          current.depth(),
+          queueCapacity,
+          dropped
+        );
+        break;
+      }
+
+      long offerTimeoutMs = Math.max(1L, TimeUnit.NANOSECONDS.toMillis(remainingNanos));
+      boolean accepted = current.enqueue(
+        new ShardBatch(target, targetEpoch, timestamp, countsForTarget, enqueuedAt),
+        offerTimeoutMs
+      );
+      if (!accepted) {
+        long dropped = droppedCounter.addAndGet(countsForTarget.size());
+        log.debug(
+          "report queue full, dropped target={} keys={}, depth={}/{}, cumulativeDrops={}",
+          target,
+          countsForTarget.size(),
+          current.depth(),
+          queueCapacity,
+          dropped
+        );
+      }
+    }
+  }
+
+  private void noteUnroutable(String key, int count, String reason) {
+    long total = unroutableDropCounter.addAndGet(count);
+    log.debug("{} for key={}, cumulativeUnroutable={}", reason, key, total);
   }
 
   /**
-   * Return the current number of batches waiting in the dispatcher work queue.
-   *
-   * @return queue depth (number of enqueued but not yet consumed batches),
-   *         or {@code -1} if the dispatcher has not been started
+   * The admission outcome: the wall-clock timestamp stamped on every shard of this
+   * flush and the epoch captured for each routed Worker.
    */
+  private record Admission(long timestamp, Map<String, Long> epochs) {}
+
   @Override
-  public int dispatcherDepth() {
-    return dispatcher == null ? -1 : dispatcher.depth();
+  public @Nullable DispatcherStats dispatcherStats() {
+    Dispatcher current = dispatcher;
+    return current == null
+      ? null
+      : new DispatcherStats(current.depth(), current.expiredDeadTarget(), current.expiredStale(), current.dropped());
+  }
+
+  @Override
+  public @Nullable RoutingStats routingStats() {
+    if (dispatcher == null) {
+      return null;
+    }
+    return new RoutingStats(unroutableDropCounter.get(), workerDeadDropCounter.get(), droppedCounter.get());
+  }
+
+  @Override
+  public @Nullable ReportFeedLoop feedLoop() {
+    return intervalFeedLoop;
   }
 
   /**
-   * Return the maximum capacity of the dispatcher work queue.
+   * A batch of key-add mappings destined for a single Worker target.
    *
-   * @return the queue capacity as configured via {@code queueCapacity},
-   *         or {@code -1} if the dispatcher has not been started
+   * @param target      the Worker nodeId for this batch
+   * @param targetEpoch the target's epoch at routing time — captured before the batch waits
+   *                    in the queue, so a restart supersedes the whole batch instead of
+   *                    silently re-basing it onto the new incarnation
+   * @param timestamp   wall-clock ms when the batch was assembled; travels on the wire
+   * @param counts      non-zero per-key counts accumulated since the last flush
+   * @param enqueuedAt  monotonic ms at enqueue — the only field used for batch-age
+   *                    arithmetic, which must not be subject to NTP steps
    */
-  @Override
-  public int dispatcherCapacity() {
-    return dispatcher == null ? -1 : dispatcher.capacity();
-  }
+  record ShardBatch(String target, long targetEpoch, long timestamp, Map<String, Long> counts, long enqueuedAt) {}
 
   /**
-   * Return the total number of batches discarded by the consumer — the sum
-   * of the two discard causes now tracked separately by
-   * {@link #dispatcherExpiredDeadTarget()} and {@link #dispatcherExpiredStale()};
-   * kept for metric continuity.
-   *
-   * @return total discarded batch count since startup, or {@code -1} if the
-   *         dispatcher has not been started
+   * Bounded work queue plus the consumer threads that drain it, and the one timer that bounds
+   * a publish (design decisions: reporting).
    */
-  @Override
-  public long dispatcherExpired() {
-    return dispatcher == null ? -1 : dispatcher.expired();
-  }
+  final class Dispatcher {
 
-  /**
-   * Return the total number of batches discarded because their target Worker
-   * was no longer alive at consumption time (dead-target discards; a batch
-   * that is both dead-target and stale is attributed here).
-   *
-   * @return total dead-target discard count since startup, or {@code -1} if the
-   *         dispatcher has not been started
-   */
-  @Override
-  public long dispatcherExpiredDeadTarget() {
-    return dispatcher == null ? -1 : dispatcher.deadTargetExpired();
-  }
-
-  /**
-   * Return the total number of batches discarded because they waited longer
-   * than 5 seconds in the dispatcher queue (staleness expiry under
-   * backpressure).
-   *
-   * @return total stale-discard count since startup, or {@code -1} if the
-   *         dispatcher has not been started
-   */
-  @Override
-  public long dispatcherExpiredStale() {
-    return dispatcher == null ? -1 : dispatcher.staleExpired();
-  }
-
-  /**
-   * Return the total number of batches rejected because the dispatcher
-   * queue was full (back-pressure drops from the flush loop).
-   *
-   * @return total dropped batch count since startup, or {@code -1} if the
-   *         dispatcher has not been started
-   */
-  @Override
-  public long dispatcherDropped() {
-    return dispatcher == null ? -1 : dispatcher.dropped();
-  }
-
-  /**
-   * Return the approximate number of unique keys currently buffered in the
-   * local double-buffer counter store.
-   *
-   * <p>This is the sum of distinct keys in both the active and standby
-   * buffers and may not reflect the exact count under concurrent access.
-   *
-   * @return estimated number of unique keys with pending access counts
-   */
-  @Override
-  public long getPendingKeyCount() {
-    return reportWaveCounter.estimatedSizeOfKeysCount();
-  }
-
-  /**
-   * Return the total number of batches that were permitted by the BBR rate
-   * limiter since startup (counted once per completed publish, i.e. per
-   * {@code onSuccess} — not once per flush cycle).
-   *
-   * @return total passed count, or {@code -1} if BBR rate limiting is disabled
-   *         ({@link #bbrRateLimiter} is {@code null})
-   */
-  @Override
-  public long bbrPassed() {
-    return bbrRateLimiter == null ? -1 : bbrRateLimiter.getTotalPassed();
-  }
-
-  /**
-   * Return the total number of batches that were dropped by the BBR rate
-   * limiter since startup (both gate drops and consumer drops — counted per
-   * batch, not per flush cycle).
-   *
-   * @return total dropped count, or {@code -1} if BBR rate limiting is disabled
-   */
-  @Override
-  public long bbrDropped() {
-    return bbrRateLimiter == null ? -1 : bbrRateLimiter.getTotalDropped();
-  }
-
-  /**
-   * Return the current number of in-flight batches tracked by the BBR rate
-   * limiter — those enqueued for publishing but not yet completed or dropped.
-   *
-   * @return current in-flight count (non-negative), or {@code -1} if BBR
-   *         rate limiting is disabled
-   */
-  @Override
-  public long bbrInFlight() {
-    return bbrRateLimiter == null ? -1 : bbrRateLimiter.getInFlight();
-  }
-
-  /**
-   * Return the current BBR-computed maximum concurrency budget (max in-flight).
-   *
-   * <p>This value is the damped baseline scaled by the CPU-derated position
-   * ratio, where the baseline tracks a sliding-window maxPASS × minRT
-   * Little's-Law estimate through a direction gate with step-size decay. It
-   * represents the limiter's estimate of the optimal number of concurrent
-   * in-flight batches before the pipeline becomes congested.
-   *
-   * @return the computed max in-flight budget, or {@code -1} if BBR rate
-   *         limiting is disabled
-   */
-  @Override
-  public long bbrMaxInFlight() {
-    return bbrRateLimiter == null ? -1 : bbrRateLimiter.getCurrentMaxInFlight();
-  }
-
-  /**
-   * Return the current damped budget baseline of the BBR rate limiter.
-   *
-   * @return current damped baseline, or {@code -1} if BBR rate limiting is disabled
-   */
-  @Override
-  public long bbrBalancedInFlight() {
-    return bbrRateLimiter == null ? -1 : bbrRateLimiter.getBalancedInFlight();
-  }
-
-  @Override
-  public long bbrMaxPass() {
-    return bbrRateLimiter == null ? -1 : bbrRateLimiter.getCurrentMaxPass();
-  }
-
-  @Override
-  public long bbrMinRt() {
-    return bbrRateLimiter == null ? -1 : bbrRateLimiter.getCurrentMinRt();
-  }
-
-  @Override
-  public long bbrYielded() {
-    return bbrRateLimiter == null ? -1 : bbrRateLimiter.getTotalDownstreamYields();
-  }
-
-  @Override
-  public boolean feedLoopEnabled() {
-    return intervalFeedLoop != null;
-  }
-
-  @Override
-  public long feedLoopIntervalMs() {
-    ReportFeedLoop feedLoop = intervalFeedLoop;
-    return feedLoop == null ? -1 : feedLoop.intervalMs();
-  }
-
-  @Override
-  public long feedLoopScoreBp() {
-    ReportFeedLoop feedLoop = intervalFeedLoop;
-    return feedLoop == null ? -1 : feedLoop.lastScoreBp();
-  }
-
-  @Override
-  public long feedLoopBatchSize() {
-    ReportFeedLoop feedLoop = intervalFeedLoop;
-    return feedLoop == null ? -1 : feedLoop.lastAvgBatchSize();
-  }
-
-  /**
-   * Manages a bounded work queue and a fixed pool of consumer threads that
-   * drain batches and publish them via {@link ReportPublisher}.
-   *
-   * <p>Burst absorption: the bound on {@code LinkedBlockingQueue} prevents
-   * the flush callback from overwhelming RabbitMQ.  When the queue is
-   * persistently full, batches are dropped after a configurable timeout.
-   */
-  class ReportDispatcher {
-
-    /** Bounded work queue between the flush loop and the consumer threads. */
-    private final BlockingQueue<ShardBatch> queue = new LinkedBlockingQueue<>(queueCapacity);
-    /**
-     * Count of batches discarded by the consumer because their target Worker
-     * was no longer alive at consumption time (the dead-worker guard in
-     * {@link #consumeLoop()}) — the worker-partition stall signal. When a
-     * batch is both dead-target and stale, it is attributed here: the
-     * partition is the more actionable signal.
-     */
-    private final AtomicLong expiredDeadTargetCount = new AtomicLong();
-    /**
-     * Count of batches discarded because they waited longer than 5 s in the
-     * queue (staleness expiry under backpressure) — the report-backpressure
-     * stall signal.
-     */
-    private final AtomicLong expiredStaleCount = new AtomicLong();
-    /** Count of batches rejected because the queue was full. */
-    private final AtomicLong droppedCount = new AtomicLong();
-    /** Timeout for a single publish call before we give up and treat it as dropped. */
+    /** One publish call's budget before the consumer thread is interrupted. */
     private static final long PUBLISH_TIMEOUT_MS = 5_000;
-    /** Queue wait after which a batch is discarded as stale instead of published. */
+    /** Watchdog scan cadence; bounds the overrun past {@link #PUBLISH_TIMEOUT_MS}. */
+    private static final long WATCHDOG_SWEEP_MS = 100;
+    /** Queue wait after which a batch is discarded as stale rather than published. */
     private static final long STALE_BATCH_MS = 5_000;
-    /** Consumer thread pool draining the work queue. */
+
+    private final BlockingQueue<ShardBatch> queue = new LinkedBlockingQueue<>(queueCapacity);
+    private final AtomicLong expiredDeadTargetCount = new AtomicLong();
+    private final AtomicLong expiredStaleCount = new AtomicLong();
+    private final AtomicLong droppedCount = new AtomicLong();
+    private final ScheduledExecutorService publishTimer;
+    /** One permanent slot per consumer thread, swept by the single timer. */
+    private final ConsumerWatchdogSlot[] watchdogs;
     private final ExecutorService consumers;
-    /** Dedicated executor for timed publish calls. */
-    private final ExecutorService publishTimeoutExecutor;
+
     /** Lifecycle flag; false after shutdown. */
     private volatile boolean running;
 
-    ReportDispatcher() {
-      this.consumers = Executors.newFixedThreadPool(consumerCount, new ZetaThreadFactory("zeta-report-consumer"));
-      this.publishTimeoutExecutor = new ThreadPoolExecutor(
-        Math.max(2, consumerCount),
-        Math.max(4, consumerCount * 2),
-        60L,
-        TimeUnit.SECONDS,
-        new ArrayBlockingQueue<>(Math.max(16, consumerCount * 8)),
-        new ZetaThreadFactory("zeta-report-publish-tmo"),
-        new ThreadPoolExecutor.AbortPolicy()
+    /** Makes a concurrent or repeated shutdown a no-op after the first close. */
+    private final AtomicBoolean closed = new AtomicBoolean();
+
+    Dispatcher() {
+      this.watchdogs = new ConsumerWatchdogSlot[consumerCount];
+      for (int i = 0; i < consumerCount; i++) {
+        watchdogs[i] = new ConsumerWatchdogSlot();
+      }
+      ScheduledExecutorService timer = Executors.newSingleThreadScheduledExecutor(
+        new ZetaThreadFactory("zeta-report-timer")
       );
+      ExecutorService pool = null;
+      try {
+        pool = Executors.newFixedThreadPool(consumerCount, new ZetaThreadFactory("zeta-report-consumer"));
+      } catch (Throwable t) {
+        timer.shutdownNow();
+        throw t;
+      }
+      this.publishTimer = timer;
+      this.consumers = pool;
     }
 
-    /**
-     * Start the consumer threads that drain batches from the bounded work
-     * queue and publish them via {@link ReportPublisher}.
-     *
-     * <p>Each consumer runs on a named daemon thread pool thread
-     * ({@code "zeta-report-consumer-N"}) so they do not prevent JVM shutdown.
-     * The number of consumer threads is determined by the
-     * {@code consumerCount} configuration.
-     */
     void start() {
       running = true;
       for (int i = 0; i < consumerCount; i++) {
-        consumers.submit(this::consumeLoop);
+        ConsumerWatchdogSlot slot = watchdogs[i];
+        consumers.submit(() -> consumeLoop(slot));
+      }
+      publishTimer.scheduleWithFixedDelay(
+        this::sweepWatchdogs,
+        WATCHDOG_SWEEP_MS,
+        WATCHDOG_SWEEP_MS,
+        TimeUnit.MILLISECONDS
+      );
+    }
+
+    private void sweepWatchdogs() {
+      long now = TimeSource.monotonicMillis();
+      for (ConsumerWatchdogSlot slot : watchdogs) {
+        slot.interruptIfExpired(now);
       }
     }
 
     /**
-     * Offer a batch to the bounded work queue with a timeout.
+     * Offer a batch to the bounded queue, waiting up to {@code timeoutMs} for space.
+     * An interrupt discards the batch and restores the flag.
      *
-     * <p>Blocks for up to {@code queueOfferTimeoutMs} milliseconds waiting
-     * for space to become available. If the queue remains full after the
-     * timeout, the batch is rejected and the drop counter is incremented.
-     *
-     * <p>If the calling thread is interrupted while waiting, the batch is
-     * discarded and {@code false} is returned.
-     *
-     * @param batch the sharded batch to enqueue for publishing
-     * @return {@code true} if the batch was accepted into the queue;
-     *         {@code false} if the queue was full or the thread was
-     *         interrupted
+     * @param batch     the batch to enqueue
+     * @param timeoutMs the remaining shared flush budget
+     * @return {@code true} when the batch was accepted
      */
-    boolean enqueue(ShardBatch batch) {
+    boolean enqueue(ShardBatch batch, long timeoutMs) {
+      if (!running) {
+        return false;
+      }
       try {
-        boolean accepted = queue.offer(batch, queueOfferTimeoutMs, TimeUnit.MILLISECONDS);
-        if (!accepted) {
+        boolean accepted = queue.offer(batch, timeoutMs, TimeUnit.MILLISECONDS);
+        // shutdown() flips running and then drains the queue. A batch offered after that
+        // drain would sit forever with no consumer, so withdraw it and report the same
+        // rejection the caller would have seen before the offer.
+        if (!accepted || (!running && queue.remove(batch))) {
           droppedCount.incrementAndGet();
+          return false;
         }
-        return accepted;
+
+        return true;
       } catch (InterruptedException e) {
         Thread.currentThread().interrupt();
+        droppedCount.incrementAndGet();
         return false;
       }
     }
 
-    /**
-     * Gracefully shut down all consumer threads.
-     *
-     * <p>Signals all consumers to stop via the {@code running} flag and
-     * executor {@link ExecutorService#shutdownNow()}, then waits up to 2
-     * seconds for termination. After shutdown, the queue may still contain
-     * unconsumed batches — they are discarded.
-     *
-     * <p>The dedicated publish timeout executor is also shut down to
-     * release any lingering publish threads.
-     *
-     * <p>This method is called from {@link KeyReporterImpl#stop()} and is
-     * idempotent. However, after shutdown the dispatcher cannot be
-     * restarted.
-     */
     void shutdown() {
+      if (!closed.compareAndSet(false, true)) {
+        return;
+      }
+      // Clear the flag first: a consumer blocked on a publish then re-tests it and exits
+      // instead of taking another item only to be interrupted again. The timer stops
+      // before the consumers, so shutdown's own interrupt is the only one in flight.
+      running = false;
+      publishTimer.shutdownNow();
       consumers.shutdownNow();
-      publishTimeoutExecutor.shutdownNow();
-
       try {
-        if (consumers.awaitTermination(2, TimeUnit.SECONDS)) {
-          running = false;
-        }
+        consumers.awaitTermination(2, TimeUnit.SECONDS);
       } catch (InterruptedException e) {
         Thread.currentThread().interrupt();
         log.warn("ReportDispatcher shutdown interrupted while waiting for consumers to terminate");
       }
-      // Drain remaining queue entries — each was onEnqueue'd but never processed,
-      // so we must onConsumerDrop to keep BBR inFlight balanced. A shutdown drain
-      // is a lifecycle event, not downstream saturation — LOCAL_REJECTED keeps it
-      // out of the downstream-yield confirmation.
-      BbrRateLimiter limiter = bbrRateLimiter;
-      if (limiter != null) {
-        List<ShardBatch> abandoned = new ArrayList<>();
-        queue.drainTo(abandoned);
-        if (!abandoned.isEmpty()) {
-          for (int i = 0; i < abandoned.size(); i++) {
-            limiter.onConsumerDrop(ConsumerDropCause.LOCAL_REJECTED);
-          }
-          log.info("Drained {} abandoned batches from queue and decremented inFlight", abandoned.size());
-        }
-      }
+
+      int abandoned = queue.size();
+      queue.clear();
       log.info(
-        "ReportDispatcher stopped, remaining queue={}, expired={} (deadTarget={}, stale={}), dropped={}",
-        queue.size(),
-        expired(),
+        "ReportDispatcher stopped, abandonedQueue={}, expiredDeadTarget={}, expiredStale={}, dropped={}",
+        abandoned,
         expiredDeadTargetCount.get(),
         expiredStaleCount.get(),
         droppedCount.get()
       );
     }
 
-    /**
-     * Return the current number of batches waiting in the work queue.
-     *
-     * @return current queue depth (non-negative)
-     */
     int depth() {
       return queue.size();
     }
 
-    /**
-     * Return the maximum number of batches the work queue can hold.
-     *
-     * @return the configured queue capacity
-     */
-    int capacity() {
-      return queueCapacity;
-    }
-
-    /**
-     * Return the number of consumer threads configured for this dispatcher.
-     *
-     * @return the configured consumer thread count
-     */
-    int consumerCount() {
-      return KeyReporterImpl.this.consumerCount;
-    }
-
-    /**
-     * Return the total number of batches discarded by the consumer since
-     * startup — the sum of the two discard causes tracked by
-     * {@link #expiredDeadTargetCount} and {@link #expiredStaleCount}
-     * (kept for metric continuity with the former conflation).
-     *
-     * @return total discarded batch count
-     */
-    long expired() {
-      return expiredDeadTargetCount.get() + expiredStaleCount.get();
-    }
-
-    /** Total batches discarded because their target Worker was no longer alive. */
-    long deadTargetExpired() {
+    long expiredDeadTarget() {
       return expiredDeadTargetCount.get();
     }
 
-    /** Total batches discarded because they waited past the 5 s staleness bound. */
-    long staleExpired() {
+    long expiredStale() {
       return expiredStaleCount.get();
     }
 
-    /**
-     * Return the total number of batches that were rejected because the
-     * queue was full since startup.
-     *
-     * @return total dropped batch count
-     */
     long dropped() {
       return droppedCount.get();
     }
 
     /**
-     * Consumer thread body: poll batches from the queue and publish them.
+     * Records batches the routing layer refused before an offer: a shared offer budget that
+     * expired between targets, or a queue offer that lost to shutdown. The queue's own
+     * {@link #enqueue} path counts its internal withdrawal separately.
      *
-     * <p>Staleness guard: batches that waited longer than 5 s in the queue
-     * are discarded rather than published, preventing the Worker from receiving
-     * stale access patterns during prolonged backpressure.
-     *
-     * <p>When BBR rate limiting is active:
-     * <ul>
-     *   <li>Successful publish records round-trip time via {@link BbrRateLimiter#onSuccess(long)}</li>
-     *   <li>Stale batches (5s+ wait) or publish failures type ,
-     *       allowing BBR to back off the send rate and prevent cascading overload</li>
-     *   <li>InterruptedException is handled separately (break, not logged as error)
-     *       to avoid noise during orderly shutdown</li>
-     * </ul>
+     * @param batches the number of batches not offered
      */
-    @SuppressWarnings("all")
-    private void consumeLoop() {
+    void recordDropped(long batches) {
+      if (batches > 0L) {
+        droppedCount.addAndGet(batches);
+      }
+    }
+
+    /**
+     * A consumer thread's permanent timeout slot. {@code arm}/{@code disarm} and the
+     * timer's {@code interruptIfExpired} synchronize on this object, so an interrupt
+     * cannot be delivered after {@code disarm} returns — otherwise it would leak into the
+     * next {@code take()}.
+     */
+    private static final class ConsumerWatchdogSlot {
+
+      @GuardedBy("this")
+      private Thread consumer;
+
+      /** 0 = idle; otherwise the monotonic deadline of the publish in flight. */
+      @GuardedBy("this")
+      private long deadlineMs;
+
+      synchronized void bind(Thread thread) {
+        this.consumer = thread;
+      }
+
+      synchronized void arm(long deadlineMs) {
+        this.deadlineMs = deadlineMs;
+      }
+
+      synchronized void disarm() {
+        this.deadlineMs = 0L;
+      }
+
+      synchronized void interruptIfExpired(long now) {
+        if (deadlineMs > 0L && now >= deadlineMs) {
+          deadlineMs = 0L;
+          consumer.interrupt();
+        }
+      }
+    }
+
+    /**
+     * Consumer body: take one batch, discard it when its target died or it waited past the
+     * staleness bound, otherwise publish it synchronously with an interrupting timeout.
+     */
+    private void consumeLoop(ConsumerWatchdogSlot watchdog) {
+      watchdog.bind(Thread.currentThread());
       while (running) {
         ShardBatch batch;
         try {
           batch = queue.take();
         } catch (InterruptedException e) {
-          log.warn("ReportDispatcher consumer interrupted, shutting down");
+          if (running) {
+            // A publish-timeout interrupt can arrive just after the publish returned and
+            // the finally cleared the flag. That is not a shutdown signal; discarding it
+            // here keeps the consumer alive.
+            continue;
+          }
+          log.debug("Report consumer interrupted, shutting down");
           Thread.currentThread().interrupt();
           break;
         }
 
-        BbrRateLimiter limiter = bbrRateLimiter;
-
-        // Dead-worker guard — discard if target is no longer alive.
-        // Covers the window between enqueue and consumption when a Worker dies.
-        // The alive set is snapshotted once per loop iteration instead of per
-        // batch: getAliveWorkerIds() streams every health record into a fresh
-        // HashSet, and a burst of shard batches would otherwise pay that
-        // O(workers) cost per batch on the publish path.
-        Set<String> aliveWorkers = healthView.getAliveWorkerIds();
-        boolean deadTarget = !aliveWorkers.contains(batch.target());
-        boolean stale = currentTimeMillis() - batch.timestamp() > STALE_BATCH_MS;
+        boolean deadTarget = !healthView.isCurrentIncarnation(batch.target(), batch.targetEpoch());
+        boolean stale = TimeSource.monotonicMillis() - batch.enqueuedAt() > STALE_BATCH_MS;
         if (deadTarget || stale) {
           (deadTarget ? expiredDeadTargetCount : expiredStaleCount).incrementAndGet();
-          if (limiter != null) {
-            // Only staleness is downstream-yield evidence; a dead target is a
-            // routing event, not saturation (kernel bbr_lt_bw attribution).
-            limiter.onConsumerDrop(deadTarget ? ConsumerDropCause.DEAD_TARGET : ConsumerDropCause.STALE);
-          }
           continue;
         }
 
-        final ShardBatch fb = batch;
-        final long dequeueTime = currentTimeMillis();
-        final BbrRateLimiter capturedLimiter = limiter;
+        watchdog.arm(TimeSource.monotonicMillis() + PUBLISH_TIMEOUT_MS);
         try {
-          CompletableFuture.runAsync(
-            () ->
-              reportPublisher.publish(
-                fb.target(),
-                new ReportMessage(snowflakeIdGenerator.nextId(), appName, fb.timestamp(), fb.counts())
-              ),
-            publishTimeoutExecutor
-          )
-            .orTimeout(PUBLISH_TIMEOUT_MS, TimeUnit.MILLISECONDS)
-            .whenComplete((ok, ex) -> {
-              if (ex != null) {
-                if (lastPublishErrorLogged.compareAndSet(false, true)) {
-                  log.error(
-                    "Failed to publish report batch for target={}, keys={}",
-                    fb.target(),
-                    fb.counts().size(),
-                    ex
-                  );
-                  scheduler.schedule(() -> lastPublishErrorLogged.set(false), 10, TimeUnit.SECONDS);
-                }
-                if (capturedLimiter != null) capturedLimiter.onConsumerDrop(ConsumerDropCause.PUBLISH_FAILED);
-              } else if (capturedLimiter != null) {
-                // Use only publish time (dequeue → completion), not queue wait,
-                // so that backpressure-driven queue buildup does not inflate minRT.
-                capturedLimiter.onSuccess(currentTimeMillis() - dequeueTime);
-              }
-            });
-        } catch (RejectedExecutionException ree) {
-          droppedCount.incrementAndGet();
-          if (capturedLimiter != null) capturedLimiter.onConsumerDrop(ConsumerDropCause.LOCAL_REJECTED);
+          reportPublisher.publish(
+            batch.target(),
+            new ReportMessage(
+              TimeSource.currentTimeMillis(),
+              appName,
+              batch.timestamp(),
+              batch.targetEpoch(),
+              batch.counts()
+            )
+          );
+        } catch (RuntimeException e) {
+          log.warn("Failed to publish report batch for target={}, keys={}", batch.target(), batch.counts().size(), e);
+        } finally {
+          // Disarm waits for an in-flight interrupt: once it returns, no timer task can
+          // interrupt this thread before the flag is cleared below.
+          watchdog.disarm();
+          Thread.interrupted();
         }
       }
     }

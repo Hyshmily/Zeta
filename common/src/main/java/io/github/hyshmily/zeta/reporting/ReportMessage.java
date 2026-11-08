@@ -15,16 +15,21 @@
  */
 package io.github.hyshmily.zeta.reporting;
 
-import io.github.hyshmily.zeta.Internal;
+import io.github.hyshmily.zeta.util.Internal;
 import java.util.Map;
 
 /**
  * A batched report of access counts sent from an app instance to the Worker.
  *
- * @param id        globally unique, time-sortable Snowflake message ID for tracing
- * @param appName   the reporting application name
- * @param timestamp the time at which the report was generated
- * @param counts    a map of key → cumulative access count
+ * @param id          time-sortable message trace ID; orders nothing and may coincide
+ *                    across reports in one millisecond
+ * @param appName     the reporting application name
+ * @param timestamp   wall-clock ms when the batch was assembled; the Worker's optional
+ *                    staleness filter measures the report's age against it
+ * @param targetEpoch the epoch of the Worker incarnation this report was routed to;
+ *                    the receiving Worker drops the report unless it matches its own
+ *                    epoch (design decisions: reporting)
+ * @param counts      per-key access counts accumulated since the previous flush
  */
 @Internal
-public record ReportMessage(long id, String appName, long timestamp, Map<String, Long> counts) {}
+public record ReportMessage(long id, String appName, long timestamp, long targetEpoch, Map<String, Long> counts) {}

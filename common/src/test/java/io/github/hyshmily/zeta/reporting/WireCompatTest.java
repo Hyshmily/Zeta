@@ -16,29 +16,38 @@
 package io.github.hyshmily.zeta.reporting;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.fasterxml.jackson.databind.DeserializationFeature;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hyshmily.zeta.sync.worker.WorkerDecisionType;
 import io.github.hyshmily.zeta.sync.worker.WorkerMessage;
 import java.nio.charset.StandardCharsets;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
 import org.springframework.amqp.core.Message;
 import org.springframework.amqp.core.MessageProperties;
+import org.springframework.amqp.support.converter.Jackson2JsonMessageConverter;
 
 /**
- * Wire-compatibility pins (ADR-0091): additive evolution must not break old
- * receivers, and newer binary versions must be rejected, never misparsed.
+ * Wire-compatibility pins (design decisions: sync messages): additive evolution must not break old
+ * receivers. Report messages are Jackson JSON only.
  */
 class WireCompatTest {
 
+  private static Jackson2JsonMessageConverter forwardCompatibleConverter() {
+    ObjectMapper mapper = new ObjectMapper().configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
+    return new Jackson2JsonMessageConverter(mapper);
+  }
+
   @Test
   void reportJson_withUnknownField_decodesAndKeepsKnownFields() {
-    CompactAwareReportMessageConverter converter = CompactAwareReportMessageConverter.forwardCompatible(false);
+    Jackson2JsonMessageConverter converter = forwardCompatibleConverter();
     // Encode through the production path so the __TypeId__ header binds the
     // decode to ReportMessage exactly like the listener container does, then
     // splice in a field from a newer producer.
     Message encoded = converter.toMessage(
-      new ReportMessage(7L, "shop", 123L, Map.of("k", 2L)), new MessageProperties()
+      new ReportMessage(7L, "shop", 123L, 0L, Map.of("k", 2L)),
+      new MessageProperties()
     );
     String json = new String(encoded.getBody(), StandardCharsets.UTF_8);
     String evolved = json.substring(0, json.length() - 1) + ",\"futureField\":\"x\"}";
@@ -51,28 +60,20 @@ class WireCompatTest {
   }
 
   @Test
-  void compactNewerVersion_isRejectedNotMisparsed() {
-    ReportMessage message = new ReportMessage(1L, "shop", 2L, Map.of("k", 3L));
-    byte[] body = ReportMessageCodec.encode(message);
-    body[1] = 0x7F;
-    assertThatThrownBy(() -> ReportMessageCodec.decode(body))
-      .isInstanceOf(IllegalArgumentException.class)
-      .hasMessageContaining("unsupported version");
-  }
-
-  @Test
-  void headerFramedMessages_missingHeadersFallBackToDefaults() {
+  void headerFramedMessages_missingOptionalHeadersFallBackToDefaults() {
     MessageProperties props = new MessageProperties();
-    props.setHeader(
-      io.github.hyshmily.zeta.constants.ZetaConstants.Amqp.HEADER_TYPE,
-      WorkerMessage.TYPE_HOT
-    );
-    Message msg = new Message("k".getBytes(StandardCharsets.UTF_8), props);
-    WorkerMessage decoded = WorkerMessage.from(msg);
+    props.setHeader(io.github.hyshmily.zeta.constants.ZetaConstants.Amqp.HEADER_TYPE, WorkerDecisionType.HOT.code());
+    // The version is the one required header: without a positive stamp the decision is
+    // unorderable and is dropped at the wire boundary.
+    Message withoutVersion = new Message("k".getBytes(StandardCharsets.UTF_8), props);
+    assertThat(WorkerMessage.from(withoutVersion)).isNull();
+
+    props.setHeader(io.github.hyshmily.zeta.constants.ZetaConstants.Amqp.HEADER_VERSION, 7L);
+    WorkerMessage decoded = WorkerMessage.from(withoutVersion);
     assertThat(decoded).isNotNull();
     assertThat(decoded.cacheKey()).isEqualTo("k");
-    assertThat(decoded.decisionVersion()).isZero();
-    assertThat(decoded.nodeId()).isNull();
-    assertThat(decoded.epoch()).isZero();
+    assertThat(decoded.stamp().decisionVersion()).isEqualTo(7L);
+    assertThat(decoded.stamp().decisionNodeId()).isNull();
+    assertThat(decoded.stamp().decisionEpoch()).isZero();
   }
 }

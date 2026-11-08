@@ -17,15 +17,14 @@ package io.github.hyshmily.zeta.reporting;
 
 import static io.github.hyshmily.zeta.constants.ZetaConstants.Routing.KEY_REPORT;
 
-import io.github.hyshmily.zeta.Internal;
+import io.github.hyshmily.zeta.util.Internal;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.amqp.AmqpException;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 
 /**
- * Publishes access-count reports to the RabbitMQ reportToWorker exchange.
- * Each reportToWorker is routed to the specific Worker queue via the
+ * Publishes batched access-add reports to the RabbitMQ report exchange.
+ * Each batch is routed to a specific Worker queue via the
  * {@code reportToWorker.<appName>.<nodeId>} routing key.
  */
 @RequiredArgsConstructor
@@ -37,24 +36,23 @@ public class ReportPublisher {
   private final RabbitTemplate rabbitTemplate;
   /** Name of the RabbitMQ exchange to which reports are sent. */
   private final String reportExchange;
-  /** Application name; included in the routing key and message payload. */
+  /** Application name; prefixes the per-Worker routing key. */
   private final String appName;
 
   /**
-   * Publish a reportToWorker message for the given target.
+   * Publish a report message for the given target.
    *
    * @param target  the Worker nodeId
-   * @param message the reportToWorker data
+   * @param message the report data
    */
   public void publish(String target, ReportMessage message) {
     String routingKey = KEY_REPORT + appName + "." + target;
-    try {
-      rabbitTemplate.convertAndSend(reportExchange, routingKey, message);
-    } catch (AmqpException e) {
-      throw new AmqpException("Failed to publish report", e);
-    }
+    rabbitTemplate.convertAndSend(reportExchange, routingKey, message);
+    // Only oversized batches are traced: the common small batch is not worth a
+    // per-flush debug call, while a >=100-key batch is where serialization and
+    // message size actually matter.
     if (message.counts().size() >= 100) {
-      log.debug("Published reportToWorker: target={}, routingKey={}, message={}", target, routingKey, message);
+      log.debug("Published report: target={}, routingKey={}, keys={}", target, routingKey, message.counts().size());
     }
   }
 }

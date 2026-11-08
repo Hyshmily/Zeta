@@ -17,21 +17,17 @@ package io.github.hyshmily.zeta.reporting;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyLong;
-import static org.mockito.ArgumentMatchers.anySet;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
-import io.github.hyshmily.zeta.reporting.impl.BbrRateLimiterImpl;
+import io.github.hyshmily.zeta.cache.AccessCounter;
 import io.github.hyshmily.zeta.reporting.impl.KeyReporterImpl;
+import io.github.hyshmily.zeta.sharding.ConsistentHashRing;
+import io.github.hyshmily.zeta.sharding.ConsistentHashRingImpl;
 import io.github.hyshmily.zeta.sharding.HealthView;
-import io.github.hyshmily.zeta.sharding.RingManager;
-import io.github.hyshmily.zeta.sharding.impl.HealthViewImpl;
-import io.github.hyshmily.zeta.sharding.impl.RingManagerImpl;
+import io.github.hyshmily.zeta.sharding.HealthViewImpl;
 import io.github.hyshmily.zeta.sync.worker.WorkerHeartbeatMessage;
-import io.github.hyshmily.zeta.util.SystemLoadMonitor;
-import io.github.hyshmily.zeta.util.id.SnowflakeIdGenerator;
 import java.lang.reflect.Field;
 import java.util.List;
 import java.util.Map;
@@ -45,7 +41,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
-class ZetaReporterTest {
+class KeyReporterTest {
 
   private static final long REPORT_INTERVAL_MS = 50;
   private static final int QUEUE_CAPACITY = 1000;
@@ -53,9 +49,10 @@ class ZetaReporterTest {
 
   private ScheduledExecutorService scheduler;
   private TestReportPublisher testPublisher;
-  private RingManager ringManager;
+  private ConsistentHashRing ring;
   private HealthView healthView;
   private KeyReporterImpl reporter;
+  private AccessCounter reporterCounter;
 
   static class TestReportPublisher extends ReportPublisher {
 
@@ -79,20 +76,17 @@ class ZetaReporterTest {
   void setUp() {
     scheduler = Executors.newSingleThreadScheduledExecutor();
     testPublisher = new TestReportPublisher();
-    ringManager = new RingManagerImpl(150);
-    healthView = new HealthViewImpl(30000, 3);
-    reporter = new KeyReporterImpl(
-      testPublisher,
+    ring = new ConsistentHashRingImpl(150);
+    healthView = new HealthViewImpl(30000);
+    reporter = new KeyReporterImpl(testPublisher, "testApp", QUEUE_CAPACITY, 100, 1, ring, healthView);
+    reporterCounter = new AccessCounter(
+      mock(io.github.hyshmily.zeta.hotkeydetector.HotKeyDetector.class),
+      reporter,
       scheduler,
-      REPORT_INTERVAL_MS,
-      "testApp",
-      QUEUE_CAPACITY,
-      100,
-      1,
-      ringManager,
-      healthView,
-      mock(SnowflakeIdGenerator.class)
+      50L,
+      AccessCounter.DEFAULT_DETECTOR_INTERVAL_MS
     );
+    reporterCounter.afterPropertiesSet();
   }
 
   @AfterEach
@@ -102,7 +96,7 @@ class ZetaReporterTest {
   }
 
   private static void registerWorker(HealthView hv, String workerId) {
-    hv.onHeartbeat(new WorkerHeartbeatMessage(0L, workerId, 1, 0.0, true, 0, 0, 0, 0));
+    hv.onHeartbeat(new WorkerHeartbeatMessage(0L, workerId, 1L, true, null));
   }
 
   private void awaitPublish(int minCount) throws InterruptedException {
@@ -117,63 +111,56 @@ class ZetaReporterTest {
 
   @Test
   void record_Report_shouldIncrementPendingCount() {
-    reporter.reportToWorker("key1");
-    reporter.reportToWorker("key1");
-    reporter.reportToWorker("key2");
-    assertThat(reporter.pendingKeyCount()).isPositive();
+    reporterCounter.add("key1");
+    reporterCounter.add("key1");
+    reporterCounter.add("key2");
+    assertThat(reporterCounter.pendingKeyCount()).isPositive();
   }
 
   @Test
   void record_Report_withNullKey_shouldBeIgnored() {
     // The underlying WaveCounter silently ignores null/empty keys (see
-    // WaveCounter.count), so the reporter must not throw either.
-    reporter.reportToWorker(null);
-    assertThat(reporter.pendingKeyCount()).isZero();
+    // WaveCounter.add), so the reporter must not throw either.
+    reporterCounter.add(null);
+    assertThat(reporterCounter.pendingKeyCount()).isZero();
   }
 
   @Test
   void start_shouldBeIdempotent() {
     reporter.start();
     reporter.start();
-    assertThat(reporter.dispatcherCapacity()).isEqualTo(QUEUE_CAPACITY);
+    assertThat(reporter.dispatcherStats().depth()).isNotNegative();
   }
 
   @Test
   void stop_shouldPreventFurtherPublishing() throws Exception {
     registerWorker(healthView, "worker-1");
     reporter.start();
-    reporter.reportToWorker("key-b");
+    reporterCounter.add("key-b");
     awaitPublish(1);
     int beforeStop = testPublisher.publishCount;
     reporter.stop();
-    reporter.reportToWorker("key-c");
+    reporterCounter.add("key-c");
     Thread.sleep(REPORT_INTERVAL_MS * 3 + 200);
     assertThat(testPublisher.publishCount).isEqualTo(beforeStop);
   }
 
   @Test
-  void dispatcherDepth_shouldReturnMinusOneBeforeStart() {
-    assertThat(reporter.dispatcherDepth()).isEqualTo(-1);
+  void dispatcherStats_shouldBeNullBeforeStart() {
+    assertThat(reporter.dispatcherStats()).isNull();
   }
 
   @Test
-  void dispatcherDepth_shouldReturnNonNegativeAfterStart() {
+  void dispatcherStats_shouldReturnNonNegativeDepthAfterStart() {
     reporter.start();
-    assertThat(reporter.dispatcherDepth()).isNotNegative();
-  }
-
-  @Test
-  void dispatcherCapacity_shouldReturnConfiguredCapacity() {
-    assertThat(reporter.dispatcherCapacity()).isEqualTo(-1);
-    reporter.start();
-    assertThat(reporter.dispatcherCapacity()).isEqualTo(QUEUE_CAPACITY);
+    assertThat(reporter.dispatcherStats().depth()).isNotNegative();
   }
 
   @Test
   void record_Report_shouldPublishAfterFlush() throws Exception {
     registerWorker(healthView, "worker-1");
     reporter.start();
-    reporter.reportToWorker("key-a");
+    reporterCounter.add("key-a");
     awaitPublish(1);
     assertThat(testPublisher.publishCount).isPositive();
   }
@@ -182,9 +169,9 @@ class ZetaReporterTest {
   void multipleRecordsForSameKey_shouldPublishAggregatedCount() throws Exception {
     registerWorker(healthView, "worker-1");
     reporter.start();
-    reporter.reportToWorker("agg-key");
-    reporter.reportToWorker("agg-key");
-    reporter.reportToWorker("agg-key");
+    reporterCounter.add("agg-key");
+    reporterCounter.add("agg-key");
+    reporterCounter.add("agg-key");
     awaitPublish(1);
     long total = testPublisher.messages
       .stream()
@@ -199,8 +186,8 @@ class ZetaReporterTest {
   void recordsForDifferentKeys_shouldPublishAsBatch() throws Exception {
     registerWorker(healthView, "worker-1");
     reporter.start();
-    reporter.reportToWorker("key-x");
-    reporter.reportToWorker("key-y");
+    reporterCounter.add("key-x");
+    reporterCounter.add("key-y");
     // Wait until both keys appear across all messages (eager swap may
     // split keys across multiple batches).
     long deadline = System.currentTimeMillis() + AWAIT_TIMEOUT_MS;
@@ -222,7 +209,7 @@ class ZetaReporterTest {
   @Test
   void gracefulDegradation_shouldDropRecordsWhenClusterUnhealthy() throws Exception {
     reporter.start();
-    reporter.reportToWorker("ghost-key");
+    reporterCounter.add("ghost-key");
     Thread.sleep(REPORT_INTERVAL_MS * 3 + 500);
     assertThat(testPublisher.publishCount).isZero();
   }
@@ -252,8 +239,8 @@ class ZetaReporterTest {
   void record_Report_withEmptyKey_shouldBeIgnored() throws Exception {
     registerWorker(healthView, "worker-1");
     reporter.start();
-    reporter.reportToWorker("");
-    // The WaveCounter drops blank keys at count() (documented: "blank keys
+    reporterCounter.add("");
+    // The WaveCounter drops blank keys at add() (documented: "blank keys
     // are silently ignored"), so an empty report must never publish.
     Thread.sleep(REPORT_INTERVAL_MS * 3 + 200);
     assertThat(testPublisher.publishCount).isZero();
@@ -263,29 +250,22 @@ class ZetaReporterTest {
   void record_Report_withVeryLongKey_shouldWork() throws Exception {
     registerWorker(healthView, "worker-1");
     reporter.start();
-    reporter.reportToWorker("k".repeat(10_000));
+    reporterCounter.add("k".repeat(10_000));
     awaitPublish(1);
     assertThat(testPublisher.publishCount).isPositive();
   }
 
   @Test
-  void bbrMethods_withoutBbr_shouldReturnMinusOne() {
-    assertThat(reporter.bbrPassed()).isEqualTo(-1);
-    assertThat(reporter.bbrDropped()).isEqualTo(-1);
-    assertThat(reporter.bbrInFlight()).isEqualTo(-1);
-    assertThat(reporter.bbrMaxInFlight()).isEqualTo(-1);
-  }
-
-  @Test
   void dispatcherExpired_shouldBeZeroInitially() {
     reporter.start();
-    assertThat(reporter.dispatcherExpired()).isZero();
+    KeyReporter.DispatcherStats stats = reporter.dispatcherStats();
+    assertThat(stats.expiredDeadTarget() + stats.expiredStale()).isZero();
   }
 
   @Test
   void dispatcherDropped_shouldBeZeroInitially() {
     reporter.start();
-    assertThat(reporter.dispatcherDropped()).isZero();
+    assertThat(reporter.dispatcherStats().dropped()).isZero();
   }
 
   @Test
@@ -293,7 +273,7 @@ class ZetaReporterTest {
     registerWorker(healthView, "worker-1");
     reporter.start();
     for (int i = 0; i < 100; i++) {
-      reporter.reportToWorker("bulk-key-" + i);
+      reporterCounter.add("bulk-key-" + i);
     }
     // Wait until all 100 distinct keys appear across all messages (periodic flush may
     // eager swap may split keys across multiple batches).
@@ -316,107 +296,80 @@ class ZetaReporterTest {
   }
 
   @Test
-  void flush_withBbrRateLimiter_shouldWireCorrectly() {
-    SystemLoadMonitor cpuMonitor = mock(SystemLoadMonitor.class);
-    when(cpuMonitor.getCpuLoadEMA()).thenReturn(0.9);
-    BbrRateLimiterImpl bbr = new BbrRateLimiterImpl(cpuMonitor, 800, 500, 5, 1000, 128L);
-    reporter.setBbrRateLimiter(bbr);
-    assertThat(reporter.bbrPassed()).isZero();
-    assertThat(reporter.bbrDropped()).isZero();
-    assertThat(reporter.bbrInFlight()).isZero();
-    assertThat(reporter.bbrMaxInFlight()).isEqualTo(1);
-  }
-
-  @Test
-  void flush_withBbrRateLimiterAndRecords_shouldTrackMetrics() throws Exception {
-    SystemLoadMonitor cpuMonitor = mock(SystemLoadMonitor.class);
-    when(cpuMonitor.getCpuLoadEMA()).thenReturn(0.5);
-    BbrRateLimiterImpl bbr = new BbrRateLimiterImpl(cpuMonitor, 800, 500, 5, 1000, 128L);
-    reporter.setBbrRateLimiter(bbr);
-    registerWorker(healthView, "worker-1");
-    reporter.start();
-    reporter.reportToWorker("bbr-key");
-    awaitPublish(1);
-    assertThat(reporter.bbrPassed()).isPositive();
-  }
-
-  @Test
-  void flush_withHighCpuBbr_shouldDropRecords() throws Exception {
-    SystemLoadMonitor cpuMonitor = mock(SystemLoadMonitor.class);
-    when(cpuMonitor.getCpuLoadEMA()).thenReturn(1.0);
-    BbrRateLimiterImpl bbr = new BbrRateLimiterImpl(cpuMonitor, 800, 500, 5, 1000, 128L);
-    reporter.setBbrRateLimiter(bbr);
-    registerWorker(healthView, "worker-1");
-    reporter.start();
-    reporter.reportToWorker("high-cpu-key");
-    Thread.sleep(REPORT_INTERVAL_MS * 3 + 500);
-    assertThat(reporter.bbrDropped()).isNotNegative();
-  }
-
-  @Test
-  void start_withFailedScheduler_shouldHandleGracefully() {
-    ScheduledExecutorService brokenScheduler = mock(ScheduledExecutorService.class);
-    when(brokenScheduler.scheduleAtFixedRate(any(), anyLong(), anyLong(), any())).thenThrow(
-      new RuntimeException("scheduler failure")
-    );
+  void start_andStop_shouldHandleGracefully() {
+    // design decisions: access counting: the reporter owns no scheduler any more (the counting tide
+    // lives on the shared access counter) — start/stop now only manage the
+    // routing executor and the publish consumers, and must stay resilient
+    // (idempotent start, quiet stop).
     KeyReporter failingReporter = new KeyReporterImpl(
       testPublisher,
-      brokenScheduler,
-      REPORT_INTERVAL_MS,
       "testApp",
       QUEUE_CAPACITY,
       100,
       1,
-      ringManager,
-      healthView,
-      mock(SnowflakeIdGenerator.class)
+      ring,
+      healthView
     );
+    AccessCounter failingReporterCounter = new AccessCounter(
+      mock(io.github.hyshmily.zeta.hotkeydetector.HotKeyDetector.class),
+      failingReporter,
+      scheduler,
+      50L,
+      AccessCounter.DEFAULT_DETECTOR_INTERVAL_MS
+    );
+    failingReporterCounter.afterPropertiesSet();
     failingReporter.start();
-    assertThat(failingReporter.dispatcherDepth()).isNotNegative();
+    failingReporter.start(); // idempotent
+    assertThat(failingReporter.dispatcherStats().depth()).isNotNegative();
     failingReporter.stop();
+    failingReporter.stop(); // idempotent
   }
 
   /**
    * Verifies the detached-routing-task failure guard: a throwing
-   * {@code routeNode} previously vanished with the discarded Future — no log,
+   * {@code locateNode} previously vanished with the discarded Future — no log,
    * no counter bump, and recurring failures silenced ALL reporting. Now the
-   * failure is counted on the unroutable-drop counter (rate-limited ERROR)
+   * failure is counted on the unroutable-drop counter (DEBUG line)
    * and the flush loop keeps routing later batches normally.
    */
   @Test
-  void flush_routeNodeThrows_shouldCountFailureAndKeepFlushLoopAlive() throws Exception {
+  void flush_locateNodeThrows_shouldCountFailureAndKeepFlushLoopAlive() throws Exception {
     AtomicInteger routeCalls = new AtomicInteger();
-    RingManager failingRing = mock(RingManager.class);
-    // onFlush() first materialises the alive set via reconcileFromHealthView; without this stub
+    ConsistentHashRing failingRing = mock(ConsistentHashRing.class);
+    // onFlush() first materialises the alive set via rebuildIfPossible; without this stub
     // the mock returns null, onFlush NPEs on aliveNodes.isEmpty() and the routing-failure counter
-    // path is never exercised. Production routing calls routeNode(key, Predicate) (not the Set
-    // overload), so the stub must match that overload to let the good-key batch publish.
-    when(failingRing.reconcileFromHealthView(any())).thenReturn(Set.of("worker-1"));
-    when(failingRing.routeNode(anyString(), any(java.util.function.Predicate.class)))
-      .thenAnswer(inv -> {
-        if (routeCalls.incrementAndGet() <= 1) {
-          throw new IllegalStateException("ring boom");
-        }
-        return "worker-1";
-      });
+    // path is never exercised. Production routes on the captured epoch map, so the stub must
+    // match the predicate overload to let the good-key batch publish.
+    when(failingRing.rebuildIfPossible(any())).thenReturn(Set.of("worker-1"));
+    when(failingRing.locateNode(anyString(), any(java.util.function.Predicate.class))).thenAnswer(inv -> {
+      if (routeCalls.incrementAndGet() <= 1) {
+        throw new IllegalStateException("ring boom");
+      }
+      return "worker-1";
+    });
 
     KeyReporterImpl failing = new KeyReporterImpl(
       testPublisher,
-      scheduler,
-      REPORT_INTERVAL_MS,
       "testApp",
       QUEUE_CAPACITY,
       100,
       1,
       failingRing,
-      healthView,
-      mock(SnowflakeIdGenerator.class)
+      healthView
     );
+    AccessCounter failingCounter = new AccessCounter(
+      mock(io.github.hyshmily.zeta.hotkeydetector.HotKeyDetector.class),
+      failing,
+      scheduler,
+      50L,
+      AccessCounter.DEFAULT_DETECTOR_INTERVAL_MS
+    );
+    failingCounter.afterPropertiesSet();
     registerWorker(healthView, "worker-1");
     failing.start();
     try {
-      // First flush: routeNode throws inside the detached routing task.
-      failing.reportToWorker("boom-key");
+      // First flush: locateNode throws inside the detached routing task.
+      failingCounter.add("boom-key");
 
       AtomicLong unroutable = new AtomicLong(-1);
       long deadline = System.currentTimeMillis() + AWAIT_TIMEOUT_MS;
@@ -432,7 +385,7 @@ class ZetaReporterTest {
       assertThat(testPublisher.publishCount).isZero();
 
       // A later batch routes normally — the flush loop survived the failure.
-      failing.reportToWorker("good-key");
+      failingCounter.add("good-key");
       awaitPublish(1);
       assertThat(testPublisher.publishCount).isPositive();
     } finally {

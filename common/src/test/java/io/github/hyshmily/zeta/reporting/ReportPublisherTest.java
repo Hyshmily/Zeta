@@ -46,7 +46,7 @@ class ReportPublisherTest {
    */
   @Test
   void publish_shouldSendToCorrectRoutingKey() {
-    ReportMessage message = new ReportMessage(0L, "testApp", 1000L, Map.of("key1", 5L));
+    ReportMessage message = new ReportMessage(0L, "testApp", 1000L, 0L, Map.of("key1", 5L));
     publisher.publish("0", message);
     verify(rabbitTemplate).convertAndSend(
       eq(ZetaConstants.Exchange.REPORT),
@@ -57,7 +57,7 @@ class ReportPublisherTest {
 
   @Test
   void publish_withEmptyTarget_shouldSendCorrectly() {
-    ReportMessage message = new ReportMessage(0L, "testApp", 1000L, Map.of("key1", 5L));
+    ReportMessage message = new ReportMessage(0L, "testApp", 1000L, 0L, Map.of("key1", 5L));
     publisher.publish("", message);
     verify(rabbitTemplate).convertAndSend(
       eq(ZetaConstants.Exchange.REPORT),
@@ -73,14 +73,10 @@ class ReportPublisherTest {
 
   @Test
   void publish_whenAmqpException_shouldThrowToCaller() {
-    ReportMessage message = new ReportMessage(0L, "testApp", 1000L, Map.of("key1", 5L));
+    ReportMessage message = new ReportMessage(0L, "testApp", 1000L, 0L, Map.of("key1", 5L));
     doThrow(new AmqpException("Broker unavailable"))
       .when(rabbitTemplate)
-      .convertAndSend(
-        eq(ZetaConstants.Exchange.REPORT),
-        eq(KEY_REPORT + "testApp.target"),
-        any(ReportMessage.class)
-      );
+      .convertAndSend(eq(ZetaConstants.Exchange.REPORT), eq(KEY_REPORT + "testApp.target"), any(ReportMessage.class));
     org.junit.jupiter.api.Assertions.assertThrows(AmqpException.class, () -> publisher.publish("target", message));
   }
 }

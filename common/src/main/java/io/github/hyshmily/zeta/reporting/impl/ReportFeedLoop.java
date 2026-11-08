@@ -15,53 +15,27 @@
  */
 package io.github.hyshmily.zeta.reporting.impl;
 
-import io.github.hyshmily.zeta.Internal;
-import io.github.hyshmily.zeta.util.FeedLoop;
+import com.google.errorprone.annotations.concurrent.GuardedBy;
+import io.github.hyshmily.zeta.util.Internal;
+import io.github.hyshmily.zeta.util.TimeSource;
+import java.util.function.LongSupplier;
 import org.springframework.util.Assert;
 
 /**
- * Feed-loop interval tuner for the reporter flush cadence (ADR-0078) — the
- * {@code damon_feed_loop_next_input} controller applied to "how often should
- * this instance flush its report batches".
+ * Feed-loop interval tuner for the reporter flush cadence (design decisions: reporting): each
+ * completed flush is scored into the next flush interval, with
+ * {@code report-interval-target-batch} keys per window as the target.
  *
- * <p>
- * <b>Plant and score.</b> The input is the flush interval (the WaveCounter
- * tide-loop base); the score is the delivered batch size against the target
- * {@code N} keys per flush ({@code zeta.local.report-interval-target-batch}),
- * normalized to basis points so the goal reads {@code 10000}. Sparse batches
- * lengthen the interval (fewer, fuller AMQP messages — the per-message
- * overhead dominates at low traffic); dense batches shorten it (message size
- * and detection lag stay bounded at high traffic). The plant is convergent by
- * construction: interval ↑ → batch ↑ → score ↑, so a negative feedback step
- * always moves the score back toward the goal.
+ * <p>The plant input is the flush interval in ms; the observable is the arrival rate
+ * {@code batchSize / windowMs}. The score is that rate projected onto the interval in force for
+ * the measured window, in basis points against the target ({@link #GOAL_BP} is on target).
+ * {@link Mode#SHADOW} computes and exposes every value and applies nothing; {@link Mode#ON}
+ * hands each interval to the caller, which applies it to the tide base.
  *
- * <p>
- * <b>Noise handling.</b> Two refinements the kernel applies to its own loop:
- * the score is the <em>two-window average</em> of the last two completed batch
- * sizes (raw per-window scores on bursty traffic would oscillate the
- * interval), and the result is clamped into {@code [minIntervalMs,
- * maxIntervalMs]} — the ceiling doubles as the detection-lag bound, the floor
- * keeps the scheduler's minimum cadence. The feed function's own single-step
- * change is bounded by construction ({@code ≤ 2x} below the overshoot cliff),
- * which is the kernel's effective {@code [0.5x, 2x]} step limit.
- *
- * <p>
- * <b>Censoring is the caller's duty.</b> Only flushes that actually happened
- * may be fed here: empty snapshots, no-alive-Worker drops and BBR gate drops
- * must return before sampling (the kernel has no analog — its sampler always
- * completes its round). Feeding a censored cycle would teach the loop from
- * data that never reached the broker.
- *
- * <p>
- * <b>Shadow mode.</b> {@link Mode#SHADOW} computes and exposes everything
- * (interval trajectory, score, batch size) but the caller must not apply the
- * result — the gauge {@code zeta.reporter.feedloop.interval} shows on real
- * traffic what {@link Mode#ON} would do, before the operator flips the switch.
- *
- * <p>
- * Thread-safety: the sampling state is monitor-guarded (one call per flush;
- * the flush callback may run on a shared scheduler pool). Gauges read through
- * the same monitor or volatile fields.
+ * <p>Thread-safety: {@link #onFlushCompleted} is synchronized; the published values are one
+ * immutable {@link State} behind a single volatile write, so every getter reads one coherent
+ * snapshot and a caller that needs the interval, batch and score together uses the returned
+ * {@link State}.
  */
 @Internal
 public final class ReportFeedLoop {
@@ -75,25 +49,52 @@ public final class ReportFeedLoop {
     ON,
   }
 
-  /** Goal score in bp — batch sizes are normalized so on-target reads this. */
+  /**
+   * Low-pass time constant of the arrival-rate estimate, in ms: a sample is weighted by
+   * {@code 1 − e^(−Δt/τ)}.
+   */
+  private static final double RATE_TAU_MS = 250.0;
+
+  /** Deadband around {@link #GOAL_BP}: a score inside it holds the input unchanged (500 bp = ±5%). */
+  private static final long DEADBAND_BP = 500L;
+
+  /** The score of a flush whose projected batch equals the target: {@code 10000} basis points. */
   private static final long GOAL_BP = 10_000L;
 
-  private final Mode mode;
-  private final long targetBatch;
+  /** Minimum move outside the deadband, so millisecond truncation cannot stall the loop. */
+  private static final long MIN_STEP_MS = 1L;
+
+  /**
+   * One atomically published observation plus the decision it produced.
+   *
+   * @param intervalMs the base interval the loop has chosen for the next
+   *                   window (what {@link Mode#ON} applies)
+   * @param batchSize  the smoothed arrival rate projected onto the interval
+   *                   that was in force for the measured window — the evidence
+   *                   the decision was made from, not the next interval's
+   *                   projection. In apply mode this equals the observed
+   *                   batch's smoothed equivalent.
+   * @param scoreBp    {@code batchSize} against the target in bp
+   *                   ({@code -1} before the first sample)
+   */
+  public record State(long intervalMs, long batchSize, long scoreBp) {}
+
   private final long minIntervalMs;
   private final long maxIntervalMs;
+  private final LongSupplier clock;
+  private final long targetBatch;
+  private final Mode mode;
 
-  /** lastInput mirror: the base interval the NEXT batch accumulates under. */
-  private long intervalMs;
+  /** The single atomically published view (interval, projected batch, score). */
+  private volatile State state;
 
-  /** Previous window's batch size; {@code -1} = no completed window yet. */
-  private long prevBatch = -1;
+  /** Smoothed arrival rate in keys/ms; negative = no sample yet. */
+  @GuardedBy("this")
+  private double ratePerMs = -1.0;
 
-  /** Last two-window-averaged batch size ({@code -1} until the first sample). */
-  private long lastAvgBatch = -1;
-
-  /** Last computed score in bp ({@code -1} until the first sample). */
-  private volatile long lastScoreBp = -1;
+  /** Monotonic time of the last accepted sample. */
+  @GuardedBy("this")
+  private long lastSampleAtMs;
 
   /**
    * Create a tuner.
@@ -101,7 +102,7 @@ public final class ReportFeedLoop {
    * @param mode            {@link Mode#SHADOW} computes only, {@link Mode#ON}
    *                        applies
    * @param targetBatch     goal keys per flush ({@code N}, must be positive)
-   * @param minIntervalMs   interval floor (scheduler cadence bound)
+   * @param minIntervalMs   interval floor (scheduler cadence bound, positive)
    * @param maxIntervalMs   interval ceiling (detection-lag bound), ≥
    *                        {@code minIntervalMs}
    * @param seedIntervalMs  initial interval (the configured
@@ -109,47 +110,76 @@ public final class ReportFeedLoop {
    *                        {@code [min, max]}
    */
   public ReportFeedLoop(Mode mode, long targetBatch, long minIntervalMs, long maxIntervalMs, long seedIntervalMs) {
+    this(mode, targetBatch, minIntervalMs, maxIntervalMs, seedIntervalMs, TimeSource::monotonicMillis);
+  }
+
+  /** Test seam over the monotonic clock (the low-pass weight is wall-clock based). */
+  ReportFeedLoop(
+    Mode mode,
+    long targetBatch,
+    long minIntervalMs,
+    long maxIntervalMs,
+    long seedIntervalMs,
+    LongSupplier clock
+  ) {
     Assert.notNull(mode, "mode must not be null");
     Assert.isTrue(targetBatch > 0, "report-interval-target-batch must be positive");
     Assert.isTrue(minIntervalMs > 0, "report-interval-min-ms must be positive");
     Assert.isTrue(maxIntervalMs >= minIntervalMs, "report-interval-max-ms must be >= report-interval-min-ms");
+    Assert.notNull(clock, "clock must not be null");
     this.mode = mode;
+    this.clock = clock;
     this.targetBatch = targetBatch;
     this.minIntervalMs = minIntervalMs;
     this.maxIntervalMs = maxIntervalMs;
-    this.intervalMs = Math.min(Math.max(seedIntervalMs, minIntervalMs), maxIntervalMs);
+    long seed = Math.min(Math.max(seedIntervalMs, minIntervalMs), maxIntervalMs);
+    this.state = new State(seed, -1, -1);
   }
 
   /**
    * Feed one completed flush and compute the next base interval.
    *
-   * <p>
-   * Call exactly once per flush that actually reached the routing stage —
-   * censored cycles (empty snapshot, no alive Worker, BBR gate drop) must
-   * return upstream before this point.
+   * <p>Call exactly once per flush that happened. An empty snapshot is a
+   * zero-rate observation and is sampled with {@code batchSize = 0}; censored
+   * cycles (no alive Worker) must return upstream before this
+   * point. The caller guarantees {@code batchSize >= 0} and
+   * {@code windowMs > 0} (the contract lives on
+   * {@code KeyReporter#publishBatch}).
    *
-   * @param batchSize distinct keys delivered by the flush
-   * @return the next base interval in ms, clamped into
-   *         {@code [minIntervalMs, maxIntervalMs]}
+   * @param batchSize distinct keys delivered by the flush; {@code 0} for an empty window
+   * @param windowMs  measured monotonic window the batch accumulated over
+   * @return the next atomically published state
    */
-  public synchronized long onFlushCompleted(int batchSize) {
-    // Two-window average (kernel's noise filter): a single burst window must
-    // not move the interval; the first sample has no previous window.
-    long avg = prevBatch < 0 ? batchSize : (prevBatch + batchSize) >> 1;
-    prevBatch = batchSize;
-    lastAvgBatch = avg;
+  public synchronized State onFlushCompleted(int batchSize, long windowMs) {
+    long now = clock.getAsLong();
+    double sampleRate = (double) batchSize / windowMs;
 
-    // score = avg / targetBatch in bp; targetBatch >= 1 and avg is bounded by
-    // the reservoir cap (~100k), so the product cannot overflow.
-    long scoreBp = (avg * GOAL_BP) / targetBatch;
-    lastScoreBp = scoreBp;
+    if (ratePerMs < 0.0) {
+      ratePerMs = sampleRate;
+    } else {
+      // Wall-clock since the last sample, not just this window: a long delivery-censored
+      // gap must age the old estimate out instead of letting it dominate the first sample
+      // after the gap.
+      long gapMs = Math.max(windowMs, now - lastSampleAtMs);
+      double alpha = -Math.expm1(-(double) gapMs / RATE_TAU_MS);
+      ratePerMs += alpha * (sampleRate - ratePerMs);
+    }
+    lastSampleAtMs = now;
 
-    long next = FeedLoop.nextInput(intervalMs, scoreBp, minIntervalMs);
-    // Caller-policy window: the feed function floors at minInput already, but
-    // the ceiling (detection-lag bound) lives here.
+    State previous = state;
+    // The evidence belongs to the input that was in force for the measured
+    // window; the published interval is the decision that evidence produced.
+    // Score the unrounded projection: rounding before the ratio loses the whole
+    // signal for a small target (4.6 vs 5 with target 5 looks exact).
+    double rawProjected = ratePerMs * previous.intervalMs();
+    long projected = Math.round(rawProjected);
+    long scoreBp = scoreBp(rawProjected);
+    long next = nextInput(previous.intervalMs(), scoreBp, DEADBAND_BP);
     next = Math.min(Math.max(next, minIntervalMs), maxIntervalMs);
-    intervalMs = next;
-    return next;
+
+    State nextState = new State(next, projected, scoreBp);
+    state = nextState;
+    return nextState;
   }
 
   /** Return the tuning mode. */
@@ -158,17 +188,75 @@ public final class ReportFeedLoop {
   }
 
   /** Return the current base interval in ms (what {@link Mode#ON} would apply). */
-  public synchronized long intervalMs() {
-    return intervalMs;
+  public long intervalMs() {
+    return state.intervalMs();
   }
 
-  /** Return the last two-window-averaged batch size ({@code -1} before the first sample). */
-  public synchronized long lastAvgBatchSize() {
-    return lastAvgBatch;
+  /**
+   * Return the projected batch at the interval in force for the measured window ({@code -1} before
+   * the first sample).
+   */
+  public long projectedBatchSize() {
+    return state.batchSize();
   }
 
   /** Return the last computed score in bp ({@code -1} before the first sample). */
   public long lastScoreBp() {
-    return lastScoreBp;
+    return state.scoreBp();
+  }
+
+  /**
+   * Projected batch against the target in bp, computed from the unrounded projection so a
+   * fractional batch still moves the loop, saturated at {@code Long.MAX_VALUE}. A zero
+   * projection (an idle window) scores the floor, which pushes the cadence toward
+   * {@code maxIntervalMs} instead of looking exactly on target.
+   */
+  private long scoreBp(double projectedBatch) {
+    return Math.max(1L, Math.round((projectedBatch * (double) GOAL_BP) / targetBatch));
+  }
+
+  /**
+   * Next plant input from the previous one and the observed score — the
+   * {@code damon_feed_loop_next_input} port ({@code mm/damon/core.c}),
+   * rewritten as the plant's exact inverse.
+   *
+   * <p>
+   * Scores are basis points against {@link #GOAL_BP}. Inside
+   * {@code ±deadbandBp} the input holds. Outside it, {@code last × goal / score}
+   * is the interval at which the projected batch would equal the target, so a
+   * sparse and a dense window move the input by the same law and there is no
+   * overshoot cliff. The move is rate limited to {@code [0.5x, 2x]} per step
+   * (one noisy window cannot vault the cadence), and a move that rounds back to
+   * {@code lastInput} is forced to at least {@link #MIN_STEP_MS} in the error
+   * direction so integer truncation cannot stall the loop. The floor is the
+   * caller's policy; this function never returns less than 1.
+   *
+   * @param lastInput   previous input in ms, positive
+   * @param scoreBp     observed score in bp; non-positive is treated as 1
+   * @param deadbandBp  hold band around {@link #GOAL_BP}, non-negative
+   * @return the next input, saturated at {@code Long.MAX_VALUE}
+   */
+  static long nextInput(long lastInput, long scoreBp, long deadbandBp) {
+    long score = Math.max(1L, scoreBp);
+    if (Math.abs(score - GOAL_BP) <= deadbandBp) {
+      return lastInput;
+    }
+
+    long ideal = Math.round(((double) lastInput * GOAL_BP) / score);
+    long lower = Math.max(1L, lastInput >> 1);
+    long upper = lastInput > (Long.MAX_VALUE >> 1) ? Long.MAX_VALUE : lastInput << 1;
+    long next = Math.min(Math.max(ideal, lower), upper);
+
+    if (next == lastInput) {
+      // Integer truncation rounded the ideal move back to the input: force the
+      // smallest legal step in the error's direction. The upward branch saturates
+      // instead of overflowing at Long.MAX_VALUE.
+      if (score > GOAL_BP) {
+        next = Math.max(1L, lastInput - MIN_STEP_MS);
+      } else if (lastInput < Long.MAX_VALUE) {
+        next = lastInput + MIN_STEP_MS;
+      }
+    }
+    return Math.max(1L, next);
   }
 }
