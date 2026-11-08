@@ -15,93 +15,89 @@
  */
 package io.github.hyshmily.zeta.hotkeydetector;
 
-import static io.github.hyshmily.zeta.cache.cachesupport.CacheKeysPolicy.invalidCacheKey;
-import static io.github.hyshmily.zeta.constants.ZetaConstants.TOPK_INCR;
+import static io.github.hyshmily.zeta.cache.CacheKeysPolicy.invalidCacheKey;
 
-import io.github.hyshmily.zeta.Internal;
-import io.github.hyshmily.zeta.constants.ZetaConstants;
-import io.github.hyshmily.zeta.hotkeydetector.doublebuffer.WaveCounter;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.AddResult;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.HeavyKeeper;
-import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.Item;
-import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.TopK;
-import java.util.HashMap;
-import java.util.List;
+import io.github.hyshmily.zeta.util.Internal;
 import java.util.Map;
-import java.util.concurrent.BlockingQueue;
-import java.util.concurrent.ScheduledExecutorService;
-import org.springframework.beans.factory.DisposableBean;
-import org.springframework.beans.factory.InitializingBean;
+import java.util.function.Consumer;
+import org.jspecify.annotations.Nullable;
 
 /**
- * Unified facade for hot key detection that implements the {@link TopK}
- * interface and manages the lifecycle of the underlying HeavyKeeper sketch
- * and its double-buffered counter.
+ * The inbound edge of the local sketch: the only place that turns read-path
+ * traffic into sketch writes.
  *
- * <p>Provides two access paths:
+ * <p>It does <b>not</b> implement {@code TopK}: query-side callers (actuator,
+ * Micrometer, the facade's ranking) inject the
+ * {@link io.github.hyshmily.zeta.hotkeydetector.heavykeeper.TopK} bean and talk
+ * to the {@link HeavyKeeper} bean directly, while this class owns the write
+ * edge and the lenient membership probe below (design decisions: access
+ * counting):
+ *
  * <ul>
- *   <li><b>Direct</b> ({@link #addDirect}) — synchronous sketch and heap update
- *       without buffering, used by the Worker and for internal detector calls.</li>
- *   <li><b>Buffered</b> ({@link #add}) — asynchronous, batched path via
- *       {@link WaveCounter} that aggregates high-frequency single-key
- *       increments and flushes them every 500 ms to the direct path. Used
- *       by the app-level read path.</li>
+ *   <li>{@link #addDirect} — one synchronous single-key write
+ *       ({@code DETECT_ONLY} tag mode).</li>
+ *   <li>{@link #ingest} — the batched flush the shared {@code AccessCounter}
+ *       tide drives every {@code detect-interval-ms}.</li>
+ *   <li>{@link #contains} — the lenient membership probe the read path and
+ *       local promotion use; an invalid key answers {@code false} instead of
+ *       reaching the strict sketch kernel.</li>
  * </ul>
  *
- * <p>Implements {@link InitializingBean} and {@link DisposableBean} for
- * Spring-managed lifecycle: the buffered counter flusher is started in
- * {@link #afterPropertiesSet()} and shut down in {@link #destroy()}.
+ * <p>The admission sink is forwarded from the sketch so the cache layer can
+ * learn about newly admitted keys without depending on {@link HeavyKeeper}.
+ * The sink runs on the admitting thread under the sketch's admission lock and
+ * must not block.
  *
- * <p>Thread-safe: all public methods delegate to the thread-safe
- * HeavyKeeper and WaveCounter implementations.
+ * <p>Thread-safe: every method delegates to the thread-safe sketch.
  */
 @Internal
-public class HotKeyDetector implements TopK, InitializingBean, DisposableBean {
+public class HotKeyDetector {
 
   private final HeavyKeeper heavyKeeper;
-  private final WaveCounter cacheWaveCounter;
 
   /**
-   * Creates a detector with a shared external scheduler.
+   * Receives keys that newly enter the TopK set. Registered by the cache layer;
+   * the detector itself stays independent of the cache.
+   */
+  private volatile Consumer<String> admittedSink;
+
+  /**
+   * Creates the detector over the given sketch.
    *
    * @param heavyKeeper the underlying sketch-based TopK implementation
-   * @param scheduler   the shared scheduler (not shut down on destroy)
    */
-  public HotKeyDetector(HeavyKeeper heavyKeeper, ScheduledExecutorService scheduler) {
+  public HotKeyDetector(HeavyKeeper heavyKeeper) {
     this.heavyKeeper = heavyKeeper;
-    // Route the buffered flush through the facade's own addDirect (not
-    // heavyKeeper::addDirect) so the flush path keeps the invalidCacheKey
-    // guard: any future validation/instrumentation added to the facade entry
-    // point must also cover the buffer's flush, not silently bypass it.
-    this.cacheWaveCounter = new WaveCounter(this::addDirect, scheduler);
+    heavyKeeper.setAdmissionListener(this::publishAdmitted);
   }
 
   /**
-   * Start the buffered counter flush scheduler.
-   * Called by the Spring container after all bean properties have been set.
+   * Register the sink for TopK admission events.
+   *
+   * @param sink the admission sink, or {@code null} to detach
    */
-  @Override
-  public void afterPropertiesSet() {
-    cacheWaveCounter.afterPropertiesSet();
+  public void setAdmittedSink(@Nullable Consumer<String> sink) {
+    this.admittedSink = sink;
+  }
+
+  private void publishAdmitted(String key) {
+    Consumer<String> sink = admittedSink;
+    if (sink != null) {
+      sink.accept(key);
+    }
   }
 
   /**
-   * Shut down the buffered counter and its scheduler.
-   * Called by the Spring container during context close.
-   */
-  @Override
-  public void destroy() {
-    cacheWaveCounter.destroy();
-  }
-
-  /**
-   * Record an access directly to the sketch and TopK heap.
+   * Record an access directly to the sketch and TopK heap. Invalid keys are
+   * mapped to {@link AddResult#cold()} here — the sketch kernel is strict and
+   * throws on {@code null}, while the read path may hand over either.
    *
    * @param key       the accessed key
    * @param increment the frequency increment
    * @return result indicating whether the key became hot
    */
-  @Override
   public AddResult addDirect(String key, long increment) {
     if (invalidCacheKey(key)) {
       return AddResult.cold();
@@ -110,80 +106,17 @@ public class HotKeyDetector implements TopK, InitializingBean, DisposableBean {
   }
 
   /**
-   * Record accesses for multiple keys. Delegates to the underlying HeavyKeeper.
+   * Ingest one flushed counting batch from the shared access counter's tide —
+   * the buffered path's entry point.
    *
-   * <p><b>Contract:</b> the caller's map is <em>not</em> modified — a filtered
-   * copy is passed downstream, so callers may safely reuse their map after the
-   * call (the copy protects the caller from {@link HeavyKeeper} retaining or
-   * mutating the entry set).
+   * <p>No copy and no per-key pre-scan: the kernel's batch ingest skips a null
+   * key rather than failing the flush, so the tide's snapshot is handed over
+   * unexamined and must not be mutated (the counter's contract).
    *
-   * @param keyCounts map of keys to their access counts
-   * @return list of {@link AddResult} for keys that entered the TopK set
+   * @param keyCounts the batch's snapshot (never mutated, may be empty)
    */
-  @Override
-  public List<AddResult> addDirect(Map<String, Long> keyCounts) {
-    Map<String, Long> filtered = new HashMap<>(keyCounts);
-    filtered.entrySet().removeIf(entry -> invalidCacheKey(entry.getKey()));
-    return heavyKeeper.addDirect(filtered);
-  }
-
-  /**
-   * Record single access for the given key through the buffer. Delegates to
-   * {@link #add(String, long)} with the standard single-access increment
-   * ({@value ZetaConstants#TOPK_INCR}).
-   *
-   * @param key the accessed key
-   */
-  public void add(String key) {
-    add(key, TOPK_INCR);
-  }
-
-  /**
-   * Record multiple accesses for the given key through the buffer.
-   *
-   * @param key   the accessed key
-   * @param delta the number of accesses
-   */
-  public void add(String key, long delta) {
-    if (invalidCacheKey(key)) {
-      return;
-    }
-    cacheWaveCounter.count(key, delta);
-  }
-
-  /**
-   * Record accesses for multiple keys through the buffer.
-   *
-   * @param keyCounts map of keys to their access counts
-   */
-  public void add(Map<String, Long> keyCounts) {
-    for (Map.Entry<String, Long> entry : keyCounts.entrySet()) {
-      if (invalidCacheKey(entry.getKey())) {
-        continue;
-      }
-      cacheWaveCounter.count(entry.getKey(), entry.getValue());
-    }
-  }
-
-  /**
-   * Return all keys currently in the TopK set, sorted by estimated count descending.
-   *
-   * @return an unmodifiable-style list of {@link Item} entries, from highest to lowest count
-   */
-  @Override
-  public List<Item> list() {
-    return heavyKeeper.list();
-  }
-
-  /**
-   * Return the top N hot keys from the underlying HeavyKeeper.
-   *
-   * @param n maximum number of keys to return
-   * @return list of at most {@code n} {@link Item} entries, never null
-   */
-  @Override
-  public List<Item> listTopN(int n) {
-    return heavyKeeper.listTopN(n);
+  public void ingest(Map<String, Long> keyCounts) {
+    heavyKeeper.ingestBatch(keyCounts);
   }
 
   /**
@@ -192,40 +125,7 @@ public class HotKeyDetector implements TopK, InitializingBean, DisposableBean {
    * @param key the key to check
    * @return {@code true} if the key is present in the current TopK ranking
    */
-  @Override
   public boolean contains(String key) {
-    if (invalidCacheKey(key)) {
-      return false;
-    }
-    return heavyKeeper.contains(key);
-  }
-
-  /**
-   * Return the total number of data streams tracked since startup or last reset.
-   *
-   * @return total access count
-   */
-  @Override
-  public long total() {
-    return heavyKeeper.total();
-  }
-
-  /**
-   * Return the blocking queue holding items that have been evicted from the TopK set.
-   *
-   * @return a blocking queue of evicted items
-   */
-  @Override
-  public BlockingQueue<Item> expelled() {
-    return heavyKeeper.expelled();
-  }
-
-  /**
-   * Decay all frequency counts to age out historical data.
-   * Delegates to the underlying HeavyKeeper.
-   */
-  @Override
-  public void fading() {
-    heavyKeeper.fading();
+    return !invalidCacheKey(key) && heavyKeeper.contains(key);
   }
 }

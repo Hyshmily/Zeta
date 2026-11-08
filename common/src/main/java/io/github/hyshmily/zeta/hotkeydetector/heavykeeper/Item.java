@@ -20,12 +20,15 @@ package io.github.hyshmily.zeta.hotkeydetector.heavykeeper;
  *
  * <p>Returned by {@link TopK#list()} and {@link TopK#listTopN(int)} to
  * represent a single entry in the current TopK ranking. The {@code count}
- * is an <b>estimate</b> produced by the Count-Min Sketch algorithm — it
- * may over-count due to hash collisions in the sketch and is periodically
- * halved by {@link TopK#fading()} to decay historical data.
+ * is the <b>estimate</b> the implementation holds for this key: for
+ * {@code HeavyKeeper} it is the maximum over the sketch rows the key actually
+ * owns (a row held by another key's fingerprint contributes nothing, design decisions: sketch),
+ * subject to sampled decay, counter saturation, and the periodic
+ * re-synchronisation of membership counts against the sketch (halving only
+ * when the sketch no longer holds the key).
  *
  * @param key   the hot key (unique identifier, e.g. a cache key)
  * @param count the estimated access count (approximate, subject to sketch
- *              error and periodic decay)
+ *              decay and periodic re-synchronisation)
  */
 public record Item(String key, long count) {}

@@ -16,29 +16,31 @@
 package io.github.hyshmily.zeta.hotkeydetector.heavykeeper;
 
 /**
- * Result of a single {@link TopK#addDirect} operation.
+ * Result of one {@link TopK#addDirect} operation.
  *
- * <p>Encapsulates three pieces of information:
- * <ol>
- *   <li>Whether the key being added entered the TopK hot set ({@code isHotKey});</li>
- *   <li>If it did and the set was full, which key was evicted to make room
- *       ({@code expelledKey});</li>
- *   <li>The identity of the key that triggered this operation ({@code currentKey}).</li>
- * </ol>
- *
- * <p>When {@code isHotKey} is {@code false}, the key either did not meet
- * the minimum count threshold or could not displace any current member.
- * In that case {@code expelledKey} is always {@code null}.
+ * <p>{@code isHotKey} is {@code true} when this add was accepted as hot: the
+ * key cleared the admission threshold and either already held a TopK seat or
+ * won one. {@code expelledKey} names the key that lost its seat to make room,
+ * and is {@code null} otherwise.
  *
  * @param expelledKey the key evicted from the TopK set by this operation,
  *                    or {@code null} if no eviction occurred
- * @param isHotKey    whether the input key entered the TopK hot set during
- *                    this operation
- * @param currentKey  the key that was added (never {@code null})
+ * @param isHotKey    whether this add was accepted as hot
+ * @param currentKey  the key the count was for; empty on the shared
+ *                    {@link #cold()} result, so callers must not treat the
+ *                    cold result's key as a real key
  */
 public record AddResult(String expelledKey, boolean isHotKey, String currentKey) {
   private static final AddResult COLD = new AddResult(null, false, "");
 
+  /**
+   * The shared "nothing happened" result for rejected adds: the key did not
+   * enter the TopK set (non-positive delta, below the admission threshold, or
+   * unable to displace a member) and no member was evicted. {@code currentKey}
+   * is empty — callers must not treat it as a real key.
+   *
+   * @return the singleton cold result (never {@code null})
+   */
   public static AddResult cold() {
     return COLD;
   }

@@ -35,7 +35,7 @@ import org.junit.jupiter.api.Test;
 
 /**
  * Tests for {@link HeavyKeeper}, covering construction validation, single-key and multi-key tracking,
- * expulsion behavior, minimum-count thresholds, ordering, containment queries, total accumulation,
+ * expulsion behavior, minimum-add thresholds, ordering, containment queries, total accumulation,
  * decay fading, and concurrency safety.
  */
 class HeavyKeeperTest {
@@ -53,6 +53,17 @@ class HeavyKeeperTest {
     keeper = new HeavyKeeper(TOP_K, WIDTH, DEPTH, DECAY, MIN_COUNT, 10_000, 3, false);
   }
 
+  /** The tracked member add of {@code key} (0 when the key is not a member). */
+  private static long memberCount(HeavyKeeper hk, String key) {
+    return hk
+      .list()
+      .stream()
+      .filter(i -> i.key().equals(key))
+      .mapToLong(Item::count)
+      .findFirst()
+      .orElse(0L);
+  }
+
   /**
    * Verifies that the constructor rejects zero or negative values for topK.
    */
@@ -67,7 +78,7 @@ class HeavyKeeperTest {
   }
 
   /**
-   * Verifies that adding a single key with sufficient count marks it as hot.
+   * Verifies that adding a single key with sufficient add marks it as hot.
    */
   @Test
   void add_Direct_shouldTrackSingleKey() {
@@ -78,7 +89,7 @@ class HeavyKeeperTest {
   }
 
   /**
-   * Verifies that when the TopK set is full, adding a high-count key expels the least frequent key.
+   * Verifies that when the TopK set is full, adding a high-add key expels the least frequent key.
    */
   @Test
   void add_Direct_shouldReturnExpelledKeyWhenTopKFull() {
@@ -94,7 +105,7 @@ class HeavyKeeperTest {
   }
 
   /**
-   * Verifies that keys added with a count below the minimum threshold are not promoted to hot.
+   * Verifies that keys added with a add below the minimum threshold are not promoted to hot.
    */
   @Test
   void add_Direct_keysBelowMinCountShouldNotBeHot() {
@@ -105,7 +116,7 @@ class HeavyKeeperTest {
   }
 
   /**
-   * Verifies that the list of hot keys is returned in descending order of count.
+   * Verifies that the list of hot keys is returned in descending order of add.
    */
   @Test
   void list_shouldReturnKeysInDescendingOrder() {
@@ -151,7 +162,7 @@ class HeavyKeeperTest {
   }
 
   /**
-   * Verifies that the total count reflects the sum of all additions across keys.
+   * Verifies that the total add reflects the sum of all additions across keys.
    */
   @Test
   void total_shouldTrackAllAdditions() {
@@ -173,7 +184,7 @@ class HeavyKeeperTest {
   }
 
   /**
-   * Verifies that the fading operation reduces the total accumulated count.
+   * Verifies that the fading operation reduces the total accumulated add.
    */
   @Test
   void fading_shouldHalveCounts() {
@@ -184,7 +195,7 @@ class HeavyKeeperTest {
   }
 
   /**
-   * Verifies that after fading, keys whose count drops to zero are removed from the tracking set.
+   * Verifies that after fading, keys whose add drops to zero are removed from the tracking set.
    */
   @Test
   void fading_shouldClearZeroCountKeys() {
@@ -256,21 +267,21 @@ class HeavyKeeperTest {
 
   /**
    * A zero increment must be a full no-op even when the key is already a
-   * member — no membership change, no count change, no total change.
+   * member — no membership change, no add change, no total change.
    */
   @Test
   void addDirect_zeroIncrementIsNoOpEvenForExistingMember() {
     keeper.addDirect("key1", 10);
     assertThat(keeper.contains("key1")).isTrue();
     long totalBefore = keeper.total();
-    long countBefore = keeper.estimatedCount("key1");
+    long countBefore = memberCount(keeper, "key1");
 
     AddResult result = keeper.addDirect("key1", 0);
 
     assertThat(result.isHotKey()).isFalse();
     assertThat(keeper.contains("key1")).isTrue();
     assertThat(keeper.total()).isEqualTo(totalBefore);
-    assertThat(keeper.estimatedCount("key1")).isEqualTo(countBefore);
+    assertThat(memberCount(keeper, "key1")).isEqualTo(countBefore);
   }
 
   @Test
@@ -282,29 +293,26 @@ class HeavyKeeperTest {
     assertThat(keeper.total()).isEqualTo(50);
   }
 
+  /**
+   * {@code total} accounting lives at the entry points, not in the per-key
+   * body: a batch folds its increments into one accumulator update. The
+   * observable total is identical either way — this pins that the fold did
+   * not drop or double-add anything, including the skipped non-positive
+   * deltas.
+   */
   @Test
-  void addDirectMap_shouldHandleEmptyMap() {
-    List<AddResult> results = keeper.addDirect(Map.of());
-    assertThat(results).isEmpty();
-  }
-
-  @Test
-  void addDirectMap_shouldThrowOnNullMap() {
-    assertThatThrownBy(() -> keeper.addDirect((Map<String, Long>) null)).isInstanceOf(NullPointerException.class);
-  }
-
-  @Test
-  void addDirectMap_shouldThrowOnNullKeyInMap() {
+  void ingestBatch_shouldAccumulateTotalAcrossBatch() {
+    HeavyKeeper hk = new HeavyKeeper(3, 100, 4, 0.9, 5, 100, 3, false);
     Map<String, Long> map = new HashMap<>();
-    map.put(null, 10L);
-    assertThatThrownBy(() -> keeper.addDirect(map)).isInstanceOf(NullPointerException.class);
-  }
+    map.put("a", 3L);
+    map.put("b", 7L);
+    map.put("c", 0L);
+    map.put("d", -4L);
+    map.put("e", null);
 
-  @Test
-  void addDirectMap_shouldThrowOnNullValueInMap() {
-    Map<String, Long> map = new HashMap<>();
-    map.put("key1", null);
-    assertThatThrownBy(() -> keeper.addDirect(map)).isInstanceOf(NullPointerException.class);
+    hk.ingestBatch(map);
+
+    assertThat(hk.total()).isEqualTo(10L);
   }
 
   @Test
@@ -347,6 +355,12 @@ class HeavyKeeperTest {
     HeavyKeeper lowMinKeeper = new HeavyKeeper(TOP_K, WIDTH, DEPTH, DECAY, 1, 10_000, 3, false);
     lowMinKeeper.addDirect("key1", 1);
     assertThat(lowMinKeeper.contains("key1")).isTrue();
+    // The add lives in a sliding window: three rotations clear the other
+    // windows, the fourth clears the one holding this add.
+    lowMinKeeper.fading();
+    lowMinKeeper.fading();
+    lowMinKeeper.fading();
+    assertThat(lowMinKeeper.contains("key1")).as("add stays while its window is in the ring").isTrue();
     lowMinKeeper.fading();
     assertThat(lowMinKeeper.contains("key1")).isFalse();
   }
@@ -395,33 +409,8 @@ class HeavyKeeperTest {
 
   /**
    * The batch path must skip non-positive entries entirely — the sketch is
-   * count-only, so a negative entry must not corrupt windows or slot sums.
+   * add-only, so a negative entry must not corrupt windows or slot sums.
    */
-  @Test
-  void addDirect_mapSkipsNonPositiveEntries() {
-    Map<String, Long> batch = new HashMap<>();
-    batch.put("hot", 20L);
-    batch.put("negative", -5L);
-    batch.put("zero", 0L);
-
-    List<AddResult> results = keeper.addDirect(batch);
-
-    assertThat(results).hasSize(1);
-    assertThat(results.get(0).currentKey()).isEqualTo("hot");
-    assertThat(keeper.total()).isEqualTo(20);
-    assertThat(keeper.contains("negative")).isFalse();
-    assertThat(keeper.contains("zero")).isFalse();
-  }
-
-  @Test
-  void addDirect_mapBatch_whenAllBelowMinCount_shouldReturnEmpty() {
-    HeavyKeeper hk = new HeavyKeeper(TOP_K, WIDTH, DEPTH, DECAY, 1000, 10_000, 3, false);
-    Map<String, Long> map = new HashMap<>();
-    map.put("low1", 1L);
-    map.put("low2", 2L);
-    assertThat(hk.addDirect(map)).isEmpty();
-  }
-
   @Test
   void addDirect_mapBatch_withBlankKeys_shouldNotThrow() {
     keeper.addDirect("", 10);
@@ -486,19 +475,66 @@ class HeavyKeeperTest {
     hk.addDirect("k2", 1);
     hk.addDirect("k3", 1);
     assertThat(hk.list()).hasSize(3);
+    // Membership counts follow the sketch, which is a sliding window: a add
+    // stays backed by its window until the ring rotates past it.
+    hk.fading();
+    hk.fading();
+    hk.fading();
+    assertThat(hk.list()).as("counts stay while the ring still covers them").hasSize(3);
+    // The fourth rotation clears the window that held the counts; the sketch
+    // now reads zero for every key, so every seat is released.
     hk.fading();
     assertThat(hk.list()).isEmpty();
-    assertThat(hk.total()).isEqualTo(1);
+    assertThat(hk.total()).isZero();
   }
 
   // ── Fingerprint collision paths in addDirect(String, int) ──
 
+  /**
+   * A partial-decay collision contributes <b>zero</b> to the caller's estimate:
+   * the slot still belongs to the occupant, so the colliding key's own
+   * cross-row maximum must stay at 0. Returning the occupant's decayed
+   * {@code slotSums} here would let a single cold key (delta=1) be admitted
+   * with a hot key's add — polluting the TopK and evicting the real member.
+   */
   @Test
-  void addDirect_withCollisionAndDecaySubtracts_shouldDecrement() {
+  void collisionWithPartialDecay_shouldNotAdmitStrangerOnOccupantCount() {
     HeavyKeeper hk = new HeavyKeeper(3, 1, 1, 0.9, 1, 100, 3, false);
-    hk.addDirect("key1", 10);
-    hk.addDirect("key2", 5);
-    assertThat(hk.contains("key2")).isTrue();
+    hk.addDirect("occupant", 200);
+    AddResult result = hk.addDirect("stranger", 5);
+    assertThat(result.isHotKey()).as("a stranger sharing a slot must not inherit the occupant's estimate").isFalse();
+    assertThat(hk.contains("stranger")).isFalse();
+    assertThat(hk.contains("occupant")).as("the occupant survives a partial-decay collision").isTrue();
+  }
+
+  /**
+   * The stranger's estimate is 0, not merely below the occupant's: a deep decay
+   * that leaves the slot far above the newcomer must still not promote it.
+   * {@code minCount=1} makes any non-zero estimate an admission.
+   */
+  @Test
+  void collisionWithPartialDecay_shouldNotRaiseStrangerToOccupantCount() {
+    HeavyKeeper hk = new HeavyKeeper(3, 1, 1, 0.5, 1, 100, 3, false);
+    for (int i = 0; i < 300; i++) {
+      hk.addDirect("occupant", 1);
+    }
+    AddResult result = hk.addDirect("stranger", 10);
+    assertThat(result.isHotKey()).isFalse();
+    assertThat(memberCount(hk, "stranger")).isEqualTo(0L);
+  }
+
+  /**
+   * The full-displacement lottery win is unaffected: when the sampled decay
+   * consumes the whole slot the newcomer legitimately takes it over, and its
+   * estimate is its own {@code delta} — never the evicted occupant's add.
+   */
+  @Test
+  void collisionWithFullDisplacement_shouldAdmitStrangerOnItsOwnDelta() {
+    HeavyKeeper hk = new HeavyKeeper(3, 1, 1, 0.0, 1, 100, 3, false);
+    hk.addDirect("occupant", 4);
+    AddResult result = hk.addDirect("stranger", 2);
+    assertThat(result.isHotKey()).isTrue();
+    assertThat(memberCount(hk, "stranger")).isEqualTo(2L);
   }
 
   @Test
@@ -507,16 +543,6 @@ class HeavyKeeperTest {
     hk.addDirect("key1", 5);
     hk.addDirect("key2", 10);
     assertThat(hk.contains("key1")).isTrue();
-    assertThat(hk.contains("key2")).isTrue();
-  }
-
-  @Test
-  void addDirect_withCollisionAndCountAboveLookup_shouldUseMaxLookupEntry() {
-    HeavyKeeper hk = new HeavyKeeper(3, 1, 1, 0.5, 1, 100, 3, false);
-    for (int i = 0; i < 300; i++) {
-      hk.addDirect("key1", 1);
-    }
-    hk.addDirect("key2", 10);
     assertThat(hk.contains("key2")).isTrue();
   }
 
@@ -547,106 +573,6 @@ class HeavyKeeperTest {
     assertThat(result.isHotKey()).isTrue();
   }
 
-  // ── addDirect(Map) edge cases ──
-
-  @Test
-  void addDirectMap_whenKeyBelowMinCount_shouldSkip() {
-    HeavyKeeper hk = new HeavyKeeper(3, 100, 4, 0.9, 50, 100, 3, false);
-    Map<String, Long> map = new HashMap<>();
-    map.put("high", 100L);
-    map.put("low", 10L);
-    List<AddResult> results = hk.addDirect(map);
-    boolean hasHigh = results.stream().anyMatch(r -> "high".equals(r.currentKey()));
-    boolean hasLow = results.stream().anyMatch(r -> "low".equals(r.currentKey()));
-    assertThat(hasHigh).isTrue();
-    assertThat(hasLow).isFalse();
-  }
-
-  @Test
-  void addDirectMap_whenKeyNotHotEnough_shouldNotInsert() {
-    HeavyKeeper hk = new HeavyKeeper(3, 100000, 4, 0.9, 1, 100, 3, false);
-    hk.addDirect("a", 100);
-    hk.addDirect("b", 100);
-    hk.addDirect("c", 100);
-    Map<String, Long> map = new HashMap<>();
-    map.put("d", 5L);
-    List<AddResult> results = hk.addDirect(map);
-    assertThat(results).isEmpty();
-    assertThat(hk.contains("d")).isFalse();
-  }
-
-  @Test
-  void addDirectMap_withCollisionInAddToSketch_shouldHandle() {
-    HeavyKeeper hk = new HeavyKeeper(3, 1, 1, 0.0, 1, 100, 3, false);
-    Map<String, Long> map = new HashMap<>();
-    map.put("key1", 10L);
-    map.put("key2", 5L);
-    List<AddResult> results = hk.addDirect(map);
-    assertThat(results).hasSize(2);
-  }
-
-  @Test
-  void addDirectMap_withExistingKeyInHeap_shouldRemoveOldNode() {
-    HeavyKeeper hk = new HeavyKeeper(3, 1000, 4, 0.9, 1, 100, 3, false);
-    hk.addDirect("k", 50);
-    Map<String, Long> map = new HashMap<>();
-    map.put("k", 10L);
-    map.put("other", 100L);
-    List<AddResult> results = hk.addDirect(map);
-    assertThat(results).hasSize(2);
-    assertThat(hk.contains("k")).isTrue();
-  }
-
-  @Test
-  void addDirectMap_withExpelledQueueFull_shouldLogWarning() {
-    HeavyKeeper hk = new HeavyKeeper(1, 1000, 4, 0.9, 1, 1, 3, false);
-    hk.addDirect("first", 100);
-    hk.addDirect("second", 200);
-    Map<String, Long> map = new HashMap<>();
-    map.put("third", 300L);
-    List<AddResult> results = hk.addDirect(map);
-    assertThat(results).hasSize(1);
-    assertThat(results.get(0).currentKey()).isEqualTo("third");
-  }
-
-  @Test
-  void addDirectMap_withExistingKeyCollisionInAddToSketch_shouldHandle() {
-    HeavyKeeper hk = new HeavyKeeper(3, 1000, 4, 0.9, 1, 100, 3, false);
-    hk.addDirect("k", 10);
-    Map<String, Long> map = new HashMap<>();
-    map.put("k", 5L);
-    List<AddResult> results = hk.addDirect(map);
-    String ks = results
-      .stream()
-      .filter(r -> "k".equals(r.currentKey()))
-      .findFirst()
-      .map(AddResult::currentKey)
-      .orElse("");
-    assertThat(results).isNotEmpty();
-  }
-
-  @Test
-  void addDirectMap_withCollisionCountAboveLookup_shouldUseMaxLookup() {
-    HeavyKeeper hk = new HeavyKeeper(3, 1, 1, 0.5, 1, 100, 3, false);
-    for (int i = 0; i < 300; i++) {
-      hk.addDirect("key1", 1);
-    }
-    Map<String, Long> map = new HashMap<>();
-    map.put("key2", 10L);
-    List<AddResult> results = hk.addDirect(map);
-    assertThat(results).isNotEmpty();
-  }
-
-  @Test
-  void addDirectMap_withCollisionAndDecayReplacesFingerprint_shouldReplace() {
-    HeavyKeeper hk = new HeavyKeeper(3, 1, 1, 1.0, 1, 100, 3, false);
-    hk.addDirect("key1", 5);
-    Map<String, Long> map = new HashMap<>();
-    map.put("key2", 10L);
-    List<AddResult> results = hk.addDirect(map);
-    assertThat(results).isNotEmpty();
-    assertThat(hk.contains("key2")).isTrue();
-  }
 
   @Test
   void fading_withConcurrentAddDirect_shouldNotDeadlock() throws InterruptedException {
@@ -686,6 +612,86 @@ class HeavyKeeperTest {
 
   // ── Soft heavy protection in decayCollisionSlot ──
 
+  /**
+   * A member whose add drops below {@code minCount} can never be re-admitted
+   * (admission requires {@code maxCount >= minCount}), so keeping its seat only
+   * starves the TopK of a better candidate and leaves {@code minMemberCount} —
+   * the O(1) fast-reject threshold — artificially low.
+   *
+   * <p>Counts follow the sketch's sliding window, so a key that stops reporting
+   * keeps its seat until the ring rotates past its last window and then loses it
+   * in one step — three rotations of {@code windowCount=3}, plus the one that
+   * clears the window holding the add.
+   */
+  @Test
+  void fading_memberHalvedBelowMinCount_shouldExpel() {
+    HeavyKeeper hk = new HeavyKeeper(3, 1, 1, 0.9, 50, 100, 3, false);
+    hk.addDirect("fading", 200);
+    assertThat(hk.contains("fading")).isTrue();
+
+    hk.fading();
+    hk.fading();
+    hk.fading();
+    assertThat(hk.contains("fading")).as("counts stay while the ring still covers them").isTrue();
+
+    // The fourth rotation clears the window holding the 200: the sketch now
+    // reads 0, below minCount, so the seat is released.
+    hk.fading();
+    assertThat(hk.contains("fading")).as("a member under minCount must not hold a TopK seat").isFalse();
+    assertThat(hk.expelled()).hasSize(1);
+  }
+
+  /**
+   * The decay drop reports the add the member actually held at departure.
+   * A hard-coded {@code 0} would tell every downstream consumer (expelled
+   * drain, stats) that a 25-add key expired identically to an empty one.
+   *
+   * <p>Reaching a non-zero departure add requires the fallback path: a larger
+   * batch takes over the member's only sketch row, so the sketch can no longer
+   * see the key and the add halves instead of syncing to the window.
+   */
+  @Test
+  void fading_expelledMember_shouldReportActualCountNotZero() {
+    HeavyKeeper hk = new HeavyKeeper(3, 1, 1, 0.9, 50, 100, 3, false);
+    hk.addDirect("fading", 200);
+    // Outweighs the occupant, so the single row changes hands and probeSketch
+    // returns -1 for "fading" from here on.
+    hk.addDirect("usurper", 100_000);
+    hk.fading(); // 100
+    hk.fading(); // 50
+    hk.fading(); // 25
+
+    Item expelled = hk.expelled().poll();
+    assertThat(expelled).isNotNull();
+    assertThat(expelled.key()).isEqualTo("fading");
+    assertThat(expelled.count()).isEqualTo(25L);
+  }
+
+  /**
+   * A live concurrent raise that lands on the same decay cycle keeps the
+   * member: the removal-time re-check re-reads the add inside the map's
+   * per-key critical section, so a add lifted back above {@code minCount}
+   * is never lost to a stale decision.
+   */
+  @Test
+  void fading_memberRaisedBackAboveMinCount_shouldSurvive() {
+    HeavyKeeper hk = new HeavyKeeper(3, 1, 1, 0.9, 50, 100, 3, false);
+    hk.addDirect("fading", 200);
+    hk.fading();
+    hk.fading();
+    hk.fading();
+    hk.fading(); // the window holding the add rolls out — below threshold, dropped
+    assertThat(hk.contains("fading")).isFalse();
+    assertThat(hk.expelled()).as("the drop is reported once").hasSize(1);
+    assertThat(hk.expelled().poll()).isNotNull();
+
+    // Re-observed traffic repopulates the sketch; the key must be able to
+    // re-enter on its own strength, without a second departure report.
+    hk.addDirect("fading", 200);
+    assertThat(hk.contains("fading")).isTrue();
+    assertThat(hk.expelled()).as("re-admission is not a departure").hasSize(0);
+  }
+
   @Test
   void decayCollision_withHotSlot_shouldLimitDecay() {
     HeavyKeeper hk = new HeavyKeeper(3, 1, 1, 0.9, 1, 100, 3, false);
@@ -721,7 +727,7 @@ class HeavyKeeperTest {
     ExecutorService exec = Executors.newFixedThreadPool(2);
     AtomicBoolean stopped = new AtomicBoolean(false);
 
-    // Accumulator thread — continuously raises the count via lock-free fast path
+    // Accumulator thread — continuously raises the add via lock-free fast path
     exec.submit(() -> {
       try {
         latch.await();
@@ -742,6 +748,16 @@ class HeavyKeeperTest {
       }
       for (int i = 0; i < 10; i++) {
         hk.fading();
+        try {
+          // Give the writer a window to land a batch between rotations. In
+          // production fading runs every 20 s; rotating the ring faster than
+          // traffic can refill it would empty the slot and evict the key —
+          // correct behaviour, but not what this test measures.
+          Thread.sleep(2);
+        } catch (InterruptedException e) {
+          Thread.currentThread().interrupt();
+          break;
+        }
       }
       stopped.set(true);
     });
@@ -754,7 +770,7 @@ class HeavyKeeperTest {
     assertThat(hk.contains("hotkey")).isTrue();
 
     // Count should be positive — in the old buggy code, concurrent accumulates
-    // were lost on every decay cycle, causing the count to drop to 0 rapidly.
+    // were lost on every decay cycle, causing the add to drop to 0 rapidly.
     List<Item> items = hk.listTopN(10);
     long hotkeyCount = -1;
     for (Item item : items) {
@@ -763,7 +779,7 @@ class HeavyKeeperTest {
         break;
       }
     }
-    assertThat(hotkeyCount).as("concurrent accumulates during decay should keep count > 0").isPositive();
+    assertThat(hotkeyCount).as("concurrent accumulates during decay should keep add > 0").isPositive();
   }
 
   /**
@@ -783,7 +799,7 @@ class HeavyKeeperTest {
 
   /**
    * Verifies that the hot-path max-raise on an existing member also saturates:
-   * repeated large adds never push a member count negative.
+   * repeated large adds never push a member add negative.
    */
   @Test
   void addDirect_repeatedLargeIncrements_shouldStayPositive() {
@@ -797,18 +813,77 @@ class HeavyKeeperTest {
   }
 
   /**
-   * Verifies that persisted snapshot counts beyond the int range are clamped
-   * (not wrapped) when injected via {@code warm}.
+   * Verifies that counts beyond the int range are clamped (not wrapped) when
+   * admitted through the batch {@code ingestBatch} path.
    */
   @Test
-  void warm_hugeSnapshotCount_shouldClampToIntMax() {
+  void addDirect_hugeSnapshotCount_shouldClampToIntMax() {
     Map<String, Long> snapshot = new HashMap<>();
     snapshot.put("key1", Long.MAX_VALUE);
-    keeper.warm(snapshot);
+    keeper.ingestBatch(snapshot);
 
     assertThat(keeper.contains("key1")).isTrue();
     List<Item> items = keeper.listTopN(1);
     assertThat(items).hasSize(1);
     assertThat(items.get(0).count()).isEqualTo(Integer.MAX_VALUE);
+  }
+
+  /**
+   * Refreshing a key that is already a member must update it in place, never
+   * run the full-set eviction path. That path removed the weakest member
+   * (which could be the refreshed key itself) and then re-put the key over the
+   * removed slot: when the refreshed key was the minimum it was reported as
+   * its own departure, and when it was not, the set was left one member short.
+   *
+   * <p>Batch values are <b>increments</b>, not absolute snapshot totals (the
+   * documented {@code addDirect(Map)} contract — every batch caller feeds
+   * per-batch deltas), so a refreshed
+   * member's add is its previous estimate plus the batch value.
+   */
+  @Test
+  void addDirect_fullSet_existingMember_shouldRefreshInPlaceWithoutExpelling() {
+    HeavyKeeper hk = new HeavyKeeper(3, 1024, 4, 0.9, 1, 100, 3, false);
+    hk.addDirect("min", 100);
+    hk.addDirect("mid", 200);
+    hk.addDirect("max", 300);
+    assertThat(hk.expelled()).as("filling the set admits without evicting").isEmpty();
+
+    // Case 1: the refreshed key is the current minimum — previous code expelled it as a
+    // false departure and re-inserted it.
+    hk.ingestBatch(Map.of("min", 500L));
+    assertThat(memberCount(hk, "min")).as("the batch value adds to the member's estimate (100 + 500)").isEqualTo(600L);
+    assertThat(hk.list()).extracting(Item::key).containsExactly("min", "max", "mid");
+    assertThat(hk.expelled()).as("warming the current minimum must not expel it").isEmpty();
+
+    // Case 2: the refreshed key is a non-minimum member — previous code evicted the real
+    // minimum and left the set one member short.
+    hk.ingestBatch(Map.of("max", 700L));
+    assertThat(memberCount(hk, "max")).as("the batch value adds to the member's estimate (300 + 700)").isEqualTo(1000L);
+    assertThat(hk.estimatedSize()).as("refresh in place keeps the set full").isEqualTo(3);
+    assertThat(hk.list()).extracting(Item::key).containsExactly("max", "min", "mid");
+    assertThat(hk.expelled()).as("refreshing a member must not evict anyone").isEmpty();
+  }
+
+  /**
+   * The in-place refresh must not weaken the {@code expelled()} contract: a genuinely
+   * new warmed key that beats the weakest member still evicts it, and the departure
+   * carries the add the member actually held.
+   */
+  @Test
+  void addDirect_fullSet_newKey_shouldEvictWeakestAndReportDeparture() {
+    HeavyKeeper hk = new HeavyKeeper(2, 1024, 4, 0.9, 1, 100, 3, false);
+    hk.addDirect("weak", 10);
+    hk.addDirect("strong", 50);
+    assertThat(hk.expelled()).as("filling the set admits without evicting").isEmpty();
+
+    hk.ingestBatch(Map.of("newcomer", 100L));
+
+    assertThat(hk.list()).extracting(Item::key).containsExactly("newcomer", "strong");
+    assertThat(hk.contains("weak")).isFalse();
+    Item departure = hk.expelled().poll();
+    assertThat(departure).isNotNull();
+    assertThat(departure.key()).isEqualTo("weak");
+    assertThat(departure.count()).as("departure carries the add the member held").isEqualTo(10L);
+    assertThat(hk.expelled()).as("exactly one genuine departure").isEmpty();
   }
 }

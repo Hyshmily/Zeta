@@ -17,7 +17,7 @@ package io.github.hyshmily.zeta.hotkeydetector;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-import io.github.hyshmily.zeta.hotkeydetector.doublebuffer.WaveCounter;
+import io.github.hyshmily.zeta.counter.WaveCounter;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.HeavyKeeper;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.Item;
 import java.lang.reflect.Method;
@@ -126,10 +126,15 @@ class HeavyKeeperBatchRecallTest {
     }
 
     List<String> members = chain.keeper().list().stream().map(Item::key).toList();
-    long hotMembers = members.stream().filter(k -> k.startsWith("hot-")).count();
+    long hotMembers = members
+      .stream()
+      .filter(k -> k.startsWith("hot-"))
+      .count();
     System.out.println("capacityOverflow: hotMembers=" + hotMembers + "/100");
     assertThat(hotMembers).as("150-key hot mass must occupy nearly all TopK slots").isGreaterThanOrEqualTo(95);
-    assertThat(members.stream().limit(10).toList()).as("top ranks are never cold").allMatch(k -> k.startsWith("hot-"));
+    assertThat(members.stream().limit(10).toList())
+      .as("top ranks are never cold")
+      .allMatch(k -> k.startsWith("hot-"));
   }
 
   /**
@@ -162,7 +167,7 @@ class HeavyKeeperBatchRecallTest {
    * Drift rotation on a production-aged sketch: 10 A-keys burn hot for 41 tides with
    * production-cadence fading (every 40 tides), then go cold while 10 B-keys ignite.
    *
-   * <p>Regression gate for the size-aware takeover (ADR-0092): before it, 2 of 10
+   * <p>Regression gate for the size-aware takeover (design decisions: sketch): before it, 2 of 10
    * rotation keys never admitted (est=0 across the run, with or without fading) —
    * every row they hashed to stayed occupied with a small sum, and their own
    * per-tide collisions pinned those blockers at an equilibrium far below admission.
@@ -207,12 +212,10 @@ class HeavyKeeperBatchRecallTest {
     for (int i = 0; i < 10; i++) {
       String k = "driftB-" + i;
       System.out.println(
-        "driftB-" + i + ": present=" + chain.keeper().contains(k) + " est=" + chain.keeper().estimatedCount(k)
+        "driftB-" + i + ": present=" + chain.keeper().contains(k) + " est=" + memberCount(chain.keeper(), k)
       );
     }
-    assertThat(promptCount)
-      .as("rotated-in heat must evict into the aged TopK within 3 tides")
-      .isEqualTo(10);
+    assertThat(promptCount).as("rotated-in heat must evict into the aged TopK within 3 tides").isEqualTo(10);
     assertThat(finalCount).as("admitted rotation heat holds (never evicted by noise)").isEqualTo(10);
   }
 
@@ -222,7 +225,7 @@ class HeavyKeeperBatchRecallTest {
    */
   @Test
   void coldOnly_promotesNothingStable() {
-    Drive drive = driveBurst(0); // non-positive delta is a no-op in WaveCounter.count
+    Drive drive = driveBurst(0); // non-positive delta is a no-op in WaveCounter.add
 
     List<Item> top = drive.keeper().listTopN(5);
     assertThat(top)
@@ -269,12 +272,15 @@ class HeavyKeeperBatchRecallTest {
   /** One production-wired detection chain under test. */
   private record Chain(HeavyKeeper keeper, WaveCounter counter) {}
 
-  /** Wires {@code WaveCounter -> HeavyKeeper.addDirect} at the production operating point. */
+  /** Wires {@code WaveCounter -> HeavyKeeper.ingestBatch} at the production operating point. */
   private static Chain newChain() {
     HeavyKeeper keeper = productionKeeper();
-    return new Chain(keeper, new WaveCounter(batch -> {
-      keeper.addDirect(batch);
-    }));
+    return new Chain(
+      keeper,
+      new WaveCounter((batch, windowMs) -> {
+        keeper.ingestBatch(batch);
+      })
+    );
   }
 
   /** Production operating point (see {@code ZetaProperties} defaults). */
@@ -289,6 +295,16 @@ class HeavyKeeperBatchRecallTest {
       keys.add(item.key());
     }
     return keys;
+  }
+
+  /** The tracked member add of {@code key} (0 when the key is not a member). */
+  private static long memberCount(HeavyKeeper keeper, String key) {
+    for (Item item : keeper.list()) {
+      if (item.key().equals(key)) {
+        return item.count();
+      }
+    }
+    return 0L;
   }
 
   /** Counts how many keys of a {@code prefix + i} family the keeper holds. */

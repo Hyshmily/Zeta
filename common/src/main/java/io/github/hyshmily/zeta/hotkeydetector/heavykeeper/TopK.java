@@ -16,7 +16,6 @@
 package io.github.hyshmily.zeta.hotkeydetector.heavykeeper;
 
 import java.util.List;
-import java.util.Map;
 import java.util.concurrent.BlockingQueue;
 
 /**
@@ -24,9 +23,10 @@ import java.util.concurrent.BlockingQueue;
  *
  * <p>Implementations track the most frequently accessed keys using a
  * sketch-based algorithm (e.g. HeavyKeeper) and provide access to the
- * current ranking (sorted by estimated frequency descending), expelled
- * items (keys evicted when the TopK set is full), and the total tracked
- * request count.
+ * current ranking (sorted by estimated frequency descending), the expelled
+ * items (keys that lost their seat — evicted when the set is full, or
+ * dropped by the periodic decay), and the decay-adjusted tracked request
+ * volume.
  *
  * <p>The interface supports both single-key and batch access recording,
  * periodic frequency decay ({@link #fading}), and read-only introspection
@@ -38,25 +38,11 @@ public interface TopK {
   /**
    * Record one or more accesses for the given key.
    *
-   * @param key       the accessed key
-   * @param increment the number of accesses to reportToWorker
-   * @return the  result indicating whether the key became hot and whether another key was evicted
+   * @param key   the accessed key
+   * @param delta the number of accesses to record (must be positive)
+   * @return the result indicating whether the key became hot and whether another key was evicted
    */
-  AddResult addDirect(String key, long increment);
-
-  /**
-   * Record accesses for multiple keys in batch.
-   *
-   * <p>Always updates both the sketch counters and the TopK heap. More
-   * efficient than repeated {@link #addDirect(String, long)} calls because
-   * the heap is updated once for the entire batch rather than per-key,
-   * reducing locking overhead. Returns results only for keys that actually
-   * entered the TopK set (possibly displacing existing members).
-   *
-   * @param keyCounts map of keys to their access counts
-   * @return list of {@link AddResult} for keys that entered the TopK set
-   */
-  List<AddResult> addDirect(Map<String, Long> keyCounts);
+  AddResult addDirect(String key, long delta);
 
   /**
    * Return the current TopK list sorted by frequency (descending).
@@ -68,13 +54,14 @@ public interface TopK {
   /**
    * Return the top N hot keys.
    *
-   * @param n maximum number of keys to return
-   * @return list of at most {@code n} {@link Item} entries
+   * @param limit maximum number of keys to return
+   * @return list of at most {@code limit} {@link Item} entries
    */
-  List<Item> listTopN(int n);
+  List<Item> listTopN(int limit);
 
   /**
-   * Return the queue of items that have been evicted from the TopK set.
+   * Return the queue of items that have lost their TopK seat — evicted to make
+   * room for a hotter key, or dropped by the periodic decay.
    * Consumers should drain this queue periodically for asynchronous processing.
    *
    * @return a blocking queue of evicted items
@@ -82,29 +69,15 @@ public interface TopK {
   BlockingQueue<Item> expelled();
 
   /**
-   * Directly inject key-count pairs into the TopK set, bypassing the
-   * sketch admission path. Used for warming up from a persisted snapshot
-   * where the keys are already known to be hot.
-   * <p>
-   * Implementations must respect the capacity limit ({@code k}) and may
-   * evict the weakest members when full. The default implementation
-   * delegates to {@link #addDirect(Map)} for backward compatibility.
-   *
-   * @param keyCounts map of keys to their estimated counts
-   */
-  default void warm(Map<String, Long> keyCounts) {
-    addDirect(keyCounts);
-  }
-
-  /**
-   * Decay all frequency counts to age out historical data and prevent
+   * Decay all frequency estimates to age out historical data and prevent
    * stale frequency accumulation.
    *
-   * <p>Typically invoked periodically by a scheduler (e.g. every 30
-   * seconds). The implementation halves all sketch counters and heap
-   * entry counts, discarding entries whose count drops to zero. This
-   * ensures that the TopK set reflects recent access patterns rather
-   * than cumulative historical popularity.
+   * <p>Typically invoked periodically by a scheduler. Each implementation
+   * decays its estimates: {@code HeavyKeeper} rotates a sliding window of
+   * sketch counters (zeroing the oldest window) and re-synchronises membership
+   * counts from the sketch under its admission lock, dropping members below the
+   * admission threshold. This ensures the TopK set reflects recent access
+   * patterns rather than cumulative historical popularity.
    */
   void fading();
 
@@ -113,9 +86,7 @@ public interface TopK {
    *
    * @return estimated number of keys in the top-K set
    */
-  default int estimatedSize() {
-    return list().size();
-  }
+  int estimatedSize();
 
   /**
    * Return the tracked access volume, <b>decay-adjusted rather than
@@ -126,8 +97,8 @@ public interface TopK {
    * converges on a weighted recent-traffic figure (roughly the last
    * {@code windowCount × decayInterval} of activity) and moves <em>down</em> as
    * traffic subsides. It is still an aggregate "how much traffic is this
-   * instance seeing" signal, which is how {@code Zeta#returnLocalTotalDataStreams()}
-   * and the {@code zeta.topk.total} gauge use it — but it must not be read as a
+   * instance seeing" signal, which is how the {@code zeta.topk.total} gauge and
+   * the actuator's {@code totalRequests} use it — but it must not be read as a
    * cumulative request count, and it is not used in any hot-key threshold or
    * ratio.
    *
@@ -141,20 +112,5 @@ public interface TopK {
    * @param key the key to check
    * @return {@code true} if the key is present in the current TopK ranking
    */
-  default boolean contains(String key) {
-    return list()
-      .stream()
-      .anyMatch(item -> item.key().equals(key));
-  }
-
-  /**
-   * Return the estimated frequency count for the given key from the sketch,
-   * or {@code 0} if the key is not tracked.
-   *
-   * @param key the key to query
-   * @return estimated access count, or {@code 0} if unknown
-   */
-  default long estimatedCount(String key) {
-    return 0L;
-  }
+  boolean contains(String key);
 }

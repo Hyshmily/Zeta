@@ -49,11 +49,17 @@ class HeavyKeeperExpelledQueueTest {
   @Test
   void decayDrop_withFullQueue_shouldBeAccountedAndMemberRemoved() throws Exception {
     HeavyKeeper hk = new HeavyKeeper(2, 1024, 4, 0.9, 1, 1, 3, false);
-    hk.warm(Map.of("a", 1L, "b", 1L));
+    hk.ingestBatch(Map.of("a", 1L, "b", 1L));
     // Fill the single-slot queue so both decay drops below fail to offer.
     assertThat(hk.expelled().offer(new Item("dummy", 1L))).isTrue();
 
-    hk.fading(); // halves 1 → 0: both members decay-drop, both offers fail
+    // addDirect(Map) seeds the sketch (decayMembership treats it as the single source
+    // of truth), so the seeded counts expire with the sliding window: roll
+    // every window past the seed (windowCount = 4, one zeroed per fading) and
+    // both members decay-drop, both offers failing into the full queue.
+    for (int i = 0; i < 5; i++) {
+      hk.fading();
+    }
 
     assertThat(hk.estimatedSize()).as("decay-dropped members leave the TopK set").isZero();
     assertThat(expelledLogCounter(hk).get()).as("one accounted failure per dropped member").isEqualTo(2);

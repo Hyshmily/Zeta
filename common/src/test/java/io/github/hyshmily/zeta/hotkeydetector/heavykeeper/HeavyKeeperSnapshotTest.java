@@ -33,10 +33,10 @@ import org.junit.jupiter.api.Test;
 
 /**
  * Tests for the snapshot-before-sort contract of
- * {@link HeavyKeeper#snapshotMembersSorted(int)}: every member's count is
- * read ONCE into an immutable {@link HeavyKeeper.MemberSnapshot} pair
- * <em>before</em> the sort runs. Member counts are concurrently mutated
- * (lock-free max-raise in {@code admit}, CAS halving in
+ * {@link HeavyKeeper#snapshotItemsSorted(int)}: every member's count is
+ * read ONCE into an immutable {@link Item} pair <em>before</em> the sort runs.
+ * Member counts are concurrently mutated
+ * (lock-free max-raise in {@code admit}, VarHandle CAS re-synchronisation in
  * {@code decayMembership}), and a comparator that re-reads a mutable
  * counter mid-sort can feed TimSort an inconsistent total order — it then
  * aborts with "Comparison method violates its general contract!" (reachable
@@ -47,25 +47,24 @@ import org.junit.jupiter.api.Test;
 class HeavyKeeperSnapshotTest {
 
   /**
-   * Deterministic ordering: count descending, ties broken on key ascending
-   * (the original ConcurrentSkipListMap semantics). Seeded via
-   * {@link HeavyKeeper#warm} so the member counts are exact — the sketch's
-   * probabilistic decay is bypassed.
+   * Deterministic ordering: count descending, ties broken on key ascending.
+   * Seeded via {@code ingestBatch(Map)} so the member counts are exact — the
+   * sketch's probabilistic decay is bypassed.
    */
   @Test
-  void snapshotMembersSorted_shouldSortByCountDescThenKeyAsc() {
+  void snapshotItemsSorted_shouldSortByCountDescThenKeyAsc() {
     HeavyKeeper hk = new HeavyKeeper(8, 1024, 4, 0.9, 1, 10_000, 3, false);
     Map<String, Long> seed = new HashMap<>();
     seed.put("alpha", 50L);
     seed.put("gamma", 50L);
     seed.put("beta", 200L);
     seed.put("delta", 1L);
-    hk.warm(seed);
+    hk.ingestBatch(seed);
 
-    List<HeavyKeeper.MemberSnapshot> snapshot = hk.snapshotMembersSorted(8);
+    List<Item> snapshot = hk.snapshotItemsSorted(8);
 
-    assertThat(snapshot).extracting(HeavyKeeper.MemberSnapshot::key).containsExactly("beta", "alpha", "gamma", "delta");
-    assertThat(snapshot).extracting(HeavyKeeper.MemberSnapshot::count).containsExactly(200L, 50L, 50L, 1L);
+    assertThat(snapshot).extracting(Item::key).containsExactly("beta", "alpha", "gamma", "delta");
+    assertThat(snapshot).extracting(Item::count).containsExactly(200L, 50L, 50L, 1L);
   }
 
   /**
@@ -73,26 +72,26 @@ class HeavyKeeperSnapshotTest {
    * other way around).
    */
   @Test
-  void snapshotMembersSorted_shouldLimitToRequestedN() {
+  void snapshotItemsSorted_shouldLimitToRequestedN() {
     HeavyKeeper hk = new HeavyKeeper(8, 1024, 4, 0.9, 1, 10_000, 3, false);
     Map<String, Long> seed = new HashMap<>();
     seed.put("alpha", 50L);
     seed.put("gamma", 50L);
     seed.put("beta", 200L);
-    hk.warm(seed);
+    hk.ingestBatch(seed);
 
-    List<HeavyKeeper.MemberSnapshot> snapshot = hk.snapshotMembersSorted(2);
+    List<Item> snapshot = hk.snapshotItemsSorted(2);
 
-    assertThat(snapshot).extracting(HeavyKeeper.MemberSnapshot::key).containsExactly("beta", "alpha");
-    assertThat(snapshot).extracting(HeavyKeeper.MemberSnapshot::count).containsExactly(200L, 50L);
+    assertThat(snapshot).extracting(Item::key).containsExactly("beta", "alpha");
+    assertThat(snapshot).extracting(Item::count).containsExactly(200L, 50L);
   }
 
   /** An empty membership yields an empty snapshot (no sentinel entries). */
   @Test
-  void snapshotMembersSorted_shouldReturnEmptyForNoMembers() {
+  void snapshotItemsSorted_shouldReturnEmptyForNoMembers() {
     HeavyKeeper hk = new HeavyKeeper(8, 1024, 4, 0.9, 1, 10_000, 3, false);
 
-    assertThat(hk.snapshotMembersSorted(8)).isEmpty();
+    assertThat(hk.snapshotItemsSorted(8)).isEmpty();
   }
 
   /**
@@ -107,16 +106,12 @@ class HeavyKeeperSnapshotTest {
     seed.put("gamma", 50L);
     seed.put("beta", 200L);
     seed.put("delta", 1L);
-    hk.warm(seed);
+    hk.ingestBatch(seed);
 
-    List<HeavyKeeper.MemberSnapshot> snapshot = hk.snapshotMembersSorted(8);
+    List<Item> snapshot = hk.snapshotItemsSorted(8);
     List<Item> items = hk.listTopN(8);
 
-    assertThat(items).hasSameSizeAs(snapshot);
-    for (int i = 0; i < items.size(); i++) {
-      assertThat(items.get(i).key()).isEqualTo(snapshot.get(i).key());
-      assertThat(items.get(i).count()).isEqualTo(snapshot.get(i).count());
-    }
+    assertThat(items).containsExactlyElementsOf(snapshot);
   }
 
   /**
@@ -136,7 +131,7 @@ class HeavyKeeperSnapshotTest {
     for (int i = 0; i < k; i++) {
       seed.put("key-" + i, 10L + i);
     }
-    hk.warm(seed);
+    hk.ingestBatch(seed);
 
     AtomicBoolean stop = new AtomicBoolean(false);
     AtomicReference<Throwable> mutatorFailure = new AtomicReference<>();
@@ -144,7 +139,7 @@ class HeavyKeeperSnapshotTest {
     CountDownLatch done = new CountDownLatch(3);
     ExecutorService pool = Executors.newFixedThreadPool(3);
 
-    // Two count mutators: hammer existing members through the lock-free
+    // Two add mutators: hammer existing members through the lock-free
     // accumulateAndGet fast path (and re-admit decay-dropped ones).
     for (int t = 0; t < 2; t++) {
       final int offset = t;
@@ -164,7 +159,7 @@ class HeavyKeeperSnapshotTest {
       });
     }
     // One fader: full membership halving while the readers sort — the
-    // largest count jumps a live-comparator sort could observe.
+    // largest add jumps a live-comparator sort could observe.
     pool.submit(() -> {
       try {
         start.await();

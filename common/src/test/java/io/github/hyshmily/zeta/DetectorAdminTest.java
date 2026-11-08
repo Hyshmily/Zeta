@@ -23,31 +23,28 @@ import static org.mockito.Mockito.when;
 
 import io.github.hyshmily.zeta.cache.HotKeyCache;
 import io.github.hyshmily.zeta.exception.ZetaModeException;
-import io.github.hyshmily.zeta.hotkeydetector.HotKeyDetector;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.Item;
-import io.github.hyshmily.zeta.model.HotKey;
-import io.github.hyshmily.zeta.rule.RuleService;
+import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.TopK;
 import java.util.List;
-import java.util.Map;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 /**
- * Tests for the {@link Zeta.DetectorAdmin} view: app-mode parity with the
- * former direct methods (which now delegate to it) and Worker-only-mode
- * degradation (feeds throw, pure queries answer empty).
+ * Tests for the {@link Zeta.DetectorAdmin} view (pure queries) and the
+ * {@link Zeta#tag} feed family: app-mode parity and Worker-only-mode
+ * degradation (tag/isLocalHotKey throw, pure queries answer empty).
  */
 class DetectorAdminTest {
 
   private HotKeyCache hotKeyCache;
-  private HotKeyDetector appDetector;
+  private TopK appDetector;
   private Zeta zeta;
 
   @BeforeEach
   void setUp() {
     hotKeyCache = mock(HotKeyCache.class);
-    appDetector = mock(HotKeyDetector.class);
-    zeta = new DefaultZeta(hotKeyCache, appDetector, null, null, mock(RuleService.class));
+    appDetector = mock(TopK.class);
+    zeta = new DefaultZeta(hotKeyCache, appDetector);
   }
 
   @Test
@@ -58,63 +55,27 @@ class DetectorAdminTest {
   }
 
   @Test
-  void detector_notifyFeeds_shouldReachDetector() {
-    zeta.detector().notifyLocalDetector("k");
-    verify(appDetector).add("k");
-    zeta.detector().notifyLocalDetector("k", 3L);
-    verify(appDetector).add("k", 3L);
-    zeta.detector().notifyLocalDetector(Map.of("k", 2L));
-    verify(appDetector).add(Map.of("k", 2L));
-    zeta.detector().notifyLocalDetectorDirect("k", 5L);
-    verify(appDetector).addDirect("k", 5L);
-    zeta.detector().notifyLocalDetectorDirect(Map.of("k", 7L));
-    verify(appDetector).addDirect(Map.of("k", 7L));
+  void detector_feeds_shouldReachEngine() {
+    zeta.tag("k", Zeta.TagMode.DETECT_ONLY);
+    verify(hotKeyCache).recordAccess("k", Zeta.TagMode.DETECT_ONLY);
   }
 
   @Test
-  void detector_localTopKeys_shouldMapItemsToHotKeys() {
-    Item item = mock(Item.class);
-    when(item.key()).thenReturn("k");
-    when(item.count()).thenReturn(42L);
-    when(appDetector.list()).thenReturn(List.of(item));
-    when(appDetector.listTopN(3)).thenReturn(List.of(item));
-    assertThat(zeta.detector().localTopKeys()).containsExactly(new HotKey("k", 42));
-    assertThat(zeta.detector().localTopKeys(3)).containsExactly(new HotKey("k", 42));
-  }
-
-  @Test
-  void detector_areLocalHotKeys_shouldFanOut() {
-    when(hotKeyCache.isHot("a")).thenReturn(true);
-    when(hotKeyCache.isHot("b")).thenReturn(false);
-    assertThat(zeta.detector().areLocalHotKeys(List.of("a", "b")))
-      .isEqualTo(Map.of("a", true, "b", false));
-  }
-
-  @Test
-  void detector_expelledAndTotal_shouldDelegate() {
-    assertThat(zeta.detector().returnLocalTotalDataStreams()).isZero();
-    verify(appDetector).total();
-    zeta.detector().returnLocalExpelledHotKeys();
-    verify(appDetector).expelled();
+  void detector_localTopKeys_shouldReturnDetectorItems() {
+    when(appDetector.listTopN(3)).thenReturn(List.of(new Item("k", 42)));
+    assertThat(zeta.detector().localTopKeys(3)).containsExactly(new Item("k", 42));
   }
 
   @Test
   void workerOnly_detectorFeeds_shouldThrow() {
-    Zeta workerOnly = new DefaultZeta(null, null, null, null, null);
-    assertThatThrownBy(() -> workerOnly.detector().notifyLocalDetector("k"))
-      .isInstanceOf(ZetaModeException.class);
-    assertThatThrownBy(() -> workerOnly.detector().notifyLocalDetectorDirect("k", 1L))
-      .isInstanceOf(ZetaModeException.class);
-    assertThatThrownBy(() -> workerOnly.detector().isLocalHotKey("k"))
-      .isInstanceOf(ZetaModeException.class);
+    Zeta workerOnly = new DefaultZeta(null, null);
+    assertThatThrownBy(() -> workerOnly.tag("k", Zeta.TagMode.DETECT_ONLY)).isInstanceOf(ZetaModeException.class);
+    assertThatThrownBy(() -> workerOnly.detector().isLocalHotKey("k")).isInstanceOf(ZetaModeException.class);
   }
 
   @Test
   void workerOnly_detectorQueries_shouldAnswerEmpty() {
-    Zeta workerOnly = new DefaultZeta(null, null, null, null, null);
-    assertThat(workerOnly.detector().localTopKeys()).isEmpty();
+    Zeta workerOnly = new DefaultZeta(null, null);
     assertThat(workerOnly.detector().localTopKeys(5)).isEmpty();
-    assertThat(workerOnly.detector().returnLocalTotalDataStreams()).isZero();
-    assertThat(workerOnly.detector().returnLocalExpelledHotKeys()).isEmpty();
   }
 }
