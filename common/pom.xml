@@ -9,7 +9,7 @@
   <parent>
     <groupId>io.github.hyshmily</groupId>
     <artifactId>zeta-parent</artifactId>
-    <version>1.1.57</version>
+    <version>1.2.0</version>
     <relativePath>../pom.xml</relativePath>
   </parent>
 
@@ -28,41 +28,13 @@
       <groupId>com.github.ben-manes.caffeine</groupId>
       <artifactId>caffeine</artifactId>
     </dependency>
-    <!-- Test scope only (ADR-0081): the murmur3 hashes moved to vendored
-         bit-identical implementations in util/FastMath; guava stays here as
-         the permanent differential-equivalence guard for the hash functions. -->
-    <dependency>
-      <groupId>com.google.guava</groupId>
-      <artifactId>guava</artifactId>
-      <scope>test</scope>
-    </dependency>
-    <dependency>
-      <groupId>org.springframework.amqp</groupId>
-      <artifactId>spring-amqp</artifactId>
-      <optional>true</optional>
-    </dependency>
 
-    <dependency>
-      <groupId>org.springframework.boot</groupId>
-      <artifactId>spring-boot-starter-data-redis</artifactId>
-      <optional>true</optional>
-    </dependency>
     <dependency>
       <groupId>org.springframework.boot</groupId>
       <artifactId>spring-boot-starter-amqp</artifactId>
       <optional>true</optional>
     </dependency>
-    <dependency>
-      <groupId>org.springframework.boot</groupId>
-      <artifactId>spring-boot-starter-cache</artifactId>
-      <optional>true</optional>
-    </dependency>
 
-    <dependency>
-      <groupId>org.springframework.boot</groupId>
-      <artifactId>spring-boot-configuration-processor</artifactId>
-      <optional>true</optional>
-    </dependency>
     <dependency>
       <groupId>org.projectlombok</groupId>
       <artifactId>lombok</artifactId>
@@ -75,11 +47,6 @@
     <dependency>
       <groupId>com.fasterxml.jackson.core</groupId>
       <artifactId>jackson-databind</artifactId>
-    </dependency>
-    <dependency>
-      <groupId>org.springframework.boot</groupId>
-      <artifactId>spring-boot-starter-aop</artifactId>
-      <optional>true</optional>
     </dependency>
     <dependency>
       <groupId>org.springframework.boot</groupId>
@@ -97,12 +64,6 @@
       <optional>true</optional>
     </dependency>
     <dependency>
-      <groupId>com.bucket4j</groupId>
-      <artifactId>bucket4j_jdk17-core</artifactId>
-      <version>8.19.0</version>
-    </dependency>
-
-    <dependency>
       <groupId>org.springframework.boot</groupId>
       <artifactId>spring-boot-starter-test</artifactId>
       <scope>test</scope>
@@ -117,6 +78,14 @@
     <dependency>
       <groupId>org.testcontainers</groupId>
       <artifactId>junit-jupiter</artifactId>
+      <scope>test</scope>
+    </dependency>
+
+    <!-- P2-7: the real-broker two-node sync IT (BrokerTwoNodeSyncIT) needs the
+         RabbitMQ testcontainer; skipped without Docker and -Dzeta.it.broker=true. -->
+    <dependency>
+      <groupId>org.testcontainers</groupId>
+      <artifactId>rabbitmq</artifactId>
       <scope>test</scope>
     </dependency>
   </dependencies>

@@ -1,50 +1,93 @@
-version: "3.9"
-
 name: zeta-worker
 
-services:
-  redis:
-    image: ${REDIS_IMAGE:-redis:7-alpine}
-    ports:
-      - "6379:6379"
-    volumes:
-      - redis_data:/data
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 3s
-      retries: 5
-    restart: unless-stopped
+# The Zeta cluster plane needs exactly one external dependency: RabbitMQ —
+# App reports in, Worker decisions and heartbeats out (design decisions: system
+# shape).
+#
+# The worker service builds from this directory and tags the result with the
+# registry name. Package the JAR before the first build:
+#   mvn clean package -pl worker -am
+#   docker compose up -d --build
+# Compose reads worker/.env automatically. Set ZETA_APP_NAME there to the same
+# value as the App, and override the worker image tag with ZETA_WORKER_TAG, the
+# broker image with RABBITMQ_IMAGE, and the shared broker credentials with
+# RABBITMQ_USER / RABBITMQ_PASSWORD (baked into rabbitmq_data on first
+# initialization only — rotate them in place with `rabbitmqctl change_password`,
+# or recreate only that volume; `docker compose down -v` also wipes
+# worker_epoch and resets the Worker epoch).
+#
+# The bundled RabbitMQ is for local/demo use. In production set
+# SPRING_RABBITMQ_HOST (worker/.env) to your own broker, point the credentials
+# at it, and remove the rabbitmq service and the worker's depends_on entry.
+#
+# Topology this stack creates on startup: a direct exchange zeta.send.exchange
+# (one per cluster, declared by both the Worker and every App instance) and, per
+# App instance, a durable queue zeta.worker:<instanceId> bound to it under the
+# key send.<appName>. An exchange's type cannot be changed in place, so a broker
+# volume left over from a release whose decision exchange was a fanout makes
+# startup fail with PRECONDITION_FAILED — delete just that exchange
+# (`rabbitmqadmin delete exchange name=zeta.send.exchange`) and restart the
+# Worker and Apps. Reserve `docker compose down -v` for a disposable local stack:
+# it also removes worker_epoch, which resets the Worker epoch.
 
+services:
   rabbitmq:
-    image: ${RABBITMQ_IMAGE:-rabbitmq:4.0-alpine}
+    image: ${RABBITMQ_IMAGE:-rabbitmq:4.0-management-alpine}
     ports:
-      - "5672:5672"
-      - "15672:15672"
+      - "5672:5672" # AMQP: App reports in, Worker decisions out
+      - "15672:15672" # management UI
     volumes:
       - rabbitmq_data:/var/lib/rabbitmq
+    environment:
+      # The stock guest account is loopback-only: a Worker container connecting
+      # over the compose network is refused (ACCESS_REFUSED). Both services read
+      # the same pair, so the credentials cannot drift apart.
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-zeta}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-zeta}
     healthcheck:
       test: ["CMD", "rabbitmq-diagnostics", "ping"]
       interval: 5s
       timeout: 3s
       retries: 5
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   worker:
-    image: ghcr.io/hyshmily/zeta-worker:1.1.55
-    pull_policy: always
+    build: .
+    image: ghcr.io/hyshmily/zeta-worker:${ZETA_WORKER_TAG:-1.2.0}
     environment:
-      SPRING_RABBITMQ_HOST: rabbitmq
-      SPRING_DATA_REDIS_HOST: redis
+      SPRING_RABBITMQ_HOST: ${SPRING_RABBITMQ_HOST:-rabbitmq}
+      SPRING_RABBITMQ_USERNAME: ${RABBITMQ_USER:-zeta}
+      SPRING_RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:-zeta}
       ZETA_WORKER_ENABLED: "true"
-      # ZETA_APP_NAME: "myapp"  # App 侧与 Worker 侧共用同一个键
+      # Must match the App's zeta.app-name: it is the routing key of the decision
+      # broadcasts (send.<appName>), so a mismatch leaves the App queues empty
+      # rather than delivering decisions that get dropped on arrival.
+      ZETA_APP_NAME: ${ZETA_APP_NAME:-default}
+      # Survives container restarts: a reset epoch makes Apps reject the new
+      # incarnation's decisions until the cached entries expire.
+      ZETA_WORKER_EPOCH_FILE: /var/lib/zeta/epoch
+    volumes:
+      - worker_epoch:/var/lib/zeta
     depends_on:
-      redis:      { condition: service_healthy }
-      rabbitmq:   { condition: service_healthy }
+      rabbitmq: { condition: service_healthy }
     restart: unless-stopped
+    # 8080 is not published so `--scale worker=3` cannot hit a host-port
+    # conflict; reach the actuator from the host with:
+    #   docker compose -f worker/docker-compose.yml exec worker \
+    #     curl -fsS http://localhost:8080/actuator/health
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
 volumes:
-  redis_data:
+  worker_epoch:
     driver: local
   rabbitmq_data:
     driver: local

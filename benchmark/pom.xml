@@ -9,7 +9,7 @@
   <parent>
     <groupId>io.github.hyshmily</groupId>
     <artifactId>zeta-parent</artifactId>
-    <version>1.1.57</version>
+    <version>1.2.0</version>
     <relativePath>../pom.xml</relativePath>
   </parent>
 
@@ -17,7 +17,9 @@
   <packaging>jar</packaging>
 
   <name>Zeta Benchmark</name>
-  <description>JMH microbenchmarks for Zeta's concurrency-critical hot paths (never published; ADR-0070)</description>
+  <description>
+    JMH microbenchmarks for Zeta's concurrency-critical hot paths (never published; design decisions: api surface)
+  </description>
 
   <properties>
     <jmh.version>1.37</jmh.version>
@@ -33,17 +35,8 @@
       <artifactId>zeta</artifactId>
       <version>${project.version}</version>
     </dependency>
-    <!--
-      Compile-only view of common's OPTIONAL dependencies: several benchmarked
-      classes expose optional types (e.g. StringRedisTemplate) in their public
-      constructor signatures, so javac needs them on the classpath even though
-      no benchmark ever touches Redis (all such collaborators stay empty).
-      Never published, never shaded into user artifacts.
-    -->
-    <dependency>
-      <groupId>org.springframework.boot</groupId>
-      <artifactId>spring-boot-starter-data-redis</artifactId>
-    </dependency>
+    <!-- Compile-only view of common's optional AMQP dependency: DropPublisher extends
+         ReportPublisher, whose constructor signature exposes RabbitTemplate. Never published. -->
     <dependency>
       <groupId>org.springframework.boot</groupId>
       <artifactId>spring-boot-starter-amqp</artifactId>

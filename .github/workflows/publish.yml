@@ -28,6 +28,33 @@ jobs:
       - name: Build all JARs
         run: mvn clean package -DskipTests --no-transfer-progress
 
+      # README pulls ghcr.io/hyshmily/zeta-worker:<version>; keep the package
+      # public so anonymous `docker run` works.
+      - name: Log in to GitHub Container Registry
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve Worker image tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        id: worker-image
+        run: echo "tag=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push Worker image
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: docker/build-push-action@v6
+        with:
+          context: worker
+          push: true
+          tags: ghcr.io/hyshmily/zeta-worker:${{ steps.worker-image.outputs.tag }}
+
       - name: Publish parent POM & starter to GitHub Packages
         continue-on-error: true
         run: mvn deploy -pl .,common -P github-packages -DskipTests --no-transfer-progress
@@ -39,8 +66,11 @@ jobs:
           VER=${{ github.ref_name }}
           PKDIR="packaging/zeta-worker-${VER}"
           mkdir -p "${PKDIR}/lib"
-          mkdir -p "${PKDIR}/docker"
+          mkdir -p "${PKDIR}/docker/target"
           cp worker/target/zeta-worker-*.jar "${PKDIR}/lib/"
+          # The shipped Dockerfile copies target/..., so keep a copy next to it;
+          # `docker compose up` from docker/ then works without the repo.
+          cp worker/target/zeta-worker-*.jar "${PKDIR}/docker/target/"
           cp worker/Dockerfile worker/docker-compose.yml "${PKDIR}/docker/" || true
           cp -r docs "${PKDIR}/"
           cp README.md README.zh.md LICENSE "${PKDIR}/"

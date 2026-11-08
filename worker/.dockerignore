@@ -1,15 +1,22 @@
+# Only the packaged JAR is needed inside the build context (see Dockerfile).
 target/classes/
+target/delombok/
 target/generated-sources/
 target/generated-test-sources/
 target/maven-archiver/
 target/maven-status/
+target/site/
 target/surefire-reports/
 target/test-classes/
-target/hotkey-worker-*.jar.original
+target/zeta-worker-*.jar.original
+target/zeta-worker-*-sources.jar
+target/zeta-worker-*-javadoc.jar
 target/jacoco.exec
+# Sources and module metadata stay out of the context.
 src/
 pom.xml
 Dockerfile
 docker-compose.yml
-hotkey-worker.iml
+*.iml
+*.log
 .env

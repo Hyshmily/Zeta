@@ -70,7 +70,8 @@ k6/result/*.json
 AGENTS.md
 CLAUDE.md
 
-# OpenCode config files.opencode/
+# OpenCode config
+files.opencode/
 
 .opencode/
 .flattened-pom.xml
@@ -79,5 +80,5 @@ CLAUDE.md
 *.history/
 .workbuddy
 /run-mvn.cmd
-/.tmp.driveupload/
-/.tmp.drivedownload/
+.tmp.driveupload/
+.tmp.drivedownload/
