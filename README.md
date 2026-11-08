@@ -5,7 +5,7 @@
   <a href="https://jitpack.io/#Hyshmily/Zeta"><img src="https://jitpack.io/v/Hyshmily/Zeta.svg" alt="JitPack"></a>
   <a href="https://github.com/Hyshmily/Zeta/releases"><img src="https://img.shields.io/github/v/release/Hyshmily/Zeta?color=brightgreen" alt="GitHub Release"></a>
   <a href="https://github.com/Hyshmily/Zeta/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/Hyshmily/Zeta/ci.yml?branch=master&label=CI&logo=github" alt="CI"></a>
-  <a href="https://coveralls.io/github/Hyshmily/Zeta?branch=master"><img src="https://coveralls.io/repos/github/Hyshmily/Zeta/badge.svg?branch=master" alt="Coveralls"></a>
+  <a href="https://coveralls.io/github/Hyshmily/Zeta?branch=master"><img src="https://coveralls.io/repos/github/Hyshmily/Zeta/badge.svg" alt="Coveralls"></a>
   <a href="https://openjdk.java.net/"><img src="https://img.shields.io/badge/Java-17-orange" alt="Java"></a>
   <a href="https://spring.io/projects/spring-boot"><img src="https://img.shields.io/badge/Spring%20Boot-3.5.3-brightgreen" alt="Spring Boot"></a>
   <a href="https://github.com/Hyshmily/zeta/commits/master"><img src="https://img.shields.io/github/last-commit/Hyshmily/zeta/master" alt="Last Commit"></a>
@@ -15,487 +15,295 @@
 
 [**中文**](README.zh.md)
 
-Zeta is an automated, high-performance, low-cost lightweight distributed cache and preheating framework — no key pre-registration; hotspot detection, decision, warming, and degradation form a fully automated closed loop. It gives burst hot keys eventually-consistent caching across the cluster at minimal cost, fully decoupling business code from distributed coordination infrastructure via Redis and RabbitMQ.
+Zeta is a lightweight distributed cache and cache-warming framework for Spring Boot. Keys need no pre-registration: it handles hot-key discovery, decision, warming and graceful degradation. A sudden hotspot gets a cluster-wide, eventually consistent cache at minimal cost.
 
 > [!NOTE]
-> 
-> A more complete and stable production version will be released soon
+>
+> Zeta 1.2.0 is coming soon.
 
-### Positioning
-
-**Good fit:**
-
-- **Unpredictable viral traffic** — HeavyKeeper counts any key on the fly, no pre-registration; the Worker's learning period auto-calibrates thresholds
-- **Read-heavy clusters hammering single keys** — hot keys get automatic L1 TTL extension (1h vs 5min defaults), SingleFlight merges reloads to prevent breakdown
-- **Caches that must stay consistent across instances (eventually)** — write-through broadcast + per-key version guard; incremental cost is one Redis INCR + one MQ message
-
-**Not a fit:**
-
-- **Steady low-traffic services** — the detection layer idles with ~5MB of sketch arrays and a dozen background threads; plain Caffeine is enough
-- **Workloads needing strong per-write consensus** — sync is at-most-once (ack-before-update), version probes fail open, and brief cross-instance inconsistency during outages is by design; Zeta is eventual-consistency
-
-### Features
-
-| Capability           | Description                                                                                                                                                            |
-| -------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Local hot-key detection | In-process HeavyKeeper TopK sketch — hot keys get their L1 Caffeine TTL extended automatically, no Worker required                                                 |
-| Cluster detection & warm | Sliding window + Bayesian confidence state machine on a Worker cluster; HOT keys pre-warmed from your real data source (DB, remote service)                       |
-| FastLane             | Glob rules for latency-critical keys (flash sales, breaking news): threshold hit → `CONFIRMED_HOT` immediately, ~60ms (P99) end-to-end                                 |
-| Two-level cache      | Caffeine L1 + any backend via named-cache loaders or one-off readers; SingleFlight anti-breakdown, stale-while-revalidate, TTL jitter anti-avalanche                                       |
-| Cross-instance coherency | Write-through broadcast with per-key version guard — eventual consistency without Paxos/Raft overhead                                                              |
-| Spring Cache fusion  | `@Cacheable` / `@CachePut` / `@CacheEvict` fused with hot-key detection, plus `@CacheTtl`, `@Intercept`, `@Fallback`, `@Preload` and friends ([docs/ANNOTATION.md](docs/ANNOTATION.md)) |
-| Runtime ops          | Actuator endpoints, FastLane rule REST API, decision hooks & handler SPIs ([docs/MONITOR.md](docs/MONITOR.md))                                                         |
-
-### Local/Cluster Detection
+## Local and cluster detection
 
 ```java
 private final Zeta zeta;
 
-// Tag key in the same namespace
+// tag the key inside the shared namespace
 zeta.tag("product:123");
 
-// get key
+// read it
 zeta.peek("product:123");
 ```
 
-- **Local tier (always on):** every instance runs a HeavyKeeper TopK sketch. A key entering the TopK set gets its L1 Caffeine TTL extended automatically — no Worker feedback needed. L1 misses are merged by SingleFlight to prevent cache breakdown; soft-expired entries serve stale while a background refresh runs, and if the data source is down the entry is kept alive by a never-shortening lease (`max(remaining, floor, remaining/2)`, floor follows the entry's own scale) instead of hitting the data source on every read ([ADR-0036](docs/adr/0036-lease-on-failure.md), amended by [ADR-0093](docs/adr/0093-explicit-outcomes-never-shorten-lease.md)).
-- **Cluster tier (optional):** instances report counts through a CPU-BBR back-pressured reporter to RabbitMQ; the Worker cluster runs a two-path evaluation pipeline — **FastLane** (glob rules, threshold → immediate `CONFIRMED_HOT`, ~60ms P99 end-to-end) and the **Bayesian path** (Normal-Normal conjugate posterior with per-key evidence accumulation: strongly hot keys confirm in ~50–150ms, borderline keys accumulate evidence across evaluation windows).
+- **Local layer (on by default):** every instance runs a HeavyKeeper TopK sketch. As soon as a key enters the TopK set, its L1 Caffeine TTL is extended automatically — no Worker feedback required. An L1 miss coalesces concurrent requests; a soft-expired entry serves the stale value while refreshing in the background.
+- **Cluster layer (optional):** per-instance counts are reported to RabbitMQ and evaluated by a Worker cluster. The Worker keeps a sliding window per key and compares its sum with the governing rule's `hotCount`/`coolCount` (regex, prefix or exact rules, precedence-ordered); a matching exact rule decides on its own threshold, everything else is gated by the promotion floor. HOT/COOL decisions are broadcast back to every App instance.
 
-<details>
-<summary><b>Implementation details</b></summary>
+## Multi-node cache coherence
 
-- The `WaveCounter` routes keys by heat into two paths: hot keys merge into a per-writer local map (zero shared contention, bulk-merged to the shared table every 128 increments) and cold keys write directly to a lock-free shared table. One snapshot is delivered per 500ms cycle.
-- The tide is self-adaptive: the `TidePacer` shortens the delivery cycle to 50ms under bursts and stretches it when idle, while the `MoonsTidalForce` promotion-floor governor drops the floor to the boundary to admit blocked renewing keys (never ratcheting) — with volume-gated regime switches (quiet traffic → floor 1; flood → one-tide stale-floor collapse), bounded, backoff-priced probe walks ([ADR-0045](docs/adr/0045-promotion-floor-governor.md)/[ADR-0051](docs/adr/0051-governor-probe-machine-bounds.md)/[ADR-0052](docs/adr/0052-governor-caffeine-refinements.md)/[ADR-0053](docs/adr/0053-density-priced-raise-stride.md)), and a direction-verified veto that probes the live signal before retreating past a confirmed rung ([ADR-0058](docs/adr/0058-direction-verified-veto-retreat.md)) — whose descent itself now probes the live renewal each stride: it parks at the first healthy rung it reaches and pivots when the descent keeps under-earning its own start ([ADR-0059](docs/adr/0059-descent-slope-verified-retreat.md)). The promotion boundary is exact ([ADR-0054](docs/adr/0054-exact-selection-promotion-boundary.md)): the cycle's k-th largest count, selected by quickselect within a log2-located bucket, with renewing members re-promoted before newcomers on ties — the hot set stays stable under flat distributions; on stable workloads the selection reuses the previous tide's exact boundary as a sweep filter, so the selection runs over ~`hotLimit` keys instead of the whole bucket ([ADR-0057](docs/adr/0057-kth-shortcut-exact-selection.md)).
+Much like a primary/replica database syncing writes through a log-replication protocol, Zeta propagates cache changes between application instances over a RabbitMQ publish-subscribe channel.
 
-- Each application instance runs a local TopK sketch that tracks frequently accessed keys. When a key enters the local TopK set, its L1 Caffeine cache TTL is automatically extended — no Worker feedback required. On L1 miss, the SingleFlight mechanism merges concurrent requests for the same key to prevent cache breakdown. Soft expiration is also supported — when the soft TTL expires but the hard TTL has not, stale entries are served immediately while a background async refresh is triggered, ensuring response latency. If that background refresh fails, the stale entry is kept alive with a decaying lease (`max(remaining/2, 120s)`, [ADR-0036](docs/adr/0036-lease-on-failure.md)) — a down source becomes background retry instead of a per-read stampede, and the entry self-heals on the first successful refresh.
+Whenever an instance performs a cluster-synced write (`put(key, value, PutPolicy.synced())`) or an invalidation, each node's local, lock-free `StampClock` assigns a `dataVersion` per key and broadcasts the result to every peer. A synced write carries the serialized value, so a peer compares versions and applies it directly, with no read-back to the source: one send converges the whole cluster, including instances that hold no related key at all.
 
-- `KeyReporter` aggregates local counts through a second `WaveCounter` (50ms flush cadence), then passes them through a CPU-BBR rate limiter (CPU threshold 80%, sliding window 10s/100 buckets) before batch-reporting to RabbitMQ via `DirectExchange` with routing key `reportToWorker.{appName}.{target}`.
+Version comparison delivers eventual consistency without paying for a consensus protocol such as Paxos or Raft.
 
-- The Worker cluster aggregates access reports from all application instances and runs a **two-path evaluation pipeline**:
-  - **FastLane**: For keys matching user-configured glob rules (e.g. `product:*`), the sliding-window sum is compared directly against the rule's threshold. When the threshold is met, the key is promoted to `CONFIRMED_HOT` immediately — no Bayesian confidence gating, no confirm windows. Under default configuration, end-to-end latency: **~60ms (P99)**.
-  - **Bayesian path**: For all other keys, sliding-window frequency analysis combined with a Bayesian confidence state machine (Normal-Normal conjugate posterior with per-key evidence accumulation) produces decisions: `HIGH (≥0.95)` → `CONFIRMED_HOT` broadcasts HOT; `MEDIUM ([0.76, 0.95))` → `CANDIDATE_HOT` accumulates evidence; `LOW (<0.76)` → retention strategy (first 2 occurrences with `hotStreak=confirmCount-1` fast re-evaluation, 3rd occurrence full reset). Promotion latency depends on traffic intensity: a strongly hot key (well above threshold) reaches CONFIRMED_HOT in **~50–150ms**, while a borderline key (near-threshold) may require multiple evaluation windows.
+Benchmarks (`HotHitBenchmark`, Intel Ultra 9 285H, JDK 26):
 
-</details>
+- `peek` **~123M ops/s** (8.1 ns/op: Caffeine lookup plus unwrapping, no side effects)
+- `get` (L1 hit) **~40M ops/s** single-threaded (25.3 ns/op), **~99M ops/s** aggregated over 8 threads (80.8 ns/op; the full path including TopK and reporter)
+- `get` (L1 hit, 1 KB String value) **~39M ops/s** (25.9 ns/op)
 
-### Multi-Node Cache Coherency
+HotKey is inspired by JD's [hotkey](https://gitee.com/jd-platform-opensource/hotkey); the algorithms come from [Aegis](https://github.com/go-kratos/aegis) and [neural](https://github.com/yu120/neural/tree/master).
 
-Much like how a primary-backup database synchronizes writes through a log replication protocol, Zeta synchronizes cache mutations across application instances through a publish-subscribe mechanism backed by RabbitMQ.
+## Configuration
 
-When any instance performs a cluster-synced write (`put(key, value, PutOptions.synced())`) or invalidation, it increments a per-key dataVersion (via Redis INCR, with a local fallback for degraded mode) and broadcasts the result to all peers — a synced write carries the serialized value itself (PUT broadcast, ADR-0098); peers apply it after comparing versions, with no reload. Each peer compares the incoming dataVersion against its local version — stale messages are silently dropped. When all Workers are unreachable, the local TopK assumes full authority over promotions and the reporter drops silently; when Workers recover, they automatically reclaim control via a higher version number — no manual intervention required.
+### Standalone App
 
-This version comparison mechanism ensures eventual coherency without the overhead of distributed consensus protocols like Paxos or Raft.
-
-![docs/png/Zeta.png](docs/png/Zeta.png)
-
-Benchmarks (`HotHitBenchmark`/`RuleBenchmark`, Intel Ultra 9 285H, JDK 26):
-
-- peek ~70M ops/s (Caffeine lookup + unwrap, no side effects)
-- get (L1 hit) ~28M ops/s single-thread, ~59M aggregate at 8 threads (full path incl. TopK + Reporter)
-- get (L1 hit, 10-rule matcher) ~17M ops/s (+24ns memo probe per hit)
-- get (L1 hit, 1KB String values) ~29M ops/s
-
-Inspired by JD.com's [hotkey](https://gitee.com/jd-platform-opensource/hotkey) project; algorithm support from [Aegis](https://github.com/go-kratos/aegis)、[neural](https://github.com/yu120/neural/tree/master)
-
-## Quick Start
-
-### 1. Add Dependency
-
-<details>
-<summary><b>Quick Deploy YAML Templates</b></summary>
-
-**Local mode (App side)** — just add the `zeta` dependency to run; uncomment optional features as needed
-
-```yaml
-zeta:
-  # local parameters all use defaults, no explicit config needed
-
-  # —— Optional features, uncomment as needed ——
-  # App report to worker
-  #report:
-  #  enabled: false
-
-  # Cross-instance cache sync (requires spring-boot-starter-amqp + spring-boot-starter-data-redis)
-  # sync:
-  #   enabled: true
-
-  # Spring Cache integration (requires spring-boot-starter-cache)
-  # spring-cache:
-  #   enabled: true
-
-  # Worker decision listener (requires spring-boot-starter-amqp + spring-boot-starter-data-redis)
-  # worker-listener:
-  #   enabled: true
-  # sync:
-  #   enabled: true     # worker-listener depends on hotKeyClusterLoader (CacheLoader) Bean
-  #                     # Customize: implement CacheLoader -> @Bean (see "Customizing Data Source" below)
-
-  # Consistent hashing is enabled by default (dynamic Worker routing via heartbeat)
-  # local:
-  #   consistent-hashing:
-  #     enabled: true     # (already enabled by default)
-```
-
-**Single Worker (standalone node)** — add `spring-boot-starter-amqp`
-
-```yaml
-zeta:
-  app-name: myapp # 【Required】Shared by the App side and the Worker side (single key)
-  worker:
-    enabled: true
-    # Consistent hashing is enabled by default; Workers register via heartbeat
-
-# Multi-Worker example: 3 machines, same app-name
-# Consistent hashing routes keys to the correct Worker via heartbeat automatically
-# No static sharding config needed — just add more machines
-# Recommended: deploy local App first, then start Workers
-```
-
-**Cluster health threshold** — by default (`min-alive-workers: 0`), the cluster is healthy when at least **one third of observed Workers** are alive (rounded up, minimum 1): e.g. 3 observed Workers → 1 alive is healthy; 5 observed → 2 alive; 9 observed → 3 alive. A single surviving Worker is intentionally treated as healthy (see [ADR-0028](docs/adr/0028-records-based-one-third-cluster-health-threshold.md)). Set `min-alive-workers: N` to require an absolute number of alive Workers. See [CONFIG.md](docs/CONFIG.md) for details.
-
-**All parameters:**
-See [CONFIG.md](docs/CONFIG.md)
-
-</details>
-
-#### Local Mode (App Side) — Maven Dependency
-
-**Maven Central** (no extra repository needed):
+Java 17 and Spring Boot 3.5.x are required.
 
 ```xml
 <dependency>
   <groupId>io.github.hyshmily</groupId>
   <artifactId>zeta</artifactId>
-  <version>1.1.57</version>
+  <version>1.2.0</version>
 </dependency>
 ```
 
-**JitPack:**
-
-```xml
-<repositories>
-    <repository>
-        <id>jitpack.io</id>
-        <url>https://jitpack.io</url>
-    </repository>
-</repositories>
-
-<dependency>
-  <groupId>io.github.hyshmily</groupId>
-  <artifactId>zeta</artifactId>
-  <version>1.1.57</version>
-</dependency>
-```
-
-**GitHub Packages:**
-
-```xml
-<repositories>
-  <repository>
-    <id>github</id>
-    <name>GitHub Packages</name>
-    <url>https://maven.pkg.github.com/hyshmily/zeta</url>
-  </repository>
-</repositories>
-
-<dependency>
-  <groupId>io.github.hyshmily</groupId>
-  <artifactId>zeta</artifactId>
-  <version>1.1.57</version>
-</dependency>
-```
-
-#### Worker Node (Standalone) — JAR / Docker
-
-> [!IMPORTANT]
->
-> **Prerequisites:**
-> Redis + RabbitMQ
-
-Pre-built images are hosted on GHCR.
-
-**Pull:** Log in with a GitHub PAT that has `read:packages` scope:
-
-```bash
-echo $PAT | docker login ghcr.io -u hyshmily --password-stdin
-```
-
-**Full stack via docker compose** (includes Redis + RabbitMQ):
-
-```bash
-docker compose -f worker/docker-compose.yml up -d
-```
-
-**Scale multiple Worker instances:**
-
-```bash
-docker compose -f worker/docker-compose.yml up -d --scale worker=3
-```
-
-**Run standalone** (external Redis + RabbitMQ):
-
-```bash
-docker run -d --name zeta-worker -p 8080:8080 \
-  -e SPRING_RABBITMQ_HOST=rabbitmq \
-  -e SPRING_DATA_REDIS_HOST=redis \
-  -e ZETA_WORKER_ENABLED=true \
-  ghcr.io/hyshmily/zeta-worker:1.1.57
-```
-
-**Run JAR directly** (no Docker):
-
-```bash
-mvn clean package -pl worker
-java -jar worker/target/zeta-worker-1.1.57.jar
-```
-
-### 2. Configuration
-
-Default local configuration:
-
-**Feature configuration:**
-
-| Feature                  | How to Enable                                | Description                                                          |
-| ------------------------ | -------------------------------------------- | -------------------------------------------------------------------- |
-| Redis L2 Cache           | Add `RedisTemplate` Bean                     | Two-level cache, L2 fallback                                         |
-| Cross-instance Sync      | `zeta.sync.enabled=true`                     | RabbitMQ-based cache invalidation                                    |
-| Worker Listener          | `zeta.worker-listener.enabled=true`          | Receive HOT/COOL decisions from Worker                               |
-| Worker Mode              | `zeta.worker.enabled=true`                   | Run a dedicated Worker node                                          |
-| Access Reporting         | `zeta.report.enabled=true` (default)         | Report access counts to Worker                                       |
-| Reporter Self-Protection | `zeta.local.reporter.enabled=true` (default) | BBR backpressure for Reporter flush                                  |
-| Spring Cache Integration | `zeta.spring-cache.enabled=true`             | `@Cacheable` / `@CachePut` / `@CacheEvict` fused with Zeta detection |
-
-See [CONFIG.md](docs/CONFIG.md) for the full property reference.
-
-### 3. Usage
-
-See [CONFIG.md](docs/CONFIG.md) for the full property reference.
-
-**Tag Operations** (feed detection without cache read)
-
-```java
-// K. tag — mark a key as potentially hot, no cache read
-zeta.tag("product:456"); // updates local TopK + enqueues Worker report
-
-// L. tag with fine-grained control
-zeta.tag("product:456", Zeta.TagMode.REPORT_ONLY); // skip detection, still report to Worker
-zeta.tag("product:456", Zeta.TagMode.DETECT_ONLY); // detect locally, skip Worker report
-```
-
-**Read Operations**
-
-```java
-@Autowired
-private Zeta zeta;
-
-// A. peek — L1 only, no loading, no hot key tracking
-String r = zeta.peek("user:123"); // returns null on L1 miss
-
-// B. get — two-level read-through (Redis or any backend); null = miss (never cached, next read re-queries)
-String val = zeta.get("user:123", () -> redisTemplate.opsForValue().get("user:123"), GetOptions.defaults());
-
-// C. get with GetOptions — per-call TTLs; soft-expired entries serve stale + async refresh by default
-User user = zeta.get("user:123", () -> loadUser(123),
-    GetOptions.of(60_000L, 30_000L));
-```
-
-**Named Caches** (LoadingCache style — build once, read anywhere)
-
-Build a typed `ZetaCache<K,V>` handle once against a named namespace, then read/write with zero-argument `get`/`put`/`invalidate` — no loader at the call site. `hardTtl` is the `expireAfterWrite` equivalent and `softTtl` the `refreshAfterWrite` equivalent; misses and background refreshes run through the standard pipeline (SingleFlight dedup, circuit breaker, Worker reporting).
-
-```java
-ZetaCache<UserId, User> users = zeta.<UserId, User>newBuilder()
-    .name("user")
-    .keyCodec(UserId::value)
-    .hardTtl(Duration.ofMinutes(5))
-    .softTtl(Duration.ofMinutes(1))
-    .build(key -> createExpensiveUser(key));
-
-// then read — no loader at the call site:
-User user = users.get(id);
-Map<UserId, User> batch = users.getAll(ids);
-```
-
-> [!NOTE]
->
-> - A miss or a soft-expire refresh invokes the registered loader through the standard read path — SingleFlight deduplication, circuit breaker and Worker reporting all apply; a plain L1 hit never invokes it.
-> - **The loader is fixed at build time:** per-call options override TTL/semantics only — the loader (including its `shouldCache` admission decision) can never be swapped per call. One-off data sources use the String facade instead: `zeta.get(key, loaderOrReader, GetOptions)` / `zeta.getAll(keys, reader, GetOptions)`.
-> - Cluster bonus: Worker HOT warm-up and peer REFRESH also load through the `hotKeyClusterLoader` bean (Redis by default), so hot keys can be warmed from your real data source (e.g. a database) without a Redis value channel.
-> - `null` is never cached: a `null` loader result writes no entry and the next read re-queries; `put(key, null)` throws `IllegalArgumentException`. Capacity (`maximumSize`) remains a global L1 knob (`zeta.local.cache.max-size`), not per-cache.
-
-**Options API** (closed per-family options objects)
-
-Every operation family exposes a full-control form taking the family's closed options record — `GetOptions` (reads), `PutOptions` (writes), `InvalidateOptions` (invalidations), in `io.github.hyshmily.zeta.model`. Each record carries exactly the knobs its family honors, so a mis-scoped knob is a compile error instead of a silent no-op. TTL fields are lazy (evaluated at most once per call) and customized via `with*` chains.
-
-```java
-// P. get with GetOptions — lazy TTL evaluation, stale policy, fail-fast control
-GetOptions options = GetOptions.of(30_000L, 10_000L);
-
-User user = zeta.get("user:123", () -> userRepo.findById("user:123"), options);
-
-// Q. fail-fast read — loader/internal failures propagate as exceptions instead
-// of being swallowed as a miss; a null loader result is still an empty result (never cached)
-User user2 = zeta.get("user:123", () -> loadUser(123),
-    GetOptions.of(60_000L, 30_000L).withFailOnError());
-```
-
-**Write Operations**
-
-```java
-// R. put — pure cache write, local-only by default ("mutate the source, then put"
-// is caller-orchestrated); put(key, null) throws
-zeta.put("user:123", newValue);
-
-// S. put with cluster sync — version bump + value-carrying PUT broadcast
-// to peers (they apply version-guarded, no reload; ADR-0098)
-zeta.put("user:123", newValue, PutOptions.synced());
-
-// T. put with explicit hard TTL (local-only)
-zeta.put("user:123", newValue, PutOptions.of(60_000L, 0));
-
-// U. invalidate — cluster sync on by default (peers drop their copy immediately)
-zeta.invalidate("user:123", InvalidateOptions.defaults());
-
-// U2. invalidate local-only — no sync message (single-instance deployments only)
-zeta.invalidate("user:123", InvalidateOptions.localOnly());
-
-// V. flushLocalEmergency — emergency local-only flush
-zeta.flushLocalEmergency();
-
-// W. refresh — version-guarded reload: the version is allocated before the load,
-// so a concurrent newer write wins instead of being regressed by a stale load
-zeta.refresh("user:123", () -> loadUser(123));
-```
-
-**Custom per-entry TTL**
-
-Zeta uses **differentiated TTLs**: hot keys and normal keys have independent defaults. Per-call overrides take effect on top.
-
-| Key State | Hard TTL (Caffeine eviction)   | Soft TTL (stale-while-revalidate) |
-| --------- | ------------------------------ | --------------------------------- |
-| Normal    | `default-hard-ttl-ms` (5min)   | `default-soft-ttl-ms` (30s)       |
-| Hot       | `default-hot-hard-ttl-ms` (1h) | `default-hot-soft-ttl-ms` (5min)  |
-
-```java
-// 5 min hard TTL + 30s soft TTL
-String shopJson = zeta.get("shop:" + shopId,
-    GetOptions.of(() -> redisTemplate.opsForValue().get("shop:" + shopId))
-        .withHardTtl(TimeUnit.MINUTES.toMillis(5))
-        .withSoftTtl(TimeUnit.SECONDS.toMillis(30)));
-
-// 30s hard TTL, soft TTL uses default
-zeta.put("weather:" + city, weatherData, PutOptions.of(TimeUnit.SECONDS.toMillis(30), 0));
-```
-
-> [!NOTE]
-> **Cache avalanche protection:** `TtlPolicy` applies a uniform random offset via `DelayUtil.computeTtlJitter()` to every expiration timestamp (default ±5%). A 5-minute hard TTL actually expires between 4.75 ~ 5.25 minutes under the default offset. Controlled by `zeta.local.ttl-jitter-ratio` (ratio, default `0.05` = ±5%, `0` to disable).
-
-> [!TIP]
-> Per-call TTL semantics: passing `0` uses the configured default for that key state. For pure logical expiration (hard TTL never evicts, soft expire only): pass `hardTtlMs = Long.MAX_VALUE` via `GetOptions.of(reader).withHardTtl(Long.MAX_VALUE).withSoftTtl(softTtlMs)` — the entry permanently resides in Caffeine. This usage is explicitly supported by Caffeine's `Expiry` JavaDoc: _"To indicate no expiration an entry may be given an excessively long period, such as `Long.MAX_VALUE`."_ ([source](https://github.com/ben-manes/caffeine/blob/master/caffeine/src/main/java/com/github/benmanes/caffeine/cache/Expiry.java))
-
-## Worker Mode
-
-Worker mode provides cluster-wide hotspot detection via dedicated nodes. App instances periodically report access counts; the Worker runs a sliding window + state machine pipeline and broadcasts HOT/COOL decisions back to all instances. State machine parameters (`confirmCount`, `coolCount`, `preCoolGraceCount`) can be adjusted at runtime via `/actuator/hotkey/worker/state`.
-
-| Mode        | `worker.enabled`  | Activated Beans                                                           |
-| ----------- | ----------------- | ------------------------------------------------------------------------- |
-| App-only    | `false` (default) | `HotKeyCache`, TopK, reporter, actuator, sync                             |
-| Worker-only | `true`            | Worker only (no cache — `get()`/`put()` throw `ZetaModeException`)        |
-
-**Worker Cluster Health:** The cluster is healthy when at least one third of the Workers observed via heartbeats are alive (rounded up, minimum 1) — e.g. 3 Workers observed → 1 alive is healthy; 9 observed → 3 alive. A single surviving Worker is intentionally treated as a healthy cluster: Worker-side report traffic is batched and the survivor can serve the cluster; degradation (local COOL→HOT takeover) triggers only when fewer than one third of observed Workers remain. Set `zeta.local.heartbeat.min-alive-workers: N` for an absolute minimum (see [ADR-0028](docs/adr/0028-records-based-one-third-cluster-health-threshold.md)).
-
-**FastLane (Immediate Promotion Bypass):** FastLane is an evaluation path that bypasses the Bayesian confidence gating entirely. Keys matching user-configured glob rules (e.g. `product:*`) are promoted to `CONFIRMED_HOT` as soon as the sliding-window sum reaches the rule's threshold — no confirm windows, no confidence scoring, no streak counting. End-to-end latency: **~60ms** (P99). FastLane only engages when `zeta.worker.fast-lane.enabled=true` (default `false`) — configuring rules alone does not activate the path.
-
-Configure FastLane rules via properties at startup:
+`zeta.report.enabled` defaults to `true`, but it is inert at this step: without `spring-boot-starter-amqp` there is no `RabbitTemplate`, so the reporter is never wired.
 
 ```yaml
 zeta:
-  worker:
-    fast-lane:
-      enabled: true # required — the gate is real (default false)
-      rules:
-        - key-pattern: "product:*" # glob pattern
-          threshold: 500 # sliding-window sum threshold
-        - key-pattern: "flashsale:*"
-          threshold: 1000
-        - key-pattern: "news:breaking:*"
-          threshold: 200
+  local:
+    top-k: 100 # seats in the local ranking
+    min-count: 10 # minimum accesses to enter the TopK
+    cache:
+      max-size: 100000 # process-wide L1 ceiling
+    hard-ttl-ms: 300000 # normal key: Caffeine eviction
+    soft-ttl-ms: 30000 # normal key: stale-while-revalidate
+    hot-hard-ttl-ms: 3600000 # Local-Hot key
+    hot-soft-ttl-ms: 300000 # Local-Hot key
 ```
 
-Or manage rules at runtime via actuator REST API (no restart needed):
-
-| Method   | Path                                  | Action                |
-| -------- | ------------------------------------- | --------------------- |
-| `GET`    | `/actuator/hotkey/fastlane`           | List all rules        |
-| `POST`   | `/actuator/hotkey/fastlane`           | Add rule              |
-| `PUT`    | `/actuator/hotkey/fastlane`           | Update rule threshold |
-| `DELETE` | `/actuator/hotkey/fastlane/{pattern}` | Remove rule           |
-
-Example: `curl -X POST -H 'Content-Type: application/json' -d '{"keyPattern":"promo:*","threshold":300}' http://worker:8080/actuator/hotkey/fastlane`
-
-**FastLane state transitions:** A matched key jumps directly to `CONFIRMED_HOT` from any current state (COLD, CANDIDATE_HOT, PRE_COOLING). The `hotStreak` is immediately set to the required confirmation count, `coolStreak` is reset to 0, and a HOT decision is broadcast — even from PRE_COOLING (where normal-path silent revive would suppress the broadcast). Already-confirmed keys simply refresh their timestamp.
-
-**When to use:** Flash-sale product IDs, breaking-news slugs, promotional item IDs — any key where false positives are tolerable and sub-second detection latency is required. For keys requiring high-confidence decisions with minimal false positives, use the default Bayesian path instead.
-
-### Notes
-
-**`hot-threshold: -1` Disables Hot Detection During Learning Period**
-
-When `zeta.worker.threshold.hot-threshold` is set to `-1` (ratio-based mode), the Worker initializes the sliding-window threshold to `Long.MAX_VALUE` — effectively no key can be classified as HOT during the 30-second learning period (`learning-period-ms`, default 30s). After the learning period, `ThresholdLearner` calculates `threshold = globalQps × hotThresholdRatio` and normal operation begins.
-
-**Mitigation:** Set a reasonable absolute threshold alongside the ratio:
+Add `spring-boot-starter-actuator` to expose the endpoints:
 
 ```yaml
-zeta:
-  worker:
-    threshold:
-      hot-threshold: 1000 # fallback during learning period
-    global-qps-dynamic-threshold:
-      learning-period-ms: 5000 # shorten for faster convergence
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,hotkey,hotkeyring
 ```
 
-Or disable the learning period entirely (`learning-period-ms: 0`) if the traffic pattern is known upfront.
+```bash
+curl -s localhost:8080/actuator/hotkey | jq '{topK: .local.topK, cacheSize: .local.cacheSize, total: .local.totalRequests}'
+```
 
-**Worker Broadcast Exchange Declaration**
+Every property, default and tuning note lives in [CONFIG.md](docs/CONFIG.md) (§2–§9); endpoint and meter fields are documented in [MONITOR.md](docs/MONITOR.md).
 
-The Worker module (`zeta-worker`) declares the broadcast exchange (`zeta.send.exchange` by default) as a Spring `FanoutExchange` bean. If deploying Workers separately (not through the provided `WorkerAutoConfiguration`), ensure the exchange exists in RabbitMQ — otherwise the Worker's HOT/COOL broadcasts will fail with a channel-level `not_found` exception.
+### Clustered App
 
-**Heartbeat Exchange Declaration Ordering**
+Add the AMQP starter on top of the standalone setup:
 
-On a fresh broker the Worker declares `zeta.heartbeat.exchange` **before** the control-plane connection is used for publishing, so a cold cluster no longer logs `NOT_FOUND - no exchange 'zeta.heartbeat.exchange'` on its first Worker. (It used to: two `ERROR` lines from the first Worker only, because the heartbeat exchange was declared lazily by Spring Boot's `RabbitAdmin` while the heartbeat producer opened its own connection — the publish could win the race and the tick's heartbeat plus fast-lane rule gossip were lost, self-healing one interval later.) The declaration rides on the control-plane `RabbitTemplate` that Zeta builds for heartbeat and rule-gossip traffic; it is idempotent and durable, so a separately deployed App benefits from it as well.
+```xml
+<dependency>
+  <groupId>org.springframework.boot</groupId>
+  <artifactId>spring-boot-starter-amqp</artifactId>
+</dependency>
+```
 
-For the remaining entities (`zeta.send.exchange`, `zeta.reportToWorker.exchange`, the sync exchange) declarations are still issued lazily by Boot's `RabbitAdmin`, so a one-off cold-start `NOT_FOUND` remains possible and remains benign — judge recovery by whether the App-side health ring becomes non-empty, as described in [CONFIG.md](docs/CONFIG.md). Do **not** add a second `AmqpAdmin`/`RabbitAdmin` bean to force earlier declaration: Boot's admin is guarded by `@ConditionalOnMissingBean` on its return type, so an extra admin silently switches it off and leaves every exchange, queue and binding undeclared.
+Then point the App at the broker and enable the paths you need:
 
-**Shared-broker appName isolation ([ADR-0068](docs/adr/0068-broadcast-app-name-isolation.md))**
+```yaml
+spring:
+  rabbitmq:
+    host: ${RABBITMQ_HOST:localhost}
+    port: 5672
+    username: ${RABBITMQ_USER:zeta}
+    password: ${RABBITMQ_PASSWORD:zeta}
 
-Every HOT/COOL decision broadcast carries an `appName` header (from the shared `zeta.app-name`), and the App-side listener drops decisions whose `appName` differs from its own — the fanout exchange ignores the routing key, so on a shared RabbitMQ broker app A's decisions would otherwise trigger useless prewarming on app B. Two compatibility rules: messages **without** the `appName` header (older Workers, rolling-upgrade window) are always processed, and apps with no `app-name` configured keep the old receive-everything behavior. A mismatch between the two `app-name` values silently discards decisions (visible at DEBUG) — keep them identical. See [ADR-0068](docs/adr/0068-broadcast-app-name-isolation.md).
+zeta:
+  app-name: order # tenancy key + decision routing key, must match the Worker; [A-Za-z0-9_-]+
+  report:
+    enabled: true # the default
+  worker-listener:
+    enabled: true # heartbeat + HOT/COOL
+  sync:
+    enabled: true # optional: cross-instance PUT/REFRESH/INVALIDATE
+  local:
+    instance-id: ${HOSTNAME} # queue name and node-id derive from it
+    node-id: 1 # unique per instance; defaults to the CRC32 of instance-id
+```
 
-**PING/PONG Verification Is Auxiliary**
+Every property of each path is listed in [CONFIG.md](docs/CONFIG.md) (§6 report queue, §7 Worker listener and cluster health, §8 cache sync); endpoint fields are in [MONITOR.md](docs/MONITOR.md).
 
-The `WorkerHeartbeatVerifier` periodically sends PING messages to Workers that appear **not alive** (heartbeat timeout > `heartbeat.timeout-ms`, default 10s). Transient failures at startup are expected and safe — the first PING may arrive before the Worker's verify queue is ready. The primary heartbeat path (Worker → `zeta.heartbeat.exchange` → App heartbeat queue) is the authoritative mechanism for HealthView updates and RingManager routing.
+### Worker
 
-**Customizing the Data Source for HOT Promotion**
+**Option A — compose, broker included**
 
-When the Worker broadcasts a HOT decision for a key, the app-side `WorkerListener` loads the authoritative value via `CacheLoader.load(key)` before promoting the entry to L1 with extended TTL. The default implementation reads from Redis (`RedisValueLoader`).
+```bash
+mvn clean package -pl worker -am # the image copies the packaged JAR
+docker compose -f worker/docker-compose.yml up -d --build
+```
 
-To use an alternative data source (database, remote service, etc.), provide your own `CacheLoader<String, Object>` bean:
+compose reads `worker/.env` automatically. `ZETA_APP_NAME` must match the App's `zeta.app-name` — it decides which application's reports this Worker consumes, and it is the **routing key** of the decisions it broadcasts: the Worker publishes to the direct exchange `zeta.send.exchange` under `send.<app-name>`, and each App instance binds its queue under the same key.
+
+```dotenv
+ZETA_APP_NAME=myapp
+ZETA_WORKER_TAG=1.2.0
+RABBITMQ_USER=zeta
+RABBITMQ_PASSWORD=change-me
+```
+
+**Option B — standalone container against your own broker**
+
+```bash
+docker run -d --name zeta-worker \
+  -p 127.0.0.1:8080:8080 \
+  -e SPRING_RABBITMQ_HOST=<rabbitmq-host> \
+  -e SPRING_RABBITMQ_USERNAME=<user> \
+  -e SPRING_RABBITMQ_PASSWORD=<password> \
+  -e ZETA_APP_NAME=myapp \
+  -e ZETA_WORKER_EPOCH_FILE=/var/lib/zeta/epoch \
+  -v zeta_worker_epoch:/var/lib/zeta \
+  ghcr.io/hyshmily/zeta-worker:1.2.0
+```
+
+**Option C — build your own Worker process**
 
 ```java
-@Bean
-@ConditionalOnMissingBean(name = "hotKeyClusterLoader")
-public CacheLoader<String, Object> dbCacheLoader(YourRepository repo) {
-  return key -> {
-    // Parse entity type from key convention, e.g. "User:123"
-    // → table "users", id=123; then query DB and return the value
-    return repo.loadByKey(key);
-  };
+@SpringBootApplication(scanBasePackages = { "com.example.worker", "io.github.hyshmily.zeta.worker" })
+public class MyWorkerApplication {
+
+  public static void main(String[] args) {
+    SpringApplication.run(MyWorkerApplication.class, args);
+  }
 }
 ```
 
-`@ConditionalOnMissingBean(name = "hotKeyClusterLoader")` ensures your bean replaces the default `RedisValueLoader`. Both `WorkerListener.handleHot()` and `CacheSyncListener.handleRefresh()` consume values through this bean — no other wiring changes needed. Returning `null` signals "absent at the data source" — the value is never cached and the next read re-queries.
+The following applies to a self-built Worker or a directly run jar:
 
-**Observing Broadcast Decisions with Hooks**
+```yaml
+zeta:
+  app-name: order # must match the App's zeta.app-name
+  report:
+    enabled: false # a Worker-only node does not report
+  worker:
+    enabled: true
+    epoch-file: /var/lib/zeta/epoch # must survive restarts
+    detection:
+      defaults:
+        hot-qps: 1000
+        cool:
+          strategy: COOL_FOR_LOW_QPS
+          cool-qps: 100
+          low-qps-for: 30s
 
-Implement `WorkerDecisionHook` and/or `SyncHook` to observe broadcast outcomes without modifying core logic:
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health
+  endpoint:
+    health:
+      probes:
+        enabled: true
+```
+
+The shipped Worker exposes only `health`. The read-only detection view is opt-in: add
+`hotkeyworker` to `management.endpoints.web.exposure.include` and set
+`management.endpoints.web.path-mapping.hotkeyworker: hotkey-worker` to publish it as
+`/actuator/hotkey-worker` (Boot 3.5 requires alphanumeric endpoint ids). A self-built Worker uses
+the same opt-in.
+
+Every Worker-side property is listed in [CONFIG.md](docs/CONFIG.md) (§10 messaging ingress, §11 detection, §12 scheduling); runtime endpoints are in [MONITOR.md](docs/MONITOR.md) (§4 worker state).
+
+### Verification
+
+**1. Broker topology.** The Worker declares one durable report queue per shard,
+`zeta.reportToWorker.<appName>.<workerNodeId>`:
+
+```bash
+docker compose -f worker/docker-compose.yml exec rabbitmq rabbitmqctl list_queues name consumers messages
+docker compose -f worker/docker-compose.yml exec rabbitmq \
+  rabbitmqctl list_bindings source_name destination_name routing_key
+```
+
+The queue should show `zeta.worker.report-consumer.concurrent-consumers` consumers (8 by default) and
+a growing message count. Its binding must name `zeta.reportToWorker.exchange` as the source; otherwise
+check the two `report-exchange` settings in [CONFIG.md §10](docs/CONFIG.md#10-worker-basics-and-messaging-ingress).
+
+**2. The App can see the Worker:**
+
+```bash
+curl -s localhost:8080/actuator/hotkey | jq '.worker'
+```
+
+`health` should be `healthy` and `msSinceLastAnyHeartbeat` should sit near 1000. A value of `-1` means no heartbeat has ever arrived: wrong broker, wrong `app-name`, or `worker-listener.enabled=false`.
+
+**3. The Worker can see reports** (with the opt-in `hotkeyworker` exposure enabled):
+
+```bash
+docker compose -f worker/docker-compose.yml exec worker \
+  curl -fsS 'localhost:8080/actuator/hotkey-worker?key=user:42'
+```
+
+A positive `windowSum`, or `hot: true` after sustained traffic, means reports arrived. See
+[MONITOR.md](docs/MONITOR.md) §4 for the fields.
+
+## Data loaders
+
+Zeta ships no data-access client; every value enters L1 through the loader you supply.
+
+### SPI
+
+`io.github.hyshmily.zeta.cache.cachesupport.loader.CacheLoader<K, V>`:
+
+| Method                     | Answers                                                                         | Default  |
+| -------------------------- | ------------------------------------------------------------------------------- | -------- |
+| `V load(K key)`            | where the value comes from — called on a foreground miss                        | abstract |
+| `V reload(K key)`          | where a background refresh reads it — never on the original call stack          | `load`   |
+| `boolean isCacheable(V v)` | whether a value the engine obtained on the loader's behalf may be written to L1 | `true`   |
+
+```java
+// reader — the convenience form: anything non-null is cached
+User a = zeta.get("user:1", () -> repo.findUser(1), GetPolicy.defaults());
+
+// loader — the same call plus an admission decision
+CacheLoader<String, User> loader = new CacheLoader<>() {
+  @Override
+  public User load(String key) {
+    return repo.findUser(key);
+  }
+
+  @Override
+  public boolean isCacheable(User v) {
+    return !v.isPlaceholder();
+  }
+};
+
+User b = zeta.get("user:1", loader, GetPolicy.defaults());
+```
+
+| Consumer                                           | Uses it to                                                 | Without it                                                                                     |
+| -------------------------------------------------- | ---------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| `WorkerListener` → `DefaultWorkerDecisionHandler`  | load the authoritative value before promoting a key to HOT | promotes what L1 already holds; the HOT is skipped when no entry is usable (`VALUE_NOT_FOUND`) |
+| `CacheSyncListener` → `DefaultSyncDecisionHandler` | reload after a peer `REFRESH`                              | degrades to a local invalidation — the next read goes back through your reader                 |
+| the same handler's value-carrying `PUT`            | validate the value carried on the wire with `isCacheable`  | no loader, no validation: the carried value is applied as-is                                   |
+
+**Custom per-entry TTL**
+
+Zeta uses **differentiated TTLs**: hot keys and normal keys each have their own defaults.
+
+| Key state | Hard TTL (Caffeine eviction) | Soft TTL (stale-while-revalidate) |
+| --------- | ---------------------------- | --------------------------------- |
+| Normal    | `hard-ttl-ms` (5 min)        | `soft-ttl-ms` (30 s)              |
+| Hot       | `hot-hard-ttl-ms` (1 h)      | `hot-soft-ttl-ms` (5 min)         |
+
+> [!NOTE]
+> **Cache-avalanche protection:** `TtlPolicy` applies a uniformly random offset to every expiry timestamp through its internal `computeTtlJitter()` (±5% by default). A 5-minute hard TTL actually expires between 4.75 and 5.25 minutes. Controlled by `zeta.local.ttl-jitter-ratio` (a ratio, `0.05` = ±5% by default, `0` disables it).
+
+## Worker listener
+
+**Observe broadcast decisions through hooks**
+
+Implement `WorkerDecisionHook` or `SyncHook` to observe how broadcasts are applied, without touching the core logic:
 
 ```java
 @Bean
@@ -508,27 +316,25 @@ public WorkerDecisionHook myMonitorHook() {
 
     @Override
     public void onHotSkipped(String cacheKey, WorkerMessage wm, HotSkipReason reason) {
-      log.warn("HOT skipped for {}: {}", cacheKey, reason);
+      log.warn("HOT skipped {}: {}", cacheKey, reason);
     }
   };
 }
 ```
 
-| Hook                 | Method               | When                                            |
-| -------------------- | -------------------- | ----------------------------------------------- |
-| `WorkerDecisionHook` | `afterHotPromotion`  | Key promoted to HOT with extended TTL           |
-| `WorkerDecisionHook` | `afterCoolDowngrade` | Key reverted to normal TTL                      |
-| `WorkerDecisionHook` | `onHotSkipped`       | HOT skipped (throttled / stale / no value)      |
-| `WorkerDecisionHook` | `onCoolSkipped`      | COOL skipped (no entry in L1)                   |
-| `SyncHook`           | `afterRefresh`       | Key refreshed from data store by peer broadcast |
-| `SyncHook`           | `afterInvalidate`    | Key evicted from L1 by peer broadcast           |
-| `SyncHook`           | `onRefreshSkipped`   | REFRESH skipped (version stale / value missing) |
+| Hook                 | Method               | Fires when                                                                                                                                                        |
+| -------------------- | -------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `WorkerDecisionHook` | `afterHotPromotion`  | a key is promoted to HOT (extended TTL)                                                                                                                           |
+| `WorkerDecisionHook` | `afterCoolDowngrade` | a key returns to the normal TTL                                                                                                                                   |
+| `WorkerDecisionHook` | `onHotSkipped`       | a HOT decision is skipped (`VERSION_STALE` stale version / `VALUE_NOT_FOUND` no usable value)                                                                     |
+| `WorkerDecisionHook` | `onCoolSkipped`      | a COOL decision is skipped (no matching entry in L1)                                                                                                              |
+| `SyncHook`           | `afterRefresh`       | a peer `REFRESH` read-back or a value-carrying `PUT` was applied                                                                                                  |
+| `SyncHook`           | `afterInvalidate`    | a key was removed from L1 because of a peer broadcast                                                                                                             |
+| `SyncHook`           | `onRefreshSkipped`   | a REFRESH or PUT did not take effect (stale version, missing value, rejected by the invalidation watermark, or overwritten by a higher version in the same batch) |
 
-All methods are `default` no-ops — implement only what you need. Exceptions from a hook are caught and logged individually; they never interrupt other hooks or the broadcast handler. Multiple hook beans are supported and run in iteration order.
+**Replace the default broadcast handling**
 
-**Replacing the Default Broadcast Processing Logic**
-
-For full control over how HOT/COOL decisions or cache-sync messages are processed, implement the strategy interface and expose it as a `@Bean` with `@ConditionalOnMissingBean`:
+To take full control of HOT/COOL decisions or of cache-sync message handling, implement the strategy interface and expose it as a bean (`@ConditionalOnMissingBean`):
 
 ```java
 @Bean
@@ -537,176 +343,153 @@ public WorkerDecisionHandler myHandler() {
   return new WorkerDecisionHandler() {
     @Override
     public void handleHot(WorkerMessage wm) {
-      // Custom HOT logic — replaces Redis load, DCL, compute, etc.
+      // custom HOT logic — replaces loader loading, DCL, compute, etc.
     }
 
     @Override
     public void handleCool(WorkerMessage wm) {
-      // Custom COOL logic — replaces TTL reset, key state change, etc.
+      // custom COOL logic — replaces the TTL reset, key-state transition, etc.
     }
   };
 }
 ```
 
-| Interface               | Methods                                                                                 | Replaces                                                                                    |
-| ----------------------- | --------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
-| `WorkerDecisionHandler` | `handleHot`, `handleCool`                                                               | `WorkerListener`'s default HOT/COOL processing (Redis-backed, SRE-limited, version-guarded) |
-| `SyncDecisionHandler`   | `handleRefresh`, `handleLocalInvalidate`, `handleLocalInvalidateAll`, `handleRulesSync` | `CacheSyncListener`'s default sync processing                                               |
-| `Evaluator`             | `evaluate`, `evictStale` (default no-op)                                                | Worker's hot-key detection pipeline (fast-lane + Bayesian confidence state machine)         |
+| Interface               | Methods                                                                                                                                                              | Replaces the default behaviour                                            |
+| ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------- |
+| `WorkerDecisionHandler` | `handleHot`, `handleCool` (plus `handleCoolInline`, which delegates to `handleCool` by default)                                                                      | `WorkerListener`'s default HOT/COOL handling (loader load, version guard) |
+| `SyncDecisionHandler`   | `handleBatch(List<SyncMessage>)` — one granted batch of one key, reduced to its highest version before applying; `handle(SyncMessage)` is the single-message default | `CacheSyncListener`'s default cache-sync handling                         |
 
-The default implementations (`DefaultWorkerDecisionHandler`, `DefaultSyncDecisionHandler`) still invoke any registered `WorkerDecisionHook` / `SyncHook` beans. Custom implementations may choose to invoke hooks or not.
+## Annotations
 
-Two approaches are available for `Evaluator` — **full replacement** or **wrapping** the default logic:
+| Annotation        | Target | Effect                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| ----------------- | ------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `@ZetaCached`     | M      | Read-through: a hit returns immediately without executing the method body; a miss executes it once and stores the non-`null` result. The body is the loader, so soft expiry (stale-while-revalidate) and SingleFlight coalescing apply as well. Key and TTLs resolve before the body, so `#result` is unavailable; unknown SpEL variables, reserved parameter names (`root`, `this`, `result`, `pN`, `aN`) when the method compiles an expression, and digits-only TTLs outside `long` fail startup.  |
+| `@ZetaPut`        | M      | Write-through: executes the body, then stores the non-`null` result. A key that does not read `#result` resolves before the body (a null argument or null key fails before the transaction); a synced dynamic hard TTL is pre-checked before the body for the permanent+sync rule. Other TTLs and `unless` resolve after the body, once the result is non-null and not vetoed. `sync = false` writes this instance only.                                                                              |
+| `@ZetaInvalidate` | M      | Removes entries: by default after the body, so the key may use `#result`. A key that does not read `#result` resolves before the body. A key that reads `#result` is evaluated by SpEL: use `#result?.id` when the body may return `null` (a null key is a no-op), while a plain `#result.id` on a null result fails; an expression with its own null fallback still runs. `beforeInvocation = true` removes before the body (where `#result` is unavailable). `scope` selects local, remote or both. |
+
+### `@ZetaCached`
 
 ```java
-// Approach 1: Full replacement — completely bypass the default evaluation pipeline.
-// No sliding window, CV, EMA, or Bayesian gating.
-@Bean
-@ConditionalOnMissingBean(Evaluator.class)
-public Evaluator myEvaluator() {
-  return (key, count) -> {
-    if (key.startsWith("priority:")) return ZetaDecision.hot(key, null);
-    return ZetaDecision.none(key, null);
-  };
+// 1. Default key and configuration placeholders (basic read)
+@Service
+public class ProductService {
+
+  // cache supports ${...} placeholders (with defaults), substituted once at method resolution
+  // key omitted: a composite key is generated from the canonical encoding of (categoryId, page, size)
+  @ZetaCached(cache = "${app.cache.catalog-namespace:catalog}")
+  public PageResult<Product> listProducts(Long categoryId, int page, int size) {
+    return productRepository.findByCategory(categoryId, page, size);
+  }
+}
+
+// 2. Soft expiry plus a dynamic TTL (stale-while-revalidate)
+@Service
+public class RankingService {
+
+  // VIP and normal users get separate rankings: VIP 120 s, normal 60 s (milliseconds)
+  // softTtl=10s: once soft-expired the old ranking is served immediately while a single
+  // background task recomputes it
+  // The background refresh invokes the method body directly, bypassing transaction and security
+  // interceptors; do not set softTtl on methods that depend on request-scoped state
+  @ZetaCached(
+    cache = "rankings",
+    key = "#region + ':' + #isVip",
+    softTtl = "10000",
+    hardTtl = "#isVip ? 120000 : 60000"
+  )
+  public RankList getTopRankings(String region, boolean isVip) {
+    return rankingCalculator.calculateTop100(region, isVip);
+  }
+}
+
+// 3. Conditional veto after the read (unless)
+@Service
+public class OrderService {
+
+  // unless is evaluated after the body returns: #result is the return value; when true the value
+  // is still returned to the caller but not written to the cache
+  // A null return is never cached anyway; PENDING orders are additionally vetoed by unless, so
+  // the next read goes through to the database again
+  @ZetaCached(cache = "orders", key = "#orderId", unless = "#result == null || #result.status == 'PENDING'")
+  public Order getOrder(String orderId) {
+    return orderRepository.findById(orderId);
+  }
 }
 ```
 
+### `@ZetaPut`
+
 ```java
-// Approach 2: Wrap the default — run the default evaluation, then add side effects.
-@Bean
-public Evaluator wrappedEvaluator(DefaultEvaluator delegate) {
-  return new Evaluator() {
-    @Override
-    public ZetaDecision evaluate(String key, long count) {
-      ZetaDecision decision = delegate.evaluate(key, count);
-      metrics.counter("eval." + decision.type().name()).increment();
-      return decision;
-    }
-    // evictStale is default no-op — not needed here
-  };
+// 4. Write back a generated primary key after insert (@ZetaPut + #result)
+@Service
+public class AccountService {
+
+  // A key that reads #result (here) resolves after the body returns, so it can read the
+  // database-generated id through #result.id; a key that does not read #result resolves before
+  // the body and cannot fail after the transaction commits. TTLs are evaluated when the write
+  // happens; a synced dynamic hard TTL is pre-checked before the body for the permanent+sync rule.
+  // sync = true (the default): the written value is broadcast to peers over the messaging channel,
+  // and peers apply it directly without reading back from the source
+  @ZetaPut(cache = "accounts", key = "#result.id", hardTtl = "3600000")
+  public Account createAccount(AccountDraft draft) {
+    Account account = new Account(draft.getUsername(), draft.getEmail());
+    accountRepository.insert(account); // account.id is populated on return
+    return account;
+  }
+}
+
+// 5. Local-only write (no cluster broadcast)
+@Service
+public class SessionService {
+
+  // sync = false: only this node's L1 is updated and no sync message is sent; peers keep their
+  // own copy until hardTtl expires
+  @ZetaPut(cache = "user_sessions", key = "#token", sync = false, hardTtl = "1800000")
+  public UserSession refreshLocalSession(String token) {
+    return sessionClient.fetchRemoteSession(token);
+  }
 }
 ```
 
-Note: when wrapping, you must NOT use `@ConditionalOnMissingBean` (otherwise your wrapper prevents itself from being created). Inject the `DefaultEvaluator` as a dependency and measure/extend selectively.
-
-## Spring Cache Integration
-
-Enable `zeta.spring-cache.enabled=true`. Standard `@Cacheable` / `@CachePut` / `@CacheEvict` are automatically routed through Zeta's hotspot detection, soft expiration, and cross-instance sync.
-
-**Requires `@EnableCaching`:** The `CacheExtensionAspect` wraps Spring's `CacheInterceptor` — without `@EnableCaching`, the interceptor is not registered and `@Cacheable` methods will execute without being cached.
+### `@ZetaInvalidate`
 
 ```java
-@SpringBootApplication
-@EnableCaching
-@EnableScheduling
-public class MyApplication { ... }
+// 6. Invalidate before the method runs (pre-invocation @ZetaInvalidate)
+@Service
+public class InventoryService {
+
+  // Default is post-invocation: the cache is left untouched when the method throws.
+  // beforeInvocation = true removes before the body, where the key cannot use #result
+  // scope = BOTH (the default): remove the local copy and tell remote nodes to remove theirs too
+  @ZetaInvalidate(cache = "inventory", key = "#skuId", beforeInvocation = true, scope = InvalidatePolicy.Scope.BOTH)
+  public void deductStock(Long skuId, int quantity) {
+    inventoryRepository.decrease(skuId, quantity);
+  }
+}
+
+// 7. Clear only the remote copies (@ZetaInvalidate with an explicit scope)
+@Service
+public class BroadcastService {
+
+  // scope = REMOTE: this node already refreshed through another path (such as binlog replay), so
+  // only peers need to drop their copies
+  // Post-invocation by default, so the key may use #result; write "#result?.id" when the body may
+  // return null (a null key skips this removal), while a fallback expression such as
+  // "#result != null ? #result.id : #fallbackId" still runs
+  @ZetaInvalidate(cache = "config", key = "#result.configKey", scope = InvalidatePolicy.Scope.REMOTE)
+  public ConfigItem updateRemoteCluster(ConfigUpdateForm form) {
+    return configRepository.update(form);
+  }
+}
 ```
-
-**Extension Annotations** (processed by `CacheExtensionAspect` at `HIGHEST_PRECEDENCE`; full combination matrix in [docs/ANNOTATION.md](docs/ANNOTATION.md)):
-
-| Annotation        | Target | Role on `@Cacheable`                                                                                                                                                                                                                                                                           |
-| ----------------- | ------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `@CacheTtl`       | M/T    | Override hard/soft TTL. Static values and SpEL (`hardTtlSpEl`, `softTtlSpEl`). SpEL evaluated at most once per call, only on miss/promotion/refresh                                                                                                                                            |
-| `@Intercept`      | M      | Skip method body via trigger mode (`IS_LOCAL_HOT`/`FORCE`/`QPS`/`CONCURRENT_THREADS`). Mode-specific config via nested `@Intercept.QpsConfig` (`threshold`, `blockDurationMs`) and `@Intercept.ConcurrentConfig` (`threshold`). Fallback via `@Intercept.fallback()`, `@Fallback`, or `peek()` |
-| `@Fallback`       | M      | Fallback value (SpEL) or convention method (`{methodName}Fallback`) when blocked/intercepted/exception                                                                                                                                                                                         |
-| `@SkipSync`       | M      | Suppress cross-instance sync messages (local-only write/evict)                                                                                                                                                                                                                                 |
-| `@Preload`        | M      | Pre-inflate HeavyKeeper counts for known hot keys (static `keys[]` or dynamic `keyExpr` SpEL)                                                                                                                                                                                                  |
-| `@CacheCondition` | M      | SpEL `unless` with purge semantics — result not kept AND any existing entry evicted (broadcast unless `@SkipSync`)                                                                                                                                                                             |
-| `@Tag`            | M      | Feed a SpEL-resolved key into detection/reporting without a cache lookup; `skipDetection`/`skipReport` suppress each side; `cacheName` aligns the key namespace                                                                                                                                |
-
-```java
-@Cacheable(cacheNames = "users", key = "#id")
-@CacheTtl(hardTtlMs = 60000, softTtlMs = 10000)
-@Intercept @Fallback
-public User getUser(Long id) { ... }
-
-// Dynamic TTL from SpEL
-@Cacheable(cacheNames = "users", key = "#id")
-@CacheTtl(hardTtlSpEl = "#id.startsWith('vip') ? 600000 : 60000")
-@Intercept
-public User getUserVip(Long id) { ... }
-
-// QPS rate-limit interception (nested @Intercept.QpsConfig)
-@Cacheable(cacheNames = "products", key = "#id")
-@Intercept(type = InterceptType.QPS, qps = @Intercept.QpsConfig(threshold = 500), fallback = "'throttled'")
-@Fallback
-public Product getProduct(String id) { ... }
-
-// QPS rate-limit with block duration (5s cooling-off after breach)
-@Cacheable(cacheNames = "flash-sale", key = "#id")
-@Intercept(type = InterceptType.QPS, qps = @Intercept.QpsConfig(threshold = 100, blockDurationMs = 5000))
-public Item getFlashItem(String id) { ... }
-
-// Concurrent threads interception (nested @Intercept.ConcurrentConfig)
-@Cacheable(cacheNames = "orders", key = "#id")
-@Intercept(type = InterceptType.CONCURRENT_THREADS, concurrent = @Intercept.ConcurrentConfig(threshold = 10), fallback = "'busy'")
-@Fallback
-public Order getOrder(Long id) { ... }
-
-// Hot key preloading
-@Cacheable(cacheNames = "flash", key = "#id")
-@Preload(keys = {"item-001", "item-002"})
-@Intercept
-public String getFlashItem(String id) { ... }
-
-// Purge the entry when the result is disabled
-@Cacheable(cacheNames = "products", key = "#id")
-@CacheCondition(unless = "#result == null || #result.disable()")
-public Product getProduct(String id) { ... }
-
-// Tag a key into the same namespace without a cache lookup
-@Tag(value = "#id", cacheName = "products", skipReport = true)
-public void touchProduct(String id) { ... }
-
-// Local-only write, no cross-instance sync
-@CachePut(cacheNames = "local", key = "#id")
-@SkipSync
-public String updateLocal(String id, String val) { ... }
-```
-
-Requires `spring-boot-starter-cache` and `spring-boot-starter-aop` on the classpath.
-
-## Cache Sync
-
-Enable `zeta.sync.enabled=true`.
-
-Read-path entries (L1 misses, soft-expire refreshes) are stamped with the `dataVersion` probed from Redis after the value read (pipelined for batch loads), so late stale broadcasts are rejected by the shared version comparison instead of overwriting fresher values. Probe failures leave entries unstamped (fail-open); see [ADR-0033](docs/adr/0033-read-path-version-stamping.md).
-
-## Rule System
-
-Enable `zeta.sync.enabled=true` to enable cross-instance rule synchronization. The rule system supports two actions:
-
-| Action            | Effect on matching keys                                                             |
-| ----------------- | ----------------------------------------------------------------------------------- |
-| `BLOCK`           | `get()` / `getAll()` throw `ZetaBlockedException`; `put()` skips      |
-| `ALLOW_NO_REPORT` | Process normally but skip Worker reporting (reduces noise from high-frequency keys) |
-
-### Pattern Types
-
-`RuleMatcher.of(pattern, action)` auto-detects the pattern:
-
-| Pattern             | Type       | Matches                      |
-| ------------------- | ---------- | ---------------------------- |
-| `"user:123"`        | `EXACT`    | Exact key                    |
-| `"temp:*"`          | `PREFIX`   | Keys starting with `temp:`   |
-| `"order:*-detail"`  | `WILDCARD` | Glob-style (`*` / `?`) match |
-| `"regex:user:\\d+"` | `REGEX`    | Java regex                   |
-
-### Persistence & Distribution (ADR-0099: Redis is the single channel)
-
-- **With Redis:** Each `addRule()`/`removeRule()`/`clearRules()` serializes the rule list to `ZetaConstants.Redis.KEY_RULES` (`"zeta:rules"`) through a versioned Lua compare-and-set. On startup, `RuleMatcher.initRules()` loads from Redis and restores the persisted `rulesVersion` ([ADR-0062](docs/adr/0062-rule-sync-version-authoritative-replace.md)). A daemon poll (`zeta-rules-reload`, every 30s) reloads the persisted set and adopts it when its version is at least the local one — peer mutations converge through Redis alone, and deletions/clears converge via the wholesale replace.
-- **Without Redis:** Rules remain purely in-memory on the node that holds them (no cross-instance distribution).
 
 ## Monitoring
 
-Zeta provides two complementary monitoring mechanisms.
+Zeta offers two complementary monitoring surfaces: Actuator endpoints (`/actuator/hotkey`, `/actuator/hotkeyring`, `/actuator/hotkey-worker`) and Micrometer meters.
 
-See [MONITOR.md](docs/MONITOR.md) for the full response format and field descriptions.
+The endpoints are governed by `management.endpoints.web.exposure.include`, which exposes only `health` by default: the App side must add `hotkey,hotkeyring`; the Worker side exposes only `health` unless an operator opts in to `hotkeyworker` plus `management.endpoints.web.path-mapping.hotkeyworker: hotkey-worker` (Boot 3.5 endpoint ids must be alphanumeric, while the public URL stays hyphenated).
 
-## Design Details
-
-See [CONTEXT.md](CONTEXT.md) for domain terminology.
-Architecture Decision Records (ADRs) are maintained in [docs/adr/](docs/adr/0001-local-promotion-worker-fallback.md).
+Full response shapes and field descriptions are in [MONITOR.md](docs/MONITOR.md).
 
 ## License
 
