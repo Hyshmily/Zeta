@@ -27,7 +27,9 @@ import io.github.hyshmily.zeta.DefaultZeta;
 import io.github.hyshmily.zeta.Zeta;
 import io.github.hyshmily.zeta.cache.HotKeyCache;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.TopK;
-import io.github.hyshmily.zeta.util.InstanceIdGenerator;
+import io.github.hyshmily.zeta.sharding.HealthView;
+import io.github.hyshmily.zeta.sync.worker.WorkerHeartbeatMessage;
+import io.github.hyshmily.zeta.util.NodeIdentity;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -45,24 +47,47 @@ import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 @ExtendWith(MockitoExtension.class)
 class ZetaFacadeAutoConfigurationTest {
 
-  private final ApplicationContextRunner runner = new ApplicationContextRunner()
-    .withBean(ZetaProperties.class, ZetaProperties::new)
-    .withConfiguration(AutoConfigurations.of(ZetaFacadeAutoConfiguration.class));
+  private final ApplicationContextRunner runner = new ApplicationContextRunner().withConfiguration(
+    AutoConfigurations.of(ZetaFacadeAutoConfiguration.class)
+  );
 
   @AfterEach
   void tearDown() {
-    InstanceIdGenerator.setOverride(null);
+    NodeIdentity.setInstanceOverride(null);
+    NodeIdentity.setNodeOverride(null);
   }
 
   /**
-   * Verifies that the HotKey facade bean is created with only minimal dependencies (ZetaProperties).
+   * Verifies that the facade auto-configuration is self-sufficient: it registers its
+   * own {@link ZetaProperties} bean, so it works even when no other Zeta
+   * auto-configuration is active in the context.
    */
   @Test
   void hotKeyBeanIsCreatedWithMinimalDependencies() {
     runner.run(ctx -> {
+      assertThat(ctx).hasSingleBean(ZetaProperties.class);
       assertThat(ctx).hasSingleBean(Zeta.class);
-      assertThat(ctx.getBean(Zeta.class).detector().localTopKeys()).isEmpty();
+      assertThat(ctx.getBean(Zeta.class).detector().localTopKeys(10)).isEmpty();
     });
+  }
+
+  /**
+   * The health view is one shared singleton assembled from the heartbeat properties: every
+   * consumer injects this bean, so a configured {@code min-alive-workers} reaches the cache,
+   * the endpoints and the listeners alike.
+   */
+  @Test
+  void clusterHealthViewIsASingleSharedBeanCarryingTheConfiguredThreshold() {
+    new ApplicationContextRunner()
+      .withPropertyValues("zeta.local.heartbeat.min-alive-workers=2")
+      .withConfiguration(AutoConfigurations.of(ZetaFacadeAutoConfiguration.class))
+      .run(ctx -> {
+        assertThat(ctx).hasSingleBean(HealthView.class);
+        HealthView view = ctx.getBean(HealthView.class);
+        view.onHeartbeat(new WorkerHeartbeatMessage(0L, "worker-1", 1L, true, null));
+        // One observed alive Worker meets the derived threshold but not the configured one.
+        assertThat(view.isClusterHealthy()).isFalse();
+      });
   }
 
   /**
@@ -71,7 +96,6 @@ class ZetaFacadeAutoConfigurationTest {
   @Test
   void hotKeyBeanIsCreatedWithAllDependencies() {
     new ApplicationContextRunner()
-      .withBean(ZetaProperties.class, ZetaProperties::new)
       .withBean("hotKeyDetector", TopK.class, () -> mock(TopK.class))
       .withBean("workerTopK", TopK.class, () -> mock(TopK.class))
       .withBean(HotKeyCache.class, () -> mock(HotKeyCache.class))
@@ -81,28 +105,28 @@ class ZetaFacadeAutoConfigurationTest {
 
   /**
    * P2 guard for the refreshAll fan-out: the auto-configuration must wire the
-   * dedicated {@code interruptibleLoadExecutor} into the facade, so a bulk
-   * refresh never parks blocking IO on the JVM-global {@code commonPool}.
+   * dedicated {@code hotKeyExecutor} refresh pool into the facade, so a bulk
+   * refresh never parks blocking IO on the JVM-global {@code commonPool} nor
+   * contends with read-miss loads on {@code interruptibleLoadExecutor}.
    * A capturing executor proves the fan-out tasks were submitted to the
-   * injected pool (the legacy parallelStream fallback would never touch it).
+   * injected pool (a fan-out on the JVM common pool would never touch it).
    */
   @Test
-  void refreshAll_fansOutThroughTheInjectedLoadExecutor_neverCommonPool() {
+  void refreshAll_fansOutThroughTheInjectedRefreshExecutor_neverCommonPool() {
     // Record AND run inline: recording alone would deadlock refreshAll (its
     // allOf(...).join() waits for tasks this executor never starts), while
     // the inline run still proves each fan-out task was submitted to the
-    // injected pool — the legacy parallelStream fallback would never touch it.
+    // injected pool — a common-pool fan-out would never touch it.
     List<Runnable> submitted = new ArrayList<>();
     Executor capturing = task -> {
       submitted.add(task);
       task.run();
     };
     new ApplicationContextRunner()
-      .withBean(ZetaProperties.class, ZetaProperties::new)
       .withBean("hotKeyDetector", TopK.class, () -> mock(TopK.class))
       .withBean("workerTopK", TopK.class, () -> mock(TopK.class))
       .withBean(HotKeyCache.class, () -> mock(HotKeyCache.class))
-      .withBean("interruptibleLoadExecutor", Executor.class, () -> capturing)
+      .withBean("hotKeyExecutor", Executor.class, () -> capturing)
       .withConfiguration(AutoConfigurations.of(ZetaFacadeAutoConfiguration.class))
       .run(ctx -> {
         DefaultZeta facade = (DefaultZeta) ctx.getBean(Zeta.class);
@@ -124,52 +148,49 @@ class ZetaFacadeAutoConfigurationTest {
   @Test
   void hotKeyBeanIsNotCreatedWhenAlreadyDefined() {
     new ApplicationContextRunner()
-      .withBean(ZetaProperties.class, ZetaProperties::new)
       .withBean(Zeta.class, () -> mock(Zeta.class))
       .withConfiguration(AutoConfigurations.of(ZetaFacadeAutoConfiguration.class))
       .run(ctx -> assertThat(ctx).hasSingleBean(Zeta.class));
   }
 
   /**
-   * Verifies that the instance ID configured via properties is propagated to the InstanceIdGenerator.
+   * Verifies that the instance ID configured via properties is propagated to {@link NodeIdentity}.
    */
   @Test
   void instanceIdIsSetFromPropertiesWhenConfigured() {
     String instanceId = "test-instance-456";
-    InstanceIdGenerator.setOverride(null);
+    NodeIdentity.setInstanceOverride(null);
     new ApplicationContextRunner()
-      .withBean(ZetaProperties.class, () -> {
-        ZetaProperties p = new ZetaProperties();
-        p.setInstanceId(instanceId);
-        return p;
-      })
+      .withPropertyValues("zeta.local.instance-id=" + instanceId)
       .withConfiguration(AutoConfigurations.of(ZetaFacadeAutoConfiguration.class))
-      .run(ctx -> assertThat(InstanceIdGenerator.get()).isEqualTo(instanceId));
+      .run(ctx -> assertThat(NodeIdentity.getInstanceId()).isEqualTo(instanceId));
   }
 
   /**
-   * Verifies that a blank instance ID property does not override the InstanceIdGenerator.
+   * The identity overrides are JVM-global: a later context without an instance id must clear
+   * the override left by an earlier context instead of inheriting it.
    */
   @Test
-  void instanceIdIsNotSetWhenPropertyIsBlank() {
-    InstanceIdGenerator.setOverride(null);
-    runner.run(ctx -> assertThat(InstanceIdGenerator.get()).isNotEqualTo("my-instance"));
+  void aLaterContextWithoutInstanceIdClearsThePreviousOverride() {
+    new ApplicationContextRunner()
+      .withPropertyValues("zeta.local.instance-id=first-context")
+      .withConfiguration(AutoConfigurations.of(ZetaFacadeAutoConfiguration.class))
+      .run(ctx -> assertThat(NodeIdentity.getInstanceId()).isEqualTo("first-context"));
+
+    runner.run(ctx -> assertThat(NodeIdentity.getInstanceId()).isNotEqualTo("first-context"));
   }
 
   /**
-   * Verifies that a null instance ID property does not override the InstanceIdGenerator.
+   * Verifies that the node id configured via properties is propagated to {@link NodeIdentity},
+   * overriding the instance-derived identity.
    */
   @Test
-  void instanceIdIsNotSetWhenPropertyIsNull() {
-    InstanceIdGenerator.setOverride(null);
+  void nodeIdIsSetFromPropertiesWhenConfigured() {
+    NodeIdentity.setNodeOverride(null);
     new ApplicationContextRunner()
-      .withBean(ZetaProperties.class, () -> {
-        ZetaProperties p = new ZetaProperties();
-        p.setInstanceId(null);
-        return p;
-      })
+      .withPropertyValues("zeta.local.node-id=777")
       .withConfiguration(AutoConfigurations.of(ZetaFacadeAutoConfiguration.class))
-      .run(ctx -> assertThat(InstanceIdGenerator.get()).isNotNull());
+      .run(ctx -> assertThat(NodeIdentity.getNodeId()).isEqualTo(777L));
   }
 
   /**
@@ -178,7 +199,6 @@ class ZetaFacadeAutoConfigurationTest {
   @Test
   void hotKeyBeanAcceptsOnlyAppTopK() {
     new ApplicationContextRunner()
-      .withBean(ZetaProperties.class, ZetaProperties::new)
       .withBean("hotKeyDetector", TopK.class, () -> mock(TopK.class))
       .withConfiguration(AutoConfigurations.of(ZetaFacadeAutoConfiguration.class))
       .run(ctx -> assertThat(ctx).hasSingleBean(Zeta.class));
@@ -190,7 +210,6 @@ class ZetaFacadeAutoConfigurationTest {
   @Test
   void hotKeyBeanAcceptsOnlyWorkerTopK() {
     new ApplicationContextRunner()
-      .withBean(ZetaProperties.class, ZetaProperties::new)
       .withBean("workerTopK", TopK.class, () -> mock(TopK.class))
       .withConfiguration(AutoConfigurations.of(ZetaFacadeAutoConfiguration.class))
       .run(ctx -> assertThat(ctx).hasSingleBean(Zeta.class));
@@ -202,7 +221,6 @@ class ZetaFacadeAutoConfigurationTest {
   @Test
   void hotKeyBeanAcceptsOnlyHotKeyCache() {
     new ApplicationContextRunner()
-      .withBean(ZetaProperties.class, ZetaProperties::new)
       .withBean(HotKeyCache.class, () -> mock(HotKeyCache.class))
       .withConfiguration(AutoConfigurations.of(ZetaFacadeAutoConfiguration.class))
       .run(ctx -> assertThat(ctx).hasSingleBean(Zeta.class));
@@ -214,8 +232,7 @@ class ZetaFacadeAutoConfigurationTest {
   @Test
   void schedulerPoolSize_shouldRespectProperty() {
     new ApplicationContextRunner()
-      .withBean(ZetaProperties.class, ZetaProperties::new)
-      .withPropertyValues("zeta.local.schedulerPoolSize=2")
+      .withPropertyValues("zeta.local.scheduler-pool-size=2")
       .withConfiguration(AutoConfigurations.of(ZetaFacadeAutoConfiguration.class))
       .run(ctx -> {
         assertThat(ctx).hasBean("hotKeyScheduler");

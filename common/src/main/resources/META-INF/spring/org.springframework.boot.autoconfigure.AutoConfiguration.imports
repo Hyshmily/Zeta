@@ -1,10 +1,7 @@
 io.github.hyshmily.zeta.autoconfigure.ZetaFacadeAutoConfiguration
 io.github.hyshmily.zeta.autoconfigure.ZetaAutoConfiguration
-io.github.hyshmily.zeta.autoconfigure.ZetaRedisAutoConfiguration
 io.github.hyshmily.zeta.autoconfigure.ZetaActuatorAutoConfiguration
 io.github.hyshmily.zeta.autoconfigure.ZetaAmqpAutoConfiguration
 io.github.hyshmily.zeta.autoconfigure.ZetaSchedulingConfiguration
 io.github.hyshmily.zeta.autoconfigure.ZetaMicrometerAutoConfiguration
-io.github.hyshmily.zeta.autoconfigure.ZetaSpringCacheAutoConfiguration
-io.github.hyshmily.zeta.autoconfigure.ZetaLockAutoConfiguration
-
+io.github.hyshmily.zeta.autoconfigure.ZetaAnnotationAutoConfiguration

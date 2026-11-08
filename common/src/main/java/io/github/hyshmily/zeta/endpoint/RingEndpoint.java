@@ -15,18 +15,19 @@
  */
 package io.github.hyshmily.zeta.endpoint;
 
-import io.github.hyshmily.zeta.Internal;
+import io.github.hyshmily.zeta.sharding.ConsistentHashRing;
 import io.github.hyshmily.zeta.sharding.HealthView;
-import io.github.hyshmily.zeta.sharding.RingManager;
-import io.github.hyshmily.zeta.sharding.impl.HealthViewImpl;
+import io.github.hyshmily.zeta.sharding.HealthViewImpl;
+import io.github.hyshmily.zeta.util.Internal;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import org.jspecify.annotations.Nullable;
-import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.boot.actuate.endpoint.annotation.Endpoint;
 import org.springframework.boot.actuate.endpoint.annotation.ReadOperation;
 import org.springframework.boot.actuate.endpoint.annotation.Selector;
+import org.springframework.http.HttpStatus;
 import org.springframework.util.Assert;
+import org.springframework.web.server.ResponseStatusException;
 
 /**
  * Actuator {@code /actuator/hotkeyring} endpoint for consistent-hash ring inspection.
@@ -40,6 +41,9 @@ import org.springframework.util.Assert;
  * <p>Runs on the management plane (port, exposure, and roles honored via the
  * standard {@code management.*} configuration), unlike a plain MVC controller.
  *
+ * <p>Both operations reconcile the ring from the health view before answering
+ * (design decisions: topology).
+ *
  * <p><b>Security:</b> This endpoint exposes cluster topology (live node addresses)
  * and per-key routing information. Protect it via Spring Security
  * (e.g. {@code management.endpoint.hotkeyring.roles=ADMIN}) to prevent
@@ -50,57 +54,73 @@ import org.springframework.util.Assert;
 public class RingEndpoint {
 
   @Nullable
-  private final RingManager ringManager;
+  private final ConsistentHashRing ring;
 
-  private final ObjectProvider<HealthView> healthViewProvider;
+  /** The live view, or a zero-timeout view so an unwired endpoint never allocates per request. */
+  private final HealthView healthView;
 
-  public RingEndpoint(@Nullable RingManager ringManager, ObjectProvider<HealthView> healthViewProvider) {
-    this.ringManager = ringManager;
-    this.healthViewProvider = healthViewProvider;
+  /**
+   * Creates a new ring endpoint.
+   *
+   * @param ring       the ring to inspect, or {@code null} when the report
+   *                   plane (which creates it) is not wired
+   * @param healthView the cluster health view used for key routing, or {@code null}
+   *                   when no view is wired
+   */
+  public RingEndpoint(@Nullable ConsistentHashRing ring, @Nullable HealthView healthView) {
+    this.ring = ring;
+    this.healthView = healthView != null ? healthView : new HealthViewImpl(0);
   }
 
   /**
-   * Return the current ring topology: node count, virtual node count,
-   * and the sorted list of live nodes.
+   * Return the live ring topology as the sorted list of participating nodes.
    *
-   * @return a map containing {@code nodeCount}, {@code virtualNodes},
-   *         and {@code nodes} entries
+   * @return a map containing the {@code nodes} entry
    */
   @ReadOperation
   public Map<String, Object> ringInfo() {
-    if (ringManager == null) {
-      return Map.of("error", "RingManager not available (RabbitMQ absent)");
-    }
-    Map<String, Object> result = new LinkedHashMap<>();
-    result.put("nodeCount", ringManager.nodeCount());
-    result.put("virtualNodes", ringManager.getVirtualNodeCount());
-    result.put("nodes", ringManager.getCurrentNodes().stream().sorted().toList());
+    ConsistentHashRing activeRing = reconciledRing();
+    return Map.of("nodes", activeRing.getNodes().stream().sorted().toList());
+  }
+
+  /**
+   * Determine which node is responsible for the given key. With no Worker alive the
+   * mapping reports {@code null} for {@code nodeId}.
+   *
+   * @param keySegments the path segments of the key; a key containing {@code /} arrives as
+   *                    several segments and is re-joined verbatim
+   * @return a map containing the key and its assigned node ID
+   * @throws IllegalArgumentException if the joined key is blank
+   */
+  @ReadOperation
+  public Map<String, Object> keyMapping(@Selector(match = Selector.Match.ALL_REMAINING) String[] keySegments) {
+    String key = String.join("/", keySegments);
+    Assert.hasText(key, "key must not be empty");
+    ConsistentHashRing activeRing = reconciledRing();
+    Map<String, Object> result = new LinkedHashMap<>(2);
+    result.put("key", key);
+    result.put("nodeId", activeRing.locateNode(key, healthView));
     return result;
   }
 
   /**
-   * Determine which node is responsible for the given key.
-   * <p>When the cluster health view is unavailable (e.g. no Workers have
-   * ever connected), a fallback view with zero expected nodes is used,
-   * which may route the key to a local placeholder.</p>
+   * Reconcile the ring against the live health view and return it.
    *
-   * @param key the cache key to look up; must not be empty
-   * @return a map containing the key and its assigned node ID
-   * @throws IllegalArgumentException if {@code key} is empty
+   * <p>An absent ring is a disabled feature rather than a caller error, so the status line carries
+   * the signal — a probe that checks only the status must not mark an unwired ring plane healthy.
+   *
+   * @return the wired ring, after a refresh from the health view
+   * @throws ResponseStatusException with {@code 503 Service Unavailable} when no
+   *                                {@link ConsistentHashRing} is wired
    */
-  @ReadOperation
-  public Map<String, Object> keyMapping(@Selector String key) {
-    Assert.hasText(key, "key must not be empty");
-    if (ringManager == null) {
-      return Map.of("error", "RingManager not available (RabbitMQ absent)");
+  private ConsistentHashRing reconciledRing() {
+    if (ring == null) {
+      throw new ResponseStatusException(
+        HttpStatus.SERVICE_UNAVAILABLE,
+        "ConsistentHashRing not available: the report plane is disabled or RabbitMQ is absent"
+      );
     }
-    Map<String, Object> result = new LinkedHashMap<>();
-    result.put("key", key);
-    HealthView view = healthViewProvider.getIfAvailable();
-    if (view == null) {
-      view = new HealthViewImpl(0, 0);
-    }
-    result.put("nodeId", ringManager.routeNode(key, view));
-    return result;
+    ring.rebuildIfPossible(healthView);
+    return ring;
   }
 }

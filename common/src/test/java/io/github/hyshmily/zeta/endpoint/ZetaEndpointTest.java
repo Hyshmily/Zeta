@@ -20,30 +20,19 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 import com.github.benmanes.caffeine.cache.Cache;
-import io.github.hyshmily.zeta.model.CacheEntry;
-import io.github.hyshmily.zeta.autoconfigure.ZetaProperties;
-import io.github.hyshmily.zeta.cache.cachesupport.EntryLifecycle;
-import io.github.hyshmily.zeta.scheduler.BackgroundRefresher;
-import io.github.hyshmily.zeta.cache.cachesupport.SingleFlight;
-import io.github.hyshmily.zeta.cache.cachesupport.TtlPolicy;
-import io.github.hyshmily.zeta.detection.ZetaBayesianSM;
+import io.github.hyshmily.zeta.cache.AccessCounter;
+import io.github.hyshmily.zeta.cache.cachesupport.loader.singleflight.SingleFlight;
+import io.github.hyshmily.zeta.cache.cachesupport.raw.CacheEntry;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.HeavyKeeper;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.Item;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.TopK;
 import io.github.hyshmily.zeta.reporting.KeyReporter;
-import io.github.hyshmily.zeta.rule.Rule;
-import io.github.hyshmily.zeta.rule.impl.RuleMatcherImpl;
+import io.github.hyshmily.zeta.scheduler.BackgroundRefresher;
 import io.github.hyshmily.zeta.sharding.HealthView;
-import io.github.hyshmily.zeta.sharding.RingManager;
-import io.github.hyshmily.zeta.sync.dispatcher.DispatcherStats;
 import io.github.hyshmily.zeta.sync.local.CacheSyncListener;
-import io.github.hyshmily.zeta.sync.local.CacheSyncPublisher;
-import io.github.hyshmily.zeta.sync.worker.WorkerListener;
-import io.github.hyshmily.zeta.util.version.VersionController;
+import io.github.hyshmily.zeta.util.clock.StampClock;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
-import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.Semaphore;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -54,40 +43,31 @@ import org.junit.jupiter.api.Test;
  * <p>Covers every field in every section (local, worker, sync), HeavyKeeper-specific
  * algorithm parameters, null-safety for all components, and partial-deployment scenarios.
  */
-@SuppressWarnings("all")
+@SuppressWarnings("unchecked")
 class ZetaEndpointTest {
 
   private TopK hotKeyDetector;
   private Cache<String, CacheEntry> caffeineCache;
   private SingleFlight singleFlight;
-  private ZetaProperties properties;
-  private KeyReporter KeyReporter;
-  private RuleMatcherImpl ruleMatcher;
-  private RingManager workerHealthMonitor;
-  private EntryLifecycle entryLifecycle;
+  private KeyReporter keyReporter;
   private BackgroundRefresher backgroundRefresher;
-  private VersionController versionController;
-  private CacheSyncPublisher cacheSyncPublisher;
-  private ZetaBayesianSM zetaBayesianSM;
+  private StampClock stampClock;
   private HealthView healthView;
+  private AccessCounter accessCounter;
+  private CacheSyncListener syncListener;
 
   @BeforeEach
-  @SuppressWarnings("all")
+  @SuppressWarnings("unchecked")
   void setUp() {
     hotKeyDetector = mock(TopK.class);
     caffeineCache = mock(Cache.class);
     singleFlight = mock(SingleFlight.class);
-    properties = new ZetaProperties();
-    KeyReporter = mock(KeyReporter.class);
-    ruleMatcher = new RuleMatcherImpl(Optional.empty());
-    workerHealthMonitor = mock(RingManager.class);
-    entryLifecycle = mock(EntryLifecycle.class);
+    keyReporter = mock(KeyReporter.class);
     backgroundRefresher = mock(BackgroundRefresher.class);
-    when(entryLifecycle.ttlPolicy()).thenReturn(mock(TtlPolicy.class));
-    versionController = mock(VersionController.class);
-    cacheSyncPublisher = mock(CacheSyncPublisher.class);
-    zetaBayesianSM = mock(ZetaBayesianSM.class);
+    stampClock = mock(StampClock.class);
     healthView = mock(HealthView.class);
+    accessCounter = mock(AccessCounter.class);
+    syncListener = mock(CacheSyncListener.class);
     when(healthView.isClusterHealthy()).thenReturn(true);
   }
 
@@ -98,22 +78,18 @@ class ZetaEndpointTest {
       .hotKeyDetector(hotKeyDetector)
       .caffeineCache(caffeineCache)
       .singleFlight(singleFlight)
-      .properties(properties)
-      .hotKeyReporter(KeyReporter)
-      .ruleRepository(ruleMatcher)
-      .entryLifecycle(entryLifecycle)
+      .hotKeyReporter(keyReporter)
       .backgroundRefresher(backgroundRefresher)
-      .versionController(versionController)
-      .cacheSyncPublisher(cacheSyncPublisher)
-      .zetaBayesianSM(zetaBayesianSM)
+      .stampClock(stampClock)
       .healthView(healthView)
+      .accessCounter(accessCounter)
+      .syncListener(syncListener)
       .build();
   }
 
   private void mockTopK(TopK topK, List<Item> items, long total) {
-    when(topK.list()).thenReturn(items);
+    when(topK.listTopN(100)).thenReturn(items);
     when(topK.total()).thenReturn(total);
-    when(topK.expelled()).thenReturn(new LinkedBlockingQueue<>());
   }
 
   /* all components present */
@@ -126,78 +102,85 @@ class ZetaEndpointTest {
     mockTopK(hotKeyDetector, List.of(new Item("k1", 10), new Item("k2", 7)), 200L);
     when(caffeineCache.estimatedSize()).thenReturn(42L);
     when(singleFlight.estimatedInFlightSize()).thenReturn(3L);
-    when(KeyReporter.dispatcherDepth()).thenReturn(7);
-    when(KeyReporter.dispatcherCapacity()).thenReturn(10000);
-    when(KeyReporter.dispatcherExpired()).thenReturn(2L);
-    when(KeyReporter.dispatcherDropped()).thenReturn(1L);
-    when(KeyReporter.pendingKeyCount()).thenReturn(5L);
-    when(entryLifecycle.ttlPolicy().effectiveHardTtlMs()).thenReturn(300000L);
-    when(entryLifecycle.ttlPolicy().effectiveSoftTtlMs()).thenReturn(30000L);
-    when(entryLifecycle.ttlPolicy().effectiveHotHardTtlMs()).thenReturn(3600000L);
-    when(entryLifecycle.ttlPolicy().effectiveHotSoftTtlMs()).thenReturn(300000L);
+    when(keyReporter.dispatcherStats()).thenReturn(new KeyReporter.DispatcherStats(7, 2, 0, 1));
+    when(accessCounter.pendingKeyCount()).thenReturn(5L);
     when(backgroundRefresher.getRefreshLimiter()).thenReturn(new Semaphore(50));
-    when(versionController.isRedisConfigured()).thenReturn(true);
-    when(versionController.getDegradedVersionCount()).thenReturn(0L);
-    when(cacheSyncPublisher.getDedupCacheSize()).thenReturn(15L);
-    when(zetaBayesianSM.getTrackedKeys()).thenReturn(7);
+    when(stampClock.skewMillis()).thenReturn(0L);
+    when(syncListener.foreignAppDrops()).thenReturn(4L);
+    when(syncListener.lastForeignApp()).thenReturn("other-app");
+    when(syncListener.nodeIdCollisions()).thenReturn(2L);
 
     Map<String, Object> info = endpointWithAll().hotKeyInfo(100);
 
-    assertThat(info).containsKeys("instanceId", "nodeId");
+    assertThat(info).containsKeys("instanceId", "jvmId");
+    assertThat(info).doesNotContainKey("dataVersionNodeId");
     assertThat(info).containsKeys("local", "worker", "sync");
 
     // ── local ──
     Map<String, Object> local = (Map<String, Object>) info.get("local");
-    assertThat(local).containsEntry("topKCount", 2);
     assertThat(local).containsEntry("totalRequests", 200L);
     assertThat(local).containsKey("topK");
-    assertThat(local).containsKey("recentlyExpelled");
     assertThat(local).containsEntry("cacheSize", 42L);
-    assertThat(local).containsEntry("cacheMaxSize", properties.getCache().getMaxSize());
     assertThat(local).containsEntry("inFlightSize", 3L);
-    assertThat(local).containsEntry("inFlightMaxSize", properties.getInFlightMaxSize());
-    assertThat(local).containsEntry("inFlightTtlSec", properties.getInFlightTtlSeconds());
-    assertThat(local).containsEntry("inFlightTimeoutSec", properties.getInFlightTimeoutSeconds());
     assertThat(local).containsEntry("reportQueueDepth", 7);
-    assertThat(local).containsEntry("reportQueueCapacity", 10000);
-    assertThat(local).containsEntry("reportExpiredCount", 2L);
     assertThat(local).containsEntry("reportQueueFullCount", 1L);
     assertThat(local).containsEntry("reportPendingKeys", 5L);
-    assertThat(local).containsKey("rules");
-    assertThat(local).containsEntry("hardTtlMs", 300000L);
-    assertThat(local).containsEntry("softTtlMs", 30000L);
-    assertThat(local).containsEntry("hotHardTtlMs", 3600000L);
-    assertThat(local).containsEntry("hotSoftTtlMs", 300000L);
     assertThat(local).containsEntry("refreshPoolAvailable", 50);
-    assertThat(local).containsEntry("versionRedisEnabled", true);
-    assertThat(local).containsEntry("versionDegradedCount", 0L);
+    assertThat(local).containsEntry("versionClockSkewMillis", 0L);
+    assertThat(local)
+      .as("configuration echoes, derived counts and internals are not exposed")
+      .doesNotContainKeys(
+        "reportExpiredCount",
+        "topKCount",
+        "recentlyExpelled",
+        "expelledQueueSize",
+        "expelledQueueRemaining",
+        "topKCapacity",
+        "sketchWidth",
+        "sketchDepth",
+        "minCountThreshold",
+        "cacheMaxSize",
+        "inFlightMaxSize",
+        "inFlightTtlSec",
+        "inFlightTimeoutSec",
+        "reportQueueCapacity",
+        "hardTtlMs",
+        "softTtlMs",
+        "hotHardTtlMs",
+        "hotSoftTtlMs",
+        "refreshFailureLeased",
+        "leaseStaleCapped",
+        "leaseSuppressedByClassifier"
+      );
 
     // ── worker ──
     Map<String, Object> worker = (Map<String, Object>) info.get("worker");
     assertThat(worker).containsKey("health");
-    assertThat(worker).containsEntry("trackedKeys", 7);
 
     // ── sync ──
     Map<String, Object> sync = (Map<String, Object>) info.get("sync");
-    assertThat(sync).containsEntry("dedupCacheSize", 15L);
+    assertThat(sync).containsEntry("foreignAppDrops", 4L);
+    assertThat(sync).containsEntry("lastForeignApp", "other-app");
+    assertThat(sync).containsEntry("nodeIdCollisions", 2L);
+    assertThat(sync).doesNotContainKey("dedupCacheSize");
   }
 
-  /* HeavyKeeper algorithm params */
+  /* algorithm parameters are configuration, not runtime state */
 
   /**
-   * Verifies that the local section exposes HeavyKeeper-specific algorithm parameters (capacity, sketch width/depth, decay, min count threshold).
+   * The detector's algorithm parameters (capacity, sketch width/depth, min add) are
+   * configuration: identical between scrapes and readable from {@code configprops}. The
+   * response carries only what the detector observes — the ranking and the total.
    */
   @Test
-  void localSection_shouldExposeHeavyKeeperParams() {
+  void localSection_shouldNotExposeDetectorConfiguration() {
     HeavyKeeper hk = new HeavyKeeper(10, 500, 4, 0.9, 5, 10_000, 3, false);
     hk.addDirect("k1", 20);
     ZetaEndpoint ep = ZetaEndpoint.builder()
       .hotKeyDetector(hk)
       .caffeineCache(caffeineCache)
       .singleFlight(singleFlight)
-      .properties(properties)
-      .hotKeyReporter(KeyReporter)
-      .ruleRepository(ruleMatcher)
+      .hotKeyReporter(keyReporter)
       .healthView(healthView)
       .build();
     when(caffeineCache.estimatedSize()).thenReturn(10L);
@@ -205,13 +188,17 @@ class ZetaEndpointTest {
     Map<String, Object> info = ep.hotKeyInfo(100);
     Map<String, Object> local = (Map<String, Object>) info.get("local");
 
-    assertThat(local).containsEntry("topKCapacity", 10);
-    assertThat(local).containsEntry("sketchWidth", 500);
-    assertThat(local).containsEntry("sketchDepth", 4);
-    assertThat(local).containsEntry("minCountThreshold", 5);
-    assertThat(local).containsEntry("topKCount", 1);
-    assertThat(local).containsKey("expelledQueueSize");
-    assertThat(local).containsKey("expelledQueueRemaining");
+    assertThat((List<?>) local.get("topK")).hasSize(1);
+    assertThat(local).doesNotContainKeys(
+      "topKCapacity",
+      "sketchWidth",
+      "sketchDepth",
+      "minCountThreshold",
+      "topKCount",
+      "expelledQueueSize",
+      "expelledQueueRemaining",
+      "recentlyExpelled"
+    );
   }
 
   /* null components */
@@ -221,10 +208,10 @@ class ZetaEndpointTest {
    */
   @Test
   void hotKeyInfo_shouldOmitSectionWhenAllComponentsNull() {
-    ZetaEndpoint minimal = ZetaEndpoint.builder().properties(properties).build();
+    ZetaEndpoint minimal = ZetaEndpoint.builder().build();
     Map<String, Object> info = minimal.hotKeyInfo(100);
     assertThat(info).doesNotContainKeys("local", "worker", "sync");
-    assertThat(info).containsKeys("instanceId", "nodeId");
+    assertThat(info).containsKeys("instanceId", "jvmId");
   }
 
   /* partial: only local, no worker/sync */
@@ -234,15 +221,10 @@ class ZetaEndpointTest {
    */
   @Test
   void hotKeyInfo_shouldOmitWorkerAndSyncWhenOnlyLocalComponents() {
-    when(hotKeyDetector.list()).thenReturn(List.of());
+    when(hotKeyDetector.listTopN(100)).thenReturn(List.of());
     when(hotKeyDetector.total()).thenReturn(0L);
-    when(hotKeyDetector.expelled()).thenReturn(new LinkedBlockingQueue<>());
     when(caffeineCache.estimatedSize()).thenReturn(5L);
-    ZetaEndpoint ep = ZetaEndpoint.builder()
-      .hotKeyDetector(hotKeyDetector)
-      .caffeineCache(caffeineCache)
-      .properties(properties)
-      .build();
+    ZetaEndpoint ep = ZetaEndpoint.builder().hotKeyDetector(hotKeyDetector).caffeineCache(caffeineCache).build();
 
     Map<String, Object> info = ep.hotKeyInfo(100);
     assertThat(info).containsKey("local");
@@ -256,70 +238,13 @@ class ZetaEndpointTest {
    */
   @Test
   void hotKeyInfo_shouldIncludeSyncWhenOnlySyncComponents() {
-    when(cacheSyncPublisher.getDedupCacheSize()).thenReturn(5L);
-    ZetaEndpoint ep = ZetaEndpoint.builder().properties(properties).cacheSyncPublisher(cacheSyncPublisher).build();
+    when(syncListener.foreignAppDrops()).thenReturn(3L);
+    ZetaEndpoint ep = ZetaEndpoint.builder().syncListener(syncListener).build();
 
     Map<String, Object> info = ep.hotKeyInfo(100);
     assertThat(info).doesNotContainKeys("local", "worker");
     assertThat(info).containsKey("sync");
-    assertThat(((Map<String, Object>) info.get("sync"))).containsEntry("dedupCacheSize", 5L);
-  }
-
-  /* per-key dispatcher gate (ADR-0072 D-1) */
-
-  /**
-   * Verifies that each plane's section reports that plane's own dispatcher gate, so a saturated gate
-   * can be told apart from an idle one without waiting for a drop WARN.
-   */
-  @Test
-  void hotKeyInfo_shouldReportDispatchGatePerPlane() {
-    CacheSyncListener syncListener = mock(CacheSyncListener.class);
-    when(syncListener.dispatcherStats()).thenReturn(new DispatcherStats(120L, 500L, 3, 7L, 2L));
-    WorkerListener workerListener = mock(WorkerListener.class);
-    when(workerListener.dispatcherStats()).thenReturn(new DispatcherStats(0L, 200L, 0, 1L, 0L));
-    ZetaEndpoint ep = ZetaEndpoint.builder()
-      .properties(properties)
-      .cacheSyncPublisher(cacheSyncPublisher)
-      .syncListener(syncListener)
-      .workerListener(workerListener)
-      .build();
-
-    Map<String, Object> info = ep.hotKeyInfo(100);
-
-    assertThat((Map<String, Object>) info.get("sync"))
-      .containsEntry("dispatchPendingUnits", 120L)
-      .containsEntry("dispatchRemainingUnits", 380L)
-      .containsEntry("dispatchMaxPendingUnits", 500L)
-      .containsEntry("dispatchActiveKeys", 3)
-      .containsEntry("dispatchBacklogged", true)
-      .containsEntry("dispatchDropped", 7L)
-      .containsEntry("dispatchRejected", 2L);
-
-    assertThat((Map<String, Object>) info.get("worker"))
-      .containsEntry("dispatchPendingUnits", 0L)
-      .containsEntry("dispatchRemainingUnits", 200L)
-      .containsEntry("dispatchBacklogged", false)
-      .containsEntry("dispatchDropped", 1L);
-  }
-
-  /**
-   * Verifies that a plane whose dispatcher does not exist yet contributes no dispatch keys and does
-   * not break the response.
-   */
-  @Test
-  void hotKeyInfo_shouldOmitDispatchKeysWhenDispatcherAbsent() {
-    CacheSyncListener syncListener = mock(CacheSyncListener.class);
-    when(syncListener.dispatcherStats()).thenReturn(null);
-    ZetaEndpoint ep = ZetaEndpoint.builder()
-      .properties(properties)
-      .cacheSyncPublisher(cacheSyncPublisher)
-      .syncListener(syncListener)
-      .build();
-
-    Map<String, Object> info = ep.hotKeyInfo(100);
-    Map<String, Object> sync = (Map<String, Object>) info.get("sync");
-    assertThat(sync).containsKey("dedupCacheSize");
-    assertThat(sync).doesNotContainKey("dispatchPendingUnits");
+    assertThat(((Map<String, Object>) info.get("sync"))).containsEntry("foreignAppDrops", 3L);
   }
 
   /* worker section with multiple shards */
@@ -329,61 +254,11 @@ class ZetaEndpointTest {
    */
   @Test
   void workerSection_shouldListWorkerHealth() {
-    when(zetaBayesianSM.getTrackedKeys()).thenReturn(3);
-    ZetaEndpoint ep = ZetaEndpoint.builder()
-      .properties(properties)
-      .zetaBayesianSM(zetaBayesianSM)
-      .healthView(healthView)
-      .build();
+    ZetaEndpoint ep = ZetaEndpoint.builder().healthView(healthView).build();
 
     Map<String, Object> info = ep.hotKeyInfo(100);
     Map<String, Object> worker = (Map<String, Object>) info.get("worker");
-    assertThat(worker).containsEntry("trackedKeys", 3);
     assertThat(worker).containsKey("health");
-  }
-
-  /* no rule matcher rules */
-
-  /**
-   * Verifies that the local section shows an empty rule list when no rules are configured.
-   */
-  @Test
-  void localSection_shouldShowEmptyRulesWhenNoRules() {
-    mockTopK(hotKeyDetector, List.of(), 0L);
-    when(caffeineCache.estimatedSize()).thenReturn(0L);
-    ZetaEndpoint ep = endpointWithAll();
-    Map<String, Object> info = ep.hotKeyInfo(100);
-    Map<String, Object> local = (Map<String, Object>) info.get("local");
-    assertThat(local).containsKey("rules");
-    assertThat((List<?>) local.get("rules")).isEmpty();
-  }
-
-  /* rule matcher with rules */
-
-  /**
-   * Verifies that the local section includes configured rules with their type, pattern, and creation timestamp.
-   */
-  @Test
-  void localSection_shouldIncludeRules() {
-    ruleMatcher = new RuleMatcherImpl(Optional.empty());
-    ruleMatcher.addRule(new Rule(Rule.RuleType.PREFIX, "secret:*", Rule.RuleAction.BLOCK));
-    ruleMatcher.addRule(new Rule(Rule.RuleType.PREFIX, "health:*", Rule.RuleAction.ALLOW_NO_REPORT));
-    mockTopK(hotKeyDetector, List.of(), 0L);
-    when(caffeineCache.estimatedSize()).thenReturn(0L);
-    ZetaEndpoint ep = ZetaEndpoint.builder()
-      .hotKeyDetector(hotKeyDetector)
-      .caffeineCache(caffeineCache)
-      .properties(properties)
-      .ruleRepository(ruleMatcher)
-      .healthView(healthView)
-      .build();
-
-    Map<String, Object> info = ep.hotKeyInfo(100);
-    Map<String, Object> local = (Map<String, Object>) info.get("local");
-    assertThat(local).containsKey("rules");
-    List<Map<String, Object>> rules = (List<Map<String, Object>>) local.get("rules");
-    assertThat(rules).hasSize(2);
-    assertThat(rules.get(0)).containsKeys("id", "type", "pattern", "createdAt");
   }
 
   /* null refresh limiter */
@@ -395,10 +270,6 @@ class ZetaEndpointTest {
   void localSection_shouldSkipRefreshPoolWhenLimiterNull() {
     mockTopK(hotKeyDetector, List.of(), 0L);
     when(caffeineCache.estimatedSize()).thenReturn(0L);
-    when(entryLifecycle.ttlPolicy().effectiveHardTtlMs()).thenReturn(300000L);
-    when(entryLifecycle.ttlPolicy().effectiveSoftTtlMs()).thenReturn(30000L);
-    when(entryLifecycle.ttlPolicy().effectiveHotHardTtlMs()).thenReturn(3600000L);
-    when(entryLifecycle.ttlPolicy().effectiveHotSoftTtlMs()).thenReturn(300000L);
     when(backgroundRefresher.getRefreshLimiter()).thenReturn(null);
     ZetaEndpoint ep = endpointWithAll();
     Map<String, Object> info = ep.hotKeyInfo(100);
@@ -414,21 +285,19 @@ class ZetaEndpointTest {
   @Test
   void localSection_shouldNotExposeHeavyKeeperParamsForNonHeavyKeeper() {
     TopK customTopK = mock(TopK.class);
-    when(customTopK.list()).thenReturn(List.of(new Item("k1", 1)));
+    when(customTopK.listTopN(100)).thenReturn(List.of(new Item("k1", 1)));
     when(customTopK.total()).thenReturn(10L);
-    when(customTopK.expelled()).thenReturn(new LinkedBlockingQueue<>());
     when(caffeineCache.estimatedSize()).thenReturn(0L);
     ZetaEndpoint ep = ZetaEndpoint.builder()
       .hotKeyDetector(customTopK)
       .caffeineCache(caffeineCache)
-      .properties(properties)
       .healthView(healthView)
       .build();
 
     Map<String, Object> info = ep.hotKeyInfo(100);
     Map<String, Object> local = (Map<String, Object>) info.get("local");
 
-    assertThat(local).containsKey("topKCount");
+    assertThat((List<?>) local.get("topK")).hasSize(1);
     assertThat(local).doesNotContainKeys("topKCapacity", "sketchWidth", "sketchDepth", "minCountThreshold");
   }
 
@@ -438,32 +307,11 @@ class ZetaEndpointTest {
    * Verifies that the worker section omits health when the health view provider returns null.
    */
   @Test
-  void workerSection_shouldOmitHealthWhenHealthViewNull() {
-    ZetaEndpoint ep = ZetaEndpoint.builder().properties(properties).zetaBayesianSM(zetaBayesianSM).build();
+  void workerSection_shouldBeOmittedWhenNoWorkerComponentExists() {
+    ZetaEndpoint ep = ZetaEndpoint.builder().build();
 
     Map<String, Object> info = ep.hotKeyInfo(100);
-    Map<String, Object> worker = (Map<String, Object>) info.get("worker");
-
-    assertThat(worker).doesNotContainKey("health");
-  }
-
-  /* expelled queue edge cases */
-
-  /**
-   * Verifies that the local section reports expelled queue metrics even when the queue is empty.
-   */
-  @Test
-  void localSection_shouldReportExpelledQueueMetricsWhenEmpty() {
-    when(hotKeyDetector.list()).thenReturn(List.of());
-    when(hotKeyDetector.total()).thenReturn(0L);
-    when(hotKeyDetector.expelled()).thenReturn(new LinkedBlockingQueue<>());
-    when(caffeineCache.estimatedSize()).thenReturn(0L);
-    ZetaEndpoint ep = endpointWithAll();
-    Map<String, Object> info = ep.hotKeyInfo(100);
-    Map<String, Object> local = (Map<String, Object>) info.get("local");
-
-    assertThat(local).containsKey("expelledQueueSize");
-    assertThat(local).containsKey("expelledQueueRemaining");
+    assertThat(info).doesNotContainKey("worker");
   }
 
   /* topK list values match mock data */
@@ -477,7 +325,7 @@ class ZetaEndpointTest {
     when(caffeineCache.estimatedSize()).thenReturn(0L);
     Map<String, Object> info = endpointWithAll().hotKeyInfo(100);
     Map<String, Object> local = (Map<String, Object>) info.get("local");
-    assertThat(local).containsEntry("topKCount", 1);
+    assertThat((List<?>) local.get("topK")).hasSize(1);
     assertThat(local).containsEntry("totalRequests", 200L);
   }
 }

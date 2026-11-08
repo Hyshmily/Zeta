@@ -18,32 +18,29 @@ package io.github.hyshmily.zeta.autoconfigure;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 import com.github.benmanes.caffeine.cache.Cache;
-import io.github.hyshmily.zeta.model.CacheEntry;
-import io.github.hyshmily.zeta.cache.cachesupport.EntryLifecycle;
-import io.github.hyshmily.zeta.cache.loader.CacheLoader;
+import io.github.hyshmily.zeta.cache.cachesupport.raw.CacheEntry;
 import io.github.hyshmily.zeta.constants.ZetaConstants;
-import io.github.hyshmily.zeta.reporting.BbrRateLimiter;
 import io.github.hyshmily.zeta.reporting.KeyReporter;
 import io.github.hyshmily.zeta.reporting.ReportPublisher;
 import io.github.hyshmily.zeta.reporting.impl.KeyReporterImpl;
+import io.github.hyshmily.zeta.sharding.ConsistentHashRing;
+import io.github.hyshmily.zeta.sharding.ConsistentHashRingImpl;
 import io.github.hyshmily.zeta.sharding.HealthView;
-import io.github.hyshmily.zeta.sharding.RingManager;
-import io.github.hyshmily.zeta.sharding.impl.HealthViewImpl;
-import io.github.hyshmily.zeta.sharding.impl.RingManagerImpl;
+import io.github.hyshmily.zeta.sharding.HealthViewImpl;
 import io.github.hyshmily.zeta.sync.local.CacheSyncListener;
 import io.github.hyshmily.zeta.sync.local.CacheSyncProperties;
 import io.github.hyshmily.zeta.sync.local.CacheSyncPublisher;
 import io.github.hyshmily.zeta.sync.local.SyncDecisionHandler;
 import io.github.hyshmily.zeta.sync.worker.WorkerDecisionHandler;
-import io.github.hyshmily.zeta.sync.worker.WorkerHeartbeatVerifier;
+import io.github.hyshmily.zeta.sync.worker.WorkerHeartbeatMessage;
 import io.github.hyshmily.zeta.sync.worker.WorkerListener;
 import io.github.hyshmily.zeta.sync.worker.WorkerListenerProperties;
-import io.github.hyshmily.zeta.util.SystemLoadMonitor;
-import io.github.hyshmily.zeta.util.id.SnowflakeIdGenerator;
-import io.github.hyshmily.zeta.util.ratelimit.SreRateLimiter;
+import io.github.hyshmily.zeta.util.clock.StampClock;
 import java.util.concurrent.ScheduledExecutorService;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -61,7 +58,6 @@ import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.autoconfigure.amqp.RabbitProperties;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 import org.springframework.core.io.DefaultResourceLoader;
-import org.springframework.data.redis.core.StringRedisTemplate;
 
 /**
  * Tests for {@link ZetaAmqpAutoConfiguration}.
@@ -135,24 +131,17 @@ class ZetaAmqpAutoConfigurationTest {
    * Verifies that KeyReporterImpl is created with its required dependencies.
    */
   @Test
-  @SuppressWarnings("all")
   void hotKeyReporterIsCreatedWithRequiredDependencies() {
     ReportPublisher reportPublisher = mock(ReportPublisher.class);
-    ScheduledExecutorService scheduler = mock(ScheduledExecutorService.class);
     ZetaProperties properties = new ZetaProperties();
-    ObjectProvider<HealthView> healthViewProvider = mock(ObjectProvider.class);
 
     ZetaAmqpAutoConfiguration.ReportConfiguration config = new ZetaAmqpAutoConfiguration.ReportConfiguration();
-    ObjectProvider<BbrRateLimiter> bbrProvider = mock(ObjectProvider.class);
     KeyReporter reporter = config.hotKeyReporter(
       reportPublisher,
-      scheduler,
       properties,
       new ZetaAppProperties(),
-      new RingManagerImpl(150),
-      healthViewProvider,
-      bbrProvider,
-      mock(SnowflakeIdGenerator.class)
+      new ConsistentHashRingImpl(150),
+      new HealthViewImpl(5_000)
     );
 
     assertThat(reporter).isNotNull();
@@ -242,9 +231,8 @@ class ZetaAmqpAutoConfigurationTest {
   }
 
   /**
-   * Verifies that a user-defined {@code ConnectionFactory} under a non-default
-   * bean name is resolved (previously a hard-coded {@code rabbitConnectionFactory}
-   * qualifier threw {@code NoSuchBeanDefinitionException} at startup).
+   * Verifies that a user-defined {@code ConnectionFactory} under a non-default bean name is
+   * resolved instead of only Boot's {@code rabbitConnectionFactory}.
    */
   @Test
   void dataPlaneFactoryResolutionFallsBackToUserNamedFactory() {
@@ -286,7 +274,7 @@ class ZetaAmqpAutoConfigurationTest {
     Queue queue = config.hotkeySyncQueue(props);
 
     assertThat(queue).isNotNull();
-    assertThat(queue.getName()).isEqualTo("test.sync:" + io.github.hyshmily.zeta.util.InstanceIdGenerator.get());
+    assertThat(queue.getName()).isEqualTo("test.sync:" + io.github.hyshmily.zeta.util.NodeIdentity.getInstanceId());
     assertThat(queue.isDurable()).isTrue();
   }
 
@@ -326,11 +314,14 @@ class ZetaAmqpAutoConfigurationTest {
     ScheduledExecutorService scheduler = mock(ScheduledExecutorService.class);
 
     ZetaAmqpAutoConfiguration.SyncConfiguration config = new ZetaAmqpAutoConfiguration.SyncConfiguration();
+    @SuppressWarnings("unchecked")
+    ObjectProvider<StampClock> clocks = mock(ObjectProvider.class);
     CacheSyncListener listener = config.cacheSyncListener(
       props,
       scheduler,
       mock(SyncDecisionHandler.class),
-      new ZetaAppProperties()
+      new ZetaAppProperties(),
+      clocks
     );
 
     assertThat(listener).isNotNull();
@@ -346,7 +337,7 @@ class ZetaAmqpAutoConfigurationTest {
       .withPropertyValues("zeta.worker-listener.enabled=false")
       .run(ctx -> {
         assertThat(ctx).doesNotHaveBean(WorkerListener.class);
-        assertThat(ctx).doesNotHaveBean(FanoutExchange.class);
+        assertThat(ctx).doesNotHaveBean("hotkeyWorkerExchange");
       });
   }
 
@@ -359,12 +350,13 @@ class ZetaAmqpAutoConfigurationTest {
       .withConfiguration(AutoConfigurations.of(ZetaAmqpAutoConfiguration.class))
       .run(ctx -> {
         assertThat(ctx).doesNotHaveBean(WorkerListener.class);
-        assertThat(ctx).doesNotHaveBean(FanoutExchange.class);
+        assertThat(ctx).doesNotHaveBean("hotkeyWorkerExchange");
       });
   }
 
   /**
-   * Verifies that the worker FanoutExchange is created with the configured name, durable, and non-auto-delete.
+   * Verifies that the worker decision exchange is a durable direct exchange: the type is what
+   * keeps a shared broker from fanning one application's decisions out to another's queues.
    */
   @Test
   void hotkeyWorkerExchangeIsCreatedWithCorrectProperties() {
@@ -373,9 +365,10 @@ class ZetaAmqpAutoConfigurationTest {
 
     ZetaAmqpAutoConfiguration.WorkerListenerConfiguration config =
       new ZetaAmqpAutoConfiguration.WorkerListenerConfiguration();
-    FanoutExchange exchange = config.hotkeyWorkerExchange(props);
+    DirectExchange exchange = config.hotkeyWorkerExchange(props);
 
     assertThat(exchange).isNotNull();
+    assertThat(exchange.getType()).isEqualTo("direct");
     assertThat(exchange.getName()).isEqualTo("test.worker.exchange");
     assertThat(exchange.isDurable()).isTrue();
     assertThat(exchange.isAutoDelete()).isFalse();
@@ -399,38 +392,24 @@ class ZetaAmqpAutoConfigurationTest {
   }
 
   /**
-   * Verifies that the worker Binding correctly binds the queue to the exchange.
+   * Verifies that the worker Binding uses this application's decision routing key — the whole
+   * shared-broker isolation mechanism.
    */
   @Test
-  void hotkeyWorkerBindingBindsQueueToExchange() {
+  void hotkeyWorkerBindingBindsQueueToExchangeWithAppNameKey() {
     Queue queue = new Queue("wq");
-    FanoutExchange exchange = new FanoutExchange("we");
+    DirectExchange exchange = new DirectExchange("we");
+    ZetaAppProperties appProps = new ZetaAppProperties();
+    appProps.setAppName("orders");
 
     ZetaAmqpAutoConfiguration.WorkerListenerConfiguration config =
       new ZetaAmqpAutoConfiguration.WorkerListenerConfiguration();
-    Binding binding = config.hotkeyWorkerBinding(queue, exchange);
+    Binding binding = config.hotkeyWorkerBinding(queue, exchange, appProps);
 
     assertThat(binding).isNotNull();
     assertThat(binding.getDestination()).isEqualTo("wq");
     assertThat(binding.getExchange()).isEqualTo("we");
-  }
-
-  /**
-   * Verifies that SreRateLimiter is created with the configured success threshold.
-   */
-  @Test
-  void sreRateLimiterIsCreatedWithCorrectProperties() {
-    WorkerListenerProperties props = new WorkerListenerProperties();
-    props.getSre().setSuccessThreshold(0.8);
-    props.getSre().setWindowMs(2000);
-    props.getSre().setBuckets(5);
-    props.getSre().setMinSamples(10);
-
-    ZetaAmqpAutoConfiguration.WorkerListenerConfiguration config =
-      new ZetaAmqpAutoConfiguration.WorkerListenerConfiguration();
-    SreRateLimiter limiter = config.hotKeySreRateLimiter(props);
-
-    assertThat(limiter).isNotNull();
+    assertThat(binding.getRoutingKey()).isEqualTo("send.orders");
   }
 
   /**
@@ -439,7 +418,6 @@ class ZetaAmqpAutoConfigurationTest {
   @Test
   void workerListenerIsCreatedWithRequiredDependencies() {
     Cache<String, CacheEntry> localCache = mock(Cache.class);
-    CacheLoader redisLoader = mock(CacheLoader.class);
     WorkerListenerProperties props = new WorkerListenerProperties();
     ScheduledExecutorService scheduler = mock(ScheduledExecutorService.class);
     ZetaAmqpAutoConfiguration.WorkerListenerConfiguration config =
@@ -491,55 +469,10 @@ class ZetaAmqpAutoConfigurationTest {
     properties.getConsistentHashing().setVirtualNodes(300);
 
     ZetaAmqpAutoConfiguration.ReportConfiguration config = new ZetaAmqpAutoConfiguration.ReportConfiguration();
-    RingManager ringManager = config.ringManager(properties);
+    ConsistentHashRing ring = config.consistentHashRing(properties);
 
-    assertThat(ringManager).isNotNull();
-    assertThat(ringManager.getVirtualNodeCount()).isEqualTo(300);
-  }
-
-  @Test
-  void hotKeyCpuMonitorIsCreatedWithCorrectProperties() {
-    ZetaProperties properties = new ZetaProperties();
-
-    ZetaAmqpAutoConfiguration.ReportConfiguration config = new ZetaAmqpAutoConfiguration.ReportConfiguration();
-    SystemLoadMonitor monitor = config.hotKeyCpuMonitor(properties);
-
-    assertThat(monitor).isNotNull();
-  }
-
-  @Test
-  void hotKeyBbrRateLimiterIsCreatedWithCorrectProperties() {
-    SystemLoadMonitor cpuMonitor = mock(SystemLoadMonitor.class);
-    ZetaProperties properties = new ZetaProperties();
-
-    ZetaAmqpAutoConfiguration.ReportConfiguration config = new ZetaAmqpAutoConfiguration.ReportConfiguration();
-    BbrRateLimiter limiter = config.hotKeyBbrRateLimiter(cpuMonitor, properties);
-
-    assertThat(limiter).isNotNull();
-  }
-
-  @Test
-  void hotKeyReporterAcceptsBbrRateLimiterViaProvider() {
-    ReportPublisher reportPublisher = mock(ReportPublisher.class);
-    ScheduledExecutorService scheduler = mock(ScheduledExecutorService.class);
-    ZetaProperties properties = new ZetaProperties();
-    RingManager ringManager = new RingManagerImpl(150);
-    ObjectProvider<HealthView> healthViewProvider = mock(ObjectProvider.class);
-    ObjectProvider<BbrRateLimiter> bbrProvider = mock(ObjectProvider.class);
-
-    ZetaAmqpAutoConfiguration.ReportConfiguration config = new ZetaAmqpAutoConfiguration.ReportConfiguration();
-    KeyReporter reporter = config.hotKeyReporter(
-      reportPublisher,
-      scheduler,
-      properties,
-      new ZetaAppProperties(),
-      ringManager,
-      healthViewProvider,
-      bbrProvider,
-      mock(SnowflakeIdGenerator.class)
-    );
-
-    assertThat(reporter).isNotNull();
+    assertThat(ring).isNotNull();
+    assertThat(ring.getVirtualNodeCount()).isEqualTo(300);
   }
 
   @Test
@@ -548,26 +481,9 @@ class ZetaAmqpAutoConfigurationTest {
     CacheSyncProperties props = new CacheSyncProperties();
 
     ZetaAmqpAutoConfiguration.SyncConfiguration config = new ZetaAmqpAutoConfiguration.SyncConfiguration();
-    CacheSyncPublisher publisher = config.cacheSyncPublisher(
-      rabbitTemplate,
-      props,
-      mock(SnowflakeIdGenerator.class),
-      new ZetaAppProperties()
-    );
+    CacheSyncPublisher publisher = config.cacheSyncPublisher(rabbitTemplate, props, new ZetaAppProperties());
 
     assertThat(publisher).isNotNull();
-  }
-
-  @Test
-  @SuppressWarnings({"all", "unchecked"})
-  void hotKeyClusterLoaderIsCreated() {
-    org.springframework.data.redis.core.StringRedisTemplate redisTemplate = mock(
-      org.springframework.data.redis.core.StringRedisTemplate.class
-    );
-
-    CacheLoader<String, Object> loader = ZetaAmqpAutoConfiguration.hotKeyClusterLoader(redisTemplate);
-
-    assertThat(loader).isNotNull();
   }
 
   @Test
@@ -582,6 +498,7 @@ class ZetaAmqpAutoConfigurationTest {
     ZetaAmqpAutoConfiguration.SyncConfiguration config = new ZetaAmqpAutoConfiguration.SyncConfiguration();
     SimpleMessageListenerContainer container = config.syncListenerContainer(
       beanFactory,
+      new Queue(props.getQueueName()),
       cacheSyncListener,
       props
     );
@@ -642,10 +559,41 @@ class ZetaAmqpAutoConfigurationTest {
 
     ZetaAmqpAutoConfiguration.WorkerListenerConfiguration config =
       new ZetaAmqpAutoConfiguration.WorkerListenerConfiguration();
-    SimpleMessageListenerContainer container = config.heartbeatContainer(connectionFactory, healthView, heartbeatQueue);
+    SimpleMessageListenerContainer container = config.heartbeatContainer(
+      connectionFactory,
+      healthView,
+      heartbeatQueue,
+      new ZetaAppProperties()
+    );
 
     assertThat(container).isNotNull();
     assertThat(container.getQueueNames()).containsExactly("zeta.heartbeat:test");
+  }
+
+  @Test
+  void heartbeatContainerRecordsOnlyHeartbeatsFromItsOwnApplication() {
+    ConnectionFactory connectionFactory = mock(ConnectionFactory.class);
+    HealthView healthView = mock(HealthView.class);
+    Queue heartbeatQueue = new Queue("zeta.heartbeat:test");
+    ZetaAppProperties appProperties = new ZetaAppProperties();
+    appProperties.setAppName("tenant-a");
+
+    ZetaAmqpAutoConfiguration.WorkerListenerConfiguration config =
+      new ZetaAmqpAutoConfiguration.WorkerListenerConfiguration();
+    MessageListener listener = config
+      .heartbeatContainer(connectionFactory, healthView, heartbeatQueue, appProperties)
+      .getMessageListener();
+
+    listener.onMessage(new WorkerHeartbeatMessage(1L, "foreign-worker", 1L, true, "tenant-b").toMessage());
+    verifyNoInteractions(healthView);
+
+    WorkerHeartbeatMessage local = new WorkerHeartbeatMessage(2L, "local-worker", 1L, true, "tenant-a");
+    listener.onMessage(local.toMessage());
+    verify(healthView).onHeartbeat(local);
+
+    WorkerHeartbeatMessage unstamped = new WorkerHeartbeatMessage(3L, "older-worker", 1L, true, null);
+    listener.onMessage(unstamped.toMessage());
+    verify(healthView).onHeartbeat(unstamped);
   }
 
   @Test
@@ -669,25 +617,6 @@ class ZetaAmqpAutoConfigurationTest {
 
     assertThat(container).isNotNull();
     assertThat(container.getQueueNames()).containsExactly("zeta.worker:test");
-  }
-
-  @Test
-  void workerHeartbeatVerifierIsCreated() {
-    RabbitTemplate rabbitTemplate = mock(RabbitTemplate.class);
-    HealthView healthView = mock(HealthView.class);
-    ZetaProperties properties = new ZetaProperties();
-    ScheduledExecutorService scheduler = mock(ScheduledExecutorService.class);
-
-    ZetaAmqpAutoConfiguration.WorkerListenerConfiguration config =
-      new ZetaAmqpAutoConfiguration.WorkerListenerConfiguration();
-    WorkerHeartbeatVerifier verifier = config.workerHeartbeatVerifier(
-      rabbitTemplate,
-      healthView,
-      properties,
-      scheduler
-    );
-
-    assertThat(verifier).isNotNull();
   }
 
   // ── HeartbeatConnectionConfiguration ──
@@ -769,7 +698,7 @@ class ZetaAmqpAutoConfigurationTest {
   }
 
   @Test
-  void workerListenerConfigRequiresRedisTemplateBean() {
+  void workerListenerConfigRequiresConnectionFactory() {
     new ApplicationContextRunner()
       .withConfiguration(AutoConfigurations.of(ZetaAmqpAutoConfiguration.class))
       .withPropertyValues("zeta.worker-listener.enabled=true")
@@ -778,23 +707,25 @@ class ZetaAmqpAutoConfigurationTest {
       });
   }
 
+  /**
+   * A control-plane-only context must not activate any data-plane configuration:
+   * the heartbeat factory is itself a {@link ConnectionFactory}, so plain
+   * type-based conditions would match it and then fail while resolving the
+   * data-plane factory.
+   */
   @Test
-  void reportBbrRateLimiterSkippedWhenLocalReporterDisabled() {
+  void controlPlaneOnlyFactoryDoesNotActivateDataPlaneConfigurations() {
     new ApplicationContextRunner()
       .withConfiguration(AutoConfigurations.of(ZetaAmqpAutoConfiguration.class))
-      .withPropertyValues("zeta.local.reporter.enabled=false")
+      .withPropertyValues("zeta.sync.enabled=true", "zeta.worker-listener.enabled=true")
+      .withBean("zetaHeartbeatConnectionFactory", ConnectionFactory.class, () -> mock(ConnectionFactory.class))
+      .withBean(RabbitTemplate.class, () -> mock(RabbitTemplate.class))
       .run(ctx -> {
-        assertThat(ctx).doesNotHaveBean(BbrRateLimiter.class);
-      });
-  }
-
-  @Test
-  void workerSreRateLimiterSkippedWhenSreDisabled() {
-    new ApplicationContextRunner()
-      .withConfiguration(AutoConfigurations.of(ZetaAmqpAutoConfiguration.class))
-      .withPropertyValues("zeta.worker-listener.sre.enabled=false")
-      .run(ctx -> {
-        assertThat(ctx).doesNotHaveBean(SreRateLimiter.class);
+        assertThat(ctx).doesNotHaveBean(ReportPublisher.class);
+        assertThat(ctx).doesNotHaveBean(CacheSyncPublisher.class);
+        assertThat(ctx).doesNotHaveBean(WorkerListener.class);
+        assertThat(ctx).doesNotHaveBean("zetaReportRabbitTemplate");
+        assertThat(ctx).doesNotHaveBean("zetaSyncRabbitTemplate");
       });
   }
 
@@ -815,46 +746,5 @@ class ZetaAmqpAutoConfigurationTest {
 
     // Container must be created without error when non-default properties are set
     assertThat(config.workerListenerContainer(beanFactory, workerQueue, workerListener, props)).isNotNull();
-  }
-
-  @Test
-  @SuppressWarnings("all")
-  void hotKeyReporter_withHealthViewProvider_shouldCreateClusterHealthViewWithProperties() {
-    ReportPublisher reportPublisher = mock(ReportPublisher.class);
-    ScheduledExecutorService scheduler = mock(ScheduledExecutorService.class);
-    ZetaProperties properties = new ZetaProperties();
-    RingManager ringManager = new RingManagerImpl(150);
-    HealthView customHealthView = new HealthViewImpl(5000, 2);
-
-    ObjectProvider<HealthView> healthViewProvider = mock(ObjectProvider.class);
-    when(healthViewProvider.getIfAvailable(any())).thenReturn(customHealthView);
-
-    ObjectProvider<BbrRateLimiter> bbrProvider = mock(ObjectProvider.class);
-
-    ZetaAmqpAutoConfiguration.ReportConfiguration config = new ZetaAmqpAutoConfiguration.ReportConfiguration();
-    KeyReporter reporter = config.hotKeyReporter(
-      reportPublisher,
-      scheduler,
-      properties,
-      new ZetaAppProperties(),
-      ringManager,
-      healthViewProvider,
-      bbrProvider,
-      mock(SnowflakeIdGenerator.class)
-    );
-
-    assertThat(reporter).isNotNull();
-  }
-
-  @Test
-  @SuppressWarnings("all")
-  void hotKeyClusterLoader_isPlainRedisLoader() {
-    org.springframework.data.redis.core.StringRedisTemplate redisTemplate = mock(
-      org.springframework.data.redis.core.StringRedisTemplate.class
-    );
-
-    CacheLoader<String, Object> loader = ZetaAmqpAutoConfiguration.hotKeyClusterLoader(redisTemplate);
-
-    assertThat(loader).isInstanceOf(io.github.hyshmily.zeta.cache.loader.RedisValueLoader.class);
   }
 }

@@ -21,22 +21,17 @@ import static org.mockito.Mockito.*;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
-import io.github.hyshmily.zeta.cache.cachesupport.BroadcastBuffer;
-import io.github.hyshmily.zeta.cache.cachesupport.SingleFlight;
-import io.github.hyshmily.zeta.detection.ZetaBayesianSM;
+import io.github.hyshmily.zeta.cache.BroadcastBuffer;
+import io.github.hyshmily.zeta.cache.cachesupport.loader.singleflight.SingleFlight;
+import io.github.hyshmily.zeta.cache.cachesupport.raw.CacheEntry;
+import io.github.hyshmily.zeta.cache.cachesupport.raw.EntryDraft;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.Item;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.TopK;
-import io.github.hyshmily.zeta.model.CacheEntry;
 import io.github.hyshmily.zeta.reporting.KeyReporter;
 import io.github.hyshmily.zeta.scheduler.BackgroundRefresher;
 import io.github.hyshmily.zeta.sharding.HealthView;
-import io.github.hyshmily.zeta.sync.dispatcher.DispatcherStats;
-import io.github.hyshmily.zeta.sync.distributedlock.LockProvider;
-import io.github.hyshmily.zeta.sync.local.CacheSyncListener;
 import io.github.hyshmily.zeta.sync.local.CacheSyncPublisher;
-import io.github.hyshmily.zeta.sync.worker.WorkerListener;
-import io.github.hyshmily.zeta.util.SystemLoadMonitor;
-import io.github.hyshmily.zeta.util.version.VersionController;
+import io.github.hyshmily.zeta.util.clock.StampClock;
 import io.micrometer.core.instrument.binder.MeterBinder;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.util.List;
@@ -78,16 +73,39 @@ class ZetaMicrometerAutoConfigurationTest {
   }
 
   /**
+   * A user-defined {@link MeterBinder} must not suppress Zeta's binders: the conditions are
+   * name-based, so any unrelated application binder leaves both Zeta binders registered.
+   */
+  @Test
+  void userMeterBinder_doesNotSuppressZetaBinders() {
+    runner
+      .withUserConfiguration(UserMeterBinderConfig.class)
+      .run(ctx -> {
+        assertThat(ctx).hasBean("hotKeyCaffeineMetrics");
+        assertThat(ctx).hasBean("hotKeyCustomMetrics");
+      });
+  }
+
+  @org.springframework.context.annotation.Configuration(proxyBeanMethods = false)
+  static class UserMeterBinderConfig {
+
+    @org.springframework.context.annotation.Bean
+    MeterBinder applicationMeterBinder() {
+      return registry -> {};
+    }
+  }
+
+  /**
    * Verifies that the Caffeine cache MeterBinder registers hit/miss and size metrics.
    */
   @Test
   void caffeineMeterBinder_registersMetrics() {
     Cache<String, CacheEntry> cache = Caffeine.newBuilder().recordStats().build();
-    cache.put("a", CacheEntry.builder().value(1).dataVersion(0).hardExpireAtMs(Long.MAX_VALUE).build());
+    cache.put("a", EntryDraft.blank(null).value(1).version(0).hardExpiryAt(Long.MAX_VALUE).build());
     cache.getIfPresent("a");
     cache.getIfPresent("missing");
 
-    @SuppressWarnings("all")
+    @SuppressWarnings("unchecked")
     ObjectProvider<Cache<String, CacheEntry>> provider = mock(ObjectProvider.class);
     doAnswer(inv -> {
       ((Consumer<Cache<String, CacheEntry>>) inv.getArgument(0)).accept(cache);
@@ -110,83 +128,72 @@ class ZetaMicrometerAutoConfigurationTest {
    */
   @Test
   void customMeterBinder_registersAllMetrics_whenAllDepsPresent() {
-    TopK detector = mockTopK(5, 100L, 3, 97);
+    TopK detector = mockTopK(5, 100L, 3);
     SingleFlight sf = mock(SingleFlight.class);
     when(sf.estimatedInFlightSize()).thenReturn(2L);
     KeyReporter reporter = mock(KeyReporter.class);
-    when(reporter.dispatcherDepth()).thenReturn(10);
-    when(reporter.dispatcherDropped()).thenReturn(5L);
-    when(reporter.dispatcherExpired()).thenReturn(3L);
-    when(reporter.pendingKeyCount()).thenReturn(200L);
+    when(reporter.dispatcherStats()).thenReturn(new KeyReporter.DispatcherStats(10, 0, 0, 5));
+    // design decisions: access counting: pending keys read from the shared counter's real reservoir.
+    io.github.hyshmily.zeta.cache.AccessCounter accessCounter = new io.github.hyshmily.zeta.cache.AccessCounter(
+      mock(io.github.hyshmily.zeta.hotkeydetector.HotKeyDetector.class),
+      null,
+      mock(java.util.concurrent.ScheduledExecutorService.class),
+      50L,
+      500L
+    );
+    accessCounter.add("pending-1");
+    accessCounter.add("pending-2");
     BackgroundRefresher backgroundRefresher = mock(BackgroundRefresher.class);
     when(backgroundRefresher.getRefreshLimiter()).thenReturn(new Semaphore(8));
-    VersionController vc = mock(VersionController.class);
-    when(vc.getDegradedVersionCount()).thenReturn(7L);
+    StampClock clock = mock(StampClock.class);
+    when(clock.skewMillis()).thenReturn(7L);
     CacheSyncPublisher csp = mock(CacheSyncPublisher.class);
-    when(csp.getDedupCacheSize()).thenReturn(15L);
     HealthView healthView = mock(HealthView.class);
     when(healthView.isClusterHealthy()).thenReturn(true);
     when(healthView.getAliveWorkerIds()).thenReturn(Set.of("worker-1"));
-    ZetaBayesianSM stateMachine = mock(ZetaBayesianSM.class);
-    when(stateMachine.getTrackedKeys()).thenReturn(12);
     BroadcastBuffer broadcastBuffer = mock(BroadcastBuffer.class);
     when(broadcastBuffer.sendFailures()).thenReturn(2L);
     when(broadcastBuffer.saturationDrops()).thenReturn(1L);
-
-    SystemLoadMonitor cpuMonitor = mock(SystemLoadMonitor.class);
-    when(cpuMonitor.getCpuLoadEMA()).thenReturn(0.5);
-
-    LockProvider lockProvider = mock(LockProvider.class);
-    when(lockProvider.lockAcquiredCount()).thenReturn(4L);
-    when(lockProvider.lockContendedCount()).thenReturn(2L);
-    when(lockProvider.lockErrorCount()).thenReturn(1L);
 
     MeterBinder binder = config.hotKeyCustomMetrics(
       providerThatReturns(detector),
       providerThatReturns(sf),
       providerThatReturns(reporter),
+      providerThatReturns(accessCounter),
       providerThatReturns(broadcastBuffer),
       providerThatReturns(backgroundRefresher),
-      providerThatReturns(vc),
+      providerThatReturns(clock),
       providerThatReturns(csp),
-      providerThatReturns(stateMachine),
       providerThatReturns(healthView),
-      providerThatReturns(cpuMonitor),
       providerThatReturns(null),
-      providerThatReturns(null),
-      providerThatReturns(lockProvider)
+      providerThatReturns(null)
     );
     binder.bindTo(registry);
 
     assertGaugeValue("zeta.topk.size", "type", "local", 5.0);
     assertGaugeValue("zeta.topk.total", "type", "local", 100.0);
     assertGaugeExists("zeta.expelled.queue.size");
-    assertGaugeExists("zeta.expelled.queue.remaining");
     assertGaugeValue("zeta.singleflight.inflight", 2.0);
     assertGaugeValue("zeta.reporter.queue.depth", 10.0);
-    assertGaugeValue("zeta.reporter.queue.dropped.total", 5.0);
-    assertGaugeValue("zeta.reporter.queue.expired.total", 3.0);
-    assertGaugeValue("zeta.reporter.queue.expired.dead.total", 0.0);
-    assertGaugeValue("zeta.reporter.queue.expired.stale.total", 0.0);
-    assertGaugeValue("zeta.reporter.pending.keys", 200.0);
+    assertCounterValue("zeta.reporter.queue.dropped.total", 5.0);
+    assertCounterValue("zeta.reporter.queue.expired.dead.total", 0.0);
+    assertCounterValue("zeta.reporter.queue.expired.stale.total", 0.0);
+    // Two distinct keys counted into the real reservoir (design decisions: access counting).
+    assertGaugeValue("zeta.reporter.pending.keys", 2.0);
     assertGaugeValue("zeta.expire.refresh.available", 8.0);
-    assertGaugeValue("zeta.version.degraded.total", 7.0);
-    assertGaugeValue("zeta.sync.dedup.size", 15.0);
+    assertGaugeValue("zeta.version.clock.skew", 7.0);
     assertGaugeValue("zeta.worker.alive", 1.0);
-    assertGaugeValue("zeta.worker.tracked.keys", 12.0);
-    assertGaugeValue("zeta.cpu.load", 0.5);
-    // Stall-cause gauges (RocksDB write_stall_stats pattern).
-    assertGaugeValue("zeta.stall.report_backpressure.delayed", 10.0);
-    assertGaugeValue("zeta.stall.report_backpressure.stopped.total", 8.0);
-    assertGaugeValue("zeta.stall.broadcast_storm.stopped.total", 3.0);
-    assertGaugeValue("zeta.stall.redis_degraded.stopped", 0.0);
-    assertGaugeValue("zeta.stall.redis_degraded.timeouts.total", 0.0);
-    assertGaugeValue("zeta.stall.worker_partition.stopped", 0.0);
-    // Distributed-lock outcomes: a null from tryLock() is ambiguous between
-    // "peer holds it" and "Redis is down", so both are counted separately.
-    assertGaugeValue("zeta.lock.acquired.total", 4.0);
-    assertGaugeValue("zeta.lock.contended.total", 2.0);
-    assertGaugeValue("zeta.lock.error.total", 1.0);
+    // Stall-cause meters: only the causes with no other series.
+    assertCounterValue("zeta.stall.broadcast_storm.stopped.total", 3.0);
+    assertGaugeValue("zeta.stall.source_degraded.stopped", 0.0);
+    assertCounterValue("zeta.stall.source_degraded.timeouts.total", 0.0);
+    // Removed duplicates/derivations must not come back.
+    assertThat(registry.find("zeta.expelled.queue.remaining").gauge()).isNull();
+    assertThat(registry.find("zeta.reporter.queue.expired.total").gauge()).isNull();
+    assertThat(registry.find("zeta.sync.dedup.size").gauge()).isNull();
+    assertThat(registry.find("zeta.stall.report_backpressure.delayed").gauge()).isNull();
+    assertThat(registry.find("zeta.stall.report_backpressure.stopped.total").gauge()).isNull();
+    assertThat(registry.find("zeta.stall.worker_partition.stopped").gauge()).isNull();
   }
 
   /**
@@ -205,13 +212,41 @@ class ZetaMicrometerAutoConfigurationTest {
       providerThatReturns(null),
       providerThatReturns(null),
       providerThatReturns(null),
+      providerThatReturns(null)
+    );
+    binder.bindTo(registry);
+
+    assertThat(registry.getMeters()).isEmpty();
+  }
+
+  /**
+   * An unstarted dispatcher reads as unknown depth ({@code -1}) and zero monotonic totals: a
+   * counter must never report a negative value.
+   */
+  @Test
+  void customMeterBinder_unstartedDispatcherUsesTheFallbacks() {
+    KeyReporter reporter = mock(KeyReporter.class);
+    when(reporter.dispatcherStats()).thenReturn(null);
+
+    MeterBinder binder = config.hotKeyCustomMetrics(
+      providerThatReturns(null),
+      providerThatReturns(null),
+      providerThatReturns(reporter),
+      providerThatReturns(null),
+      providerThatReturns(null),
+      providerThatReturns(null),
+      providerThatReturns(null),
+      providerThatReturns(null),
       providerThatReturns(null),
       providerThatReturns(null),
       providerThatReturns(null)
     );
     binder.bindTo(registry);
 
-    assertThat(registry.getMeters()).isEmpty();
+    assertGaugeValue("zeta.reporter.queue.depth", -1.0);
+    assertCounterValue("zeta.reporter.queue.dropped.total", 0.0);
+    assertCounterValue("zeta.reporter.queue.expired.dead.total", 0.0);
+    assertCounterValue("zeta.reporter.queue.expired.stale.total", 0.0);
   }
 
   /**
@@ -227,10 +262,8 @@ class ZetaMicrometerAutoConfigurationTest {
       providerThatReturns(null),
       providerThatReturns(null),
       providerThatReturns(null),
+      providerThatReturns(null),
       providerThatReturns(backgroundRefresher),
-      providerThatReturns(null),
-      providerThatReturns(null),
-      providerThatReturns(null),
       providerThatReturns(null),
       providerThatReturns(null),
       providerThatReturns(null),
@@ -242,11 +275,9 @@ class ZetaMicrometerAutoConfigurationTest {
     assertThat(registry.find("zeta.expire.refresh.available").gauge()).isNull();
     // Lease counters live on the refresher seam itself (not the limiter), so
     // they register even when the limiter is absent.
-    assertThat(registry.find("zeta.expire.refresh.failure.leased.total").gauge()).isNotNull();
-    assertThat(registry.find("zeta.expire.refresh.lease.stale.capped.total").gauge()).isNotNull();
-    assertThat(registry.find("zeta.expire.refresh.lease.suppressed.total").gauge()).isNotNull();
+    assertThat(registry.find("zeta.expire.refresh.failure.leased.total").functionCounter()).isNotNull();
     assertThat(registry.find("zeta.expire.refresh.lease.debt.keys").gauge()).isNotNull();
-    assertThat(registry.getMeters()).hasSize(4);
+    assertThat(registry.getMeters()).hasSize(2);
   }
 
   /**
@@ -254,15 +285,13 @@ class ZetaMicrometerAutoConfigurationTest {
    */
   @Test
   void customMeterBinder_registersLocalOnly() {
-    TopK detector = mockTopK(3, 50L, 0, 100);
+    TopK detector = mockTopK(3, 50L, 0);
     SingleFlight sf = mock(SingleFlight.class);
     when(sf.estimatedInFlightSize()).thenReturn(1L);
 
     MeterBinder binder = config.hotKeyCustomMetrics(
       providerThatReturns(detector),
       providerThatReturns(sf),
-      providerThatReturns(null),
-      providerThatReturns(null),
       providerThatReturns(null),
       providerThatReturns(null),
       providerThatReturns(null),
@@ -278,94 +307,15 @@ class ZetaMicrometerAutoConfigurationTest {
     assertGaugeValue("zeta.topk.size", "type", "local", 3.0);
     assertGaugeValue("zeta.topk.total", "type", "local", 50.0);
     assertGaugeExists("zeta.expelled.queue.size");
-    assertGaugeExists("zeta.expelled.queue.remaining");
     assertGaugeValue("zeta.singleflight.inflight", 1.0);
 
     assertThat(registry.find("zeta.topk.size").tags("type", "worker").gauge()).isNull();
     assertThat(registry.find("zeta.reporter.queue.depth").gauge()).isNull();
     assertThat(registry.find("zeta.worker.alive").gauge()).isNull();
-    assertThat(registry.find("zeta.worker.tracked.keys").gauge()).isNull();
     assertThat(registry.find("zeta.sync.dedup.size").gauge()).isNull();
-    assertThat(registry.find("zeta.dispatch.pending.units").gauge()).isNull();
   }
 
-  /**
-   * Verifies that the per-key dispatcher gate gauges are registered per plane and report the gate
-   * snapshot the plane's listener exposes (ADR-0072 D-1).
-   */
-  @Test
-  void customMeterBinder_registersDispatchGateGauges() {
-    CacheSyncListener syncListener = mock(CacheSyncListener.class);
-    when(syncListener.dispatcherStats()).thenReturn(new DispatcherStats(120L, 500L, 3, 7L, 2L));
-    WorkerListener workerListener = mock(WorkerListener.class);
-    when(workerListener.dispatcherStats()).thenReturn(new DispatcherStats(0L, 200L, 0, 0L, 0L));
-
-    MeterBinder binder = config.hotKeyCustomMetrics(
-      providerThatReturns(null),
-      providerThatReturns(null),
-      providerThatReturns(null),
-      providerThatReturns(null),
-      providerThatReturns(null),
-      providerThatReturns(null),
-      providerThatReturns(null),
-      providerThatReturns(null),
-      providerThatReturns(null),
-      providerThatReturns(null),
-      providerThatReturns(syncListener),
-      providerThatReturns(workerListener),
-      providerThatReturns(null)
-    );;
-    binder.bindTo(registry);
-
-    assertGaugeValue("zeta.dispatch.pending.units", "plane", "sync", 120.0);
-    assertGaugeValue("zeta.dispatch.remaining.units", "plane", "sync", 380.0);
-    assertGaugeValue("zeta.dispatch.active.keys", "plane", "sync", 3.0);
-    assertGaugeValue("zeta.dispatch.backlogged", "plane", "sync", 1.0);
-    assertGaugeValue("zeta.dispatch.dropped.total", "plane", "sync", 7.0);
-    assertGaugeValue("zeta.dispatch.rejected.total", "plane", "sync", 2.0);
-
-    // The decision plane reports its own gate: an empty backlog must read as "not backlogged" and
-    // as "full capacity remaining", which is the distinction this gauge pair exists to make.
-    assertGaugeValue("zeta.dispatch.pending.units", "plane", "worker", 0.0);
-    assertGaugeValue("zeta.dispatch.remaining.units", "plane", "worker", 200.0);
-    assertGaugeValue("zeta.dispatch.backlogged", "plane", "worker", 0.0);
-  }
-
-  /**
-   * Verifies that a plane whose listener has no initialized dispatcher registers no gate gauges at
-   * all — the scrape must not fail, and must not report a zeroed gate as if it were real.
-   */
-  @Test
-  void customMeterBinder_skipsDispatchGauges_whenDispatcherAbsent() {
-    CacheSyncListener syncListener = mock(CacheSyncListener.class);
-    when(syncListener.dispatcherStats()).thenReturn(null);
-    WorkerListener workerListener = mock(WorkerListener.class);
-    when(workerListener.dispatcherStats()).thenReturn(null);
-
-    MeterBinder binder = config.hotKeyCustomMetrics(
-      providerThatReturns(null),
-      providerThatReturns(null),
-      providerThatReturns(null),
-      providerThatReturns(null),
-      providerThatReturns(null),
-      providerThatReturns(null),
-      providerThatReturns(null),
-      providerThatReturns(null),
-      providerThatReturns(null),
-      providerThatReturns(null),
-      providerThatReturns(syncListener),
-      providerThatReturns(workerListener),
-      providerThatReturns(null)
-    );;
-    binder.bindTo(registry);
-
-    assertThat(registry.find("zeta.dispatch.pending.units").gauge()).isNull();
-    assertThat(registry.find("zeta.dispatch.remaining.units").gauge()).isNull();
-    assertThat(registry.find("zeta.dispatch.dropped.total").gauge()).isNull();
-    assertThat(registry.find("zeta.dispatch.rejected.total").gauge()).isNull();
-  }
-
-  @SuppressWarnings("all")
+  @SuppressWarnings("unchecked")
   private <T> ObjectProvider<T> providerThatReturns(T value) {
     ObjectProvider<T> provider = mock(ObjectProvider.class);
     doAnswer(invocation -> {
@@ -379,11 +329,13 @@ class ZetaMicrometerAutoConfigurationTest {
     return provider;
   }
 
-  private TopK mockTopK(int listSize, long total, int expelledSize, int expelledRemaining) {
+  private TopK mockTopK(int listSize, long total, int expelledSize) {
     TopK topK = mock(TopK.class);
     List<Item> items = mock(List.class);
     when(items.size()).thenReturn(listSize);
     when(topK.list()).thenReturn(items);
+    // The size gauge reads the O(1) estimate, never the (materialising) ranking list.
+    when(topK.estimatedSize()).thenReturn(listSize);
     when(topK.total()).thenReturn(total);
     BlockingQueue<Item> queue = new LinkedBlockingQueue<>();
     for (int i = 0; i < expelledSize; i++) {
@@ -405,5 +357,9 @@ class ZetaMicrometerAutoConfigurationTest {
     assertThat(registry.find(name).tags(tagKey, tagValue).gauge().value())
       .as("gauge %s{%s=%s} value", name, tagKey, tagValue)
       .isEqualTo(expected);
+  }
+
+  private void assertCounterValue(String name, double expected) {
+    assertThat(registry.find(name).functionCounter().count()).as("counter %s value", name).isEqualTo(expected);
   }
 }

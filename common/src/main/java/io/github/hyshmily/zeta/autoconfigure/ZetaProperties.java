@@ -15,18 +15,13 @@
  */
 package io.github.hyshmily.zeta.autoconfigure;
 
-import io.github.hyshmily.zeta.annotation.annotationsupporter.SpringCacheSettings;
-import io.github.hyshmily.zeta.cache.cachesupport.CacheCoreSettings;
-import io.github.hyshmily.zeta.cache.cachesupport.CircuitBreakerSettings;
 import io.github.hyshmily.zeta.constants.ZetaConstants;
-import io.github.hyshmily.zeta.endpoint.EndpointSettings;
+import io.github.hyshmily.zeta.util.clock.MonotonicStampClock;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.*;
 import java.util.ArrayList;
 import java.util.List;
-import lombok.AccessLevel;
 import lombok.Data;
-import lombok.Getter;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.validation.annotation.Validated;
 
@@ -36,20 +31,19 @@ import org.springframework.validation.annotation.Validated;
  * <p>Groups: TopK algorithm parameters (capacity, sketch width/depth,
  * decay, minimum count), L1 Caffeine cache limits, SingleFlight
  * deduplication settings, executor thread pool, TTL overrides (hard
- * and soft, for normal and hot keys), and reporting shard topology.
+ * and soft, for normal and hot keys), reporting cadence and queueing.
  *
- * <p>Implements the cache-core configuration views ({@link CacheCoreSettings},
- * plus the nested {@link CircuitBreakerSettings} block) so the cache packages
- * never import this assembly package — the dependency points one way
- * (autoconfigure → cache, ADR-0082). The same holds for the annotation and
- * endpoint views ({@link SpringCacheSettings}, {@link EndpointSettings}).
- * The bridges delegate to the live bound bean, so runtime configuration
- * updates keep working exactly as before the views existed.
+ * <p>The concrete configuration bean is consumed directly by the cache core,
+ * the circuit breaker and the endpoint. TTL, refresh and breaker reads are live;
+ * construction-time fields (sketch geometry, pool sizes, queue capacities) are
+ * read when their bean is created and do not follow a later rebind.
  */
 @Data
 @Validated
 @ConfigurationProperties(prefix = "zeta.local")
-public class ZetaProperties implements CacheCoreSettings, SpringCacheSettings, EndpointSettings {
+public class ZetaProperties {
+
+  private static final int CACHED_PROCESSORS = Runtime.getRuntime().availableProcessors();
 
   /** Number of top hot keys to track. */
   @Min(1)
@@ -81,7 +75,7 @@ public class ZetaProperties implements CacheCoreSettings, SpringCacheSettings, E
   @Min(1)
   private int inFlightTtlSeconds = 5;
 
-  /** Timeout in seconds for waiting on an in-flight cache load. */
+  /** Execution timeout in seconds for an in-flight cache load; queue wait is not counted. */
   @Min(1)
   private int inFlightTimeoutSeconds = 3;
 
@@ -98,14 +92,25 @@ public class ZetaProperties implements CacheCoreSettings, SpringCacheSettings, E
   private int executorQueueCapacity = 2000;
 
   /**
-   * Rejection policy for the HotKey async executor when both the queue and the
-   * max pool are saturated (ADR-0070). {@code ABORT} (default) throws
-   * {@link java.util.concurrent.RejectedExecutionException} — load failures are
-   * swallowed as cache misses upstream, the caller is never blocked.
-   * {@code CALLER_RUNS} runs the task on the submitting thread — protects the
-   * async work from being dropped at the cost of back-pressuring the caller.
+   * Rejection policy when a pool's queue and max size are saturated (design decisions: api surface).
+   * {@code ABORT} (default) throws {@link java.util.concurrent.RejectedExecutionException};
+   * {@code CALLER_RUNS} runs the task on the submitting thread and back-pressures the caller.
+   * Only the refresh fan-out pool honors {@code CALLER_RUNS}: the load and send pools always abort,
+   * and a load-pool rejection is a suppressed read, never a miss.
    */
   private ExecutorRejection executorRejection = ExecutorRejection.ABORT;
+
+  /**
+   * The executor pool must be able to grow to its configured maximum: a core
+   * size above the maximum makes {@link java.util.concurrent.ThreadPoolExecutor}
+   * reject the construction.
+   *
+   * @return whether {@code executor-max-pool-size >= executor-core-pool-size}
+   */
+  @AssertTrue(message = "zeta.local.executor-max-pool-size must be >= zeta.local.executor-core-pool-size")
+  public boolean isExecutorPoolSizeValid() {
+    return executorMaxPoolSize >= executorCorePoolSize;
+  }
 
   /** Rejection policy options for the HotKey async executor. */
   public enum ExecutorRejection {
@@ -124,127 +129,59 @@ public class ZetaProperties implements CacheCoreSettings, SpringCacheSettings, E
   @Min(1)
   private int expelledQueueCapacity = 10_000;
 
-  /** Number of sliding time windows per sketch slot (ring buffer depth). Default 3. */
-  @Min(1)
+  /** Number of sliding time windows per sketch slot (power of two, rounded up). */
+  @Min(2)
   @Max(10)
-  private int sketchWindowCount = 3;
+  private int sketchWindowCount = 4;
 
-  /** Default hard TTL (ms) for normal keys — fallback when {@link #hardTtlMs} is not set. */
-  private long defaultHardTtlMs = 300_000;
+  /** Hard TTL (ms) for normal keys. {@code 0} means permanent (no hard expiry). */
+  @Min(0)
+  private long hardTtlMs = 300_000;
 
-  /** Override hard TTL (ms) for normal keys. 0 means use {@link #defaultHardTtlMs}. */
-  private long hardTtlMs;
+  /** Hard TTL (ms) for hot keys. {@code 0} means permanent (no hard expiry). */
+  @Min(0)
+  private long hotHardTtlMs = 3_600_000;
 
-  /** Default hard TTL (ms) for hot keys — fallback when {@link #hotHardTtlMs} is not set. */
-  private long defaultHotHardTtlMs = 3_600_000;
+  /** Soft TTL (ms) for normal keys. {@code 0} disables soft expiry. */
+  @Min(0)
+  private long softTtlMs = 30_000;
 
-  /** Override hard TTL (ms) for hot keys. 0 means use {@link #defaultHotHardTtlMs}. */
-  private long hotHardTtlMs;
-
-  /** Default soft TTL (ms) for normal keys — fallback when {@link #softTtlMs} is not set. */
-  private long defaultSoftTtlMs = 30_000;
-
-  /** Override soft TTL (ms) for normal keys. 0 means use {@link #defaultSoftTtlMs}. */
-  private long softTtlMs;
-
-  /** Default soft TTL (ms) for hot keys — fallback when {@link #hotSoftTtlMs} is not set. */
-  private long defaultHotSoftTtlMs = 300_000;
-
-  /** Override soft TTL (ms) for hot keys. 0 means use {@link #defaultHotSoftTtlMs}. */
-  private long hotSoftTtlMs;
-
-  @Override
-  public String keySeparator() {
-    return getSpringCache().getKeySeparator();
-  }
-
-  @Override
-  public int cacheMaxSize() {
-    return getCache().getMaxSize();
-  }
-
-  @Override
-  public int inFlightMaxSize() {
-    return getInFlightMaxSize();
-  }
-
-  @Override
-  public int inFlightTtlSeconds() {
-    return getInFlightTtlSeconds();
-  }
-
-  @Override
-  public int inFlightTimeoutSeconds() {
-    return getInFlightTimeoutSeconds();
-  }
-
-  /**
-   * Effective hard TTL for normal keys.
-   * Returns the override value if set, otherwise the default.
-   *
-   * @return the effective hard TTL in milliseconds
-   */
-  public long effectiveHardTtlMs() {
-    return hardTtlMs > 0 ? hardTtlMs : defaultHardTtlMs;
-  }
-
-  /**
-   * Effective hard TTL for hot keys.
-   * Returns the override value if set, otherwise the default.
-   *
-   * @return the effective hot-key hard TTL in milliseconds
-   */
-  public long effectiveHotHardTtlMs() {
-    return hotHardTtlMs > 0 ? hotHardTtlMs : defaultHotHardTtlMs;
-  }
-
-  /**
-   * Effective soft TTL for normal keys.
-   * Returns the override value if set, otherwise the default. Returns 0 if disabled.
-   *
-   * @return the effective soft TTL in milliseconds, or 0 if disabled
-   */
-  public long effectiveSoftTtlMs() {
-    return softTtlMs > 0 ? softTtlMs : defaultSoftTtlMs;
-  }
-
-  /**
-   * Effective soft TTL for hot keys.
-   * Returns the override value if set, otherwise the default. Returns 0 if disabled.
-   *
-   * @return the effective hot-key soft TTL in milliseconds, or 0 if disabled
-   */
-  public long effectiveHotSoftTtlMs() {
-    return hotSoftTtlMs > 0 ? hotSoftTtlMs : defaultHotSoftTtlMs;
-  }
+  /** Soft TTL (ms) for hot keys. {@code 0} disables soft expiry. */
+  @Min(0)
+  private long hotSoftTtlMs = 300_000;
 
   /** Jitter ratio (0.0–1.0) applied to TTLs — e.g. 0.1 means ±10% random offset. */
   @Min(0)
   @Max(1)
   private double ttlJitterRatio = 0.05;
 
-  /** Maximum number of concurrent refresh tasks for soft-expiry management. */
-  @Min(1)
-  private int refreshMaxPools = 100;
+  /**
+   * Maximum number of concurrent background refreshes for soft-expiry
+   * management.
+   *
+   * <p>{@code 0} (the default) derives the bound from
+   * {@link #executorMaxPoolSize} as half the pool, at least 1. Background
+   * refreshes share {@code interruptibleLoadExecutor} with read-miss loads, so
+   * the semaphore must stay below the pool size or it stops bounding anything:
+   * a limit above the pool lets refreshes occupy every thread and park reads in
+   * the queue. A positive value is clamped to {@link #executorMaxPoolSize}; a
+   * configured value above it is logged at startup.
+   */
+  @Min(0)
+  private int refreshMaxPools = 0;
 
   /**
-   * TTL in minutes for Redis version keys used in stale-detection.
-   * <p>MUST be far greater than the maximum lifetime of any L1 entry for the same key.
-   * Setting this too low risks version key expiry and silent dataVersion wraparound
-   * (INCR restarts from 1), causing {@link io.github.hyshmily.zeta.util.version.VersionGuard#shouldSkipForSync}
-   * to reject legitimate updates because the new version is numerically lower than
-   * the existing version cached on peer instances.
-   * <p>Default 10080 minutes (7 days). Do not reduce unless you have verified that
-   * no L1 entry in your deployment can outlive this TTL.
+   * Effective background-refresh concurrency bound: the configured value when
+   * positive, otherwise half of {@link #executorMaxPoolSize} (at least 1),
+   * clamped to {@link #executorMaxPoolSize} — the shared pool is the real bound.
+   *
+   * @return the effective refresh permit count, always {@code >= 1} and
+   *         {@code <= executorMaxPoolSize}
    */
-  @Min(1)
-  private int versionKeyTtlMinutes = 10080;
-
-  /**
-   * Application identity moved to {@link ZetaAppProperties}: one key
-   * ({@code zeta.app-name}) bound once and consumed by both the App side and
-   * the Worker side, so the two ends cannot disagree by construction.
-   */
+  public int effectiveRefreshMaxPools() {
+    int maximum = refreshMaxPools > 0 ? refreshMaxPools : Math.max(1, executorMaxPoolSize / 2);
+    return Math.min(maximum, executorMaxPoolSize);
+  }
 
   /** Exchange name for app-to-Worker reportToWorker routing. */
   private String reportExchange = ZetaConstants.Exchange.REPORT;
@@ -253,7 +190,16 @@ public class ZetaProperties implements CacheCoreSettings, SpringCacheSettings, E
   private long reportIntervalMs = 50;
 
   /**
-   * ADR-0078 feed-loop tuning of the reporter flush cadence (kernel
+   * Maximum elapsed time (ms) between two sketch ingests on the shared access
+   * counter (design decisions: access counting): reporter-sized tides merge into an accumulator and the
+   * merged batch lands in the HeavyKeeper sketch whenever this cadence has
+   * elapsed — the detector keeps its own 500 ms rhythm regardless of the
+   * (usually faster) report tide. Also the tide base when no reporter is wired.
+   */
+  private long detectIntervalMs = 500;
+
+  /**
+   * design decisions: reporting feed-loop tuning of the reporter flush cadence (kernel
    * {@code damon_feed_loop_next_input} port). {@code off} disables the tuner;
    * {@code shadow} (default) computes and exposes the interval trajectory via
    * the {@code zeta.reporter.feedloop.*} gauges without applying it;
@@ -266,8 +212,8 @@ public class ZetaProperties implements CacheCoreSettings, SpringCacheSettings, E
 
   /**
    * Goal keys per flush for the feed-loop tuner ({@code N}); the loop settles
-   * the flush interval where the two-window-averaged batch size matches this
-   * target. Only meaningful when {@code report-interval-tuning} != off.
+   * the interval at which the smoothed arrival rate projects to this batch
+   * size. Only meaningful when {@code report-interval-tuning} != off.
    */
   @Min(1)
   private long reportIntervalTargetBatch = 512;
@@ -291,7 +237,19 @@ public class ZetaProperties implements CacheCoreSettings, SpringCacheSettings, E
   @Min(1)
   private long reportIntervalMaxMs = 1000;
 
-  /** Tuning modes for the ADR-0078 reporter flush-cadence feed loop. */
+  /**
+   * The feed-loop clamp must not be inverted: a ceiling below the floor would
+   * make every computed interval resolve to the floor. Only checked when the
+   * tuner is enabled — the two values are inert at {@code off}.
+   *
+   * @return whether the interval range is consistent
+   */
+  @AssertTrue(message = "zeta.local.report-interval-max-ms must be >= zeta.local.report-interval-min-ms")
+  public boolean isReportIntervalRangeValid() {
+    return reportIntervalTuning == ReportIntervalTuning.OFF || reportIntervalMaxMs >= reportIntervalMinMs;
+  }
+
+  /** Tuning modes for the reporter flush-cadence feed loop (design decisions: reporting). */
   public enum ReportIntervalTuning {
     /** No tuner: the flush cadence stays at {@code report-interval-ms}. */
     OFF,
@@ -304,16 +262,12 @@ public class ZetaProperties implements CacheCoreSettings, SpringCacheSettings, E
   }
 
   /**
-   * Number of shards for reportToWorker partitioning.
-   *
-   * @deprecated no longer read by any code path; kept only for property binding compatibility.
+   * Capacity of the reporter dispatch work queue, in batches. Consumers blocked on a
+   * publish cannot drain, so this is the bound on a stalled broker's backlog; 1024
+   * batches covers one 5 s staleness window at up to ~200 batches/s.
    */
-  @Deprecated
-  private int shardCount = 1;
-
-  /** Capacity of the per-shard reportToWorker queue. */
   @Min(1)
-  private int queueCapacity = 10_000;
+  private int queueCapacity = 1_024;
 
   /** Timeout in ms for offering new entries to the reportToWorker queue. */
   @Min(1)
@@ -335,30 +289,48 @@ public class ZetaProperties implements CacheCoreSettings, SpringCacheSettings, E
     return consumerCount > 0 ? consumerCount : Math.max(4, CACHED_PROCESSORS / 2);
   }
 
-  private static final int CACHED_PROCESSORS = Runtime.getRuntime().availableProcessors();
-
   /** L1 cache sizing configuration. */
   @Data
   public static class CacheConfig {
 
-    /** Maximum number of entries. */
+    /**
+     * Maximum number of entries in the L1 table — the process-wide bound.
+     */
     private int maxSize = 100_000;
+
+    /**
+     * Maximum number of per-key invalidation tombstones
+     * ({@code EntryLifecycle}). Bounds the anti-resurrection state under a
+     * mass-invalidation burst; the tombstone only has to outlive in-flight
+     * reads, so the bound is workload-tunable rather than fixed.
+     */
+    private int tombstoneMaximumSize = 10_000;
+
+    /**
+     * Per-key invalidation tombstone retention in seconds. Only has to outlive
+     * an in-flight read/load (seconds in practice); past it a pre-invalidation
+     * fill becomes admissible again.
+     */
+    private int tombstoneTtlSeconds = 600;
   }
+
   /** L1 cache configuration. */
   @Valid
   private CacheConfig cache = new CacheConfig();
 
   /**
-   * Configuration for consistent-hashing based reportToWorker routing.
-   * <p>
-   * When enabled, the app uses a consistent-hash ring to select the target
-   * shard for each key, ensuring the same key always maps to the same Worker
-   * shard even when the shard set changes.
+   * Consistent-hash ring configuration for reportToWorker routing.
+   *
+   * <p>The app always routes reports through the consistent-hash ring
+   * ({@link #virtualNodes} sizes it), so the same key maps to the same Worker
+   * shard even when the shard set changes. {@link #enabled} is <b>not</b> a
+   * routing switch — it only gates creation of the {@code /actuator/hotkeyring}
+   * inspection endpoint (default {@code true}).
    */
   @Data
   public static class ConsistentHashing {
 
-    /** Whether consistent-hashing mode is enabled. */
+    /** Whether the {@code /actuator/hotkeyring} inspection endpoint is created (routing always uses the ring). */
     private boolean enabled = true;
 
     /** Number of virtual nodes per physical shard on the hash ring. */
@@ -366,99 +338,102 @@ public class ZetaProperties implements CacheCoreSettings, SpringCacheSettings, E
     private int virtualNodes = 500;
   }
 
-  /** Consistent-hashing configuration for reportToWorker routing. */
+  /** Consistent-hash ring configuration for reportToWorker routing (see {@link ConsistentHashing}). */
   @Valid
   private ConsistentHashing consistentHashing = new ConsistentHashing();
 
-  /** Reporting BBR adaptive rate-limiter and CPU monitor configuration. */
-  @Valid
-  private ReporterLimiter reporter = new ReporterLimiter();
-
   /**
-   * Configuration for the BBR adaptive rate-limiter and CPU monitor.
-   * <p>
-   * Controls CPU threshold, polling interval, EMA decay factor, BBR sliding
-   * window parameters, and the cooldown period after a rate-limit drop.
-   */
-  @Data
-  public static class ReporterLimiter {
-
-    /** Whether BBR adaptive rate-limiting is enabled (binds {@code zeta.report.enabled}). */
-    private boolean enabled = true;
-
-    /** CPU threshold (0–1000, default 800 = 80 %). */
-    @Min(0)
-    @Max(1000)
-    private int cpuThreshold = 800;
-
-    /** CPU polling interval in milliseconds. */
-    @Min(100)
-    private long cpuPollIntervalMs = 500;
-
-    /** EMA decay factor for CPU smoothing (0.0 – 1.0). */
-    private double cpuDecay = 0.95;
-
-    /** BBR sliding window size in milliseconds. Must be >= {@link #bbrWindowBuckets}. */
-    @Min(100)
-    private long bbrWindowMs = 10_000;
-
-    /** Number of buckets in the BBR sliding window. Must be <= {@link #bbrWindowMs}. */
-    @Min(2)
-    private int bbrWindowBuckets = 100;
-
-    /** Cooldown period in ms after a drop before allowing again. */
-    @Min(0)
-    private long bbrCooldownMs = 1_000;
-
-    /**
-     * Absolute in-flight ceiling (hard limit) for the damped adaptive limiter.
-     * Quasi-static position reference: the Little-Law estimate and the damped
-     * baseline are both capped by it, and CPU pressure derates it continuously
-     * over a ±20 pp ramp around {@link #cpuThreshold}. Should exceed the
-     * expected Worker count so the {@code minInFlight} floor never overrides it.
-     */
-    @Min(1)
-    private long bbrMaxInFlightCeiling = 128;
-  }
-
-  /**
-   * Explicit instance ID for queue naming.
+   * Explicit instance ID for queue naming and node-id derivation.
    * Falls back to {@code server.port-HOSTNAME} (or {@code server.port-UUID} if {@code HOSTNAME} is unset) if empty.
    */
   private String instanceId = "";
 
   /**
+   * Explicit 10-bit dataVersion node id (0..1023), embedded in every stamp the
+   * stamp clock mints.
+   *
+   * <p>When unset it is derived from {@link #instanceId} (or the auto-detected
+   * instance id). Two instances that resolve to the same node id can mint
+   * equal stamps in the same millisecond; in a multi-instance deployment set
+   * either a unique {@code node-id} per instance or unique instance ids.
+   */
+  @Min(0)
+  @Max(1023)
+  private Integer nodeId;
+
+  /**
+   * Largest forward distance (ms) an observed peer stamp may lead local
+   * physical time before the stamp clock refuses to raise its floor.
+   *
+   * <p>Without a bound, one peer with a broken clock drags every node's
+   * version floor into the future and keeps it there until physical time
+   * catches up (design decisions: version stamps). The default is deliberately
+   * looser than an HLC's 500 ms anti-drift delta because Zeta's LWW contract
+   * already tolerates bounded clock skew: this rejects clearly broken clocks,
+   * not ordinary NTP skew. Rejecting the floor bump does not reject the
+   * message the stamp belongs to.
+   */
+  @Min(0)
+  private long clockMaxForwardDriftMs = MonotonicStampClock.DEFAULT_MAX_FORWARD_DRIFT_MS;
+
+  /**
    * Configuration for Worker heartbeat exchange and liveliness detection.
    * <p>
-   * Controls the exchange name, timeout intervals for heartbeat reception,
-   * PING verification, and the number of consecutive failures before
-   * graceful degradation is triggered.
+   * Controls the exchange name and the heartbeat reception timeout.
    */
   @Data
   public static class Heartbeat {
 
     /** Heartbeat exchange name. */
     private String exchangeName = ZetaConstants.Exchange.HEARTBEAT;
+
     /** Heartbeat timeout (ms). */
+    @Min(1)
     private int timeoutMs = 10000;
-    /** Verify interval (ms). */
-    private long verifyIntervalMs = 5000;
-    /** PING timeout (ms). */
-    private long pingTimeoutMs = 3000;
-    /** Degrade after consecutive failures. */
-    private int degradeAfterFailures = 3;
-    /** Max backoff (ms) for per-Worker exponential backoff between verification probes. */
-    private long verifyMaxBackoffMs = 600_000;
+
     /**
      * Minimum alive workers for cluster health.
      * <p>0 (default) = derived threshold: one third of the observed Worker count,
      * rounded up, with a floor of 1 (e.g. 3 Workers observed → 1 alive is healthy;
      * 5 observed → 2 alive; 9 observed → 3 alive). A single surviving Worker is
-     * intentionally accepted as a healthy cluster — see ADR-0028.
+     * intentionally accepted as a healthy cluster — see design decisions: heartbeat and health.
      * <p>Set to a positive value to override the derived threshold with an
      * absolute alive count.
      */
+    @Min(0)
     private int minAliveWorkers;
+
+    /**
+     * Per-Worker adaptive liveness timeout (design decisions: heartbeat and health): each Worker's
+     * effective timeout becomes the Jacobson/Karels estimate over its heartbeat
+     * inter-arrival ({@code SRTT + 4×RTTVAR}, the Linux TCP RTO shape), clamped
+     * into [{@link #adaptiveFloorMs}, {@link #timeoutMs}]. The static
+     * {@code timeoutMs} stops being a flat threshold and becomes the warm-up
+     * value and the ceiling. This tightens dead-Worker detection from the full
+     * static window down to a few heartbeat intervals while widening
+     * automatically under observed jitter.
+     */
+    private boolean adaptiveTimeout = true;
+
+    /**
+     * Lower clamp (ms) for the adaptive liveness timeout. Must stay above a few
+     * heartbeat intervals (the Worker's default cadence is 1 s) so a single
+     * lost beat or a short GC pause does not flap the Worker dead.
+     * Default 3 000.
+     */
+    @Min(1)
+    private long adaptiveFloorMs = 3_000;
+
+    /**
+     * The adaptive floor is the lower clamp and {@link #timeoutMs} the upper
+     * clamp; an inverted pair would make the timeout stop being a ceiling.
+     *
+     * @return whether the adaptive window bounds are ordered
+     */
+    @AssertTrue(message = "zeta.local.heartbeat.adaptive-floor-ms must be <= zeta.local.heartbeat.timeout-ms")
+    public boolean isAdaptiveWindowValid() {
+      return !adaptiveTimeout || adaptiveFloorMs <= timeoutMs;
+    }
   }
 
   /** Worker heartbeat and liveliness detection configuration. */
@@ -472,34 +447,46 @@ public class ZetaProperties implements CacheCoreSettings, SpringCacheSettings, E
    * Default is disabled — users should only enable when their cache-load suppliers
    * (e.g. database queries, remote API calls) are prone to timeout or error cascades.
    *
-   * <p>Implements the {@link CircuitBreakerSettings} view: the breaker
-   * implementation reads every decision through this live view (ADR-0082).
+   * <p>The breaker reads every decision through this live configuration
+   * (design decisions: load protection).
    */
   @Data
-  public static class CircuitBreaker implements CircuitBreakerSettings {
+  public static class CircuitBreaker {
 
     /** Whether circuit breaker is enabled. Default {@code false}. */
     private boolean enabled = false;
 
     /** Sliding window duration in milliseconds. */
+    @Min(1)
     private long windowTimeMs = 10_000;
 
     /** Number of buckets in the sliding window. */
+    @Min(1)
     private int windowBuckets = 10;
 
     /** Failure rate threshold (0.0–1.0) — opens when exceeded. */
+    @DecimalMin("0.0")
+    @DecimalMax("1.0")
     private double failThreshold = 0.5;
 
     /** Minimum total requests in the window before the breaker evaluates the failure rate. */
+    @Min(0)
     private long requestVolumeThreshold = 20;
 
-    /** How long to wait (ms) before allowing a half-open probe request. */
+    /**
+     * How long to wait (ms) before allowing a half-open probe request. Also bounds a
+     * HALF_OPEN episode: an episode with no probe activity (episode start, settlement
+     * or abandonment) for this long is force-retired, so a hung probe cannot pin the
+     * breaker in HALF_OPEN.
+     */
+    @Min(1)
     private long singleTestIntervalMs = 5_000;
 
     /** Whether to log state transitions. */
     private boolean logEnabled = true;
 
     /** Maximum number of probe requests allowed in the HALF_OPEN state. */
+    @Min(1)
     private int halfOpenMaxProbes = 3;
 
     /**
@@ -507,14 +494,16 @@ public class ZetaProperties implements CacheCoreSettings, SpringCacheSettings, E
      * Higher values prevent flapping from single lucky probe requests.
      * Default 3 balances fast recovery with stability.
      */
+    @Min(1)
     private int consecutiveSuccessThreshold = 3;
 
     /**
-     * Maximum live per-prefix breaker shards (the key segment before the
-     * first {@code ':'} owns a shard; prefix-less keys share one bucket).
-     * Bounds memory when the key space is unbounded (LRU eviction past the
-     * cap, 30-minute access expiry). One sick datasource trips only its own
-     * shard instead of silencing every key.
+     * Maximum live per-prefix breaker shards. An annotated key uses the cache
+     * namespace before {@code CacheKeysPolicy.NAMESPACE_DELIMITER} ({@code U+0000});
+     * a programmatic key uses the segment before the first {@code ':'}; a key with
+     * neither shares one bucket. Bounds memory when the key space is unbounded
+     * (Caffeine Window TinyLFU eviction past the cap, 30-minute access expiry). One
+     * sick datasource trips only its own shard instead of silencing every key.
      */
     @Min(1)
     private int maxPrefixes = 64;
@@ -541,30 +530,4 @@ public class ZetaProperties implements CacheCoreSettings, SpringCacheSettings, E
   /** Circuit breaker configuration. */
   @Valid
   private CircuitBreaker circuitBreaker = new CircuitBreaker();
-
-  /**
-   * Configuration for Spring {@code @Cacheable} / {@code @CachePut} / {@code @CacheEvict} integration.
-   *
-   * <p>When enabled, HotKey detects hot keys on all Spring Cache reads and applies
-   * dynamic TTL via Caffeine L1.
-   */
-  @Data
-  public static class SpringCache {
-
-    /** Separator between cache name and key in the internal cache key string. */
-    private String keySeparator = "::";
-  }
-
-  /** Spring Cache integration configuration. */
-  @Valid
-  private SpringCache springCache = new SpringCache();
-
-  /** Number of {@code SET NX} retries for Redis distributed-lock acquisition (lock attempts). */
-  private int tryLockLockCount = 2;
-
-  /** Number of {@code GET} inquiries after a transient {@code SET NX} failure. */
-  private int tryLockInquiryCount = 1;
-
-  /** Number of {@code DEL} retries for Redis distributed-lock release (unlock attempts). */
-  private int tryLockUnlockCount = 2;
 }

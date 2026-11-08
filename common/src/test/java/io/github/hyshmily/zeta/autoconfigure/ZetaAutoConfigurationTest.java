@@ -16,22 +16,30 @@
 package io.github.hyshmily.zeta.autoconfigure;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import io.github.hyshmily.zeta.Zeta;
 import io.github.hyshmily.zeta.cache.HotKeyCache;
-import io.github.hyshmily.zeta.cache.cachesupport.EntryLifecycle;
-import io.github.hyshmily.zeta.scheduler.BackgroundRefresher;
-import io.github.hyshmily.zeta.cache.cachesupport.SingleFlight;
+import io.github.hyshmily.zeta.cache.cachesupport.lifecycle.EntryLifecycle;
+import io.github.hyshmily.zeta.cache.cachesupport.loader.singleflight.SingleFlight;
+import io.github.hyshmily.zeta.cache.cachesupport.raw.CacheEntry;
+import io.github.hyshmily.zeta.cache.cachesupport.raw.EntryDraft;
 import io.github.hyshmily.zeta.hotkeydetector.HotKeyDetector;
-import io.github.hyshmily.zeta.model.CacheEntry;
-import io.github.hyshmily.zeta.rule.RuleMatcher;
+import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.TopK;
+import io.github.hyshmily.zeta.scheduler.BackgroundRefresher;
 import java.util.concurrent.Executor;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.RejectedExecutionHandler;
+import java.util.concurrent.ThreadPoolExecutor;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
+import org.springframework.boot.test.context.assertj.AssertableApplicationContext;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 
 /**
@@ -52,6 +60,9 @@ class ZetaAutoConfigurationTest {
     runner.run(ctx -> {
       assertThat(ctx).hasSingleBean(HotKeyDetector.class);
       assertThat(ctx.getBean("hotKeyDetector")).isInstanceOf(HotKeyDetector.class);
+      // Exactly one TopK bean: the sketch. A second one (the detector used to
+      // be one) makes every List<TopK> injection decay the same sketch twice.
+      assertThat(ctx.getBeansOfType(TopK.class)).containsOnlyKeys("heavyKeeper");
       assertThat(ctx).hasSingleBean(Cache.class);
       assertThat(ctx).hasSingleBean(SingleFlight.class);
       assertThat(ctx).hasSingleBean(EntryLifecycle.class);
@@ -145,6 +156,41 @@ class ZetaAutoConfigurationTest {
       });
   }
 
+  @Test
+  void callerRunsIsHonoredOnTheHotKeyPoolOnly() {
+    new ApplicationContextRunner()
+      .withPropertyValues("zeta.local.topK=200", "zeta.local.executor-rejection=CALLER_RUNS")
+      .withConfiguration(AutoConfigurations.of(ZetaFacadeAutoConfiguration.class, ZetaAutoConfiguration.class))
+      .run(ctx -> {
+        assertThat(rejectionHandler(ctx, "hotKeyExecutor")).isInstanceOf(ThreadPoolExecutor.CallerRunsPolicy.class);
+        assertAborts(ctx, "interruptibleLoadExecutor");
+        assertAborts(ctx, "zetaSendExecutor");
+      });
+  }
+
+  @Test
+  void abortIsTheDefaultOnEveryPool() {
+    runner.run(ctx -> {
+      assertAborts(ctx, "hotKeyExecutor");
+      assertAborts(ctx, "interruptibleLoadExecutor");
+      assertAborts(ctx, "zetaSendExecutor");
+    });
+  }
+
+  private static RejectedExecutionHandler rejectionHandler(AssertableApplicationContext ctx, String bean) {
+    return ((ThreadPoolExecutor) ctx.getBean(bean)).getRejectedExecutionHandler();
+  }
+
+  private static void assertAborts(AssertableApplicationContext ctx, String bean) {
+    RejectedExecutionHandler handler = rejectionHandler(ctx, bean);
+    assertThat(handler).isNotInstanceOf(ThreadPoolExecutor.CallerRunsPolicy.class);
+    ThreadPoolExecutor executor = mock(ThreadPoolExecutor.class);
+    when(executor.getQueue()).thenReturn(new LinkedBlockingQueue<>());
+    assertThatThrownBy(() -> handler.rejectedExecution(() -> {}, executor)).isInstanceOf(
+      RejectedExecutionException.class
+    );
+  }
+
   /**
    * Verifies that a non-Redis HotKeyCache is created when RedisTemplate is not on the test classpath.
    */
@@ -216,27 +262,19 @@ class ZetaAutoConfigurationTest {
   }
 
   /**
-   * Verifies that the ruleMatcher bean is created with optional sync publisher.
+   * Verifies that the L1 cache bean is bounded by the configured max size and
+   * keeps live entries across a cleanup pass.
    */
   @Test
-  void ruleMatcher_shouldHandleMissingPublisher() {
-    runner.run(ctx -> {
-      assertThat(ctx).hasSingleBean(RuleMatcher.class);
-    });
-  }
-
-  /**
-   * Verifies that the cache uses weight-based eviction when max-weight is configured.
-   */
-  @Test
-  void hotLocalCache_shouldUseWeightBasedEvictionWhenMaxWeightSet() {
+  void hotLocalCache_shouldKeepEntryWithinMaxSize() {
     new ApplicationContextRunner()
-      .withPropertyValues("zeta.local.topK=200", "zeta.local.cache.max-weight=1000000", "zeta.local.cache.max-size=10")
+      .withPropertyValues("zeta.local.topK=200", "zeta.local.cache.max-size=10")
       .withConfiguration(AutoConfigurations.of(ZetaFacadeAutoConfiguration.class, ZetaAutoConfiguration.class))
       .run(ctx -> {
         assertThat(ctx).hasSingleBean(Cache.class);
         Cache<String, CacheEntry> cache = ctx.getBean(Cache.class);
-        // Put an entry; weight should be computed by DefaultWeigher
+        // Put an entry; capacity is entry-add based (maximumSize) — the
+        // weight-based eviction path and DefaultWeigher were removed.
         cache.put("test", plainEntry("value"));
         cache.cleanUp();
         assertThat(cache.estimatedSize()).isOne();
@@ -254,10 +292,10 @@ class ZetaAutoConfigurationTest {
       .withConfiguration(AutoConfigurations.of(ZetaFacadeAutoConfiguration.class, ZetaAutoConfiguration.class))
       .run(ctx -> {
         Cache<String, CacheEntry> cache = ctx.getBean(Cache.class);
-        CacheEntry entry = CacheEntry.builder()
+        CacheEntry entry = EntryDraft.blank(null)
           .value("logical-expiry-value")
-          .hardExpireAtMs(Long.MAX_VALUE)
-          .dataVersion(1)
+          .version(1)
+          .hardExpiryAt(Long.MAX_VALUE)
           .build();
         cache.put("logical", entry);
         cache.cleanUp();
@@ -285,6 +323,6 @@ class ZetaAutoConfigurationTest {
 
   /** Minimal NORMAL entry with pure logical expiry (never time-evicted). */
   private static CacheEntry plainEntry(String value) {
-    return CacheEntry.builder().value(value).dataVersion(0).hardExpireAtMs(Long.MAX_VALUE).build();
+    return EntryDraft.blank(null).value(value).version(0).hardExpiryAt(Long.MAX_VALUE).build();
   }
 }

@@ -18,12 +18,19 @@ package io.github.hyshmily.zeta.autoconfigure;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import io.github.hyshmily.zeta.constants.ZetaConstants;
+import jakarta.validation.ConstraintViolation;
+import jakarta.validation.Validation;
+import jakarta.validation.Validator;
+import java.util.Set;
+import java.util.stream.Collectors;
 import org.junit.jupiter.api.Test;
 
 /**
- * Tests for {@link ZetaProperties}, verifying default values and effective TTL computation.
+ * Tests for {@link ZetaProperties}, verifying default values, validation and TTL ownership.
  */
 class ZetaPropertiesTest {
+
+  private static final Validator VALIDATOR = Validation.buildDefaultValidatorFactory().getValidator();
 
   private ZetaProperties props() {
     return new ZetaProperties();
@@ -43,56 +50,29 @@ class ZetaPropertiesTest {
   }
 
   /**
-   * Verifies that effectiveHardTtlMs returns the explicitly set value when non-zero.
+   * The TTL fields carry both the default and the configured value: Spring's
+   * binder overlays a property onto the initialized field, so a second
+   * "override" field would only add a branch and make an explicit 0
+   * indistinguishable from "unset".
    */
   @Test
-  void effectiveHardTtlMs_shouldReturnOverrideWhenSet() {
+  void ttlFieldsCarryDefaultsDirectly() {
     ZetaProperties p = props();
-    assertThat(p.effectiveHardTtlMs()).isEqualTo(300_000L);
-    p.setHardTtlMs(600_000L);
-    assertThat(p.effectiveHardTtlMs()).isEqualTo(600_000L);
+    assertThat(p.getHardTtlMs()).isEqualTo(300_000L);
+    assertThat(p.getHotHardTtlMs()).isEqualTo(3_600_000L);
+    assertThat(p.getSoftTtlMs()).isEqualTo(30_000L);
+    assertThat(p.getHotSoftTtlMs()).isEqualTo(300_000L);
   }
 
   /**
-   * Verifies that effectiveHardTtlMs falls back to the default when the explicit value is zero.
+   * An explicit soft TTL of 0 disables soft expiry; it must not fall back to a
+   * default in a later resolution layer.
    */
   @Test
-  void effectiveHardTtlMs_shouldReturnDefaultWhenOverrideIsZero() {
+  void softTtlCanBeDisabledWithZero() {
     ZetaProperties p = props();
-    assertThat(p.effectiveHardTtlMs()).isEqualTo(300_000L);
-  }
-
-  /**
-   * Verifies that effectiveHotHardTtlMs returns the explicitly set non-zero value.
-   */
-  @Test
-  void effectiveHotHardTtlMs_shouldReturnOverrideWhenSet() {
-    ZetaProperties p = props();
-    assertThat(p.effectiveHotHardTtlMs()).isEqualTo(3_600_000L);
-    p.setHotHardTtlMs(7_200_000L);
-    assertThat(p.effectiveHotHardTtlMs()).isEqualTo(7_200_000L);
-  }
-
-  /**
-   * Verifies that effectiveSoftTtlMs returns the explicitly set non-zero value.
-   */
-  @Test
-  void effectiveSoftTtlMs_shouldReturnOverrideWhenSet() {
-    ZetaProperties p = props();
-    assertThat(p.effectiveSoftTtlMs()).isEqualTo(30_000L);
-    p.setSoftTtlMs(60_000L);
-    assertThat(p.effectiveSoftTtlMs()).isEqualTo(60_000L);
-  }
-
-  /**
-   * Verifies that effectiveHotSoftTtlMs returns the explicitly set non-zero value.
-   */
-  @Test
-  void effectiveHotSoftTtlMs_shouldReturnOverrideWhenSet() {
-    ZetaProperties p = props();
-    assertThat(p.effectiveHotSoftTtlMs()).isEqualTo(300_000L);
-    p.setHotSoftTtlMs(600_000L);
-    assertThat(p.effectiveHotSoftTtlMs()).isEqualTo(600_000L);
+    p.setSoftTtlMs(0L);
+    assertThat(p.getSoftTtlMs()).isZero();
   }
 
   /**
@@ -113,33 +93,76 @@ class ZetaPropertiesTest {
     ZetaProperties p = props();
     assertThat(p.getHeartbeat().getExchangeName()).isEqualTo(ZetaConstants.Exchange.HEARTBEAT);
     assertThat(p.getHeartbeat().getTimeoutMs()).isEqualTo(10000);
-    assertThat(p.getHeartbeat().getVerifyIntervalMs()).isEqualTo(5000);
-    assertThat(p.getHeartbeat().getPingTimeoutMs()).isEqualTo(3000);
-    assertThat(p.getHeartbeat().getDegradeAfterFailures()).isEqualTo(3);
-    assertThat(p.getHeartbeat().getVerifyMaxBackoffMs()).isEqualTo(600_000);
     assertThat(p.getHeartbeat().getMinAliveWorkers()).isEqualTo(0);
   }
 
   /**
-   * Verifies the default values for the ReporterLimiter nested config.
+   * The refresh limiter cannot exceed the shared load pool: a higher configured
+   * value is clamped, and the default stays half the pool.
    */
   @Test
-  void reporterLimiter_shouldHaveDefaultValues() {
+  void effectiveRefreshMaxPoolsClampsToTheExecutorPool() {
     ZetaProperties p = props();
-    assertThat(p.getReporter().getCpuThreshold()).isEqualTo(800);
-    assertThat(p.getReporter().getCpuPollIntervalMs()).isEqualTo(500);
-    assertThat(p.getReporter().getCpuDecay()).isEqualTo(0.95);
-    assertThat(p.getReporter().getBbrWindowMs()).isEqualTo(10_000);
-    assertThat(p.getReporter().getBbrWindowBuckets()).isEqualTo(100);
-    assertThat(p.getReporter().getBbrCooldownMs()).isEqualTo(1_000);
+    p.setExecutorMaxPoolSize(16);
+    p.setRefreshMaxPools(64);
+
+    assertThat(p.effectiveRefreshMaxPools()).isEqualTo(16);
+
+    p.setRefreshMaxPools(0);
+    assertThat(p.effectiveRefreshMaxPools()).isEqualTo(8);
   }
 
   /**
-   * Verifies the default values for the SpringCache nested config.
+   * The executor's core size above its maximum makes the pool constructor
+   * reject the configuration; the properties reject it before any bean is
+   * created.
    */
   @Test
-  void springCache_shouldHaveDefaultValues() {
+  void executorPoolSizeValidationRejectsCoreAboveMax() {
     ZetaProperties p = props();
-    assertThat(p.getSpringCache().getKeySeparator()).isEqualTo("::");
+    p.setExecutorCorePoolSize(64);
+    p.setExecutorMaxPoolSize(32);
+
+    assertThat(violationMessages(p)).contains(
+      "zeta.local.executor-max-pool-size must be >= zeta.local.executor-core-pool-size"
+    );
+  }
+
+  /**
+   * The feed-loop range is checked only while the tuner is enabled: at
+   * {@code off} the two values are inert.
+   */
+  @Test
+  void reportIntervalValidationAppliesOnlyWhenTuningIsEnabled() {
+    ZetaProperties p = props();
+    p.setReportIntervalMinMs(200);
+    p.setReportIntervalMaxMs(100);
+
+    assertThat(violationMessages(p)).contains(
+      "zeta.local.report-interval-max-ms must be >= zeta.local.report-interval-min-ms"
+    );
+
+    p.setReportIntervalTuning(ZetaProperties.ReportIntervalTuning.OFF);
+    assertThat(violationMessages(p)).doesNotContain(
+      "zeta.local.report-interval-max-ms must be >= zeta.local.report-interval-min-ms"
+    );
+  }
+
+  /**
+   * The adaptive floor is the lower clamp and timeout-ms the ceiling; an
+   * inverted pair would make the timeout stop being a bound.
+   */
+  @Test
+  void heartbeatAdaptiveWindowValidationRejectsFloorAboveTimeout() {
+    ZetaProperties p = props();
+    p.getHeartbeat().setAdaptiveFloorMs(20_000);
+
+    assertThat(violationMessages(p)).contains(
+      "zeta.local.heartbeat.adaptive-floor-ms must be <= zeta.local.heartbeat.timeout-ms"
+    );
+  }
+
+  private static Set<String> violationMessages(ZetaProperties properties) {
+    return VALIDATOR.validate(properties).stream().map(ConstraintViolation::getMessage).collect(Collectors.toSet());
   }
 }

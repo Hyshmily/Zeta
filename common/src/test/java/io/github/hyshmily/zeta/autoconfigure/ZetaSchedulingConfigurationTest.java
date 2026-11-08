@@ -18,17 +18,19 @@ package io.github.hyshmily.zeta.autoconfigure;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.*;
 
-import io.github.hyshmily.zeta.hotkeydetector.HotKeyDetector;
+import io.github.hyshmily.zeta.cache.HotKeyCache;
+import io.github.hyshmily.zeta.cache.cachesupport.raw.CacheEntry;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.Item;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.TopK;
-import io.github.hyshmily.zeta.model.CacheEntry;
 import java.util.List;
-import java.util.Optional;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
+import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 
@@ -49,8 +51,9 @@ class ZetaSchedulingConfigurationTest {
     TopK topK2 = mock(TopK.class);
     ZetaSchedulingConfiguration config = new ZetaSchedulingConfiguration(
       List.of(topK1, topK2),
+      provider(null),
       scheduler,
-      Optional.empty()
+      provider(null)
     );
 
     config.cleanHotKeys();
@@ -65,7 +68,12 @@ class ZetaSchedulingConfigurationTest {
   @Test
   void cleanHotKeysHandlesSingleInstance() {
     TopK topK = mock(TopK.class);
-    ZetaSchedulingConfiguration config = new ZetaSchedulingConfiguration(List.of(topK), scheduler, Optional.empty());
+    ZetaSchedulingConfiguration config = new ZetaSchedulingConfiguration(
+      List.of(topK),
+      provider(null),
+      scheduler,
+      provider(null)
+    );
 
     config.cleanHotKeys();
 
@@ -77,7 +85,12 @@ class ZetaSchedulingConfigurationTest {
    */
   @Test
   void cleanHotKeysHandlesEmptyList() {
-    ZetaSchedulingConfiguration config = new ZetaSchedulingConfiguration(List.of(), scheduler, Optional.empty());
+    ZetaSchedulingConfiguration config = new ZetaSchedulingConfiguration(
+      List.of(),
+      provider(null),
+      scheduler,
+      provider(null)
+    );
 
     config.cleanHotKeys();
     // No exception should be thrown
@@ -100,8 +113,9 @@ class ZetaSchedulingConfigurationTest {
 
     ZetaSchedulingConfiguration config = new ZetaSchedulingConfiguration(
       List.of(topK1, topK2),
+      provider(null),
       scheduler,
-      Optional.empty()
+      provider(null)
     );
     config.drainExpelled();
 
@@ -117,16 +131,21 @@ class ZetaSchedulingConfigurationTest {
     TopK topK = mock(TopK.class);
     when(topK.expelled()).thenReturn(new LinkedBlockingQueue<>());
 
-    ZetaSchedulingConfiguration config = new ZetaSchedulingConfiguration(List.of(topK), scheduler, Optional.empty());
+    ZetaSchedulingConfiguration config = new ZetaSchedulingConfiguration(
+      List.of(topK),
+      provider(null),
+      scheduler,
+      provider(null)
+    );
     config.drainExpelled();
     // No exception should be thrown
   }
 
   /**
-   * Verifies that drainExpelled handles a large number of expelled items (1500) in a single queue.
+   * The drain is a memory-protection pass: every queue is emptied, not just a bounded batch.
    */
   @Test
-  void drainExpelledLimitsDrainTo1000ItemsPerInstance() {
+  void drainExpelledEmptiesTheQueue() {
     TopK topK = mock(TopK.class);
     LinkedBlockingQueue<Item> queue = new LinkedBlockingQueue<>();
     for (int i = 0; i < 1500; i++) {
@@ -134,37 +153,38 @@ class ZetaSchedulingConfigurationTest {
     }
     when(topK.expelled()).thenReturn(queue);
 
-    ZetaSchedulingConfiguration config = new ZetaSchedulingConfiguration(List.of(topK), scheduler, Optional.empty());
+    ZetaSchedulingConfiguration config = new ZetaSchedulingConfiguration(
+      List.of(topK),
+      provider(null),
+      scheduler,
+      provider(null)
+    );
     config.drainExpelled();
 
-    // drainTo(collection, 100_000) should have drained all 1500 items
     assertThat(queue).isEmpty();
   }
 
   /**
-   * Regression: {@link HotKeyDetector} implements TopK by delegating to its
-   * wrapped HeavyKeeper bean, which is itself registered as a TopK — iterating
-   * both beans applied HeavyKeeper decay twice per tick (2× decay rate). The
-   * facade must be excluded from both maintenance passes.
+   * The app-side detector is not a {@link TopK} bean, so the maintenance pass decays the
+   * sketch exactly once per tick.
    */
   @Test
-  void maintenanceSkipsHotKeyDetectorFacade() {
+  void maintenanceDecaysTheSketchExactlyOncePerTick() {
     TopK heavyKeeper = mock(TopK.class);
     when(heavyKeeper.expelled()).thenReturn(new LinkedBlockingQueue<>());
-    HotKeyDetector detector = mock(HotKeyDetector.class);
 
     ZetaSchedulingConfiguration config = new ZetaSchedulingConfiguration(
-      List.of(heavyKeeper, detector),
+      List.of(heavyKeeper),
+      provider(null),
       scheduler,
-      Optional.empty()
+      provider(null)
     );
 
     config.cleanHotKeys();
     config.drainExpelled();
 
     verify(heavyKeeper).fading();
-    verify(detector, never()).fading();
-    verify(detector, never()).expelled();
+    verify(heavyKeeper).expelled();
   }
 
   /**
@@ -176,7 +196,12 @@ class ZetaSchedulingConfigurationTest {
     com.github.benmanes.caffeine.cache.Cache<String, CacheEntry> l1Cache = mock(
       com.github.benmanes.caffeine.cache.Cache.class
     );
-    ZetaSchedulingConfiguration config = new ZetaSchedulingConfiguration(List.of(), scheduler, Optional.of(l1Cache));
+    ZetaSchedulingConfiguration config = new ZetaSchedulingConfiguration(
+      List.of(),
+      provider(null),
+      scheduler,
+      provider(l1Cache)
+    );
 
     config.cleanUpExpiredEntries();
 
@@ -184,14 +209,23 @@ class ZetaSchedulingConfigurationTest {
   }
 
   /**
-   * Verifies that cleanUpExpiredEntries is a no-op when no L1 cache bean exists.
+   * A tick whose collaborator is absent is not registered at all, so the shared
+   * scheduler does not run an empty pass every interval.
    */
   @Test
-  void cleanUpExpiredEntries_withoutL1Cache_shouldDoNothing() {
-    ZetaSchedulingConfiguration config = new ZetaSchedulingConfiguration(List.of(), scheduler, Optional.empty());
+  void scheduleTasksRegistersOnlyPresentCollaborators() {
+    HotKeyCache hotKeyCache = mock(HotKeyCache.class);
+    ZetaSchedulingConfiguration config = new ZetaSchedulingConfiguration(
+      List.of(mock(TopK.class)),
+      provider(hotKeyCache),
+      scheduler,
+      provider(null)
+    );
 
-    config.cleanUpExpiredEntries();
-    // No exception should be thrown
+    config.scheduleTasks();
+
+    // cleanHotKeys + drainExpelled + promoteAdmittedKeys; no L1 cleanup tick.
+    verify(scheduler, times(3)).scheduleWithFixedDelay(any(Runnable.class), anyLong(), anyLong(), any(TimeUnit.class));
   }
 
   /**
@@ -225,5 +259,12 @@ class ZetaSchedulingConfigurationTest {
     new ApplicationContextRunner()
       .withConfiguration(AutoConfigurations.of(ZetaSchedulingConfiguration.class))
       .run(ctx -> assertThat(ctx).doesNotHaveBean(ZetaSchedulingConfiguration.class));
+  }
+
+  private static <T> ObjectProvider<T> provider(@Nullable T value) {
+    @SuppressWarnings("unchecked")
+    ObjectProvider<T> provider = mock(ObjectProvider.class);
+    when(provider.getIfAvailable()).thenReturn(value);
+    return provider;
   }
 }

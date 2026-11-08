@@ -3,7 +3,7 @@
     {
       "name": "zeta.scheduling.enabled",
       "type": "java.lang.Boolean",
-      "description": "Enable periodic TopK decay and expelled-key drain scheduling.",
+      "description": "Enable periodic TopK decay, expelled-key drain, and TopK-admission promotion scheduling.",
       "defaultValue": true
     },
     {
@@ -49,28 +49,40 @@
       "defaultValue": 100000
     },
     {
-      "name": "zeta.local.sketch-window-count",
+      "name": "zeta.local.cache.tombstone-maximum-size",
       "type": "java.lang.Integer",
-      "description": "Sliding-window depth per sketch slot (ring buffer). Range 1–10.",
-      "defaultValue": 3
+      "description": "Maximum number of per-key invalidation tombstones kept for the anti-resurrection guard.",
+      "defaultValue": 10000
     },
     {
-      "name": "zeta.local.inflight-max-size",
+      "name": "zeta.local.cache.tombstone-ttl-seconds",
       "type": "java.lang.Integer",
-      "description": "Maximum number of in-flight (pending) SingleFlight requests.",
+      "description": "Retention in seconds for per-key invalidation tombstones; only has to outlive in-flight reads.",
+      "defaultValue": 600
+    },
+    {
+      "name": "zeta.local.in-flight-max-size",
+      "type": "java.lang.Integer",
+      "description": "Maximum number of in-flight SingleFlight deduplication entries.",
       "defaultValue": 50000
     },
     {
-      "name": "zeta.local.inflight-ttl-seconds",
+      "name": "zeta.local.in-flight-ttl-seconds",
       "type": "java.lang.Integer",
-      "description": "Time-to-live in seconds for in-flight SingleFlight entries.",
+      "description": "TTL in seconds for in-flight deduplication entries; must exceed the slowest remote data source response.",
       "defaultValue": 5
     },
     {
-      "name": "zeta.local.inflight-timeout-seconds",
+      "name": "zeta.local.in-flight-timeout-seconds",
       "type": "java.lang.Integer",
-      "description": "Timeout in seconds before an in-flight SingleFlight request is considered failed.",
+      "description": "Execution timeout in seconds for one in-flight cache load; queue wait is not counted.",
       "defaultValue": 3
+    },
+    {
+      "name": "zeta.local.sketch-window-count",
+      "type": "java.lang.Integer",
+      "description": "Sliding-window depth per sketch slot (ring buffer). Range 2–10; rounded up to a power of two.",
+      "defaultValue": 4
     },
     {
       "name": "zeta.local.executor-core-pool-size",
@@ -81,7 +93,7 @@
     {
       "name": "zeta.local.executor-max-pool-size",
       "type": "java.lang.Integer",
-      "description": "Maximum pool size for the async cache-loading executor.",
+      "description": "Maximum pool size for the async cache-loading executor; must be >= executor-core-pool-size.",
       "defaultValue": 32
     },
     {
@@ -93,7 +105,7 @@
     {
       "name": "zeta.local.executor-rejection",
       "type": "io.github.hyshmily.zeta.autoconfigure.ZetaProperties$ExecutorRejection",
-      "description": "Rejection policy when the executor queue and max pool are saturated: abort throws RejectedExecutionException (load failures are swallowed as cache misses), caller-runs runs the task on the submitting thread.",
+      "description": "Rejection policy when the executor queue and max pool are saturated: abort throws RejectedExecutionException, caller-runs runs the task on the submitting thread. Only the refresh fan-out pool honors caller-runs; the load and send pools always abort, and a load-pool rejection is a suppressed read, never a miss.",
       "defaultValue": "abort"
     },
     {
@@ -109,62 +121,28 @@
       "defaultValue": 10000
     },
     {
-      "name": "zeta.local.decay-period",
-      "type": "java.lang.Integer",
-      "description": "Deprecated: decay period in seconds (no longer used).",
-      "defaultValue": 20,
-      "deprecation": {
-        "level": "warning",
-        "reason": "No longer used; decay is driven by ZetaSchedulingConfiguration."
-      }
-    },
-    {
-      "name": "zeta.local.default-hard-ttl-ms",
-      "type": "java.lang.Long",
-      "description": "Default hard TTL in milliseconds for normal (non-hot) cache entries.",
-      "defaultValue": 300000
-    },
-    {
       "name": "zeta.local.hard-ttl-ms",
       "type": "java.lang.Long",
-      "description": "Override hard TTL in milliseconds for normal keys (0 = use default-hard-ttl-ms).",
-      "defaultValue": 0
-    },
-    {
-      "name": "zeta.local.default-hot-hard-ttl-ms",
-      "type": "java.lang.Long",
-      "description": "Default hard TTL in milliseconds for hot cache entries.",
-      "defaultValue": 3600000
+      "description": "Hard TTL in milliseconds for normal keys; 0 means permanent (no hard expiry).",
+      "defaultValue": 300000
     },
     {
       "name": "zeta.local.hot-hard-ttl-ms",
       "type": "java.lang.Long",
-      "description": "Override hard TTL in milliseconds for hot keys (0 = use default-hot-hard-ttl-ms).",
-      "defaultValue": 0
-    },
-    {
-      "name": "zeta.local.default-soft-ttl-ms",
-      "type": "java.lang.Long",
-      "description": "Default soft TTL in milliseconds for normal (non-hot) cache entries.",
-      "defaultValue": 30000
+      "description": "Hard TTL in milliseconds for hot keys; 0 means permanent (no hard expiry).",
+      "defaultValue": 3600000
     },
     {
       "name": "zeta.local.soft-ttl-ms",
       "type": "java.lang.Long",
-      "description": "Override soft TTL in milliseconds for normal keys (0 = use default-soft-ttl-ms).",
-      "defaultValue": 0
-    },
-    {
-      "name": "zeta.local.default-hot-soft-ttl-ms",
-      "type": "java.lang.Long",
-      "description": "Default soft TTL in milliseconds for hot cache entries.",
-      "defaultValue": 300000
+      "description": "Soft TTL in milliseconds for normal keys; 0 disables soft expiry.",
+      "defaultValue": 30000
     },
     {
       "name": "zeta.local.hot-soft-ttl-ms",
       "type": "java.lang.Long",
-      "description": "Override soft TTL in milliseconds for hot keys (0 = use default-hot-soft-ttl-ms).",
-      "defaultValue": 0
+      "description": "Soft TTL in milliseconds for hot keys; 0 disables soft expiry.",
+      "defaultValue": 300000
     },
     {
       "name": "zeta.local.ttl-jitter-ratio",
@@ -175,14 +153,8 @@
     {
       "name": "zeta.local.refresh-max-pools",
       "type": "java.lang.Integer",
-      "description": "Maximum number of async refresh pools for soft-expired cache entries.",
-      "defaultValue": 100
-    },
-    {
-      "name": "zeta.local.version-key-ttl-minutes",
-      "type": "java.lang.Integer",
-      "description": "TTL in minutes for Redis version tracking keys. MUST be far greater than the maximum lifetime of any L1 entry for the same key: if a version key expires while a peer still holds an L1 entry, the Redis INCR restarts from 1 and peers reject the lower version as stale, so updates silently stop syncing.",
-      "defaultValue": 10080
+      "description": "Maximum number of concurrent background refreshes for soft-expired cache entries. 0 (default) derives half of executor-max-pool-size; refreshes share that pool with read-miss loads, so a value above the pool size is clamped to executor-max-pool-size.",
+      "defaultValue": 0
     },
     {
       "name": "zeta.app-name",
@@ -203,17 +175,40 @@
       "defaultValue": 50
     },
     {
-      "name": "zeta.local.shard-count",
-      "type": "java.lang.Integer",
-      "description": "Deprecated legacy knob: no code path reads this property (superseded by consistent-hashing routing and auto consumer count). Setting it has no effect.",
-      "defaultValue": 1,
-      "deprecated": true
+      "name": "zeta.local.detect-interval-ms",
+      "type": "java.lang.Long",
+      "description": "Maximum elapsed time in milliseconds between two sketch ingests on the shared access counter; also the access-counter tide base when no reporter is wired.",
+      "defaultValue": 500
+    },
+    {
+      "name": "zeta.local.report-interval-tuning",
+      "type": "io.github.hyshmily.zeta.autoconfigure.ZetaProperties$ReportIntervalTuning",
+      "description": "Feed-loop tuning mode for the reporter flush cadence (design decisions: reporting): off disables the tuner; shadow computes and exposes the interval trajectory via the zeta.reporter.feedloop.* gauges without applying it; on applies each computed interval to the WaveCounter tide base.",
+      "defaultValue": "shadow"
+    },
+    {
+      "name": "zeta.local.report-interval-target-batch",
+      "type": "java.lang.Long",
+      "description": "Goal keys per flush for the feed-loop tuner (N); the loop settles the interval at which the smoothed arrival rate projects to this batch size. Only meaningful when report-interval-tuning != off.",
+      "defaultValue": 512
+    },
+    {
+      "name": "zeta.local.report-interval-min-ms",
+      "type": "java.lang.Long",
+      "description": "Flush-interval floor for the feed-loop tuner (scheduler cadence bound; the WaveCounter tide floor is 50ms, so lower values are effectively 50). Only meaningful when report-interval-tuning != off.",
+      "defaultValue": 50
+    },
+    {
+      "name": "zeta.local.report-interval-max-ms",
+      "type": "java.lang.Long",
+      "description": "Flush-interval ceiling for the feed-loop tuner — the detection-lag bound: a new hot key waits at most this long before its first report reaches the Worker. The empty-tide ladder stretches to 2x the tuned base, so the effective idle worst case is 2x this value. Should be >= report-interval-min-ms. Only meaningful when report-interval-tuning != off.",
+      "defaultValue": 1000
     },
     {
       "name": "zeta.local.queue-capacity",
       "type": "java.lang.Integer",
-      "description": "Capacity of the internal report batch queue.",
-      "defaultValue": 10000
+      "description": "Capacity of the reporter dispatch work queue, in batches. Consumers blocked on a publish cannot drain, so this bounds a stalled broker's backlog; 1024 batches covers one 5 s staleness window at up to ~200 batches/s.",
+      "defaultValue": 1024
     },
     {
       "name": "zeta.local.queue-offer-timeout-ms",
@@ -230,7 +225,7 @@
     {
       "name": "zeta.local.consistent-hashing.enabled",
       "type": "java.lang.Boolean",
-      "description": "Enable consistent-hashing mode for report routing to dynamic Worker instances.",
+      "description": "Gate for the /actuator/hotkeyring inspection endpoint. Report routing always uses the consistent-hash ring (there is no separate routing switch); set false to hide the inspection endpoint.",
       "defaultValue": true
     },
     {
@@ -246,46 +241,15 @@
       "defaultValue": ""
     },
     {
-      "name": "zeta.local.reporter.enabled",
-      "type": "java.lang.Boolean",
-      "description": "Whether BBR adaptive rate-limiting is enabled for the reporter.",
-      "defaultValue": true
-    },
-    {
-      "name": "zeta.local.reporter.cpu-threshold",
+      "name": "zeta.local.node-id",
       "type": "java.lang.Integer",
-      "description": "CPU threshold (0-1000, default 800 = 80%) for reporter backpressure.",
-      "defaultValue": 800
+      "description": "Explicit 10-bit dataVersion node id (0..1023), embedded in every stamp the stamp clock mints. When unset it is derived from the instance id."
     },
     {
-      "name": "zeta.local.reporter.cpu-poll-interval-ms",
+      "name": "zeta.local.clock-max-forward-drift-ms",
       "type": "java.lang.Long",
-      "description": "CPU polling interval in milliseconds for reporter backpressure.",
-      "defaultValue": 500
-    },
-    {
-      "name": "zeta.local.reporter.cpu-decay",
-      "type": "java.lang.Double",
-      "description": "EMA decay factor for CPU smoothing (0.0-1.0).",
-      "defaultValue": 0.95
-    },
-    {
-      "name": "zeta.local.reporter.bbr-window-ms",
-      "type": "java.lang.Long",
-      "description": "BBR sliding window size in milliseconds.",
-      "defaultValue": 10000
-    },
-    {
-      "name": "zeta.local.reporter.bbr-window-buckets",
-      "type": "java.lang.Integer",
-      "description": "Number of buckets in the BBR sliding window.",
-      "defaultValue": 100
-    },
-    {
-      "name": "zeta.local.reporter.bbr-cooldown-ms",
-      "type": "java.lang.Long",
-      "description": "Cooldown period in ms after a reporter drop before allowing again.",
-      "defaultValue": 1000
+      "description": "Largest forward distance (ms) an observed peer stamp may lead local physical time before the stamp clock refuses to raise its floor. Rejects broken clocks, not ordinary NTP skew; the message itself is still applied.",
+      "defaultValue": 60000
     },
     {
       "name": "zeta.local.heartbeat.exchange-name",
@@ -295,63 +259,15 @@
     },
     {
       "name": "zeta.local.heartbeat.timeout-ms",
-      "type": "java.lang.Long",
-      "description": "Heartbeat timeout in ms — a Worker is considered dead if no heartbeat is received within this window.",
-      "defaultValue": 10000
-    },
-    {
-      "name": "zeta.local.heartbeat.verify-interval-ms",
-      "type": "java.lang.Long",
-      "description": "Verify interval in ms for suspected dead Worker via Direct reply-to PING.",
-      "defaultValue": 5000
-    },
-    {
-      "name": "zeta.local.heartbeat.ping-timeout-ms",
-      "type": "java.lang.Long",
-      "description": "PING timeout in ms for Worker verification probe.",
-      "defaultValue": 3000
-    },
-    {
-      "name": "zeta.local.heartbeat.degrade-after-failures",
       "type": "java.lang.Integer",
-      "description": "Consecutive PING failures before graceful degradation of the Worker.",
-      "defaultValue": 3
-    },
-    {
-      "name": "zeta.local.heartbeat.verify-max-backoff-ms",
-      "type": "java.lang.Long",
-      "description": "Max exponential backoff in ms between verification probes for a repeatedly failing Worker.",
-      "defaultValue": 600000
+      "description": "Heartbeat timeout in ms. With adaptive-timeout on it is the warm-up window and the ceiling of the per-Worker Jacobson/Karels estimate; with it off it is the fixed liveness threshold.",
+      "defaultValue": 10000
     },
     {
       "name": "zeta.local.heartbeat.min-alive-workers",
       "type": "java.lang.Integer",
-      "description": "Minimum alive Workers for cluster health; 0 = one third of observed Workers, rounded up, minimum 1 (ADR-0028).",
+      "description": "Minimum alive Workers for cluster health; 0 = one third of observed Workers, rounded up, minimum 1 (design decisions: heartbeat and health).",
       "defaultValue": 0
-    },
-    {
-      "name": "zeta.local.try-lock-lock-count",
-      "type": "java.lang.Integer",
-      "description": "Number of SET NX retries for distributed lock acquisition.",
-      "defaultValue": 2
-    },
-    {
-      "name": "zeta.local.try-lock-inquiry-count",
-      "type": "java.lang.Integer",
-      "description": "Number of GET inquiries after transient SET NX failure.",
-      "defaultValue": 1
-    },
-    {
-      "name": "zeta.local.try-lock-unlock-count",
-      "type": "java.lang.Integer",
-      "description": "Number of DEL retries for distributed lock release.",
-      "defaultValue": 2
-    },
-    {
-      "name": "zeta.local.spring-cache.key-separator",
-      "type": "java.lang.String",
-      "description": "Separator between cache name and key in internal cache key string.",
-      "defaultValue": "::"
     },
     {
       "name": "zeta.sync.flush-delay-ms",
@@ -364,6 +280,24 @@
       "type": "java.lang.Long",
       "description": "Maximum deferral in ms before a flush is forced, even under continuous writes.",
       "defaultValue": 500
+    },
+    {
+      "name": "zeta.sync.put-max-bytes",
+      "type": "java.lang.Integer",
+      "description": "Upper bound (bytes) for a single value-carrying PUT payload; a write over the bound (or not Jackson-round-trippable) degrades to a value-less REFRESH.",
+      "defaultValue": 32768
+    },
+    {
+      "name": "zeta.sync.put-allowed-packages",
+      "type": "java.util.List",
+      "description": "Extra package prefixes admitted by the PUT deserialization whitelist. The built-in whitelist keeps JDK value types and io.github.hyshmily.zeta.*; a business DTO outside both fails closed and degrades to a versioned INVALIDATE.",
+      "defaultValue": []
+    },
+    {
+      "name": "zeta.sync.max-pending-units",
+      "type": "java.lang.Integer",
+      "description": "Global cap (weighted units, ~1 KB each) on tasks pending in the per-key sync dispatcher; new tasks are dropped when exhausted.",
+      "defaultValue": 50000
     },
     {
       "name": "zeta.local.circuit-breaker.enabled",
@@ -414,6 +348,12 @@
       "defaultValue": 3
     },
     {
+      "name": "zeta.local.circuit-breaker.max-prefixes",
+      "type": "java.lang.Integer",
+      "description": "Maximum live per-prefix circuit-breaker shards. An annotated key shards on the cache namespace before the U+0000 namespace delimiter; a programmatic key on the segment before the first ':'; a key with neither shares one bucket. Bounds memory when the key space is unbounded (LRU eviction past the cap); one sick datasource trips only its own shard.",
+      "defaultValue": 64
+    },
+    {
       "name": "zeta.local.circuit-breaker.log-enabled",
       "type": "java.lang.Boolean",
       "description": "Whether to log state transitions (OPEN/CLOSE/HALF-OPEN).",
@@ -432,15 +372,9 @@
       "defaultValue": []
     },
     {
-      "name": "zeta.spring-cache.enabled",
-      "type": "java.lang.Boolean",
-      "description": "Enable Spring @Cacheable integration with HotKey dynamic TTL.",
-      "defaultValue": false
-    },
-    {
       "name": "zeta.sync.enabled",
       "type": "java.lang.Boolean",
-      "description": "Enable cross-instance cache synchronization (INVALIDATE/REFRESH). Requires Redis.",
+      "description": "Enable cross-instance cache synchronization (INVALIDATE/REFRESH/PUT) over RabbitMQ.",
       "defaultValue": false
     },
     {
@@ -476,8 +410,8 @@
     {
       "name": "zeta.sync.warmup-jitter-ms",
       "type": "java.lang.Integer",
-      "description": "Maximum random jitter in milliseconds applied to sync listener startup.",
-      "defaultValue": 100
+      "description": "Maximum random jitter in ms parked before a key's first sync cache-update cycle (one draw per key-dispatch burst).",
+      "defaultValue": 50
     },
     {
       "name": "zeta.sync.concurrent-consumers",
@@ -488,7 +422,7 @@
     {
       "name": "zeta.sync.scheduler-pool-size",
       "type": "java.lang.Integer",
-      "description": "Pool size for the sync scheduler (deferred Redis reads).",
+      "description": "Pool size for the sync scheduler (jittered cache-update tasks).",
       "defaultValue": 4
     },
     {
@@ -500,13 +434,13 @@
     {
       "name": "zeta.worker-listener.enabled",
       "type": "java.lang.Boolean",
-      "description": "Enable listening for Worker HOT/COOL decisions. Requires Redis.",
+      "description": "Enable listening for Worker HOT/COOL decisions over RabbitMQ.",
       "defaultValue": false
     },
     {
       "name": "zeta.worker-listener.exchange-name",
       "type": "java.lang.String",
-      "description": "Name of the FanoutExchange for Worker decision broadcasts. Must match zeta.worker.messaging.broadcast-exchange.",
+      "description": "Name of the DirectExchange for Worker decision broadcasts. Must match zeta.worker.messaging.broadcast-exchange.",
       "defaultValue": "zeta.send.exchange"
     },
     {
@@ -546,34 +480,22 @@
       "defaultValue": 5
     },
     {
-      "name": "zeta.worker-listener.sre.enabled",
+      "name": "zeta.worker-listener.max-pending-units",
+      "type": "java.lang.Integer",
+      "description": "Global cap (weighted units, ~1 KB each) on tasks pending in the per-key Worker-decision dispatcher.",
+      "defaultValue": 200000
+    },
+    {
+      "name": "zeta.local.heartbeat.adaptive-timeout",
       "type": "java.lang.Boolean",
-      "description": "Enable SRE adaptive rate limiter for HOT decision processing.",
-      "defaultValue": true
+      "defaultValue": true,
+      "description": "Per-Worker adaptive liveness windows: the effective timeout is the Jacobson/Karels estimate over heartbeat inter-arrival, clamped into [adaptive-floor-ms, timeout-ms]."
     },
     {
-      "name": "zeta.worker-listener.sre.window-ms",
+      "name": "zeta.local.heartbeat.adaptive-floor-ms",
       "type": "java.lang.Long",
-      "description": "Sliding window duration in ms for SRE rate limiter tracking.",
-      "defaultValue": 3000
-    },
-    {
-      "name": "zeta.worker-listener.sre.buckets",
-      "type": "java.lang.Integer",
-      "description": "Number of time buckets within the SRE rate limiter sliding window.",
-      "defaultValue": 10
-    },
-    {
-      "name": "zeta.worker-listener.sre.min-samples",
-      "type": "java.lang.Integer",
-      "description": "Minimum total samples before SRE rate limiter begins active throttling.",
-      "defaultValue": 20
-    },
-    {
-      "name": "zeta.worker-listener.sre.success-threshold",
-      "type": "java.lang.Double",
-      "description": "Success ratio threshold (0.0-1.0) for SRE rate limiter backpressure.",
-      "defaultValue": 0.6
+      "defaultValue": 3000,
+      "description": "Lower clamp (ms) for the adaptive liveness window; must be <= timeout-ms and stay above a few heartbeat intervals."
     }
   ]
 }

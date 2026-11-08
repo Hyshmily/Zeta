@@ -16,7 +16,7 @@
 package io.github.hyshmily.zeta.autoconfigure;
 
 import com.github.benmanes.caffeine.cache.Caffeine;
-import io.github.hyshmily.zeta.model.CacheEntry;
+import io.github.hyshmily.zeta.cache.cachesupport.raw.CacheEntry;
 
 /**
  * Callback interface for customizing the L1 Caffeine cache builder before the
@@ -27,13 +27,13 @@ import io.github.hyshmily.zeta.model.CacheEntry;
  * tune the L1 cache (add a {@code removalListener}, set a {@code scheduler} or
  * {@code executor}, adjust capacity) <b>without</b> replacing the whole
  * {@code Cache<String, CacheEntry>} bean — a replacement that would otherwise have
- * to re-implement Zeta's {@code hardExpireAtMs}-driven {@code Expiry}, stats
- * recording, and weigher wiring by hand.
+ * to re-implement Zeta's {@code hardExpireAtMs}-driven {@code Expiry} and stats
+ * recording by hand.
  *
- * <h3>Contract</h3>
+ * <h2>Contract</h2>
  * <ul>
  *   <li>Customizers are applied <b>after</b> the built-in configuration
- *       (capacity / weigher, {@code recordStats()}, variable {@code Expiry}) and
+ *       (capacity, {@code recordStats()}, variable {@code Expiry}) and
  *       in {@link org.springframework.core.annotation.Order} sequence, just
  *       before {@code build()}.</li>
  *   <li>Caffeine setters are single-use: calling {@code expireAfter(...)} or
@@ -48,7 +48,6 @@ import io.github.hyshmily.zeta.model.CacheEntry;
  */
 @FunctionalInterface
 public interface ZetaCacheCustomizer {
-
   /**
    * Customize the L1 cache builder.
    *
