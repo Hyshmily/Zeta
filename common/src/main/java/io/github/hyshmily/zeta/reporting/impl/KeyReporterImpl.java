@@ -247,12 +247,7 @@ public class KeyReporterImpl implements KeyReporter {
     // unroutable rather than re-based onto an epoch it was never counted under.
     Set<String> aliveNodes = ring.rebuildIfPossible(healthView);
     if (aliveNodes.isEmpty()) {
-      long total = workerDeadDropCounter.addAndGet(counts.size());
-      log.warn(
-        "No alive Worker nodes for routing; dropping {} keys in this flush (cumulative: {})",
-        counts.size(),
-        total
-      );
+      dropUnroutable(counts, "No alive Worker nodes for routing");
       return null;
     }
 
@@ -267,7 +262,25 @@ public class KeyReporterImpl implements KeyReporter {
         epochs.put(node, epoch);
       }
     }
+    if (epochs.isEmpty()) {
+      // Every live Worker is still cold-starting (no epoch captured). This cycle is censored
+      // exactly like a no-alive-Worker one: routing every key through an always-false predicate
+      // and counting each as unroutable would only burn the flush.
+      dropUnroutable(counts, "No Worker node has a routable epoch");
+      return null;
+    }
     return new Admission(TimeSource.currentTimeMillis(), Map.copyOf(epochs));
+  }
+
+  /**
+   * Drops a flush that cannot be routed and counts every key as a dead-Worker drop.
+   *
+   * @param counts the flush counts
+   * @param reason the operator-facing cause, without a trailing separator
+   */
+  private void dropUnroutable(Map<String, Long> counts, String reason) {
+    long total = workerDeadDropCounter.addAndGet(counts.size());
+    log.warn("{}; dropping {} keys in this flush (cumulative: {})", reason, counts.size(), total);
   }
 
   /**
@@ -279,6 +292,11 @@ public class KeyReporterImpl implements KeyReporter {
   private void sampleFeedLoop(int batchSize, long windowMs) {
     ReportFeedLoop feedLoop = intervalFeedLoop;
     if (feedLoop == null) {
+      return;
+    }
+    // Two flushes inside one millisecond (or a manual flush) carry no measurable rate; dividing
+    // by zero would poison the EMA with NaN/Infinity for the rest of the process.
+    if (windowMs <= 0L) {
       return;
     }
     try {
@@ -311,8 +329,9 @@ public class KeyReporterImpl implements KeyReporter {
     Predicate<String> admittedTarget = admission.epochs()::containsKey;
     Map<String, Map<String, Long>> sharded = new HashMap<>();
     for (Map.Entry<String, Long> entry : counts.entrySet()) {
-      long count = entry.getValue();
-      if (count <= 0) {
+      Long count = entry.getValue();
+      if (entry.getKey() == null || count == null || count <= 0L) {
+        // One malformed record must not discard the whole flush.
         continue;
       }
 
@@ -472,7 +491,7 @@ public class KeyReporterImpl implements KeyReporter {
       ScheduledExecutorService timer = Executors.newSingleThreadScheduledExecutor(
         new ZetaThreadFactory("zeta-report-timer")
       );
-      ExecutorService pool = null;
+      ExecutorService pool;
       try {
         pool = Executors.newFixedThreadPool(consumerCount, new ZetaThreadFactory("zeta-report-consumer"));
       } catch (Throwable t) {
@@ -534,6 +553,7 @@ public class KeyReporterImpl implements KeyReporter {
       }
     }
 
+    @SuppressWarnings("all")
     void shutdown() {
       if (!closed.compareAndSet(false, true)) {
         return;
@@ -630,6 +650,7 @@ public class KeyReporterImpl implements KeyReporter {
      * Consumer body: take one batch, discard it when its target died or it waited past the
      * staleness bound, otherwise publish it synchronously with an interrupting timeout.
      */
+    @SuppressWarnings("all")
     private void consumeLoop(ConsumerWatchdogSlot watchdog) {
       watchdog.bind(Thread.currentThread());
       while (running) {

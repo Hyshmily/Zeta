@@ -19,8 +19,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import io.github.hyshmily.zeta.sync.worker.WorkerDecisionType;
-import io.github.hyshmily.zeta.sync.worker.WorkerMessage;
+import io.github.hyshmily.zeta.sync.worker.WorkerDecision;
+import io.github.hyshmily.zeta.sync.worker.WorkerType;
 import java.nio.charset.StandardCharsets;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
@@ -62,14 +62,14 @@ class WireCompatTest {
   @Test
   void headerFramedMessages_missingOptionalHeadersFallBackToDefaults() {
     MessageProperties props = new MessageProperties();
-    props.setHeader(io.github.hyshmily.zeta.constants.ZetaConstants.Amqp.HEADER_TYPE, WorkerDecisionType.HOT.code());
+    props.setHeader(io.github.hyshmily.zeta.constants.ZetaConstants.Amqp.HEADER_TYPE, WorkerType.HOT.code());
     // The version is the one required header: without a positive stamp the decision is
     // unorderable and is dropped at the wire boundary.
     Message withoutVersion = new Message("k".getBytes(StandardCharsets.UTF_8), props);
-    assertThat(WorkerMessage.from(withoutVersion)).isNull();
+    assertThat(WorkerDecision.from(withoutVersion)).isNull();
 
     props.setHeader(io.github.hyshmily.zeta.constants.ZetaConstants.Amqp.HEADER_VERSION, 7L);
-    WorkerMessage decoded = WorkerMessage.from(withoutVersion);
+    WorkerDecision decoded = WorkerDecision.from(withoutVersion);
     assertThat(decoded).isNotNull();
     assertThat(decoded.cacheKey()).isEqualTo("k");
     assertThat(decoded.stamp().decisionVersion()).isEqualTo(7L);
