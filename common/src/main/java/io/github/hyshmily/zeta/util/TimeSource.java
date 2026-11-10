@@ -46,8 +46,8 @@ public final class TimeSource {
 
   /**
    * Largest forward wall-clock leap (beyond the time the ticker actually slept) adopted
-   * verbatim; a larger leap is not adopted and the cached clock slews at real-time rate
-   * instead (design decisions: version stamps).
+   * verbatim; a larger leap is not adopted and the cached clock slews at twice real-time
+   * rate until it catches up (design decisions: version stamps).
    */
   private static final long MAX_FORWARD_JUMP_MS = 5_000L;
 
@@ -117,6 +117,7 @@ public final class TimeSource {
    * the lifecycle and read fallback described in the class doc. Reached through
    * {@link #registerLifecycleUser()} and from the production stamp clock.
    */
+  @SuppressWarnings("all")
   public static synchronized void start() {
     // clockThread != null also covers the 1s backoff: the dying ticker still owns the
     // slot and will re-arm itself, so starting a second thread here would only force
@@ -143,6 +144,10 @@ public final class TimeSource {
           // stopTicker() or the test hook encoded the stopped state.
           return;
         }
+        // Wall clock first: elapsedMs then covers everything the wall reading could have
+        // missed, so a pause between the two reads inflates both sides equally and cannot
+        // turn a real tick into a rejected leap.
+        long wallNow = System.currentTimeMillis();
         long nowNanos = System.nanoTime();
         long elapsedMs = Math.max(0L, (nowNanos - lastTickNanos) / 1_000_000L);
         // Advance by the whole milliseconds actually accounted for, keeping
@@ -150,7 +155,6 @@ public final class TimeSource {
         // nowNanos would discard up to 0.9ms per 5ms tick and under-measure
         // elapsed time (and thus the slew step).
         lastTickNanos += elapsedMs * 1_000_000L;
-        long wallNow = System.currentTimeMillis();
         long offset = wallOffsetMs;
         // Monotonic floor: a backward NTP step must never make the cached
         // wall clock jump backwards. Consumers compute deltas like
@@ -162,22 +166,21 @@ public final class TimeSource {
         if (wallNow > cachedWall) {
           long delta = wallNow - cachedWall;
           // Adopt a normal tick or a pause whose growth the ticker observed;
-          // slew anything that leaps beyond the elapsed real time. A slew
-          // advances at real-time rate, so a transient bad leap that NTP
-          // reverts within seconds leaves only seconds of overhang instead
-          // of pinning the clock until the bogus future arrives.
+          // slew anything that leaps beyond the elapsed real time.
           long plausible = MAX_FORWARD_JUMP_MS + elapsedMs;
           long next;
           if (delta <= plausible) {
             next = wallNow + offset;
           } else {
-            // Real-time slew: elapsedMs is already the time that passed.
-            // Adding TICK_MS on top would run the catch-up at ~2x wall rate
-            // (10ms of progress per 5ms tick), letting a rejected bogus leap
-            // re-pin the clock in seconds.
-            next = cached + Math.max(elapsedMs, TICK_MS);
+            // Catch-up slew at twice real time, capped at the wall clock. A real step
+            // (VM resume, a first NTP correction) is recovered in about the time it
+            // jumped, while a bogus leap that NTP reverts within seconds leaves only
+            // seconds of overhang. elapsedMs (not TICK_MS) keeps sub-millisecond
+            // remainders from being counted twice.
+            long slewMs = Math.max(1L, elapsedMs) * 2L;
+            next = Math.min(wallNow + offset, cached + slewMs);
             log.debug(
-              "Rejected forward wall-clock leap of {}ms (max plausible {}ms); slewing the cached clock at real-time rate",
+              "Rejected forward wall-clock leap of {}ms (max plausible {}ms); slewing the cached clock at twice real time",
               delta,
               plausible
             );
@@ -230,12 +233,16 @@ public final class TimeSource {
    * {@code start()} sees the installed thread and leaves the re-arm to this thread, while a
    * concurrent {@link #stopTicker()} clears ownership and makes the final check a no-op.
    */
+  @SuppressWarnings("all")
   private static void restartWithBackoff() {
     if (!markStopped()) {
       // This ticker was superseded by stopTicker()/start() before it could claim the slot:
       // never resurrect it and never pay the backoff.
       return;
     }
+    // Clear whatever interrupted the dying thread (the failure that reached this handler may
+    // itself have been an interrupt), or sleep would throw immediately and skip the backoff.
+    Thread.interrupted();
     try {
       Thread.sleep(1000);
     } catch (InterruptedException e) {
@@ -315,6 +322,7 @@ public final class TimeSource {
    * monotonic floor and the wall clock, shifted by the test offset. Callers hold
    * the class monitor, which is what orders these sign transitions.
    */
+  @SuppressWarnings("all")
   private static void publishRunning() {
     currentMillis = Math.max(rawFloor(currentMillis), System.currentTimeMillis()) + wallOffsetMs;
   }
@@ -323,6 +331,7 @@ public final class TimeSource {
    * Publishes the stopped state: the sign bit is set and the raw monotonic floor
    * preserved, so readers fall back to the wall clock until the ticker resumes.
    */
+  @SuppressWarnings("all")
   private static void publishStopped() {
     currentMillis = ~rawFloor(currentMillis);
   }
@@ -355,10 +364,12 @@ public final class TimeSource {
   public static void releaseLifecycleUser() {
     boolean lastOwner;
     synchronized (TimeSource.class) {
-      lastOwner = --lifecycleUsers <= 0;
-      if (lastOwner) {
-        lifecycleUsers = 0;
+      // An unmatched release (no registered owner) must not stop a ticker another component
+      // started directly, e.g. a stamp clock's constructor.
+      if (lifecycleUsers <= 0) {
+        return;
       }
+      lastOwner = --lifecycleUsers == 0;
     }
     if (lastOwner) {
       stopTicker();
@@ -476,9 +487,13 @@ public final class TimeSource {
    * @param wallOffsetMs offset applied to {@link #currentTimeMillis()}
    * @param monoOffsetMs offset applied to {@link #monotonicMillis()}
    */
-  public static void setTimeOffsetForTest(long wallOffsetMs, long monoOffsetMs) {
+  public static synchronized void setTimeOffsetForTest(long wallOffsetMs, long monoOffsetMs) {
     TimeSource.monoOffsetMs = monoOffsetMs;
     long delta = wallOffsetMs - TimeSource.wallOffsetMs;
+    // Publish the offset before the cached value derived from it: a reader that observes the
+    // shifted value is guaranteed to see the new offset, never the previous one. The class
+    // monitor keeps start()/stopTicker() out of this section.
+    TimeSource.wallOffsetMs = wallOffsetMs;
     if (delta != 0L) {
       // The running state already contains the old offset, so apply the delta
       // to the cached value. The stopped state stores a raw floor and applies
@@ -499,7 +514,6 @@ public final class TimeSource {
         }
       }
     }
-    TimeSource.wallOffsetMs = wallOffsetMs;
   }
 
   private TimeSource() {}

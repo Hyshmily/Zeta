@@ -423,6 +423,28 @@ class StandardThreadExecutorTest {
   }
 
   @Test
+  void maxSubmittedTaskCount_shouldSaturateInsteadOfWrappingNegative() throws Exception {
+    // queueCapacity + maxThreads overflowed int to a negative ceiling, and the over-cap
+    // pre-check then rejected every submission.
+    var executor = newExecutor(1, 2, Integer.MAX_VALUE - 1);
+    try {
+      assertThat(executor.getMaxSubmittedTaskCount()).isEqualTo(Integer.MAX_VALUE);
+      CountDownLatch ran = new CountDownLatch(1);
+      executor.execute(ran::countDown);
+      assertThat(ran.await(5, TimeUnit.SECONDS)).as("a saturated ceiling must not reject").isTrue();
+    } finally {
+      executor.shutdownNow();
+    }
+  }
+
+  @Test
+  void constructor_shouldRejectNegativeQueueCapacity() {
+    assertThatThrownBy(() -> newExecutor(1, 2, -1))
+      .isInstanceOf(IllegalArgumentException.class)
+      .hasMessageContaining("queueCapacity");
+  }
+
+  @Test
   void callerRunsPolicy_onPoolInternalReject_shouldNotLeakSubmittedCount() throws Exception {
     // Pins the accounting wrapper for NON-throwing rejection handlers: the pool itself
     // rejects (shutdown) and CallerRunsPolicy returns without throwing, so

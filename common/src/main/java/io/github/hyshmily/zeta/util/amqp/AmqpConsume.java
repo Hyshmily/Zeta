@@ -42,16 +42,19 @@ public final class AmqpConsume {
   /**
    * Run {@code body} for one delivery, then ack it. On a processing failure:
    * one ERROR with the truncated body, then nack ({@code requeue=false}) — no
-   * ack for that delivery.
+   * ack for that delivery. An {@link Error} is nacked and then rethrown: an
+   * escaping error would leave the delivery unsettled, and RabbitMQ would
+   * redeliver the same poison message after the channel recovers.
    *
    * @param channel       the AMQP channel used for ack/nack
    * @param msg           the raw AMQP message (delivery tag + body)
    * @param log           the plane's logger for the failure line
    * @param failurePrefix the ERROR prefix naming the plane ("CacheSync",
    *                      "Worker message")
-   * @param body          the plane's processing body; exceptions are reported,
-   *                      never rethrown
-   * @throws IOException when the final ack itself fails (propagates to the container)
+   * @param body          the plane's processing body; a failure is reported and
+   *                      nacked, and an {@link Error} is rethrown after the nack
+   * @throws IOException when the final ack (or the failure nack) itself fails
+   *                     (propagates to the container)
    */
   public static void ackOrNack(
     Channel channel,
@@ -63,15 +66,18 @@ public final class AmqpConsume {
     long tag = msg.getMessageProperties().getDeliveryTag();
     try {
       body.run();
-    } catch (Exception e) {
+    } catch (Throwable t) {
       // Body is truncated: a PUT payload can be tens of KB and must not be echoed whole.
       log.error(
         "{} processing failed: body={}",
         failurePrefix,
         AmqpMessageReader.abbreviateBody(msg.getBody(), 256),
-        e
+        t
       );
       channel.basicNack(tag, false, false);
+      if (t instanceof Error error) {
+        throw error;
+      }
       return;
     }
     channel.basicAck(tag, false);

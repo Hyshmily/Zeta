@@ -47,7 +47,7 @@ import org.jspecify.annotations.Nullable;
  * <p>All methods are thread-safe and keep no instance state; the utility class must never
  * be instantiated.
  *
- * <p><b>Incoming stamps are validated at the wire boundary.</b> {@code WorkerMessage.from}
+ * <p><b>Incoming stamps are validated at the wire boundary.</b> {@code WorkerDecision.from}
  * and {@code SyncMessage.from} drop a non-positive stamp, so every method here assumes a
  * positive incoming value and does not re-check it (one rule, one owner).
  *

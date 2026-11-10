@@ -67,9 +67,11 @@ public class StandardThreadExecutor extends ThreadPoolExecutor {
    * Records a task removed by {@link #remove(Runnable)} while the pool is shutting down.
    * {@link ThreadPoolExecutor#execute(Runnable)} only ever calls {@code remove(command)} inside its
    * {@code !isRunning(recheck) && remove(command)} shutdown recheck, immediately before calling
-   * {@code reject(command)} on the same thread. Keeping the marker off the running path means
-   * normal {@link #execute(Runnable)} and {@link #remove(Runnable)} calls never touch a
-   * {@link ThreadLocal}.
+   * {@code reject(command)} on the same thread. The marker lets that rejection skip the second
+   * decrement. Keeping the marker off the running path means normal {@link #execute(Runnable)} and
+   * {@link #remove(Runnable)} calls never touch a {@link ThreadLocal}; a marker left behind by an
+   * <em>external</em> removal is dropped by the next {@link #execute(Runnable)} on that thread,
+   * which always sees the pool already shut down.
    */
   private static final ThreadLocal<Runnable> SHUTDOWN_REMOVED = new ThreadLocal<>();
 
@@ -120,7 +122,7 @@ public class StandardThreadExecutor extends ThreadPoolExecutor {
     ((StandardExecutorQueue) getQueue()).setStandardThreadExecutor(this);
     this.userHandler = handler;
     this.queueCapacity = queueCapacity;
-    this.maxSubmittedTaskCount = queueCapacity + maxThreads;
+    this.maxSubmittedTaskCount = computeMaxSubmitted(queueCapacity, maxThreads);
     // Install the force-first handler only after the counter and handler fields are
     // initialized. The executor is not yet published, so no task can be rejected
     // before this line runs.
@@ -134,6 +136,13 @@ public class StandardThreadExecutor extends ThreadPoolExecutor {
       submittedTasksCount.decrementAndGet();
       userHandler.rejectedExecution(command, this);
       return;
+    }
+    // A marker left on this thread by an external remove() during shutdown cannot belong to this
+    // submission: the JDK's recheck writes its own marker inside super.execute, below. Clearing it
+    // first keeps the rejection handler from treating this submission as already compensated
+    // (which would leak one admission slot).
+    if (isShutdown()) {
+      SHUTDOWN_REMOVED.remove();
     }
     // No catch around super.execute: every rejection it can raise is already
     // fully resolved by the internal force-first handler — the force, the
@@ -150,13 +159,31 @@ public class StandardThreadExecutor extends ThreadPoolExecutor {
     }
   }
 
+  /**
+   * The admission ceiling, saturating instead of wrapping: a large
+   * {@code queueCapacity} (up to {@link Integer#MAX_VALUE}) overflowing into a
+   * negative ceiling would reject every submission.
+   *
+   * @param queueCapacity the configured queue capacity
+   * @param maxThreads    the maximum pool size
+   * @return {@code queueCapacity + maxThreads}, capped at {@link Integer#MAX_VALUE}
+   */
+  private static int computeMaxSubmitted(int queueCapacity, int maxThreads) {
+    if (queueCapacity < 0) {
+      throw new IllegalArgumentException("queueCapacity must be >= 0, but got: " + queueCapacity);
+    }
+    return (int) Math.min((long) queueCapacity + maxThreads, Integer.MAX_VALUE);
+  }
+
   @Override
   public boolean remove(Runnable task) {
     // A removed queued task never reaches afterExecute's decrement — balance
     // the submission increment here, or each external removal permanently
     // leaks one slot of the admission ceiling (maxSubmittedTaskCount). When the
     // JDK's shutdown recheck removes the command it is about to reject, the
-    // marker lets the rejection handler skip the second decrement.
+    // marker lets the rejection handler skip the second decrement; an external
+    // remove() during shutdown writes the same marker, and the next execute()
+    // drops it before submitting.
     if (super.remove(task)) {
       submittedTasksCount.decrementAndGet();
       if (isShutdown()) {
@@ -201,7 +228,7 @@ public class StandardThreadExecutor extends ThreadPoolExecutor {
   @Override
   public void setMaximumPoolSize(int maximumPoolSize) {
     super.setMaximumPoolSize(maximumPoolSize);
-    this.maxSubmittedTaskCount = queueCapacity + maximumPoolSize;
+    this.maxSubmittedTaskCount = computeMaxSubmitted(queueCapacity, maximumPoolSize);
   }
 
   @Override

@@ -107,6 +107,11 @@ public class SafeScheduledExecutorService extends ScheduledThreadPoolExecutor {
    */
   public SafeScheduledExecutorService(int corePoolSize, ThreadFactory threadFactory) {
     super(corePoolSize, threadFactory);
+    // Cancelled chain links must leave the delay queue immediately. Without this the JDK keeps
+    // the cancelled ScheduledFutureTask — and every object the link closes over — queued for its
+    // full delay, and a link cancelled concurrently with shutdown() keeps the pool from reaching
+    // TERMINATED until that delay expires.
+    setRemoveOnCancelPolicy(true);
   }
 
   /**
@@ -303,7 +308,9 @@ public class SafeScheduledExecutorService extends ScheduledThreadPoolExecutor {
     }
 
     private ScheduledFuture<Void> start(long initialDelay, TimeUnit unit) {
-      long initialDelayNanos = unit.toNanos(initialDelay);
+      // The JDK treats a negative initial delay as "run now"; matching that here keeps the
+      // phase anchor from landing in the past and skewing every later slot.
+      long initialDelayNanos = Math.max(0L, unit.toNanos(initialDelay));
       if (gapNanos > 0L) {
         // Anchor the cadence phase: the first slot is now + initialDelay, and every subsequent
         // slot advances by exactly one period from here (see scheduleNext()).
@@ -318,6 +325,7 @@ public class SafeScheduledExecutorService extends ScheduledThreadPoolExecutor {
     }
 
     @Override
+    @SuppressWarnings("all")
     // catching Throwable is deliberate: an Error must not kill the cadence of
     // heartbeats/window-slides/flushes, and the chain link must never leak an exception into the worker loop
     public void run() {

@@ -137,7 +137,10 @@ public final class AmqpMessageReader {
       return text;
     }
     if (text.length() > maxChars) {
-      text = text.substring(0, maxChars);
+      // Never cut between the two chars of a surrogate pair: the orphaned high surrogate is not
+      // valid UTF-16 and breaks downstream JSON log encoders.
+      int cut = Character.isHighSurrogate(text.charAt(maxChars - 1)) ? maxChars - 1 : maxChars;
+      text = text.substring(0, cut);
     }
     return text + "...(total " + body.length + " bytes)";
   }

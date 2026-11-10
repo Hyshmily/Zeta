@@ -141,7 +141,7 @@ public final class InterruptingAsync {
     }
 
     @Override
-    @SuppressWarnings("unchecked")
+    @SuppressWarnings("all")
     public void run() {
       Supplier<? extends T> supplier;
       synchronized (this) {
@@ -155,23 +155,31 @@ public final class InterruptingAsync {
         supplier = (Supplier<? extends T>) queued;
         state = Thread.currentThread();
       }
+      T result = null;
+      Throwable failure = null;
       try {
         // Armed here, not at submission: queue wait is not execution time, so a
         // batch's tail keys get the same budget as its head.
         orTimeout(timeoutNanos, TimeUnit.NANOSECONDS);
-        complete(supplier.get());
-      } catch (Throwable failure) {
+        result = supplier.get();
+      } catch (Throwable t) {
+        failure = t;
+      } finally {
+        synchronized (this) {
+          // Leave the interruptible phase before publishing the outcome: complete*() runs the
+          // dependent actions synchronously on this thread, and a stale interrupt flag (or a
+          // still-armed timeout/cancel that could target this thread) would hit those callbacks
+          // instead of the reader.
+          state = null;
+          Thread.interrupted();
+        }
+      }
+      if (failure == null) {
+        complete(result);
+      } else {
         // Same encoding as CompletableFuture.supplyAsync: a CompletionException
         // travels as-is, everything else is wrapped once.
         completeExceptionally(failure instanceof CompletionException ? failure : new CompletionException(failure));
-      } finally {
-        synchronized (this) {
-          state = null;
-          // A task that caught InterruptedException and restored the flag (or one
-          // interrupted by the timeout/cancel path) leaves it on the pooled
-          // thread. Clear it so the next task on this thread starts clean.
-          Thread.interrupted();
-        }
       }
     }
 

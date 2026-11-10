@@ -95,6 +95,14 @@ public class MonotonicStampClock implements StampClock {
   private static final long MAX_STAMP = Long.MAX_VALUE - 1L;
 
   /**
+   * Largest timestamp offset that still fits the 41-bit field. Checked before
+   * shifting: a left shift silently drops the bits above 41, so an
+   * out-of-range physical clock would otherwise wrap into a plausible-looking
+   * window and issue stamps from the past instead of failing.
+   */
+  private static final long MAX_TIMESTAMP = (1L << (Long.SIZE - 1 - TIMESTAMP_SHIFT)) - 1L;
+
+  /**
    * Highest peer-stamp timestamp (epoch millis) refused by the forward-drift
    * guard. An accepted stamp raises {@link #last}, which already carries the
    * same evidence; this watermark keeps the skew gauge visible exactly when a
@@ -216,12 +224,17 @@ public class MonotonicStampClock implements StampClock {
     long cur = last.get();
     for (;;) {
       long first = base(count, cur, nowTs, nodeBase);
+      // base() answers -1 for a window past the 41-bit timestamp field: shifting it would
+      // drop the high bits and mint a stamp from the past. Refuse before the block tail is
+      // computed, so the sentinel can never be turned into a positive value by the addition.
+      if (first < 1L) {
+        throw timestampSpaceExhausted(first, count, cur);
+      }
       long top = first + (count - 1L);
-      // The only illegal results are the sign-bit overflow at the end of the
-      // 41-bit timestamp space and the reserved saturated sentinel. Refusing
-      // here keeps every issued stamp positive; a silent negative would be
-      // persisted and propagated cluster-wide.
-      if (top < 1L || top > MAX_STAMP) {
+      // The only other illegal result is the reserved saturated sentinel. Refusing here keeps
+      // every issued stamp positive; a silent negative would be persisted and propagated
+      // cluster-wide.
+      if (top > MAX_STAMP) {
         throw timestampSpaceExhausted(first, count, cur);
       }
       // compareAndExchange returns the witness on failure, so a retry does not
@@ -256,15 +269,21 @@ public class MonotonicStampClock implements StampClock {
    * @param nowTs physical time minus {@link StampClock#EPOCH} in ms, {@code >= 0}
    * @param nodeBits this clock's node bits, resolved once per allocation
    * @return the block's first stamp; the block occupies
-   *         {@code [base, base + count - 1]} and {@code base > cur}
+   *         {@code [base, base + count - 1]} and {@code base > cur}, or
+   *         {@code -1} when the window is past the 41-bit timestamp field
    */
   private static long base(int count, long cur, long nowTs, long nodeBits) {
     long windowTs = Math.max(cur >>> TIMESTAMP_SHIFT, nowTs);
+    if (windowTs > MAX_TIMESTAMP) {
+      return -1L;
+    }
     long ownBase = (windowTs << TIMESTAMP_SHIFT) | nodeBits;
     long candidate = Math.max(ownBase, cur + 1L);
-    return (candidate + count - 1L <= (ownBase | SEQ_MASK))
-      ? candidate
-      : ((windowTs + 1L) << TIMESTAMP_SHIFT) | nodeBits;
+    if (candidate + count - 1L <= (ownBase | SEQ_MASK)) {
+      return candidate;
+    }
+    long nextTs = windowTs + 1L;
+    return nextTs <= MAX_TIMESTAMP ? (nextTs << TIMESTAMP_SHIFT) | nodeBits : -1L;
   }
 
   private static IllegalStateException timestampSpaceExhausted(long base, long count, long cur) {
