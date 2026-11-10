@@ -143,7 +143,7 @@ class ZetaAnnotationAutoConfigurationTest {
         assertThat(service.getClass()).isNotSameAs(AnnotatedService.class);
         assertThat(service.load("42")).isEqualTo("real-42");
         assertThat(service.calls()).isEqualTo(1);
-        verify(zeta).get(eq("users\u000042"), any(CacheLoader.class), any(GetPolicy.class));
+        verify(zeta).get(eq("users\u0000[s2:42]"), any(CacheLoader.class), any(GetPolicy.class));
       });
   }
 }

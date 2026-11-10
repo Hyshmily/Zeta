@@ -371,6 +371,8 @@ public class ZetaMicrometerAutoConfiguration {
    *   <tr><th>Metric name</th><th>Meaning</th><th>Source</th></tr>
    *   <tr><td>{@code zeta.stall.broadcast_storm.stopped.total}</td><td>Refresh broadcasts lost to
    *       broker send failures or a saturated send executor</td><td>BroadcastBuffer</td></tr>
+   *   <tr><td>{@code zeta.sync.invalidate.dropped.total}</td><td>INVALIDATE-family messages
+   *       dropped because the send executor refused them (counted per message)</td><td>BroadcastBuffer</td></tr>
    *   <tr><td>{@code zeta.stall.source_degraded.stopped}</td><td>1 while the circuit breaker is
    *       open (loads fast-fail; reads degrade to stale values)</td><td>SingleFlight</td></tr>
    *   <tr><td>{@code zeta.stall.source_degraded.timeouts.total}</td><td>Cumulative dedup loads
@@ -382,11 +384,14 @@ public class ZetaMicrometerAutoConfiguration {
     ObjectProvider<SingleFlight> singleFlightProvider,
     ObjectProvider<BroadcastBuffer> broadcastBufferProvider
   ) {
-    broadcastBufferProvider.ifAvailable(bb ->
+    broadcastBufferProvider.ifAvailable(bb -> {
       FunctionCounter.builder("zeta.stall.broadcast_storm.stopped.total", bb, b ->
         (double) (b.sendFailures() + b.saturationDrops())
-      ).register(registry)
-    );
+      ).register(registry);
+      FunctionCounter.builder("zeta.sync.invalidate.dropped.total", bb, b -> (double) b.invalidatesDropped()).register(
+        registry
+      );
+    });
     singleFlightProvider.ifAvailable(sf -> {
       Gauge.builder("zeta.stall.source_degraded.stopped", sf, s -> s.isBreakerOpen() ? 1.0 : 0.0).register(registry);
       FunctionCounter.builder("zeta.stall.source_degraded.timeouts.total", sf, s ->

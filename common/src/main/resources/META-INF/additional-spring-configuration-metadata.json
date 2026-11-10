@@ -408,7 +408,7 @@
       "defaultValue": 10000
     },
     {
-      "name": "zeta.sync.warmup-jitter-ms",
+      "name": "zeta.sync.jitter-ms",
       "type": "java.lang.Integer",
       "description": "Maximum random jitter in ms parked before a key's first sync cache-update cycle (one draw per key-dispatch burst).",
       "defaultValue": 50
@@ -456,7 +456,7 @@
       "defaultValue": true
     },
     {
-      "name": "zeta.worker-listener.broadcast-jitter-ms",
+      "name": "zeta.worker-listener.jitter-ms",
       "type": "java.lang.Integer",
       "description": "Maximum random jitter in ms before applying Worker broadcasts. 0 = immediate.",
       "defaultValue": 0

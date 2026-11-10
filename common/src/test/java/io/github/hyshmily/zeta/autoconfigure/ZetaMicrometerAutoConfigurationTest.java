@@ -154,6 +154,7 @@ class ZetaMicrometerAutoConfigurationTest {
     BroadcastBuffer broadcastBuffer = mock(BroadcastBuffer.class);
     when(broadcastBuffer.sendFailures()).thenReturn(2L);
     when(broadcastBuffer.saturationDrops()).thenReturn(1L);
+    when(broadcastBuffer.invalidatesDropped()).thenReturn(4L);
 
     MeterBinder binder = config.hotKeyCustomMetrics(
       providerThatReturns(detector),
@@ -185,6 +186,7 @@ class ZetaMicrometerAutoConfigurationTest {
     assertGaugeValue("zeta.worker.alive", 1.0);
     // Stall-cause meters: only the causes with no other series.
     assertCounterValue("zeta.stall.broadcast_storm.stopped.total", 3.0);
+    assertCounterValue("zeta.sync.invalidate.dropped.total", 4.0);
     assertGaugeValue("zeta.stall.source_degraded.stopped", 0.0);
     assertCounterValue("zeta.stall.source_degraded.timeouts.total", 0.0);
     // Removed duplicates/derivations must not come back.

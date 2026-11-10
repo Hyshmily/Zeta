@@ -15,8 +15,6 @@
  */
 package io.github.hyshmily.zeta.autoconfigure;
 
-import static io.github.hyshmily.zeta.constants.ZetaConstants.Routing.KEY_HEARTBEAT;
-
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.github.benmanes.caffeine.cache.Cache;
@@ -41,8 +39,7 @@ import io.github.hyshmily.zeta.util.amqp.AmqpMessageReader.AppIsolationFilter;
 import io.github.hyshmily.zeta.util.clock.StampClock;
 import io.github.hyshmily.zeta.util.executor.ZetaThreadFactory;
 import jakarta.annotation.PostConstruct;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
+import lombok.extern.slf4j.Slf4j;
 import org.jspecify.annotations.NonNull;
 import org.jspecify.annotations.Nullable;
 import org.springframework.amqp.core.*;
@@ -69,6 +66,11 @@ import org.springframework.core.io.ResourceLoader;
 import org.springframework.core.type.AnnotatedTypeMetadata;
 import org.springframework.util.Assert;
 
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+
+import static io.github.hyshmily.zeta.constants.ZetaConstants.Routing.KEY_HEARTBEAT;
+
 /**
  * Unified AMQP auto-configuration for HotKey messaging: app-to-Worker reporting,
  * instance-to-instance cache sync, and Worker decision listening.
@@ -93,7 +95,7 @@ import org.springframework.util.Assert;
 @EnableConfigurationProperties(
   { ZetaProperties.class, ZetaAppProperties.class, CacheSyncProperties.class, WorkerListenerProperties.class }
 )
-@lombok.extern.slf4j.Slf4j
+@Slf4j
 public class ZetaAmqpAutoConfiguration {
 
   /** Bean name of Zeta's dedicated control-plane (heartbeat) connection factory. */
@@ -403,7 +405,6 @@ public class ZetaAmqpAutoConfiguration {
   @Configuration
   @Conditional(DataPlaneConnectionFactoryPresent.class)
   @ConditionalOnProperty(prefix = "zeta.sync", name = "enabled", havingValue = "true")
-  @lombok.extern.slf4j.Slf4j
   static class SyncConfiguration {
 
     /**
@@ -415,7 +416,6 @@ public class ZetaAmqpAutoConfiguration {
      */
     @Bean
     @ConditionalOnMissingBean(name = "hotkeySyncExchange")
-    @SuppressWarnings("SpringJavaInjectionPointsAutowiringInspection")
     public FanoutExchange hotkeySyncExchange(CacheSyncProperties properties) {
       return new FanoutExchange(properties.getExchangeName(), true, false);
     }
@@ -429,7 +429,6 @@ public class ZetaAmqpAutoConfiguration {
      */
     @Bean
     @ConditionalOnMissingBean(name = "hotkeySyncQueue")
-    @SuppressWarnings("SpringJavaInjectionPointsAutowiringInspection")
     public Queue hotkeySyncQueue(CacheSyncProperties properties) {
       return durableTtlQueue(properties.getQueueName());
     }
@@ -461,10 +460,25 @@ public class ZetaAmqpAutoConfiguration {
     }
 
     /**
+     * The PUT payload codec shared by the sync publisher and the receiver context. One
+     * mapper owns both directions, so the configured allowlist cannot drift between the
+     * writer and the reader.
+     *
+     * @param properties the cache sync configuration properties
+     * @return a new {@link PutPayloadCodec}
+     */
+    @Bean
+    @ConditionalOnMissingBean
+    public PutPayloadCodec putPayloadCodec(CacheSyncProperties properties) {
+      return new PutPayloadCodec(properties);
+    }
+
+    /**
      * Create the cache sync publisher for sending INVALIDATE/REFRESH messages.
      *
      * @param rabbitTemplate the dedicated Zeta cache-sync RabbitMQ template
      * @param properties     the cache sync configuration properties
+     * @param putPayloadCodec the PUT payload serializer
      * @param appProperties  the application identity, stamped on every message as the
      *                       receiver-side isolation filter
      * @return a new {@link CacheSyncPublisher} instance
@@ -474,12 +488,13 @@ public class ZetaAmqpAutoConfiguration {
     public CacheSyncPublisher cacheSyncPublisher(
       @Qualifier("zetaSyncRabbitTemplate") RabbitTemplate rabbitTemplate,
       CacheSyncProperties properties,
+      PutPayloadCodec putPayloadCodec,
       ZetaAppProperties appProperties
     ) {
       // The sync plane stamps zeta.app-name (design decisions: sync messages pattern) so peers on a
       // shared broker can drop another application's INVALIDATE / REFRESH /
       // PUT messages instead of acting on them.
-      return new CacheSyncPublisher(rabbitTemplate, properties, appProperties.getAppName());
+      return new CacheSyncPublisher(rabbitTemplate, properties, putPayloadCodec, appProperties.getAppName());
     }
 
     /**
@@ -502,35 +517,47 @@ public class ZetaAmqpAutoConfiguration {
     }
 
     /**
-     * Default {@link SyncDecisionHandler} that performs loader-backed REFRESH,
-     * version-guarded INVALIDATE, whole-table clear (design decisions: invalidation, design decisions: cache table) and
-     * value-carrying PUT apply. The optional SingleFlight collaborator lets
-     * applied removals also drop the key's dedup entry (design decisions: dedup lifecycle); when
-     * absent, applied removals leave the dedup entry in place. The cluster
-     * loader is optional: when the application supplies no
-     * {@code CacheLoader<String, Object>} bean, the handler skips loader-backed
-     * reloads instead of failing startup. The sync publisher supplies the PUT
-     * payload parser carrying this node's configured deserialization whitelist
-     * ({@code zeta.sync.put-allowed-packages}, design decisions: invalidation).
+     * Framework-owned {@link SyncContext}: loader-backed REFRESH, version-guarded
+     * INVALIDATE, whole-table clear (design decisions: invalidation, design decisions: cache
+     * table) and value-carrying PUT apply. The context is not a user extension point: the
+     * policy decides, the context owns every guard and hook.
+     *
+     * <p>The optional SingleFlight collaborator lets applied removals also drop the key's
+     * dedup entry (design decisions: dedup lifecycle); when absent, applied removals leave
+     * the dedup entry in place. The cluster loader is optional: when the application supplies
+     * no {@code CacheLoader<String, Object>} bean, the context skips loader-backed reloads
+     * instead of failing startup. The shared {@link PutPayloadCodec} carries this node's
+     * configured deserialization whitelist ({@code zeta.sync.put-allowed-packages}, design
+     * decisions: invalidation) without depending on the outbound publisher.
      */
     @Bean
-    @ConditionalOnMissingBean(SyncDecisionHandler.class)
-    public SyncDecisionHandler defaultSyncDecisionHandler(
+    @SuppressWarnings("SpringJavaInjectionPointsAutowiringInspection")
+    public SyncContext syncContext(
       Cache<String, CacheEntry> hotLocalCache,
       ObjectProvider<CacheLoader<String, Object>> hotKeyClusterLoaderProvider,
       EntryLifecycle entryLifecycle,
       ObjectProvider<SingleFlight> singleFlightProvider,
       ObjectProvider<SyncHook> syncHookProvider,
-      ObjectProvider<CacheSyncPublisher> syncPublisherProvider
+      ObjectProvider<PutPayloadCodec> putPayloadCodecProvider
     ) {
-      return new DefaultSyncDecisionHandler(
+      return new DefaultSyncContext(
         hotLocalCache,
         hotKeyClusterLoaderProvider.getIfAvailable(),
         entryLifecycle,
         syncHookProvider.stream().toList(),
         singleFlightProvider.getIfAvailable(),
-        syncPublisherProvider.getIfAvailable()
+        putPayloadCodecProvider.getIfAvailable()
       );
+    }
+
+    /**
+     * Default {@link SyncPolicy}: the interface's default methods run the framework's
+     * standard sync pipeline through the {@link SyncContext}.
+     */
+    @Bean
+    @ConditionalOnMissingBean(SyncPolicy.class)
+    public SyncPolicy syncPolicy() {
+      return new SyncPolicy() {};
     }
 
     /**
@@ -538,7 +565,8 @@ public class ZetaAmqpAutoConfiguration {
      *
      * @param properties         the cache sync configuration properties
      * @param syncScheduler      the scheduler for jitter-delayed cache updates
-     * @param decisionHandler    the strategy for processing sync messages
+     * @param policy             the strategy for processing sync messages
+     * @param context            the framework's guarded write path
      * @param appProperties      the application identity (receiver-side isolation filter)
      * @param stampClockProvider provider for the shared stamp clock (may be absent)
      * @return a new {@link CacheSyncListener} instance
@@ -548,7 +576,8 @@ public class ZetaAmqpAutoConfiguration {
     public CacheSyncListener cacheSyncListener(
       CacheSyncProperties properties,
       @Qualifier("hotKeySyncScheduler") ScheduledExecutorService syncScheduler,
-      SyncDecisionHandler decisionHandler,
+      SyncPolicy policy,
+      SyncContext context,
       ZetaAppProperties appProperties,
       ObjectProvider<StampClock> stampClockProvider
     ) {
@@ -557,7 +586,8 @@ public class ZetaAmqpAutoConfiguration {
       return new CacheSyncListener(
         properties,
         syncScheduler,
-        decisionHandler,
+        policy,
+        context,
         appProperties.getAppName(),
         stampClockProvider.getIfAvailable()
       );
@@ -574,7 +604,6 @@ public class ZetaAmqpAutoConfiguration {
      */
     @Bean
     @ConditionalOnMissingBean(name = "syncListenerContainer")
-    @SuppressWarnings("SpringJavaInjectionPointsAutowiringInspection")
     public SimpleMessageListenerContainer syncListenerContainer(
       ListableBeanFactory beanFactory,
       @Qualifier("hotkeySyncQueue") Queue hotkeySyncQueue,
@@ -585,7 +614,7 @@ public class ZetaAmqpAutoConfiguration {
         dataPlaneConnectionFactory(beanFactory),
         hotkeySyncQueue,
         properties,
-        (msg, channel) -> cacheSyncListener.handleSyncMessage(channel, msg),
+        (msg, channel) -> cacheSyncListener.onMessage(channel, msg),
         "Sync listener uncaught exception (message will be requeued by container)"
       );
     }
@@ -625,7 +654,7 @@ public class ZetaAmqpAutoConfiguration {
   @Configuration
   @Conditional(DataPlaneConnectionFactoryPresent.class)
   @ConditionalOnProperty(prefix = "zeta.worker-listener", name = "enabled", havingValue = "true")
-  @lombok.extern.slf4j.Slf4j
+  @Slf4j
   static class WorkerListenerConfiguration {
 
     /**
@@ -733,19 +762,18 @@ public class ZetaAmqpAutoConfiguration {
     }
 
     /**
-     * Default {@link WorkerDecisionHandler} that performs loader-backed HOT promotion
-     * and COOL downgrade with version guarding.
+     * Framework-owned {@link DefaultWorkerContext}: the guarded write path for HOT
+     * promotion and COOL downgrade. The context is not a user extension point: the policy
+     * decides, the context owns every guard and hook.
      *
-     * <p>The shard-ownership refinement for stale cross-Worker COOLs (scale
-     * re-balance ghost-COOL kill — see
-     * {@link io.github.hyshmily.zeta.sync.worker.DefaultWorkerDecisionHandler})
-     * is wired from the ring and the shared health view when present; both
-     * are optional so a report-disabled deployment still builds (the guard then
-     * fails open to the pure version-guard behaviour).
+     * <p>The shard-ownership refinement for stale cross-Worker COOLs (scale re-balance
+     * ghost-COOL kill — see {@link DefaultWorkerContext}) is wired from the ring and the
+     * shared health view when present; both are optional so a report-disabled deployment
+     * still builds (the guard then fails open to the pure version-guard behaviour).
      */
     @Bean
-    @ConditionalOnMissingBean(WorkerDecisionHandler.class)
-    public WorkerDecisionHandler defaultWorkerDecisionHandler(
+    @SuppressWarnings("SpringJavaInjectionPointsAutowiringInspection")
+    public DefaultWorkerContext workerContext(
       Cache<String, CacheEntry> hotLocalCache,
       ObjectProvider<CacheLoader<String, Object>> hotKeyClusterLoaderProvider,
       EntryLifecycle entryLifecycle,
@@ -754,7 +782,7 @@ public class ZetaAmqpAutoConfiguration {
       ObjectProvider<ConsistentHashRing> ringProvider,
       ObjectProvider<HealthView> healthViewProvider
     ) {
-      return new DefaultWorkerDecisionHandler(
+      return new DefaultWorkerContext(
         hotLocalCache,
         hotKeyClusterLoaderProvider.getIfAvailable(),
         entryLifecycle,
@@ -763,6 +791,16 @@ public class ZetaAmqpAutoConfiguration {
         ringProvider.getIfAvailable(),
         healthViewProvider.getIfAvailable()
       );
+    }
+
+    /**
+     * Default {@link WorkerPolicy}: the interface's default methods run the framework's
+     * standard HOT/COOL pipeline through the {@link DefaultWorkerContext}.
+     */
+    @Bean
+    @ConditionalOnMissingBean(WorkerPolicy.class)
+    public WorkerPolicy workerPolicy() {
+      return new WorkerPolicy() {};
     }
 
     /**
@@ -776,7 +814,8 @@ public class ZetaAmqpAutoConfiguration {
      * application's cache. The declared application name is validated non-blank at binding time.
      *
      * @param properties          the Worker listener configuration properties
-     * @param decisionHandler     the strategy for processing HOT/COOL decisions
+     * @param policy              the strategy for deciding HOT/COOL outcomes
+     * @param context             the framework's guarded write path
      * @param appProperties       the application-identity properties (appName source)
      * @return a new {@link WorkerListener} instance
      */
@@ -785,10 +824,11 @@ public class ZetaAmqpAutoConfiguration {
     public WorkerListener workerListener(
       WorkerListenerProperties properties,
       @Qualifier("hotKeyWorkerSchedScheduler") ScheduledExecutorService workerSchedScheduler,
-      WorkerDecisionHandler decisionHandler,
+      WorkerPolicy policy,
+      DefaultWorkerContext context,
       ZetaAppProperties appProperties
     ) {
-      return new WorkerListener(properties, workerSchedScheduler, decisionHandler, appProperties.getAppName());
+      return new WorkerListener(properties, workerSchedScheduler, policy, context, appProperties.getAppName());
     }
 
     /**
@@ -834,7 +874,7 @@ public class ZetaAmqpAutoConfiguration {
      * via the {@link WorkerListener}.
      *
      * <p>The container uses {@link AcknowledgeMode#MANUAL} because the
-     * {@link WorkerListener#handleWorkerMessage} performs its own ack/nack
+     * {@link WorkerListener#onMessage} performs its own ack/nack
      * (ack-before-update pattern, see design decisions: sync messages).
      *
      * @param beanFactory       the bean factory, used to resolve the data-plane connection factory by type
@@ -855,7 +895,7 @@ public class ZetaAmqpAutoConfiguration {
         dataPlaneConnectionFactory(beanFactory),
         hotkeyWorkerQueue,
         properties,
-        (msg, channel) -> workerListener.handleWorkerMessage(channel, msg),
+        (msg, channel) -> workerListener.onMessage(channel, msg),
         "Worker listener uncaught exception (message will be requeued by container)"
       );
     }
@@ -910,6 +950,7 @@ public class ZetaAmqpAutoConfiguration {
    */
   @Configuration
   @Conditional(HeartbeatFeatureEnabled.class)
+  @SuppressWarnings("all")
   static class HeartbeatConnectionConfiguration {
 
     @Primary

@@ -35,8 +35,11 @@ import io.github.hyshmily.zeta.sharding.HealthViewImpl;
 import io.github.hyshmily.zeta.sync.local.CacheSyncListener;
 import io.github.hyshmily.zeta.sync.local.CacheSyncProperties;
 import io.github.hyshmily.zeta.sync.local.CacheSyncPublisher;
-import io.github.hyshmily.zeta.sync.local.SyncDecisionHandler;
-import io.github.hyshmily.zeta.sync.worker.WorkerDecisionHandler;
+import io.github.hyshmily.zeta.sync.local.PutPayloadCodec;
+import io.github.hyshmily.zeta.sync.local.SyncContext;
+import io.github.hyshmily.zeta.sync.local.SyncPolicy;
+import io.github.hyshmily.zeta.sync.worker.DefaultWorkerContext;
+import io.github.hyshmily.zeta.sync.worker.WorkerPolicy;
 import io.github.hyshmily.zeta.sync.worker.WorkerHeartbeatMessage;
 import io.github.hyshmily.zeta.sync.worker.WorkerListener;
 import io.github.hyshmily.zeta.sync.worker.WorkerListenerProperties;
@@ -319,7 +322,8 @@ class ZetaAmqpAutoConfigurationTest {
     CacheSyncListener listener = config.cacheSyncListener(
       props,
       scheduler,
-      mock(SyncDecisionHandler.class),
+      mock(SyncPolicy.class),
+      mock(SyncContext.class),
       new ZetaAppProperties(),
       clocks
     );
@@ -425,7 +429,8 @@ class ZetaAmqpAutoConfigurationTest {
     WorkerListener listener = config.workerListener(
       props,
       scheduler,
-      mock(WorkerDecisionHandler.class),
+      mock(WorkerPolicy.class),
+      mock(DefaultWorkerContext.class),
       new io.github.hyshmily.zeta.autoconfigure.ZetaAppProperties()
     );
 
@@ -481,7 +486,12 @@ class ZetaAmqpAutoConfigurationTest {
     CacheSyncProperties props = new CacheSyncProperties();
 
     ZetaAmqpAutoConfiguration.SyncConfiguration config = new ZetaAmqpAutoConfiguration.SyncConfiguration();
-    CacheSyncPublisher publisher = config.cacheSyncPublisher(rabbitTemplate, props, new ZetaAppProperties());
+    CacheSyncPublisher publisher = config.cacheSyncPublisher(
+      rabbitTemplate,
+      props,
+      new PutPayloadCodec(props),
+      new ZetaAppProperties()
+    );
 
     assertThat(publisher).isNotNull();
   }

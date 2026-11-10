@@ -22,7 +22,6 @@ import com.github.benmanes.caffeine.cache.Caffeine;
 import com.github.benmanes.caffeine.cache.Expiry;
 import io.github.hyshmily.zeta.cache.AccessCounter;
 import io.github.hyshmily.zeta.cache.BroadcastBuffer;
-import io.github.hyshmily.zeta.cache.CentralDispatcher;
 import io.github.hyshmily.zeta.cache.HotKeyCache;
 import io.github.hyshmily.zeta.cache.cachesupport.circuitbreaker.CircuitBreakerRegistry;
 import io.github.hyshmily.zeta.cache.cachesupport.lifecycle.EntryLifecycle;
@@ -477,8 +476,8 @@ public class ZetaAutoConfiguration {
   }
 
   /**
-   * Create the deferred send buffer for putThrough cache-sync messages
-   * (value-carrying PUT and version-only REFRESH broadcasts).
+   * Create the sync plane's send outlet: deferred PUT/REFRESH records plus the
+   * immediate INVALIDATE family, including the cancel-before-send rule.
    */
   @Bean
   @ConditionalOnMissingBean
@@ -500,24 +499,6 @@ public class ZetaAutoConfiguration {
   }
 
   /**
-   * Create the {@link CentralDispatcher} that aggregates access counting and
-   * broadcasting: the shared {@link AccessCounter} is the read path's single
-   * counting entry (design decisions: access counting), and the INVALIDATE family sends through
-   * {@code zetaSendExecutor} so a slow broker never stalls the business thread
-   * (design decisions: invalidation).
-   */
-  @Bean
-  @ConditionalOnMissingBean
-  public CentralDispatcher centralDispatcher(
-    AccessCounter accessCounter,
-    ObjectProvider<CacheSyncPublisher> syncPublisherProvider,
-    BroadcastBuffer broadcastBuffer,
-    @Qualifier("zetaSendExecutor") Executor sendExecutor
-  ) {
-    return new CentralDispatcher(accessCounter, syncPublisherProvider.getIfAvailable(), broadcastBuffer, sendExecutor);
-  }
-
-  /**
    * Create the {@link HotKeyCache}.
    *
    * @param hotKeyDetector            the app-side TopK detector (never {@code null})
@@ -525,7 +506,8 @@ public class ZetaAutoConfiguration {
    * @param singleFlight              the deduplication layer (never {@code null})
    * @param entryLifecycle            the entry lifecycle manager for TTL control (never {@code null})
    * @param backgroundRefresher       the background soft-expire refresh coordinator (never {@code null})
-   * @param centralDispatcher         the central dispatcher for send coordination
+   * @param accessCounter             the shared read-path counter (never {@code null})
+   * @param broadcastBuffer           the sync-plane send outlet (never {@code null})
    * @param properties                the Zeta configuration properties (never {@code null})
    * @param clusterHealthView         the shared cluster health view (never {@code null})
    * @param stampClock                the node-local data-stamp clock (never {@code null})
@@ -540,7 +522,8 @@ public class ZetaAutoConfiguration {
     SingleFlight singleFlight,
     EntryLifecycle entryLifecycle,
     BackgroundRefresher backgroundRefresher,
-    CentralDispatcher centralDispatcher,
+    AccessCounter accessCounter,
+    BroadcastBuffer broadcastBuffer,
     ZetaProperties properties,
     HealthView clusterHealthView,
     StampClock stampClock
@@ -551,7 +534,8 @@ public class ZetaAutoConfiguration {
       singleFlight,
       entryLifecycle,
       backgroundRefresher,
-      centralDispatcher,
+      accessCounter,
+      broadcastBuffer,
       stampClock,
       clusterHealthView
     );
