@@ -15,10 +15,11 @@
  */
 package io.github.hyshmily.zeta.sync.local;
 
+import org.jspecify.annotations.Nullable;
+
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
-import org.jspecify.annotations.Nullable;
 
 /**
  * One granted sync batch, classified by the operation family it carries.
@@ -119,10 +120,12 @@ public sealed interface Batch permits Batch.Value, Batch.Clear {
     if (messages.isEmpty()) {
       throw new IllegalArgumentException("a sync batch must not be empty");
     }
+
     SyncMessage first = messages.get(0);
     if (first.type().isClear()) {
       return new Clear(messages);
     }
+
     int size = messages.size();
     if (size == 1) {
       return new Value(messages, first, List.of(), null);
