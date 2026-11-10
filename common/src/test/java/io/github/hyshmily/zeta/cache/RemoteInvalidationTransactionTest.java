@@ -43,7 +43,7 @@ import org.springframework.transaction.support.TransactionSynchronizationManager
 /** Remote-only invalidation and clear follow the same after-commit contract as the local paths. */
 class RemoteInvalidationTransactionTest {
 
-  private CentralDispatcher dispatcher;
+  private BroadcastBuffer broadcastBuffer;
   private HotKeyCache cache;
 
   @BeforeEach
@@ -52,14 +52,15 @@ class RemoteInvalidationTransactionTest {
     ZetaProperties properties = new ZetaProperties();
     HealthView healthView = mock(HealthView.class);
     EntryLifecycle lifecycle = new EntryLifecycleImpl(table, properties, healthView);
-    dispatcher = mock(CentralDispatcher.class);
+    broadcastBuffer = mock(BroadcastBuffer.class);
     cache = new HotKeyCache(
       mock(HotKeyDetector.class),
       table,
       mock(SingleFlight.class),
       lifecycle,
       mock(BackgroundRefresher.class),
-      dispatcher,
+      mock(AccessCounter.class),
+      broadcastBuffer,
       new MonotonicStampClock(1L, MonotonicStampClock.DEFAULT_MAX_FORWARD_DRIFT_MS),
       healthView
     );
@@ -71,11 +72,11 @@ class RemoteInvalidationTransactionTest {
     TransactionSynchronizationManager.initSynchronization();
     try {
       cache.invalidate("k", new InvalidatePolicy(InvalidatePolicy.Scope.REMOTE, false));
-      verifyNoInteractions(dispatcher);
+      verifyNoInteractions(broadcastBuffer);
 
       commit();
 
-      verify(dispatcher).broadcastInvalidate(eq("k"), anyLong());
+      verify(broadcastBuffer).invalidate(eq("k"), anyLong());
     } finally {
       TransactionSynchronizationManager.clear();
     }
@@ -87,7 +88,7 @@ class RemoteInvalidationTransactionTest {
     TransactionSynchronizationManager.initSynchronization();
     try {
       cache.invalidate("k", new InvalidatePolicy(InvalidatePolicy.Scope.REMOTE, true));
-      verify(dispatcher).broadcastInvalidate(eq("k"), anyLong());
+      verify(broadcastBuffer).invalidate(eq("k"), anyLong());
     } finally {
       TransactionSynchronizationManager.clear();
     }
@@ -102,13 +103,13 @@ class RemoteInvalidationTransactionTest {
       cache.invalidate(List.of("k1", "k2"), remote);
       cache.clear(remote);
       cache.clearPrefix("ns" + CacheKeysPolicy.NAMESPACE_DELIMITER, remote);
-      verifyNoInteractions(dispatcher);
+      verifyNoInteractions(broadcastBuffer);
 
       commit();
 
-      verify(dispatcher).broadcastInvalidateBatch(org.mockito.ArgumentMatchers.anyList());
-      verify(dispatcher).broadcastInvalidateAll(anyLong());
-      verify(dispatcher).broadcastInvalidatePrefix(org.mockito.ArgumentMatchers.anyString(), anyLong());
+      verify(broadcastBuffer).invalidateBatch(org.mockito.ArgumentMatchers.anyList());
+      verify(broadcastBuffer).invalidateAll(anyLong());
+      verify(broadcastBuffer).invalidatePrefix(org.mockito.ArgumentMatchers.anyString(), anyLong());
     } finally {
       TransactionSynchronizationManager.clear();
     }

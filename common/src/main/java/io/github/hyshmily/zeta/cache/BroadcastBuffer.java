@@ -14,9 +14,12 @@
  */
 package io.github.hyshmily.zeta.cache;
 
+import static io.github.hyshmily.zeta.constants.ZetaConstants.NO_SYNC_PUBLISHER_MESSAGE;
+
 import com.google.errorprone.annotations.concurrent.GuardedBy;
 import io.github.hyshmily.zeta.sync.local.CacheSyncPublisher;
 import io.github.hyshmily.zeta.sync.local.SyncMessage;
+import io.github.hyshmily.zeta.sync.local.SyncType;
 import io.github.hyshmily.zeta.util.Internal;
 import io.github.hyshmily.zeta.util.TimeSource;
 import java.util.ArrayList;
@@ -31,7 +34,19 @@ import lombok.extern.slf4j.Slf4j;
 import org.jspecify.annotations.Nullable;
 
 /**
- * Lossy deferred send buffer for cache-sync messages.
+ * The sync plane's single send outlet: a lossy deferred buffer for PUT/REFRESH
+ * records and the immediate INVALIDATE family.
+ *
+ * <p>All broadcasts to peers leave through this class, so the publisher and the
+ * dedicated send executor are owned in one place and a deployment without a
+ * publisher explains its silence identically at every site.
+ *
+ * <p><b>Causal cancellation.</b> An INVALIDATE at version {@code v} cancels every
+ * buffered PUT/REFRESH for the same key at or below {@code v} before the
+ * invalidation leaves: those records are dead the moment the invalidation exists,
+ * and shipping them afterwards would re-warm what the peers just removed. The
+ * cancellation is part of the invalidation send, not a caller obligation, so a
+ * new invalidation shape cannot forget it.
  *
  * <p>Records the newest version for each key; on {@link #flush()} sends the
  * most recent entry per key via the {@link CacheSyncPublisher}. Concurrent
@@ -128,6 +143,15 @@ public class BroadcastBuffer {
    * {@code zeta.stall.broadcast_storm.stopped.total}.
    */
   private final AtomicLong saturationDropCounter = new AtomicLong();
+
+  /**
+   * Cumulative INVALIDATE-family messages dropped because the send executor
+   * refused them. Kept separate from {@link #saturationDropCounter}: that meter
+   * is documented as put/refresh loss, and one batch invalidation is one message
+   * regardless of how many keys it carries. A dropped invalidation converges
+   * through the peer's hard TTL (at-most-once sync contract, design decisions: sync messages).
+   */
+  private final AtomicLong invalidatesDropped = new AtomicLong();
 
   /**
    * Cumulative put/refresh broadcasts that failed to send (broker errors in
@@ -235,9 +259,9 @@ public class BroadcastBuffer {
    * <p>When {@code stillCurrent} is supplied, it runs once under the swap read side
    * before the merge and once after it: a tombstone already recorded refuses the
    * record, and one recorded while the payload was being serialized is re-checked
-   * after the merge so the record removes itself. Paired with
-   * {@link #evictIfAtOrBelow} recording the tombstone before evicting, the two
-   * sides close the serialize-then-record window without a second lock.
+   * after the merge so the record removes itself. Paired with the invalidation's
+   * {@link #cancel} running before the send, the two sides close the
+   * serialize-then-record window without a second lock.
    *
    * <p>Schedules the deferred flush if none is pending; a flush that is already scheduled
    * is left alone (it picks up the latest state at fire time), and is only forced when the
@@ -275,7 +299,7 @@ public class BroadcastBuffer {
       // or refuses it. The read side is shared, so this second check — not the
       // lock — closes the serialize-then-record window.
       if (stillCurrent != null && !stillCurrent.test(version)) {
-        evictInBin(key, version);
+        cancelInBin(key, version);
         return;
       }
       sizeAfter = pendingSizeApprox.get();
@@ -301,6 +325,156 @@ public class BroadcastBuffer {
   }
 
   /**
+   * Broadcast a value-carrying PUT for a freshly written key (design decisions: sync messages).
+   *
+   * <p>The value is serialized into an immutable byte payload on the calling
+   * thread so the buffer holds a frozen snapshot; the payload flows through the
+   * same deferred path as REFRESH (same-key writes merge to the newest
+   * version+value). Degrades to a value-less {@link SyncType#REFRESH} when the
+   * value cannot be carried (not JSON-serializable or over
+   * {@code zeta.sync.put-max-bytes}) — peers reload through their own loader.
+   *
+   * @param key          the affected cache key
+   * @param value        the value just written (never {@code null} — the facade
+   *                     rejects null puts)
+   * @param version      the data version allocated for the write
+   * @param stillCurrent the currentness predicate, or {@code null} to admit
+   *                     every record
+   */
+  public void put(String key, Object value, long version, @Nullable LongPredicate stillCurrent) {
+    CacheSyncPublisher pub = publisherFor("PUT");
+    if (pub == null) {
+      return;
+    }
+    record(key, version, pub.serializePutPayload(value), stillCurrent);
+  }
+
+  /**
+   * Broadcast a single-key INVALIDATE on the send executor, cancelling any
+   * buffered PUT/REFRESH for the same key at or below {@code version} first.
+   *
+   * @param key     the affected cache key
+   * @param version the data version the invalidation was allocated at
+   */
+  public void invalidate(String key, long version) {
+    CacheSyncPublisher pub = publisherFor("INVALIDATE");
+    if (pub == null) {
+      return;
+    }
+    cancel(key, version);
+    sendInvalidate(() -> pub.broadcastInvalidate(key, version));
+  }
+
+  /**
+   * Broadcast one batched invalidation message carrying up to
+   * {@value SyncMessage#MAX_BATCH_ENTRIES} key/version pairs (design decisions: invalidation).
+   *
+   * @param entries the key/version pairs (never {@code null}/empty — the engine
+   *                chunks its key set into non-empty blocks)
+   */
+  public void invalidateBatch(List<SyncMessage.Entry> entries) {
+    CacheSyncPublisher pub = publisherFor("INVALIDATE_BATCH");
+    if (pub == null) {
+      return;
+    }
+    cancelBatch(entries);
+    sendInvalidate(() -> pub.broadcastInvalidateBatch(entries));
+  }
+
+  /**
+   * Broadcast a namespace clear: peers remove every entry whose key starts with
+   * {@code prefix} and whose data version is at or below {@code clearStamp}.
+   *
+   * @param prefix     the physical key prefix (never null or empty)
+   * @param clearStamp the data stamp the clear was allocated at
+   */
+  public void invalidatePrefix(String prefix, long clearStamp) {
+    CacheSyncPublisher pub = publisherFor("INVALIDATE_PREFIX");
+    if (pub == null) {
+      return;
+    }
+    if (prefix != null && !prefix.isEmpty()) {
+      cancelMatching(prefix, clearStamp);
+    }
+    sendInvalidate(() -> pub.broadcastInvalidatePrefix(prefix, clearStamp));
+  }
+
+  /**
+   * Broadcast a full clear: peers remove every entry whose data version is at
+   * or below {@code clearStamp}. One message covers the whole cache regardless
+   * of how many keys the sender holds locally.
+   *
+   * @param clearStamp the data stamp the clear was allocated at
+   */
+  public void invalidateAll(long clearStamp) {
+    CacheSyncPublisher pub = publisherFor("INVALIDATE_ALL");
+    if (pub == null) {
+      return;
+    }
+    cancelMatching(null, clearStamp);
+    sendInvalidate(() -> pub.broadcastInvalidateAll(clearStamp));
+  }
+
+  /**
+   * The no-publisher guard shared by every immediate broadcast: returns the
+   * wired publisher, or {@code null} after logging the plane's debug line so a
+   * local-only deployment explains its silence identically at every site.
+   *
+   * <p>Returning the reference rather than a boolean keeps the non-null
+   * guarantee in the caller's local scope: the send lambdas capture it directly
+   * instead of re-testing the field the guard just checked.
+   *
+   * @param op the operation that could not be sent (named in the debug line)
+   * @return the publisher, or {@code null} when the caller must return without broadcasting
+   */
+  @Nullable
+  private CacheSyncPublisher publisherFor(String op) {
+    CacheSyncPublisher current = publisher;
+    if (current != null) {
+      return current;
+    }
+    if (log.isDebugEnabled()) {
+      log.debug("send {}: {}", op, NO_SYNC_PUBLISHER_MESSAGE);
+    }
+    return null;
+  }
+
+  /**
+   * Run one INVALIDATE-family publish, off the calling thread when a send
+   * executor is wired (design decisions: invalidation). Executor saturation or shutdown drops the
+   * message with a counted DEBUG line — at-most-once sync means the peer
+   * converges via the next write or its hard TTL.
+   *
+   * @param send the publish action (never {@code null})
+   */
+  private void sendInvalidate(Runnable send) {
+    Executor executor = sendExecutor;
+    if (executor == null) {
+      // Manual construction / tests: no executor, so send synchronously.
+      send.run();
+      return;
+    }
+
+    try {
+      executor.execute(() -> {
+        try {
+          send.run();
+        } catch (RuntimeException e) {
+          // The publisher logs and counts its own broker failures; this guard keeps an
+          // executor-side failure from killing a pooled thread.
+          log.debug("INVALIDATE send failed on send executor: {}", e.toString());
+        }
+      });
+    } catch (RuntimeException rejected) {
+      long total = invalidatesDropped.incrementAndGet();
+      log.debug(
+        "INVALIDATE send dropped: send executor saturated (cumulativeDrops={}; peers converge via hard TTL)",
+        total
+      );
+    }
+  }
+
+  /**
    * Cancels pending PUT/REFRESH records for {@code key} whose version is at or
    * below {@code version} — the process-local causal cancellation for the
    * cross-channel race: a PUT/REFRESH buffered here is flushed up to
@@ -312,34 +486,34 @@ public class BroadcastBuffer {
    * data on the peers.
    *
    * <p>The approximate size/payload counters move inside the same bin compute as
-   * the removal. Every eviction holds the swap read side and every flush reset holds
-   * the write side, so the decrement cannot race the reset, and a record that
+   * the removal. Every cancellation holds the swap read side and every flush reset
+   * holds the write side, so the decrement cannot race the reset, and a record that
    * re-creates the key afterwards is counted from zero instead of inheriting a
    * phantom capacity.
    *
    * @param key     the key whose pending records to cancel
    * @param version the invalidation's data stamp; records at or below it die
    */
-  public void evictIfAtOrBelow(String key, long version) {
+  private void cancel(String key, long version) {
     if (version <= 0L) {
       return;
     }
 
     swapLock.readLock().lock();
     try {
-      evictEntry(key, version);
+      cancelEntry(key, version);
     } finally {
       swapLock.readLock().unlock();
     }
   }
 
   /**
-   * Batch form of {@link #evictIfAtOrBelow(String, long)}: one read-lock
-   * acquisition for the whole key/version list instead of one per entry.
+   * Batch form of {@link #cancel(String, long)}: one read-lock acquisition for
+   * the whole key/version list instead of one per entry.
    *
    * @param entries the key/version pairs to cancel; never {@code null}
    */
-  public void evictBatchIfAtOrBelow(List<SyncMessage.Entry> entries) {
+  private void cancelBatch(List<SyncMessage.Entry> entries) {
     if (entries.isEmpty()) {
       return;
     }
@@ -347,7 +521,7 @@ public class BroadcastBuffer {
     try {
       for (SyncMessage.Entry entry : entries) {
         if (entry.version() > 0L) {
-          evictEntry(entry.key(), entry.version());
+          cancelEntry(entry.key(), entry.version());
         }
       }
     } finally {
@@ -357,49 +531,33 @@ public class BroadcastBuffer {
 
   /**
    * Cancels pending records for every key under {@code prefix} whose version
-   * is at or below {@code clearStamp} — the namespace-scoped form of
-   * {@link #evictIfAtOrBelow(String, long)}.
+   * is at or below {@code clearStamp}; a {@code null} prefix is the table-wide
+   * form.
    *
-   * @param prefix     the physical key prefix (non-empty)
+   * @param prefix     the physical key prefix, or {@code null} for the whole table
    * @param clearStamp the clear's data stamp
    */
-  public void evictPrefixIfAtOrBelow(String prefix, long clearStamp) {
-    evictMatching(prefix, clearStamp);
-  }
-
-  /**
-   * Cancels every pending record whose version is at or below
-   * {@code clearStamp} — the table-wide form of
-   * {@link #evictIfAtOrBelow(String, long)}.
-   *
-   * @param clearStamp the clear's data stamp
-   */
-  public void evictAllIfAtOrBelow(long clearStamp) {
-    evictMatching(null, clearStamp);
-  }
-
-  /** Prefix-scoped (or table-wide when {@code prefix == null}) pending-record cancellation. */
-  private void evictMatching(String prefix, long clearStamp) {
+  private void cancelMatching(@Nullable String prefix, long clearStamp) {
     if (clearStamp <= 0L) {
       return;
     }
 
     swapLock.readLock().lock();
     try {
-      evictWhere(prefix, clearStamp);
+      cancelWhere(prefix, clearStamp);
     } finally {
       swapLock.readLock().unlock();
     }
   }
 
-  private void evictEntry(String key, long version) {
+  private void cancelEntry(String key, long version) {
     // Lock-free pre-check: an absent key, or one already newer than the
     // invalidation, must not take the bin lock that computeIfPresent would.
     VersionInfo current = pending.get(key);
     if (current == null || current.version() > version) {
       return;
     }
-    evictInBin(key, version);
+    cancelInBin(key, version);
   }
 
   /**
@@ -409,7 +567,7 @@ public class BroadcastBuffer {
    * entry's count. The caller holds the swap read side, so this cannot interleave a
    * flush reset.
    */
-  private void evictInBin(String key, long version) {
+  private void cancelInBin(String key, long version) {
     pending.computeIfPresent(key, (k, old) -> {
       if (old.version() > version) {
         return old;
@@ -423,7 +581,7 @@ public class BroadcastBuffer {
     });
   }
 
-  private void evictWhere(@Nullable String prefix, long version) {
+  private void cancelWhere(@Nullable String prefix, long version) {
     for (Map.Entry<String, VersionInfo> entry : pending.entrySet()) {
       // Integer compare first: startsWith is the expensive half and most
       // entries in a table-wide sweep fail this cheaper test.
@@ -431,7 +589,7 @@ public class BroadcastBuffer {
         // Version-guarded removal, not remove(key, value): a record merged after
         // this iteration entry was read must still be cancelled when its live
         // version is at or below the invalidation, whatever its object identity.
-        evictInBin(entry.getKey(), version);
+        cancelInBin(entry.getKey(), version);
       }
     }
   }
@@ -494,6 +652,10 @@ public class BroadcastBuffer {
     }
 
     synchronized (scheduleLock) {
+      // Re-read inside the lock: a flush that completed between this call's first sample and
+      // the lock reset the window, and anchoring the new window to the stale sample would make
+      // it look older than it is (an early urgent flush).
+      long anchorNow = TimeSource.monotonicMillis();
       // The record whose entry this call observed was swapped out by a flush that
       // already cleared the window: arming a task for the empty map would anchor
       // the next record's deferral window to a cycle that carries nothing.
@@ -501,9 +663,9 @@ public class BroadcastBuffer {
         return;
       }
       if (firstRecordAtMs == 0L) {
-        firstRecordAtMs = now;
+        firstRecordAtMs = anchorNow;
       }
-      boolean urgent = immediate || now - firstRecordAtMs >= maxDeferMs;
+      boolean urgent = immediate || anchorNow - firstRecordAtMs >= maxDeferMs;
       ScheduledFuture<?> current = scheduledFlush;
       if (current != null && !current.isDone()) {
         if (!urgent || current.getDelay(TimeUnit.MILLISECONDS) <= 0L) {
@@ -699,6 +861,19 @@ public class BroadcastBuffer {
    */
   public long saturationDrops() {
     return saturationDropCounter.get();
+  }
+
+  /**
+   * Cumulative INVALIDATE-family messages dropped because the send executor
+   * refused them since startup. Monotonic; safe to read from any thread.
+   * Counted per message, not per carried key, and kept out of
+   * {@code zeta.stall.broadcast_storm.stopped.total} because that meter is
+   * documented as put/refresh loss.
+   *
+   * @return the total invalidation-drop count
+   */
+  public long invalidatesDropped() {
+    return invalidatesDropped.get();
   }
 
   /**

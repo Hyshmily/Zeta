@@ -44,8 +44,9 @@ import io.github.hyshmily.zeta.scheduler.DefaultBackgroundRefresher;
 import io.github.hyshmily.zeta.sharding.HealthView;
 import io.github.hyshmily.zeta.sync.local.CacheSyncListener;
 import io.github.hyshmily.zeta.sync.local.CacheSyncProperties;
-import io.github.hyshmily.zeta.sync.local.DefaultSyncDecisionHandler;
-import io.github.hyshmily.zeta.sync.local.SyncDecisionHandler;
+import io.github.hyshmily.zeta.sync.local.DefaultSyncContext;
+import io.github.hyshmily.zeta.sync.local.SyncContext;
+import io.github.hyshmily.zeta.sync.local.SyncPolicy;
 import io.github.hyshmily.zeta.sync.local.SyncMessage;
 import io.github.hyshmily.zeta.sync.local.SyncType;
 import io.github.hyshmily.zeta.util.TimeSource;
@@ -150,12 +151,8 @@ class VersionStampedLoadTest {
       singleFlight,
       entryLifecycle,
       backgroundRefresher,
-      new CentralDispatcher(
-        new AccessCounter(hotKeyDetector, null, scheduler, 50L, AccessCounter.DEFAULT_DETECTOR_INTERVAL_MS),
-        null,
-        new BroadcastBuffer(scheduler, null, 500, 2_000, null),
-        null
-      ),
+      new AccessCounter(hotKeyDetector, null, scheduler, 50L, AccessCounter.DEFAULT_DETECTOR_INTERVAL_MS),
+      new BroadcastBuffer(scheduler, null, 500, 2_000, null),
       stampClock,
       mock(HealthView.class)
     );
@@ -184,9 +181,10 @@ class VersionStampedLoadTest {
 
   private CacheSyncListener createListener(CacheLoader loader) {
     CacheSyncProperties props = new CacheSyncProperties();
-    props.setWarmupJitterMs(0);
-    SyncDecisionHandler handler = new DefaultSyncDecisionHandler(cache, loader, entryLifecycle, List.of(), null, null);
-    CacheSyncListener l = new CacheSyncListener(props, scheduler, handler, null, null);
+    props.setJitterMs(0);
+    SyncPolicy handler = new SyncPolicy() {};
+    SyncContext context = new DefaultSyncContext(cache, loader, entryLifecycle, List.of(), null, null);
+    CacheSyncListener l = new CacheSyncListener(props, scheduler, handler, context, null, null);
     return l;
   }
 
@@ -235,14 +233,14 @@ class VersionStampedLoadTest {
     assertThat(ce.getDataVersion()).isEqualTo(42L);
 
     // Late stale broadcast (version 10 < the load's 42) — must be rejected.
-    listener.handleSyncMessage(channel, syncMessage("k", SyncType.REFRESH.code(), 10L));
+    listener.onMessage(channel, syncMessage("k", SyncType.REFRESH.code(), 10L));
     awaitScheduler();
     ce = (CacheEntry) cache.getIfPresent("k");
     assertThat(ce.getDataVersion()).isEqualTo(42L);
     assertThat(ce.getValue()).isEqualTo("v");
 
     // A genuinely newer broadcast (version 50 > 42) still applies.
-    listener.handleSyncMessage(channel, syncMessage("k", SyncType.REFRESH.code(), 50L));
+    listener.onMessage(channel, syncMessage("k", SyncType.REFRESH.code(), 50L));
     awaitScheduler();
     ce = (CacheEntry) cache.getIfPresent("k");
     assertThat(ce.getDataVersion()).isEqualTo(50L);
@@ -283,7 +281,7 @@ class VersionStampedLoadTest {
     assertThat(cache.getIfPresent("k")).isNull();
 
     // A versioned REFRESH broadcast still applies normally.
-    listener.handleSyncMessage(channel, syncMessage("k", SyncType.REFRESH.code(), 150L));
+    listener.onMessage(channel, syncMessage("k", SyncType.REFRESH.code(), 150L));
     awaitScheduler();
     CacheEntry ce = (CacheEntry) cache.getIfPresent("k");
     assertThat(ce).isNotNull();

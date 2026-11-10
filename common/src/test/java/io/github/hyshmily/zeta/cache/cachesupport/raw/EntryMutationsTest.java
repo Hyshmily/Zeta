@@ -26,9 +26,9 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 /**
- * Pins the contract every entry-mutating caller relies on: the applied
- * pre/post images are reported only when the stored reference changed, a no-op
- * mutation reports nothing, and a mutation still runs on an absent key.
+ * Pins the contract every entry-mutating caller relies on: the pre/post images
+ * are always the ones the bin lock observed — including an absent key and a
+ * no-op — and the mutation still runs on an absent key.
  */
 class EntryMutationsTest {
 
@@ -40,8 +40,8 @@ class EntryMutationsTest {
   }
 
   @Test
-  @DisplayName("an absent key with a null no-op reports nothing but still runs the mutation")
-  void absentKey_runsTheMutation_andReportsNothingWhenUnchanged() {
+  @DisplayName("an absent key with a null no-op runs the mutation and reports the absent image")
+  void absentKey_runsTheMutation_andReportsTheObservedImage() {
     boolean[] ran = new boolean[1];
 
     EntryMutations.Applied applied = EntryMutations.apply(cache, "k", existing -> {
@@ -50,7 +50,9 @@ class EntryMutationsTest {
     });
 
     assertThat(ran[0]).as("the mutation must run even when the key is absent").isTrue();
-    assertThat(applied).isNull();
+    assertThat(applied.changed()).isFalse();
+    assertThat(applied.previous()).isNull();
+    assertThat(applied.current()).as("the observed post-image is what a serving caller reads").isNull();
     assertThat(cache.getIfPresent("k")).isNull();
   }
 
@@ -61,21 +63,22 @@ class EntryMutationsTest {
 
     EntryMutations.Applied applied = EntryMutations.apply(cache, "k", existing -> created);
 
-    assertThat(applied).isNotNull();
+    assertThat(applied.changed()).isTrue();
     assertThat(applied.previous()).isNull();
     assertThat(applied.current()).isSameAs(created);
     assertThat(cache.getIfPresent("k")).isSameAs(created);
   }
 
   @Test
-  @DisplayName("returning the resident instance reports nothing")
-  void presentKey_unchanged_reportsNothing() {
+  @DisplayName("returning the resident instance reports no change but the resident image")
+  void presentKey_unchanged_reportsTheResidentImage() {
     CacheEntry resident = entry("v");
     cache.put("k", resident);
 
     EntryMutations.Applied applied = EntryMutations.apply(cache, "k", existing -> existing);
 
-    assertThat(applied).isNull();
+    assertThat(applied.changed()).isFalse();
+    assertThat(applied.current()).isSameAs(resident);
     assertThat(cache.getIfPresent("k")).isSameAs(resident);
   }
 
@@ -88,7 +91,7 @@ class EntryMutationsTest {
 
     EntryMutations.Applied applied = EntryMutations.apply(cache, "k", existing -> replacement);
 
-    assertThat(applied).isNotNull();
+    assertThat(applied.changed()).isTrue();
     assertThat(applied.previous()).isSameAs(resident);
     assertThat(applied.current()).isSameAs(replacement);
     assertThat(cache.getIfPresent("k")).isSameAs(replacement);
@@ -102,7 +105,7 @@ class EntryMutationsTest {
 
     EntryMutations.Applied applied = EntryMutations.apply(cache, "k", existing -> null);
 
-    assertThat(applied).isNotNull();
+    assertThat(applied.changed()).isTrue();
     assertThat(applied.previous()).isSameAs(resident);
     assertThat(applied.current()).isNull();
     assertThat(cache.getIfPresent("k")).isNull();

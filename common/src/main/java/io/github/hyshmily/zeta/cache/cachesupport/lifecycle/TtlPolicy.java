@@ -205,8 +205,9 @@ public final class TtlPolicy implements EntryDraft.ExpiryArithmetic {
 
   /**
    * Effective soft TTL for a background refresh: the per-call override wins,
-   * otherwise a HOT entry keeps the hot cadence and a NORMAL/COOL entry reuses
-   * its own stored normal soft TTL or the configured default.
+   * otherwise a HOT entry keeps its own soft window (a promotion may have
+   * raised it above the hot default) and a NORMAL/COOL entry reuses its own
+   * stored normal soft TTL or the configured default.
    *
    * @param entry             the entry being refreshed
    * @param softTtlOverrideMs per-call soft TTL override ({@code 0} = derive)
@@ -215,9 +216,9 @@ public final class TtlPolicy implements EntryDraft.ExpiryArithmetic {
   public long resolveRefreshSoftTtl(CacheEntry entry, long softTtlOverrideMs) {
     return softTtlOverrideMs > 0
       ? softTtlOverrideMs
-      : (entry.getKeyState() == KeyState.HOT
-          ? effectiveHotSoftTtlMs()
-          : (entry.getNormalSoftTtlMs() > 0 ? entry.getNormalSoftTtlMs() : effectiveSoftTtlMs()));
+      : entry.getKeyState() == KeyState.HOT
+        ? (entry.getSoftTtlMs() > 0 ? entry.getSoftTtlMs() : effectiveHotSoftTtlMs())
+        : (entry.getNormalSoftTtlMs() > 0 ? entry.getNormalSoftTtlMs() : effectiveSoftTtlMs());
   }
 
   /**

@@ -37,6 +37,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -136,10 +137,28 @@ class SingleFlightOutcomeTest {
   }
 
   /**
-   * The isolated form runs on the calling thread, commits exactly once and never publishes a
-   * flight; this is the transactional caller's path, where a follower must not observe a value
-   * that may still roll back.
+   * A rejection that races the shutdown drain must not be mistaken for a leader:
+   * the created-flight holder is null on both sides. The load settles as a
+   * suppression instead of touching a null flight.
    */
+  @Test
+  void loadOutcome_breakerRejectsWhileCloseRuns_doesNotThrow() {
+    CircuitBreaker openBreaker = mock(CircuitBreaker.class);
+    AtomicReference<TestSingleFlight> flight = new AtomicReference<>();
+    when(openBreaker.tryAcquireStamp()).thenAnswer(inv -> {
+      flight.get().close();
+      return CircuitBreaker.STAMP_REJECTED;
+    });
+    TestSingleFlight sf = new TestSingleFlight(1000, 10, 5, Runnable::run, registryOf(openBreaker));
+    flight.set(sf);
+
+    LoaderOutcome<String> outcome = sf.loadOutcome("k", () -> {
+      throw new AssertionError("reader must not run after close");
+    });
+
+    assertThat(outcome.status()).isEqualTo(LoadStatus.SUPPRESSED_BREAKER);
+  }
+
   @Test
   void loadIsolated_runsInlineAndCommitsWithoutPublishingAFlight() {
     TestSingleFlight sf = directFlight();
@@ -159,9 +178,13 @@ class SingleFlightOutcomeTest {
     when(openBreaker.tryAcquireStamp()).thenReturn(CircuitBreaker.STAMP_REJECTED);
     TestSingleFlight sf = new TestSingleFlight(1000, 10, 5, Runnable::run, registryOf(openBreaker));
 
-    LoaderOutcome<String> outcome = sf.loadIsolated("k", () -> {
-      throw new AssertionError("reader must not run under an open breaker");
-    }, value -> {});
+    LoaderOutcome<String> outcome = sf.loadIsolated(
+      "k",
+      () -> {
+        throw new AssertionError("reader must not run under an open breaker");
+      },
+      value -> {}
+    );
 
     assertThat(outcome.status()).isEqualTo(LoadStatus.SUPPRESSED_BREAKER);
   }

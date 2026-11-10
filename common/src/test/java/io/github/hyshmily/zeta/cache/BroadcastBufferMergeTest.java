@@ -18,6 +18,8 @@ package io.github.hyshmily.zeta.cache;
 import static org.mockito.Mockito.*;
 
 import io.github.hyshmily.zeta.sync.local.CacheSyncPublisher;
+import io.github.hyshmily.zeta.sync.local.SyncMessage;
+import java.util.List;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -144,36 +146,72 @@ class BroadcastBufferMergeTest {
 
   /**
    * A same-key invalidation cancels only records at or below its stamp; an
-   * absent key or an already-newer record is left untouched.
+   * absent key or an already-newer record is left untouched, and the
+   * invalidation itself leaves.
    */
   @Test
-  void evictIfAtOrBelow_cancelsOldRecordsOnly() {
+  void invalidate_cancelsOldRecordsOnly() {
     BroadcastBuffer buf = buffer();
     buf.record("old", 5L, null, null);
     buf.record("new", 7L, null, null);
 
-    buf.evictIfAtOrBelow("old", 5L);
-    buf.evictIfAtOrBelow("absent", 10L);
-    buf.evictIfAtOrBelow("new", 6L);
+    buf.invalidate("old", 5L);
+    buf.invalidate("absent", 10L);
+    buf.invalidate("new", 6L);
     buf.flush();
 
+    verify(publisher).broadcastInvalidate("old", 5L);
+    verify(publisher).broadcastInvalidate("absent", 10L);
+    verify(publisher).broadcastInvalidate("new", 6L);
     verify(publisher).broadcastRefresh("new", 7L);
+    verifyNoMoreInteractions(publisher);
+  }
+
+  /** A batched invalidation cancels every old record it carries. */
+  @Test
+  void invalidateBatch_cancelsOldRecords() {
+    BroadcastBuffer buf = buffer();
+    buf.record("a", 1L, null, null);
+    buf.record("b", 9L, null, null);
+    List<SyncMessage.Entry> entries = List.of(new SyncMessage.Entry("a", 1L), new SyncMessage.Entry("b", 9L));
+
+    buf.invalidateBatch(entries);
+    buf.flush();
+
+    verify(publisher).broadcastInvalidateBatch(entries);
+    verify(publisher, never()).broadcastRefresh(anyString(), anyLong());
     verifyNoMoreInteractions(publisher);
   }
 
   /** A prefix clear cancels matching old records and leaves other namespaces alone. */
   @Test
-  void evictPrefixIfAtOrBelow_removesOnlyMatchingOldRecords() {
+  void invalidatePrefix_removesOnlyMatchingOldRecords() {
     BroadcastBuffer buf = buffer();
     buf.record("ns:a", 3L, null, null);
     buf.record("ns:b", 9L, null, null);
     buf.record("other", 1L, null, null);
 
-    buf.evictPrefixIfAtOrBelow("ns:", 5L);
+    buf.invalidatePrefix("ns:", 5L);
     buf.flush();
 
+    verify(publisher).broadcastInvalidatePrefix("ns:", 5L);
     verify(publisher).broadcastRefresh("ns:b", 9L);
     verify(publisher).broadcastRefresh("other", 1L);
+    verifyNoMoreInteractions(publisher);
+  }
+
+  /** A full clear cancels every old record, including other namespaces. */
+  @Test
+  void invalidateAll_cancelsEveryOldRecord() {
+    BroadcastBuffer buf = buffer();
+    buf.record("ns:a", 3L, null, null);
+    buf.record("ns:b", 9L, null, null);
+
+    buf.invalidateAll(5L);
+    buf.flush();
+
+    verify(publisher).broadcastInvalidateAll(5L);
+    verify(publisher).broadcastRefresh("ns:b", 9L);
     verifyNoMoreInteractions(publisher);
   }
 

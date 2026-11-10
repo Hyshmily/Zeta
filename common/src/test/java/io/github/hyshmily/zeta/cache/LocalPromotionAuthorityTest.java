@@ -31,6 +31,7 @@ import io.github.hyshmily.zeta.hotkeydetector.HotKeyDetector;
 import io.github.hyshmily.zeta.model.DecisionStamp;
 import io.github.hyshmily.zeta.model.KeyState;
 import io.github.hyshmily.zeta.sharding.HealthView;
+import io.github.hyshmily.zeta.util.TimeSource;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -81,7 +82,7 @@ class LocalPromotionAuthorityTest {
     when(healthView.isCurrentIncarnation("w1", 1L)).thenReturn(true);
     CacheEntry promoted = cache.getIfPresent("k");
 
-    promotion.reassertIfNeeded("k", promoted);
+    promotion.reassertIfNeeded("k", promoted, TimeSource.currentTimeMillis());
 
     CacheEntry reasserted = cache.getIfPresent("k");
     assertThat(reasserted.getKeyState()).isEqualTo(KeyState.COOL);
@@ -109,7 +110,7 @@ class LocalPromotionAuthorityTest {
 
     when(healthView.isClusterHealthy()).thenReturn(true);
     when(healthView.isCurrentIncarnation("w1", 1L)).thenReturn(false);
-    promotion.reassertIfNeeded("k", cache.getIfPresent("k"));
+    promotion.reassertIfNeeded("k", cache.getIfPresent("k"), TimeSource.currentTimeMillis());
 
     CacheEntry after = cache.getIfPresent("k");
     assertThat(after.getKeyState()).isEqualTo(KeyState.HOT);

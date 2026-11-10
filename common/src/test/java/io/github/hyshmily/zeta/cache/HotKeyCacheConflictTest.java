@@ -101,7 +101,7 @@ class HotKeyCacheConflictTest {
   private HealthView healthView;
   private ZetaProperties ttlConfig;
   private StampClock stampClock;
-  private RecordingDispatcher dispatcher;
+  private RecordingBroadcastBuffer broadcastBuffer;
 
   @BeforeEach
   void setUp() {
@@ -123,7 +123,7 @@ class HotKeyCacheConflictTest {
     scheduler = Executors.newSingleThreadScheduledExecutor();
     accessCounter = mock(AccessCounter.class);
     stampClock = mock(StampClock.class);
-    dispatcher = new RecordingDispatcher();
+    broadcastBuffer = new RecordingBroadcastBuffer();
   }
 
   @AfterEach
@@ -143,23 +143,24 @@ class HotKeyCacheConflictTest {
       singleFlight,
       entryLifecycle,
       backgroundRefresher,
-      dispatcher,
+      accessCounter,
+      broadcastBuffer,
       stampClock,
       healthView
     );
   }
 
-  /** The INVALIDATE_BATCH wire entries the cache broadcast (with a null publisher the plain dispatcher drops them). */
-  private final class RecordingDispatcher extends CentralDispatcher {
+  /** The INVALIDATE_BATCH wire entries the cache broadcast (with a null publisher the plain buffer drops them). */
+  private final class RecordingBroadcastBuffer extends BroadcastBuffer {
 
     private final List<SyncMessage.Entry> invalidatedBatches = new ArrayList<>();
 
-    private RecordingDispatcher() {
-      super(accessCounter, null, new BroadcastBuffer(scheduler, null, 500, 2_000, null), null);
+    private RecordingBroadcastBuffer() {
+      super(scheduler, null, 500, 2_000, null);
     }
 
     @Override
-    public void broadcastInvalidateBatch(List<SyncMessage.Entry> entries) {
+    public void invalidateBatch(List<SyncMessage.Entry> entries) {
       invalidatedBatches.addAll(entries);
     }
   }
@@ -298,10 +299,10 @@ class HotKeyCacheConflictTest {
     verify(stampClock, times(1)).nextStamps(keys.size());
     // The block went out on the wire as one INVALIDATE_BATCH — base 30, one
     // entry per key in reservation order.
-    assertThat(dispatcher.invalidatedBatches).hasSize(keys.size());
+    assertThat(broadcastBuffer.invalidatedBatches).hasSize(keys.size());
     for (int i = 0; i < keys.size(); i++) {
-      assertThat(dispatcher.invalidatedBatches.get(i).key()).isEqualTo(keys.get(i));
-      assertThat(dispatcher.invalidatedBatches.get(i).version()).isEqualTo(30L + i);
+      assertThat(broadcastBuffer.invalidatedBatches.get(i).key()).isEqualTo(keys.get(i));
+      assertThat(broadcastBuffer.invalidatedBatches.get(i).version()).isEqualTo(30L + i);
     }
   }
 
@@ -324,7 +325,7 @@ class HotKeyCacheConflictTest {
 
     assertThat(caffeineCache.getIfPresent("k")).isNull();
     verify(stampClock).nextStamp();
-    assertThat(dispatcher.invalidatedBatches).as("a local-only invalidation never reaches a peer").isEmpty();
+    assertThat(broadcastBuffer.invalidatedBatches).as("a local-only invalidation never reaches a peer").isEmpty();
   }
 
   // ── putLocal dedup invariant (design decisions: dedup lifecycle) ──
@@ -562,7 +563,8 @@ class HotKeyCacheConflictTest {
       flight,
       entryLifecycle,
       backgroundRefresher,
-      new CentralDispatcher(accessCounter, null, new BroadcastBuffer(scheduler, null, 500, 2_000, null), null),
+      accessCounter,
+      new BroadcastBuffer(scheduler, null, 500, 2_000, null),
       stampClock,
       healthView
     );

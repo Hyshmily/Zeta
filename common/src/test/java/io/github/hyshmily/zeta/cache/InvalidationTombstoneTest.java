@@ -21,7 +21,6 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import io.github.hyshmily.zeta.cache.cachesupport.policy.GetPolicy;
 import io.github.hyshmily.zeta.cache.cachesupport.policy.InvalidatePolicy;
 import io.github.hyshmily.zeta.cache.cachesupport.policy.StalePolicy;
-import io.github.hyshmily.zeta.sync.local.DefaultSyncDecisionHandler;
 import io.github.hyshmily.zeta.sync.local.SyncMessage;
 import io.github.hyshmily.zeta.sync.local.SyncType;
 import java.util.List;
@@ -121,7 +120,7 @@ class InvalidationTombstoneTest {
   @DisplayName("a peer INVALIDATE refuses a local load that started before it")
   void peerInvalidate_refusesLocalLoad() {
     try (StampTestSupport s = new StampTestSupport()) {
-      TestSyncHandler handler = new TestSyncHandler(s.l1, null, s.lifecycle, List.of(), null);
+      TestSync handler = new TestSync(s.l1, null, s.lifecycle, List.of(), null);
       String served = s.cache.get(
         "k",
         () -> {
@@ -140,7 +139,7 @@ class InvalidationTombstoneTest {
   @DisplayName("a peer INVALIDATE_ALL refuses a local load that started before it")
   void peerClearAll_refusesLocalLoad() {
     try (StampTestSupport s = new StampTestSupport()) {
-      TestSyncHandler handler = new TestSyncHandler(s.l1, null, s.lifecycle, List.of(), null);
+      TestSync handler = new TestSync(s.l1, null, s.lifecycle, List.of(), null);
       String served = s.cache.get(
         "k",
         () -> {
@@ -202,9 +201,7 @@ class InvalidationTombstoneTest {
     try (StampTestSupport s = new StampTestSupport()) {
       s.lifecycle.recordInvalidation("k", 7L);
 
-      assertThat(s.lifecycle.staleAgainstInvalidation("k", 7L))
-        .as("the invalidation applies at equality")
-        .isTrue();
+      assertThat(s.lifecycle.staleAgainstInvalidation("k", 7L)).as("the invalidation applies at equality").isTrue();
       assertThat(s.lifecycle.staleAgainstInvalidation("k", 8L)).isFalse();
     }
   }

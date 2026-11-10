@@ -18,7 +18,6 @@ package io.github.hyshmily.zeta.cache;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import io.github.hyshmily.zeta.cache.cachesupport.raw.CacheEntry;
-import io.github.hyshmily.zeta.sync.local.DefaultSyncDecisionHandler;
 import io.github.hyshmily.zeta.sync.local.SyncMessage;
 import io.github.hyshmily.zeta.sync.local.SyncType;
 import java.util.List;
@@ -36,7 +35,7 @@ class StaleBroadcastRejectedTest {
   void staleRefresh_doesNotOverwrite() {
     try (StampTestSupport support = new StampTestSupport()) {
       support.l1.put("k", StampTestSupport.entry("old", 10L));
-      TestSyncHandler handler = new TestSyncHandler(support.l1, key -> "fresh", support.lifecycle, List.of(), null);
+      TestSync handler = new TestSync(support.l1, key -> "fresh", support.lifecycle, List.of(), null);
 
       handler.handleRefresh(new SyncMessage(1L, "k", SyncType.REFRESH, 5L));
 

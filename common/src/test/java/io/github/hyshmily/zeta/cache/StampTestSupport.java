@@ -67,7 +67,7 @@ final class StampTestSupport implements AutoCloseable {
   final EntryLifecycle lifecycle;
   final ScheduledExecutorService scheduler;
   final HotKeyCache cache;
-  /** Every INVALIDATE_BATCH wire entry the cache broadcast (with a null publisher the plain dispatcher drops them). */
+  /** Every INVALIDATE_BATCH wire entry the cache broadcast (with a null publisher the buffer drops them). */
   final List<SyncMessage.Entry> batchedInvalidations = new ArrayList<>();
 
   StampTestSupport() {
@@ -150,21 +150,22 @@ final class StampTestSupport implements AutoCloseable {
       singleFlight,
       lifecycle,
       new DefaultBackgroundRefresher(l1, Runnable::run, lifecycle, 10),
-      new RecordingDispatcher(accessCounter),
+      accessCounter,
+      new RecordingBroadcastBuffer(),
       clock,
       mock(HealthView.class)
     );
   }
 
-  /** Delegates everything to the null-publisher dispatcher, keeping only the batched-invalidation wire entries. */
-  private final class RecordingDispatcher extends CentralDispatcher {
+  /** Delegates everything to the null-publisher buffer, keeping only the batched-invalidation wire entries. */
+  private final class RecordingBroadcastBuffer extends BroadcastBuffer {
 
-    private RecordingDispatcher(AccessCounter accessCounter) {
-      super(accessCounter, null, new BroadcastBuffer(scheduler, null, 500, 2_000, null), null);
+    private RecordingBroadcastBuffer() {
+      super(scheduler, null, 500, 2_000, null);
     }
 
     @Override
-    public void broadcastInvalidateBatch(List<SyncMessage.Entry> entries) {
+    public void invalidateBatch(List<SyncMessage.Entry> entries) {
       batchedInvalidations.addAll(entries);
     }
   }

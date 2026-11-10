@@ -95,12 +95,8 @@ class HotKeyCacheLoaderReloadTest {
       new SingleFlightImpl(10_000, 5, 5, executor, breakerRegistry),
       entryLifecycle,
       backgroundRefresher,
-      new CentralDispatcher(
-        mock(AccessCounter.class),
-        null,
-        new BroadcastBuffer(scheduler, null, 500, 2_000, null),
-        null
-      ),
+      mock(AccessCounter.class),
+      new BroadcastBuffer(scheduler, null, 500, 2_000, null),
       new MonotonicStampClock(1L, MonotonicStampClock.DEFAULT_MAX_FORWARD_DRIFT_MS),
       healthView
     );

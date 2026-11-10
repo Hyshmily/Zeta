@@ -177,8 +177,17 @@ public class CircuitBreakerImpl implements CircuitBreaker {
    * (batch) or nested cache calls can never cross-consume probes.
    *
    * <p>CLOSED → allow all. OPEN → allow only after {@code singleTestIntervalMs}
-   * has elapsed since opening (HALF_OPEN probe). HALF_OPEN → allow probes only
-   * within the credit-scaled quota.
+   * has elapsed since opening (the HALF_OPEN transitioner). HALF_OPEN → allow
+   * probes only within the credit-scaled quota; an episode whose probes stop
+   * settling (all slots held by hung stamps) is force-retired after
+   * {@code singleTestIntervalMs} without any activity, and the fresh episode
+   * evicts the hung stamps, whose later settlements are ignored by generation.
+   *
+   * <p>The whole machine is one retry loop: a lost CAS means another thread
+   * advanced the state, and the answer must be re-derived from the new epoch.
+   * A thread that observes a transition in flight must not be rejected — it may
+   * read CLOSED a moment later, and a rejection against a healthy breaker
+   * becomes an exception for the caller.
    *
    * @return {@link CircuitBreaker#STAMP_REJECTED} when denied,
    *         {@link CircuitBreaker#STAMP_CLOSED} on the CLOSED path,
@@ -191,72 +200,45 @@ public class CircuitBreakerImpl implements CircuitBreaker {
       return STAMP_CLOSED;
     }
 
-    Epoch e = epoch.get();
-    return switch (e.state) {
-      case CLOSED -> STAMP_CLOSED;
-      case OPEN -> admitFirstProbe(e);
-      case HALF_OPEN -> admitProbe();
-    };
-  }
-
-  /**
-   * OPEN → HALF_OPEN: opens a fresh episode owning one probe slot (the
-   * transitioner) and returns its generation. The cooldown check reads the same
-   * snapshot it CASes on, so a timer that is one transition behind can never
-   * admit a probe — and the CAS is the whole election, so a storm that all sees
-   * an elapsed cooldown still opens exactly one episode.
-   */
-  private long admitFirstProbe(Epoch open) {
-    long now = monotonicMillis();
-    if (now - open.anchorMillis <= config.getSingleTestIntervalMs()) {
-      return STAMP_REJECTED;
-    }
-
-    Epoch episode = open.startNew(now);
-    if (!epoch.compareAndSet(open, episode)) {
-      // Another thread opened the episode (or the state moved on): its admission stands.
-      return STAMP_REJECTED;
-    }
-    if (config.isLogEnabled()) {
-      log.info("CB HALF_OPEN probe");
-    }
-    return episode.generation;
-  }
-
-  /**
-   * HALF_OPEN admission against the credit-scaled quota. Rejected surplus
-   * threads never touch the counter, so their retreat cannot corrupt a
-   * concurrently-reset episode. An episode whose probes stop settling (all
-   * slots held by hung stamps) is force-retired after {@code
-   * singleTestIntervalMs} without any activity: the fresh episode evicts the
-   * hung stamps, whose later settlements are ignored by generation. Slow-but-alive
-   * probes keep settling and keep the episode alive.
-   */
-  private long admitProbe() {
     for (;;) {
       Epoch e = epoch.get();
-      if (e.state != CircuitBreakerState.HALF_OPEN) {
-        return STAMP_REJECTED;
-      }
-
-      int maxProbes = Math.max(1, (int) (config.getHalfOpenMaxProbes() * e.probeCredit));
-      if (e.inflight < maxProbes) {
-        if (epoch.compareAndSet(e, e.slotAcquire())) {
-          return e.generation;
+      switch (e.state) {
+        case CLOSED -> {
+          return STAMP_CLOSED;
         }
-        continue;
-      }
-
-      long now = monotonicMillis();
-      if (now - e.anchorMillis <= config.getSingleTestIntervalMs()) {
-        return STAMP_REJECTED;
-      }
-      Epoch episode = e.startNew(now);
-      if (epoch.compareAndSet(e, episode)) {
-        if (config.isLogEnabled()) {
-          log.info("CB HALF_OPEN episode reset (no probe settled within {} ms)", config.getSingleTestIntervalMs());
+        case OPEN -> {
+          long now = monotonicMillis();
+          if (now - e.anchorMillis <= config.getSingleTestIntervalMs()) {
+            return STAMP_REJECTED;
+          }
+          Epoch episode = e.startNew(now);
+          if (epoch.compareAndSet(e, episode)) {
+            if (config.isLogEnabled()) {
+              log.info("CB HALF_OPEN probe");
+            }
+            return episode.generation;
+          }
         }
-        return episode.generation;
+        case HALF_OPEN -> {
+          int maxProbes = Math.max(1, (int) (config.getHalfOpenMaxProbes() * e.probeCredit));
+          if (e.inflight < maxProbes) {
+            if (epoch.compareAndSet(e, e.slotAcquire())) {
+              return e.generation;
+            }
+            continue;
+          }
+          long now = monotonicMillis();
+          if (now - e.anchorMillis <= config.getSingleTestIntervalMs()) {
+            return STAMP_REJECTED;
+          }
+          Epoch episode = e.startNew(now);
+          if (epoch.compareAndSet(e, episode)) {
+            if (config.isLogEnabled()) {
+              log.info("CB HALF_OPEN episode reset (no probe settled within {} ms)", config.getSingleTestIntervalMs());
+            }
+            return episode.generation;
+          }
+        }
       }
     }
   }

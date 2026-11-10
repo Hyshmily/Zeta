@@ -93,12 +93,8 @@ class HotKeyCacheSingleFlightLifecycleTest {
       singleFlight,
       new EntryLifecycleImpl(l1, props, healthView),
       new DefaultBackgroundRefresher(l1, Runnable::run, new EntryLifecycleImpl(l1, props, healthView), 10),
-      new CentralDispatcher(
-        new AccessCounter(detector, null, scheduler, 50L, AccessCounter.DEFAULT_DETECTOR_INTERVAL_MS),
-        null,
-        new BroadcastBuffer(scheduler, null, 500, 2_000, null),
-        null
-      ),
+      new AccessCounter(detector, null, scheduler, 50L, AccessCounter.DEFAULT_DETECTOR_INTERVAL_MS),
+      new BroadcastBuffer(scheduler, null, 500, 2_000, null),
       new MonotonicStampClock(1L, MonotonicStampClock.DEFAULT_MAX_FORWARD_DRIFT_MS),
       healthView
     );

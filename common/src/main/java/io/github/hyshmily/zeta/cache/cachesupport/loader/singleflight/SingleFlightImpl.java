@@ -151,6 +151,8 @@ public class SingleFlightImpl implements SingleFlight {
     private static final long BIT_INVALIDATED = 1L << 63;
     /** The single settlement bit (leader commit + breaker outcome). */
     private static final long BIT_SETTLED = 1L << 62;
+    /** Set once the load has incremented the backlog; cleared by the one releaser. */
+    private static final long BIT_BACKLOG = 1L << 61;
     private static final VarHandle STATE;
 
     static {
@@ -162,13 +164,9 @@ public class SingleFlightImpl implements SingleFlight {
     }
 
     private final CircuitBreaker breaker;
-    /** One owner releases the backlog count, whether the load settles or the context closes. */
-    private final AtomicBoolean pendingReleased = new AtomicBoolean();
-    /** Set once the load has incremented the backlog; close must not release an uncounted slot. */
-    private volatile boolean pendingClaimed;
     /** The thread running the leader's reader, or {@code 0} when none is running. */
     private volatile long runningThreadId;
-    /** [63]: invalidated | [62]: settled | [0..60]: circuit-breaker stamp. */
+    /** [63]: invalidated | [62]: settled | [61]: backlog counted | [0..60]: circuit-breaker stamp. */
     private volatile long state;
 
     InFlight(CircuitBreaker breaker, long stamp) {
@@ -183,9 +181,30 @@ public class SingleFlightImpl implements SingleFlight {
       this.runningThreadId = 0L;
     }
 
-    /** Whether this flight's backlog increment was already released. */
+    /**
+     * Marks this flight's backlog slot as counted. Called after
+     * {@code pendingLoads.incrementAndGet()}, so close() can release exactly the
+     * slots that were actually counted.
+     */
+    void claimPending() {
+      STATE.getAndBitwiseOr(this, BIT_BACKLOG);
+    }
+
+    /**
+     * Releases this flight's backlog count once. Returns {@code false} when the
+     * slot was never claimed or was already released, so the decrement happens
+     * exactly once per counted load.
+     */
     boolean tryReleasePending() {
-      return pendingReleased.compareAndSet(false, true);
+      for (;;) {
+        long current = state;
+        if ((current & BIT_BACKLOG) == 0L) {
+          return false;
+        }
+        if (STATE.compareAndSet(this, current, current & ~BIT_BACKLOG)) {
+          return true;
+        }
+      }
     }
 
     /** Whether this flight's reader is executing on the calling thread. */
@@ -266,7 +285,9 @@ public class SingleFlightImpl implements SingleFlight {
   ) {
     Election election = elect(cacheKey);
     InFlight flight = election.flight();
-    if (election.leader()) {
+    // close() may have drained and failed the flight between the election and this line; the
+    // join below then reports the rejection instead of running a reader nobody waits for.
+    if (election.leader() && !flight.isDone()) {
       if (callerRuns) {
         return runInline(cacheKey, flight, reader, leaderCommit);
       }
@@ -340,7 +361,7 @@ public class SingleFlightImpl implements SingleFlight {
       }
       Election election = elect(key);
       InFlight flight = election.flight();
-      if (election.leader()) {
+      if (election.leader() && !flight.isDone()) {
         flight = submit(key, flight, () -> reader.apply(key), v -> leaderCommit.accept(key, v));
       }
       elections.put(key, flight);
@@ -397,11 +418,12 @@ public class SingleFlightImpl implements SingleFlight {
     }
     CircuitBreaker breaker = breakerRegistry.breakerFor(key);
 
-    // The candidate is built before the atomic insertion because a mapping
-    // function cannot publish a local; if another thread's flight wins, this
-    // instance is discarded and the winner is a follower. Identity with the
-    // returned flight is the election result: only this call inserted it.
-    InFlight candidate = new InFlight(breaker, CircuitBreaker.STAMP_CLOSED);
+    // The flight is created only after breaker admission, inside the atomic
+    // insertion: a rejected load allocates nothing beyond the small holder. The
+    // holder publishes the created instance back to this call; identity with the
+    // returned flight is the election result, so a loser is a follower without a
+    // second atomic read-modify-write.
+    InFlight[] created = new InFlight[1];
     InFlight flight;
     try {
       flight = inFlightLoads
@@ -411,30 +433,31 @@ public class SingleFlightImpl implements SingleFlight {
           if (stamp == CircuitBreaker.STAMP_REJECTED) {
             return null;
           }
-          // Publish the stamp before leaving the mapping function: the catch
-          // below must be able to release a probe this insertion reserved.
-          candidate.state = stamp & InFlight.STAMP_MASK;
+          InFlight candidate = new InFlight(breaker, stamp);
+          created[0] = candidate;
           return candidate;
         });
     } catch (RuntimeException | Error e) {
       // The mapping stored nothing, so a probe it took before failing must not stay
       // reserved in HALF_OPEN.
-      breaker.onAbandoned(candidate.stamp());
+      InFlight candidate = created[0];
+      if (candidate != null) {
+        breaker.onAbandoned(candidate.stamp());
+      }
       throw e;
     }
-    boolean leader = flight == candidate;
+    boolean leader = flight != null && flight == created[0];
     if (leader) {
       if (closed.get()) {
-        // close() may have drained the table before this insertion became visible. A follower can
-        // observe the candidate between the insertion and this removal, so the withdrawal must
-        // fail its future as well as release the probe: completing the placeholder is what keeps
-        // that follower from joining a flight that no leader will ever finish.
-        if (inFlightLoads.asMap().remove(key, candidate)) {
-          if (candidate.trySettle() && candidate.breaker() != null) {
-            candidate.breaker().onAbandoned(candidate.stamp());
-          }
-          candidate.completeExceptionally(new RejectedExecutionException("SingleFlight closed"));
+        // close() may have drained the table before this insertion became visible, and a
+        // concurrent invalidate(key) may have removed the flight in the same window. Settle and
+        // fail the flight unconditionally: a withdrawal gated on "the removal won" would leak the
+        // breaker probe and leave a follower that already joined waiting forever.
+        inFlightLoads.asMap().remove(key, flight);
+        if (flight.trySettle() && flight.breaker() != null) {
+          flight.breaker().onAbandoned(flight.stamp());
         }
+        flight.completeExceptionally(new RejectedExecutionException("SingleFlight closed"));
         return new Election(CLOSED, false);
       }
       logHighBacklog();
@@ -466,24 +489,29 @@ public class SingleFlightImpl implements SingleFlight {
    * The leader's reader execution and settlement, shared by the inline and submitted
    * paths. The flight is settled exactly once; the leader commits only when it owns
    * that settlement and the value was not superseded.
+   *
+   * <p>The breaker is settled as soon as the reader returns, before the local commit.
+   * The commit runs the admission predicate and the TTL encoding, none of which
+   * passed through the data source: counting a commit failure as a source failure
+   * would fail a HALF_OPEN probe (reopening the breaker) or trip it on a bad
+   * {@code isCacheable} decision.
    */
   private <T> T executeLeaderTask(InFlight flight, Supplier<T> reader, Consumer<? super T> commit) {
     runningLoads.incrementAndGet();
     flight.runningThreadId = Thread.currentThread().getId();
-    boolean settledHere = false;
     try {
       T value = reader.get();
-      settledHere = flight.trySettle();
-      if (settledHere) {
+      if (flight.trySettle()) {
+        flight.breaker().onSuccess(flight.stamp());
         if (value != null && !flight.isInvalidated()) {
           commit.accept(value);
         }
-        flight.breaker().onSuccess(flight.stamp());
       }
       return value;
     } catch (Throwable t) {
-      // A reader failure settles only if no external timeout won the flight first.
-      if (settledHere || flight.trySettle()) {
+      // A reader failure settles only if no external timeout won the flight first. A commit
+      // failure finds the flight already settled here, so the source breaker stays untouched.
+      if (flight.trySettle()) {
         flight.breaker().onFailure(causeOf(t), flight.stamp());
       }
       if (t instanceof Error err) {
@@ -546,7 +574,7 @@ public class SingleFlightImpl implements SingleFlight {
    */
   private <T> LoaderOutcome<T> runInline(String key, InFlight flight, Supplier<T> reader, Consumer<? super T> commit) {
     pendingLoads.incrementAndGet();
-    flight.pendingClaimed = true;
+    flight.claimPending();
     T value;
     try {
       value = executeLeaderTask(flight, reader, commit);
@@ -651,7 +679,7 @@ public class SingleFlightImpl implements SingleFlight {
       if (flight == null) {
         continue;
       }
-      if (flight.pendingClaimed && flight.tryReleasePending()) {
+      if (flight.tryReleasePending()) {
         pendingLoads.decrementAndGet();
       }
       if (flight.trySettle() && flight.breaker() != null) {
@@ -717,7 +745,7 @@ public class SingleFlightImpl implements SingleFlight {
       );
       // Mark after a successful submission: a failed submit decrements below, and
       // close() must not release a slot this load never held.
-      flight.pendingClaimed = true;
+      flight.claimPending();
       return submitted;
     } catch (RuntimeException | Error e) {
       pendingLoads.decrementAndGet();

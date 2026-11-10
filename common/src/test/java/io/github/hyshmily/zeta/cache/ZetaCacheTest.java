@@ -111,7 +111,8 @@ class ZetaCacheTest {
       singleFlight,
       entryLifecycle,
       backgroundRefresher,
-      new CentralDispatcher(accessCounter, null, new BroadcastBuffer(scheduler, null, 500, 2_000, null), null),
+      accessCounter,
+      new BroadcastBuffer(scheduler, null, 500, 2_000, null),
       new MonotonicStampClock(1L, MonotonicStampClock.DEFAULT_MAX_FORWARD_DRIFT_MS),
       healthView
     );
@@ -204,9 +205,7 @@ class ZetaCacheTest {
 
       TransactionSynchronizationManager.getSynchronizations().forEach(TransactionSynchronization::afterCommit);
 
-      assertThat(caffeineCache.getIfPresent("tx-key"))
-        .as("the isolated read registers no deferred store")
-        .isNull();
+      assertThat(caffeineCache.getIfPresent("tx-key")).as("the isolated read registers no deferred store").isNull();
     } finally {
       TransactionSynchronizationManager.clear();
     }
@@ -1085,12 +1084,8 @@ class ZetaCacheTest {
       singleFlight,
       noSoft,
       noSoftRefresh,
-      new CentralDispatcher(
-        new AccessCounter(hotKeyDetector, null, scheduler, 50L, AccessCounter.DEFAULT_DETECTOR_INTERVAL_MS),
-        null,
-        new BroadcastBuffer(scheduler, null, 500, 2_000, null),
-        null
-      ),
+      new AccessCounter(hotKeyDetector, null, scheduler, 50L, AccessCounter.DEFAULT_DETECTOR_INTERVAL_MS),
+      new BroadcastBuffer(scheduler, null, 500, 2_000, null),
       new MonotonicStampClock(1L, MonotonicStampClock.DEFAULT_MAX_FORWARD_DRIFT_MS),
       mock(HealthView.class)
     );
@@ -1205,12 +1200,8 @@ class ZetaCacheTest {
       singleFlight,
       entryLifecycle,
       backgroundRefresher,
-      new CentralDispatcher(
-        new AccessCounter(hotKeyDetector, null, scheduler, 50L, AccessCounter.DEFAULT_DETECTOR_INTERVAL_MS),
-        publisher,
-        new BroadcastBuffer(rejecting, publisher, 500, 2_000, null),
-        null
-      ),
+      new AccessCounter(hotKeyDetector, null, scheduler, 50L, AccessCounter.DEFAULT_DETECTOR_INTERVAL_MS),
+      new BroadcastBuffer(rejecting, publisher, 500, 2_000, null),
       new MonotonicStampClock(1L, MonotonicStampClock.DEFAULT_MAX_FORWARD_DRIFT_MS),
       mock(HealthView.class)
     );
@@ -1621,12 +1612,8 @@ class ZetaCacheTest {
         singleFlight,
         entryLifecycle,
         backgroundRefresher,
-        new CentralDispatcher(
-          new AccessCounter(hotKeyDetector, reporter, scheduler, 50L, AccessCounter.DEFAULT_DETECTOR_INTERVAL_MS),
-          publisher,
-          broadcastBuffer,
-          null
-        ),
+        new AccessCounter(hotKeyDetector, reporter, scheduler, 50L, AccessCounter.DEFAULT_DETECTOR_INTERVAL_MS),
+        broadcastBuffer,
         new MonotonicStampClock(1L, MonotonicStampClock.DEFAULT_MAX_FORWARD_DRIFT_MS),
         healthView
       );
@@ -2060,7 +2047,7 @@ class ZetaCacheTest {
     void invalidate_shouldBroadcastWhenPublisherPresent() {
       hotKeyCache.invalidate("key1", new InvalidatePolicy(InvalidatePolicy.Scope.BOTH, false));
 
-      verify(publisher).broadcastLocalInvalidate(eq("key1"), anyLong());
+      verify(publisher).broadcastInvalidate(eq("key1"), anyLong());
     }
 
     @Test
@@ -2484,12 +2471,8 @@ class ZetaCacheTest {
           new EntryLifecycleImpl(realFlightL1, ttlConfig, healthView),
           10
         ),
-        new CentralDispatcher(
-          new AccessCounter(hotKeyDetector, null, scheduler, 50L, AccessCounter.DEFAULT_DETECTOR_INTERVAL_MS),
-          null,
-          new BroadcastBuffer(scheduler, null, 500, 2_000, null),
-          null
-        ),
+        new AccessCounter(hotKeyDetector, null, scheduler, 50L, AccessCounter.DEFAULT_DETECTOR_INTERVAL_MS),
+        new BroadcastBuffer(scheduler, null, 500, 2_000, null),
         stampClock,
         healthView
       );

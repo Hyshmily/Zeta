@@ -28,19 +28,13 @@ import io.github.hyshmily.zeta.cache.cachesupport.loader.singleflight.SingleFlig
 import io.github.hyshmily.zeta.cache.cachesupport.policy.GetPolicy;
 import io.github.hyshmily.zeta.cache.cachesupport.policy.InvalidatePolicy;
 import io.github.hyshmily.zeta.cache.cachesupport.policy.StalePolicy;
-import io.github.hyshmily.zeta.cache.cachesupport.raw.CacheEntry;
-import io.github.hyshmily.zeta.cache.cachesupport.raw.EntryMutations;
-import io.github.hyshmily.zeta.cache.cachesupport.raw.LocalPromotion;
-import io.github.hyshmily.zeta.cache.cachesupport.raw.QuietCache;
-import io.github.hyshmily.zeta.cache.cachesupport.raw.ReadContext;
-import io.github.hyshmily.zeta.cache.cachesupport.raw.VersionedValue;
+import io.github.hyshmily.zeta.cache.cachesupport.raw.*;
 import io.github.hyshmily.zeta.exception.ZetaSuppressedException;
 import io.github.hyshmily.zeta.hotkeydetector.HotKeyDetector;
 import io.github.hyshmily.zeta.model.KeyState;
 import io.github.hyshmily.zeta.model.ZetaCacheStats;
 import io.github.hyshmily.zeta.scheduler.BackgroundRefresher;
 import io.github.hyshmily.zeta.sharding.HealthView;
-import io.github.hyshmily.zeta.sync.local.CacheSyncPublisher;
 import io.github.hyshmily.zeta.sync.local.SyncMessage;
 import io.github.hyshmily.zeta.util.Internal;
 import io.github.hyshmily.zeta.util.TimeSource;
@@ -50,7 +44,6 @@ import java.util.*;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.function.Function;
-import java.util.function.Predicate;
 import java.util.function.Supplier;
 import lombok.extern.slf4j.Slf4j;
 import org.jspecify.annotations.Nullable;
@@ -62,7 +55,7 @@ import org.jspecify.annotations.Nullable;
  * data-stamp space ({@code dataVersion} for data mutation ordering, orthogonal
  * to {@code decisionVersion} for Worker HOT/COOL decision ordering),
  * SingleFlight deduplication, soft-expire (stale-while-revalidate), and
- * cross-instance synchronization via {@link CacheSyncPublisher}.
+ * cross-instance synchronization via {@link BroadcastBuffer}.
  * All write operations are transaction-aware via {@link TransactionSupport}.
  *
  * <p>
@@ -92,8 +85,11 @@ public class HotKeyCache {
   /** Manages entry lifecycle: guards, demotion and the draft factory. */
   private final EntryLifecycle entryLifecycle;
 
-  /** Central dispatcher: access counting and peer broadcasts. */
-  private final CentralDispatcher dispatcher;
+  /** Central access counter: the read path's single detection/reporting entry. */
+  private final AccessCounter accessCounter;
+
+  /** Sync plane: deferred PUT/REFRESH plus the immediate INVALIDATE family. */
+  private final BroadcastBuffer broadcastBuffer;
 
   /** Deduplicator preventing concurrent in-flight loads for the same key. */
   private final SingleFlight singleFlight;
@@ -144,20 +140,24 @@ public class HotKeyCache {
    * @param singleFlight        load deduplication layer
    * @param entryLifecycle      entry lifecycle manager
    * @param backgroundRefresher background soft-expire refresh executor
-   * @param dispatcher          central send/report dispatch
+   * @param accessCounter       shared read-path counter for detection and reporting
+   * @param broadcastBuffer     sync-plane send outlet for PUT/REFRESH and INVALIDATE
    * @param stampClock          data-version stamp allocation
    * @param healthView          cluster health view for Decision-Validity demotion
    */
   public HotKeyCache(
-      HotKeyDetector hotKeyDetector,
-      Cache<String, CacheEntry> caffeineCache,
-      SingleFlight singleFlight,
-      EntryLifecycle entryLifecycle,
-      BackgroundRefresher backgroundRefresher,
-      CentralDispatcher dispatcher,
-      StampClock stampClock,
-      HealthView healthView) {
-    this.dispatcher = Objects.requireNonNull(dispatcher, "dispatcher");
+    HotKeyDetector hotKeyDetector,
+    Cache<String, CacheEntry> caffeineCache,
+    SingleFlight singleFlight,
+    EntryLifecycle entryLifecycle,
+    BackgroundRefresher backgroundRefresher,
+    AccessCounter accessCounter,
+    BroadcastBuffer broadcastBuffer,
+    StampClock stampClock,
+    HealthView healthView
+  ) {
+    this.accessCounter = Objects.requireNonNull(accessCounter, "accessCounter");
+    this.broadcastBuffer = Objects.requireNonNull(broadcastBuffer, "broadcastBuffer");
     this.stampClock = Objects.requireNonNull(stampClock, "stampClock");
     this.singleFlight = Objects.requireNonNull(singleFlight, "singleFlight");
     this.caffeineCache = Objects.requireNonNull(caffeineCache, "caffeineCache");
@@ -167,10 +167,11 @@ public class HotKeyCache {
     this.ttlPolicy = entryLifecycle.ttlPolicy();
     this.quietCache = new QuietCache<>(this.caffeineCache);
     this.promotion = new LocalPromotion(
-        this.caffeineCache,
-        this.hotKeyDetector,
-        this.entryLifecycle,
-        Objects.requireNonNull(healthView, "healthView"));
+      this.caffeineCache,
+      this.hotKeyDetector,
+      this.entryLifecycle,
+      Objects.requireNonNull(healthView, "healthView")
+    );
     this.hotKeyDetector.setAdmittedSink(this.promotion::onAdmitted);
     // The lifecycle owns demotion; the promoter owns re-promotion. One sink
     // wiring here covers the read paths AND the background sweeper — a
@@ -201,8 +202,10 @@ public class HotKeyCache {
   public boolean isHot(String cacheKey) {
     CacheEntry entry = quietCache.getIfPresent(cacheKey);
 
-    return ((entry != null && !ttlPolicy.isLogicallyExpired(entry) && entry.getKeyState() == KeyState.HOT) ||
-        hotKeyDetector.contains(cacheKey));
+    return (
+      (entry != null && !ttlPolicy.isLogicallyExpired(entry) && entry.getKeyState() == KeyState.HOT) ||
+      hotKeyDetector.contains(cacheKey)
+    );
   }
 
   /**
@@ -231,7 +234,7 @@ public class HotKeyCache {
    * @param mode     how much of the pipeline to run (never {@code null})
    */
   public void recordAccess(String cacheKey, Zeta.TagMode mode) {
-    dispatcher.recordAccess(cacheKey, mode);
+    accessCounter.record(cacheKey, mode);
   }
 
   /**
@@ -245,7 +248,7 @@ public class HotKeyCache {
    *                 facade rejects non-positive counts)
    */
   public void recordAccess(String cacheKey, long count) {
-    dispatcher.recordAccess(cacheKey, count);
+    accessCounter.add(cacheKey, count);
   }
 
   /**
@@ -366,10 +369,11 @@ public class HotKeyCache {
    * @return the cached (possibly stale) or loaded value; {@code null} = miss
    */
   private <T> T readThrough(
-      String key,
-      @Nullable Supplier<T> reader,
-      @Nullable CacheLoader<String, T> loader,
-      GetPolicy options) {
+    String key,
+    @Nullable Supplier<T> reader,
+    @Nullable CacheLoader<String, T> loader,
+    GetPolicy options
+  ) {
     boolean report = options.report();
     CacheEntry entry = caffeineCache.getIfPresent(key);
     if (entry == null) {
@@ -397,7 +401,7 @@ public class HotKeyCache {
         // reload
         // decides the write regime; the reload itself records the single access and
         // hit/miss.
-        reconcileStateOnly(key, hit, ctx);
+        applyHit(key, hit, ctx, now);
         requestMisses.increment();
         return loadAndCache(key, ctx);
       }
@@ -421,10 +425,11 @@ public class HotKeyCache {
    * the hit path.
    */
   private <T> ReadContext readContext(
-      String key,
-      @Nullable Supplier<T> reader,
-      @Nullable CacheLoader<String, T> loader,
-      GetPolicy options) {
+    String key,
+    @Nullable Supplier<T> reader,
+    @Nullable CacheLoader<String, T> loader,
+    GetPolicy options
+  ) {
     return loader == null ? ReadContext.of(reader, options) : ReadContext.ofLoader(loader, key, options);
   }
 
@@ -443,7 +448,7 @@ public class HotKeyCache {
   private <T> T servePlain(String key, CacheEntry entry, boolean report) {
     T value = unwrap(entry);
     if (value != null) {
-      dispatcher.recordAccess(key, report);
+      accessCounter.record(key, report);
     }
     return value;
   }
@@ -526,17 +531,11 @@ public class HotKeyCache {
     }
 
     boolean softExpired = ttlPolicy.isSoftExpired(current, now);
-    if (softExpired && policy == StalePolicy.REVALIDATE) {
-      // The caller blocks on a reload, but a state correction must still run first: a
-      // soft-expired
-      // Worker-HOT entry whose Worker is gone has to be demoted before writeValue
-      // decides whether
-      // to preserve the elevated regime. The reload otherwise re-stores the stale HOT
-      // lease.
-      return new HitClassification(current, resolveStateAction(key, current), false, true);
-    }
+    // REVALIDATE is the only policy that blocks the caller on a reload; SOFT_REFRESH serves
+    // the stale value and arms the refresh below. The state correction travels with both.
+    boolean revalidate = softExpired && policy == StalePolicy.REVALIDATE;
     boolean refresh = softExpired && policy == StalePolicy.SOFT_REFRESH;
-    return new HitClassification(current, resolveStateAction(key, current), refresh, false);
+    return new HitClassification(current, resolveStateAction(key, current), refresh, revalidate);
   }
 
   /**
@@ -577,9 +576,10 @@ public class HotKeyCache {
    *         keys with no value are omitted
    */
   public <T> Map<String, T> get(
-      List<String> cacheKeys,
-      Function<? super String, ? extends T> reader,
-      GetPolicy options) {
+    List<String> cacheKeys,
+    Function<? super String, ? extends T> reader,
+    GetPolicy options
+  ) {
     // The batch pipeline has no per-key lazy-TTL path: evaluate the override
     // suppliers once for the whole batch (the documented batch contract).
     long hard = options.hardTtlMs().getAsLong();
@@ -615,11 +615,12 @@ public class HotKeyCache {
    *         keys with no value are omitted
    */
   private <T> Map<String, T> batchGet(
-      List<String> cacheKeys,
-      Function<? super String, ? extends T> reader,
-      GetPolicy options,
-      long hardTtlMs,
-      long softTtlMs) {
+    List<String> cacheKeys,
+    Function<? super String, ? extends T> reader,
+    GetPolicy options,
+    long hardTtlMs,
+    long softTtlMs
+  ) {
     List<String> misses = new ArrayList<>(cacheKeys.size());
     Map<String, T> results = new LinkedHashMap<>(mapCapacity(cacheKeys.size()));
     // GetPolicy is an immutable record: the report flag is batch-wide, not per key.
@@ -659,8 +660,7 @@ public class HotKeyCache {
         misses.add(key);
       }
     }
-    if (misses.isEmpty())
-      return results;
+    if (misses.isEmpty()) return results;
 
     loadAndCache(misses, reader, hardTtlMs, softTtlMs, report, results);
     return results;
@@ -684,13 +684,14 @@ public class HotKeyCache {
    *         reload
    */
   private <T> T probeBatchHit(
-      String key,
-      Function<? super String, ? extends T> reader,
-      StalePolicy stalePolicy,
-      long hardTtlMs,
-      long softTtlMs,
-      boolean report,
-      long now) {
+    String key,
+    Function<? super String, ? extends T> reader,
+    StalePolicy stalePolicy,
+    long hardTtlMs,
+    long softTtlMs,
+    boolean report,
+    long now
+  ) {
     CacheEntry entry = caffeineCache.getIfPresent(key);
     if (entry == null) {
       return null;
@@ -704,10 +705,7 @@ public class HotKeyCache {
       // The batched load is the reload; apply the state correction first so its write
       // does not
       // preserve a Worker-HOT regime whose Worker is no longer authoritative.
-      reconcileStateOnly(
-          key,
-          hit,
-          ReadContext.ofBatch(null, hardTtlMs, softTtlMs, report, stalePolicy));
+      applyHit(key, hit, ReadContext.ofBatch(null, hardTtlMs, softTtlMs, report, stalePolicy), now);
       return null;
     }
     // EXPIRED defers to the batched load: the key joins the one loadAndCache
@@ -760,8 +758,7 @@ public class HotKeyCache {
    * @param now   the current epoch-millis (a single per-call sample)
    */
   private void refreshSoftExpire(String key, CacheEntry entry, ReadContext ctx, long now) {
-    Supplier<?> refreshReader = ctx.refreshReader();
-    if (refreshReader == null || !ttlPolicy.isSoftExpired(entry, now)) {
+    if (!ctx.hasSource() || !ttlPolicy.isSoftExpired(entry, now)) {
       return;
     }
 
@@ -782,47 +779,53 @@ public class HotKeyCache {
     // rejected value resolves to null, which the refresher treats as "skip the
     // apply".
     backgroundRefresher.triggerBackgroundRefresh(
-        key,
-        () -> {
-          long stamp = nextStamp();
-          Object value = refreshReader.get();
-          return ctx.admits(value) ? new VersionedValue(value, stamp) : null;
-        },
-        softTtl);
+      key,
+      () -> {
+        long stamp = nextStamp();
+        Object value = ctx.refreshValue();
+        return ctx.admits(value) ? new VersionedValue(value, stamp) : null;
+      },
+      softTtl
+    );
   }
 
   /**
-   * Applies the one state rewrite a classification named without serving or
-   * counting the value —
-   * the reload path's pre-step. A reload discards the returned image anyway, so
-   * this method only
-   * performs the correction; the following load records the single access.
+   * Applies the one state rewrite a hit classification named and returns the
+   * post-image the bin lock observed. A {@code null} answer means the key is now
+   * absent (a removal, or a hard-expired resident cleared by the compute), so
+   * the caller reloads instead of serving the pre-lock snapshot. A reload
+   * discards the returned image; it calls this only for the correction.
    *
    * @param key the cache key
    * @param hit the classification whose action to apply
-   * @param ctx the per-call read context for a degraded promotion's TTLs
+   * @param ctx the per-call read context (TTL overrides stay lazy)
+   * @param now the per-call clock sample
+   * @return the entry to serve, or {@code null} when the key is gone
    */
-  private void reconcileStateOnly(String key, HitClassification hit, ReadContext ctx) {
+  @Nullable
+  private CacheEntry applyHit(String key, HitClassification hit, ReadContext ctx, long now) {
     CacheEntry entry = hit.entry();
     if (entry == null) {
-      return;
+      return null;
     }
-    switch (hit.action()) {
-      case DEMOTE -> entryLifecycle.demoteIfRemoteNodeIdInvalid(key, entry);
-      case REASSERT -> promotion.reassertIfNeeded(key, entry);
-      case PROMOTE -> promotion.promoteDegraded(key, ctx);
-      default -> {
-      }
-    }
+    return switch (hit.action()) {
+      case DEMOTE -> entryLifecycle.demoteIfRemoteNodeIdInvalid(key, entry, now).current();
+      case REASSERT -> promotion.reassertIfNeeded(key, entry, now).current();
+      case PROMOTE -> promotion.promoteDegraded(key, ctx, now).current();
+      case NONE -> entry;
+      case EXPIRED -> null;
+    };
   }
 
   /**
    * Reconcile a classified hit: perform the one state rewrite the
    * classification named (demote an invalid Worker decision, reassert a
-   * recovered COOL lease, or promote a degraded-mode COOL entry), then re-check
-   * logical expiry on the post-image the mutation reported (TOCTOU) — no second
-   * table lookup. Both the single-key and batch hit paths converge here (design
-   * decisions: hot state).
+   * recovered COOL lease, or promote a degraded-mode COOL entry), then serve the
+   * post-image the rewrite's bin lock observed — no second table lookup and no
+   * fallback to the pre-lock snapshot. A concurrent invalidation or eviction
+   * therefore resolves as a miss instead of serving the removed entry.
+   * Both the single-key and batch hit paths converge here (design decisions: hot
+   * state).
    *
    * <p>
    * The {@code SOFT_REFRESH} arming lives here rather than in the caller so the
@@ -846,45 +849,30 @@ public class HotKeyCache {
    * @param <T> the value type
    * @return the cached value, or {@code null} if logically expired
    */
-  @SuppressWarnings("unchecked")
   private <T> T reconcileHit(String key, HitClassification hit, ReadContext ctx, long now) {
     CacheEntry entry = hit.entry();
-    if (entry == null) {
+    if (entry == null || entry.getValue() == null) {
       return null;
     }
-    T value = (T) entry.getValue();
-    if (value == null) {
-      return null;
-    }
-    EntryMutations.Applied applied = switch (hit.action()) {
-      case DEMOTE -> entryLifecycle.demoteIfRemoteNodeIdInvalid(key, entry);
-      case REASSERT -> promotion.reassertIfNeeded(key, entry);
-      case PROMOTE -> promotion.promoteDegraded(key, ctx);
-      default -> null;
-    };
-    CacheEntry effective = applied != null ? applied.current() : entry;
+
+    // The post-image comes from the mutation's own compute, i.e. from what the
+    // bin lock observed: an entry a concurrent invalidate/eviction removed
+    // yields null and becomes a miss, never the snapshot read before the lock.
+    // Every rewrite removes a resident that was hard-expired at `now`, so the
+    // post-image is live and needs no second expiry check.
+    CacheEntry effective = applyHit(key, hit, ctx, now);
     if (effective == null) {
       return null;
     }
-    // TOCTOU: a rewrite may have crossed its hard deadline, or a concurrent
-    // replacement may have landed. No access is recorded when the key is gone: the
-    // caller's reload records it once.
-    if (effective != entry) {
-      effective = entryLifecycle.evictIfExpired(key, effective, now);
-      if (effective == null) {
-        return null;
-      }
-    }
 
-    dispatcher.recordAccess(key, ctx.report());
+    accessCounter.record(key, ctx.report());
     // Arm only when the classification asked for a refresh or a rewrite changed
     // the entry's expiry image; a rewrite alone can leave a fresh entry.
     if (ctx.stalePolicy() == StalePolicy.SOFT_REFRESH && (hit.refresh() || effective != entry)) {
       refreshSoftExpire(key, effective, ctx, now);
     }
     // Return the post-image's value: a concurrent replacement observed under the
-    // bin lock may
-    // differ from the snapshot this call started with.
+    // bin lock may differ from the snapshot this call started with.
     return unwrap(effective);
   }
 
@@ -912,14 +900,13 @@ public class HotKeyCache {
    * write.
    *
    * @param key the key to load
-   * @param ctx the per-call read context (reader, cacheFilter and
-   *            TTL overrides; the TTL suppliers are consumed exactly once
-   *            per call through the memoized context)
+   * @param ctx the per-call read context (loader/reader source and the loader's
+   *            admission rule; the TTL suppliers are consumed exactly once per
+   *            call through the memoized context)
    */
   @SuppressWarnings("unchecked")
   private <T> T loadAndCache(String key, ReadContext ctx) {
-    Supplier<T> reader = (Supplier<T>) ctx.reader();
-    if (reader == null) {
+    if (!ctx.hasSource()) {
       // No reader on a miss resolves as the documented null answer instead of an
       // NPE inside the SingleFlight execution.
       return resolveNullAnswer(key, ctx.report());
@@ -933,18 +920,15 @@ public class HotKeyCache {
     // the followers wake; inside one it waits for afterCommit.
     Supplier<VersionedValue> stampedReader = () -> {
       long stamp = nextStamp();
-      T loaded = reader.get();
+      T loaded = (T) ctx.loadValue();
       return loaded == null ? null : new VersionedValue(loaded, stamp);
     };
     boolean transactionalCaller = ctx.callerRunsLoader() && TransactionSupport.isDeferred(false);
     LoaderOutcome<VersionedValue> outcome = transactionalCaller
-        ? singleFlight.loadIsolated(key, stampedReader, value -> {
-        })
-        : singleFlight.load(
-            key,
-            stampedReader,
-            ctx.callerRunsLoader(),
-            value -> loadCacheEntry(key, hardTtl, softTtl, value, ctx.cacheFilter()));
+      ? singleFlight.loadIsolated(key, stampedReader, value -> {})
+      : singleFlight.load(key, stampedReader, ctx.callerRunsLoader(), value ->
+          loadCacheEntry(key, hardTtl, softTtl, value, ctx)
+        );
     return resolveLoaded(key, outcome, ctx.report());
   }
 
@@ -968,12 +952,13 @@ public class HotKeyCache {
    * @param <T>       the value type
    */
   private <T> void loadAndCache(
-      List<String> cacheKeys,
-      Function<? super String, ? extends T> reader,
-      long hardTtlMs,
-      long softTtlMs,
-      boolean report,
-      Map<String, T> into) {
+    List<String> cacheKeys,
+    Function<? super String, ? extends T> reader,
+    long hardTtlMs,
+    long softTtlMs,
+    boolean report,
+    Map<String, T> into
+  ) {
     final long effectiveHardTtlMs = ttlPolicy.resolveEffectiveHardTtl(hardTtlMs);
     final long effectiveSoftTtlMs = ttlPolicy.resolveEffectiveSoftTtl(softTtlMs);
     // design decisions: version stamps: every key's stamp is allocated BEFORE the
@@ -984,12 +969,13 @@ public class HotKeyCache {
     allocateStampBlocks(cacheKeys, stamps);
 
     Map<String, LoaderOutcome<VersionedValue>> loaded = singleFlight.load(
-        cacheKeys,
-        k -> {
-          T value = reader.apply(k);
-          return value == null ? null : new VersionedValue(value, stamps.get(k));
-        },
-        (k, value) -> loadCacheEntry(k, effectiveHardTtlMs, effectiveSoftTtlMs, value, null));
+      cacheKeys,
+      k -> {
+        T value = reader.apply(k);
+        return value == null ? null : new VersionedValue(value, stamps.get(k));
+      },
+      (k, value) -> loadCacheEntry(k, effectiveHardTtlMs, effectiveSoftTtlMs, value, null)
+    );
 
     Throwable failure = null;
     for (String key : cacheKeys) {
@@ -1046,37 +1032,50 @@ public class HotKeyCache {
         if (value == null || value.value() == null) {
           yield resolveNullAnswer(key, report);
         }
-        dispatcher.recordAccess(key, report);
+        accessCounter.record(key, report);
         yield (T) value.value();
       }
       // An empty source is not a failure: no throw, no suppression log.
       case SOURCE_EMPTY -> resolveNullAnswer(key, report);
       case SUPPRESSED_BREAKER, SUPPRESSED_TIMEOUT, SUPPRESSED_EXECUTOR -> resolveSuppressed(
-          key,
-          outcome.status(),
-          report);
+        key,
+        outcome.status(),
+        report
+      );
       case FAILED -> resolveFailed(key, outcome.cause(), report);
     };
   }
 
   /**
-   * A suppressed load: an open breaker degrades to the stale fallback, any other
-   * suppression still propagates its {@link ZetaSuppressedException}. The breaker
-   * is consulted once — the stale fallback trusts this verdict.
+   * A suppressed load: the stale fallback is tried once, without a second breaker probe. A
+   * suppression that <em>can</em> be degraded serves the stale entry even when the breaker has
+   * closed in the meantime — re-asking it would race a recovery that already happened and turn a
+   * designed degradation into a thrown {@link ZetaSuppressedException}. With nothing servable a
+   * breaker suppression surfaces like a timeout or an executor rejection: the reader never ran,
+   * so the caller must be able to tell that from "no data" (`SOURCE_EMPTY`). An open breaker with
+   * nothing servable still resolves as a miss, the documented stale-first degradation.
    *
    * @param key    the key whose load was suppressed
    * @param status the suppression reason
    * @param report whether this read feeds Worker reporting
    * @param <T>    the value type
-   * @return the stale value when the breaker is open, otherwise this method
-   *         throws
+   * @return the stale value, or {@code null} for an open breaker with nothing servable
    */
   private <T> T resolveSuppressed(String key, LoadStatus status, boolean report) {
-    if (!singleFlight.isBreakerOpen(key)) {
+    boolean breakerSuppressed = status == LoadStatus.SUPPRESSED_BREAKER;
+    if (!breakerSuppressed && !singleFlight.isBreakerOpen(key)) {
+      throw new ZetaSuppressedException(key, status);
+    }
+    T stale = serveStaleEntry(key, report);
+    if (stale != null) {
+      logSuppressedLoad(key, status);
+      return stale;
+    }
+    if (breakerSuppressed) {
       throw new ZetaSuppressedException(key, status);
     }
     logSuppressedLoad(key, status);
-    return serveStaleEntry(key, report);
+    return null;
   }
 
   /**
@@ -1229,8 +1228,13 @@ public class HotKeyCache {
       log.debug("CB open, discarding hard-expired entry for key={}", key);
       return null;
     }
-    dispatcher.recordAccess(key, report);
     T value = unwrap(resident);
+    // Only a served value is a read: a value-less entry is not served and must
+    // not feed the access history.
+    if (value == null) {
+      return null;
+    }
+    accessCounter.record(key, report);
     log.debug("CB open, returning stale entry for key={}", key);
     return value;
   }
@@ -1266,10 +1270,11 @@ public class HotKeyCache {
     if (entryLifecycle.staleAgainstInvalidation(key, stamp)) {
       return true;
     }
-    return (entry != null &&
-        !ttlPolicy.isLogicallyExpired(entry) &&
-        (equalApplies ? VersionGuard.shouldSkipForRefresh(entry, stamp)
-            : VersionGuard.shouldSkipForSync(entry, stamp)));
+    return (
+      entry != null &&
+      !ttlPolicy.isLogicallyExpired(entry) &&
+      (equalApplies ? VersionGuard.shouldSkipForRefresh(entry, stamp) : VersionGuard.shouldSkipForSync(entry, stamp))
+    );
   }
 
   /**
@@ -1285,21 +1290,21 @@ public class HotKeyCache {
    * @param loaded        the load carrier; every entry is built with its
    *                      positive pre-read stamp (design decisions: version
    *                      stamps)
-   * @param cacheFilter   admission predicate ({@code null} = admit all);
-   *                      {@code false} skips the store — the value is served
-   *                      but leaves no L1 entry
+   * @param ctx           the per-call read context whose loader admission rule
+   *                      gates the store, or {@code null} to admit every value
    */
   private void loadCacheEntry(
-      String key,
-      long normalHardTtl,
-      long normalSoftTtl,
-      VersionedValue loaded,
-      @Nullable Predicate<Object> cacheFilter) {
-    // cacheFilter admission: a rejected value never takes L1 residency
+    String key,
+    long normalHardTtl,
+    long normalSoftTtl,
+    VersionedValue loaded,
+    @Nullable ReadContext ctx
+  ) {
+    // Loader admission: a rejected value never takes L1 residency
     // (detection/reporting already ran for the value). Evaluate it here, on the
     // load thread, so a deferred store does not pin the loader or its scope.
-    if (cacheFilter != null && !cacheFilter.test(loaded.value())) {
-      log.debug("cacheFilter rejected value, skipping L1 store: key={}", key);
+    if (ctx != null && !ctx.admits(loaded.value())) {
+      log.debug("loader admission rejected value, skipping L1 store: key={}", key);
       return;
     }
 
@@ -1309,8 +1314,11 @@ public class HotKeyCache {
     // Inside an active transaction the loader may have read that transaction's
     // own uncommitted writes. The store waits for afterCommit, so a rollback
     // never leaves those writes in L1. Outside a transaction it runs inline.
-    TransactionSupport.run(false, () -> EntryMutations.mutate(caffeineCache, key,
-        entry -> buildEntryOnWrite(key, entry, value, stamp, normalHardTtl, normalSoftTtl, false, hot)));
+    TransactionSupport.run(false, () ->
+      EntryMutations.mutate(caffeineCache, key, entry ->
+        buildEntryOnWrite(key, entry, value, stamp, normalHardTtl, normalSoftTtl, false, hot)
+      )
+    );
   }
 
   /**
@@ -1333,7 +1341,7 @@ public class HotKeyCache {
     TransactionSupport.run(policy.immediate(), () -> {
       long stamp = nextStamp();
       if (policy.scope() == InvalidatePolicy.Scope.REMOTE) {
-        dispatcher.broadcastInvalidate(cacheKey, stamp);
+        broadcastBuffer.invalidate(cacheKey, stamp);
         return;
       }
       dropAndBroadcastInvalidate(cacheKey, stamp, policy.sync());
@@ -1382,7 +1390,7 @@ public class HotKeyCache {
   private void dropAndBroadcastInvalidate(String key, long stamp, boolean broadcast) {
     dropLocal(key, stamp);
     if (broadcast) {
-      dispatcher.broadcastInvalidate(key, stamp);
+      broadcastBuffer.invalidate(key, stamp);
     }
   }
 
@@ -1455,7 +1463,7 @@ public class HotKeyCache {
         }
       }
       if (broadcast) {
-        dispatcher.broadcastInvalidateBatch(entries);
+        broadcastBuffer.invalidateBatch(entries);
       }
     });
   }
@@ -1508,12 +1516,13 @@ public class HotKeyCache {
       return;
     }
     writeThroughApply(
-        key,
-        value,
-        stamp,
-        ttlPolicy.resolveEffectiveHardTtl(hardTtlMs),
-        ttlPolicy.resolveEffectiveSoftTtl(softTtlMs),
-        sync);
+      key,
+      value,
+      stamp,
+      ttlPolicy.resolveEffectiveHardTtl(hardTtlMs),
+      ttlPolicy.resolveEffectiveSoftTtl(softTtlMs),
+      sync
+    );
   }
 
   /**
@@ -1540,7 +1549,7 @@ public class HotKeyCache {
    * Apply one write to L1, retire the key's dedup entry, and — when
    * {@code broadcast} is set and the store was actually applied — broadcast the
    * value-carrying PUT to peers (they apply version-guarded, no reload; degrades
-   * to a value-less REFRESH inside the dispatcher when the value is not
+   * to a value-less REFRESH inside the broadcast buffer when the value is not
    * serializable or over the size bound). This is the single apply tail of
    * {@code putThrough}, {@code refresh} and {@code putLocal}.
    *
@@ -1561,22 +1570,24 @@ public class HotKeyCache {
    * touching the dedup entry.
    */
   private void writeThroughApply(
-      String key,
-      Object value,
-      long stamp,
-      long normalHardTtl,
-      long normalSoftTtl,
-      boolean broadcast) {
+    String key,
+    Object value,
+    long stamp,
+    long normalHardTtl,
+    long normalSoftTtl,
+    boolean broadcast
+  ) {
     boolean hot = hotKeyDetector.contains(key);
-    EntryMutations.Applied applied = EntryMutations.apply(caffeineCache, key,
-        entry -> buildEntryOnWrite(key, entry, value, stamp, normalHardTtl, normalSoftTtl, true, hot));
+    CacheEntry applied = EntryMutations.mutate(caffeineCache, key, entry ->
+      buildEntryOnWrite(key, entry, value, stamp, normalHardTtl, normalSoftTtl, true, hot)
+    );
     singleFlight.invalidate(key);
     // Only an applied store reaches peers: a refused write returns the untouched
-    // resident.
-    if (broadcast && applied != null) {
+    // resident, whose older stamp cannot equal this call's freshly allocated one.
+    if (broadcast && applied != null && applied.getDataVersion() == stamp) {
       // The predicate runs when the record enters the buffer, after serialization:
       // an invalidation that lands while the payload is being built suppresses it.
-      dispatcher.broadcastPut(key, value, stamp, version -> !entryLifecycle.staleAgainstInvalidation(key, version));
+      broadcastBuffer.put(key, value, stamp, version -> !entryLifecycle.staleAgainstInvalidation(key, version));
     }
   }
 
@@ -1611,20 +1622,21 @@ public class HotKeyCache {
    * @return the entry to store; the resident unchanged when the write is refused
    */
   private CacheEntry buildEntryOnWrite(
-      String key,
-      @Nullable CacheEntry entry,
-      Object value,
-      long stamp,
-      long normalHardTtl,
-      long normalSoftTtl,
-      boolean equalApplies,
-      boolean hot) {
+    String key,
+    @Nullable CacheEntry entry,
+    Object value,
+    long stamp,
+    long normalHardTtl,
+    long normalSoftTtl,
+    boolean equalApplies,
+    boolean hot
+  ) {
     if (writeRefused(key, entry, stamp, equalApplies)) {
       return entry;
     }
 
-    boolean promoteHot = hot
-        && (entry == null || ttlPolicy.isLogicallyExpired(entry) || promotion.mayPromoteLocally(entry));
+    boolean promoteHot =
+      hot && (entry == null || ttlPolicy.isLogicallyExpired(entry) || promotion.mayPromoteLocally(entry));
 
     return entryLifecycle.writeValue(entry, value, stamp, normalHardTtl, normalSoftTtl, promoteHot);
   }
@@ -1880,9 +1892,9 @@ public class HotKeyCache {
 
   private void broadcastClear(@Nullable String prefix, long clearStamp) {
     if (prefix == null) {
-      dispatcher.broadcastInvalidateAll(clearStamp);
+      broadcastBuffer.invalidateAll(clearStamp);
     } else {
-      dispatcher.broadcastInvalidatePrefix(prefix, clearStamp);
+      broadcastBuffer.invalidatePrefix(prefix, clearStamp);
     }
   }
 
@@ -1916,8 +1928,8 @@ public class HotKeyCache {
         continue;
       }
       caffeineCache
-          .asMap()
-          .compute(key, (k, entry) -> (entry != null && entry.getDataVersion() > versionCeiling) ? entry : null);
+        .asMap()
+        .compute(key, (k, entry) -> (entry != null && entry.getDataVersion() > versionCeiling) ? entry : null);
     }
   }
 

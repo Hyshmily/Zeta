@@ -62,12 +62,8 @@ class L1TypeClosureTest {
       mock(SingleFlight.class),
       entryLifecycle,
       new DefaultBackgroundRefresher(caffeineCache, Runnable::run, entryLifecycle, 10),
-      new CentralDispatcher(
-        new AccessCounter(hotKeyDetector, null, scheduler, 50L, AccessCounter.DEFAULT_DETECTOR_INTERVAL_MS),
-        null,
-        new BroadcastBuffer(scheduler, null, 500, 2_000, null),
-        null
-      ),
+      new AccessCounter(hotKeyDetector, null, scheduler, 50L, AccessCounter.DEFAULT_DETECTOR_INTERVAL_MS),
+      new BroadcastBuffer(scheduler, null, 500, 2_000, null),
       mock(StampClock.class),
       healthView
     );

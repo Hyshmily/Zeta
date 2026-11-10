@@ -20,6 +20,9 @@ import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.mockito.Mockito.*;
 
 import io.github.hyshmily.zeta.sync.local.CacheSyncPublisher;
+import io.github.hyshmily.zeta.sync.local.SyncMessage;
+import java.nio.charset.StandardCharsets;
+import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -596,5 +599,100 @@ class BroadcastBufferTest {
       actualDistinctKeys,
       "All distinct keys should be published exactly once"
     );
+  }
+
+  // ── Immediate INVALIDATE family ──
+
+  @Test
+  void broadcastInvalidate_withPublisher_runsOnTheSendExecutor() throws Exception {
+    ExecutorService sendExecutor = Executors.newSingleThreadExecutor();
+    try {
+      BroadcastBuffer buf = new BroadcastBuffer(scheduler, publisher, 5000L, 2_000L, sendExecutor);
+      CountDownLatch latch = new CountDownLatch(1);
+      doAnswer(inv -> {
+        latch.countDown();
+        return null;
+      })
+        .when(publisher)
+        .broadcastInvalidate("key5", 1L);
+
+      buf.invalidate("key5", 1L);
+
+      assertThat(latch.await(2, TimeUnit.SECONDS)).isTrue();
+      verify(publisher).broadcastInvalidate("key5", 1L);
+    } finally {
+      sendExecutor.shutdownNow();
+    }
+  }
+
+  @Test
+  void broadcastInvalidate_withoutExecutor_runsInline() {
+    BroadcastBuffer buf = new BroadcastBuffer(scheduler, publisher, 5000L, 2_000L, null);
+    buf.invalidate("key5b", 1L);
+    verify(publisher, timeout(1000)).broadcastInvalidate("key5b", 1L);
+  }
+
+  @Test
+  void broadcastInvalidate_withoutPublisher_isNoOp() {
+    BroadcastBuffer buf = new BroadcastBuffer(scheduler, null, 5000L, 2_000L, null);
+    assertThatCode(() -> buf.invalidate("key6", 2L)).doesNotThrowAnyException();
+  }
+
+  @Test
+  void invalidate_withRejectingExecutor_countsTheDrop() {
+    Executor rejecting = command -> {
+      throw new RejectedExecutionException("saturated");
+    };
+    BroadcastBuffer buf = new BroadcastBuffer(scheduler, publisher, 5000L, 2_000L, rejecting);
+
+    buf.invalidate("key7", 3L);
+
+    assertThat(buf.invalidatesDropped()).isEqualTo(1L);
+  }
+
+  @Test
+  void broadcastInvalidateBatch_sendsOneChunk() {
+    BroadcastBuffer buf = new BroadcastBuffer(scheduler, publisher, 5000L, 2_000L, null);
+    List<SyncMessage.Entry> entries = List.of(new SyncMessage.Entry("a", 1L), new SyncMessage.Entry("b", 2L));
+    buf.invalidateBatch(entries);
+    verify(publisher).broadcastInvalidateBatch(entries);
+  }
+
+  @Test
+  void broadcastInvalidateAll_sendsOneClear() {
+    BroadcastBuffer buf = new BroadcastBuffer(scheduler, publisher, 5000L, 2_000L, null);
+    buf.invalidateAll(9L);
+    verify(publisher).broadcastInvalidateAll(9L);
+  }
+
+  @Test
+  void broadcastPut_serializable_buffersPutRecord() {
+    BroadcastBuffer buf = new BroadcastBuffer(scheduler, publisher, 5000L, 2_000L, null);
+    byte[] payload = "value-bytes".getBytes(StandardCharsets.UTF_8);
+    when(publisher.serializePutPayload("v")).thenReturn(payload);
+
+    buf.put("key9", "v", 5L, null);
+    buf.flush();
+
+    verify(publisher).broadcastPut("key9", 5L, payload);
+    verify(publisher, never()).broadcastRefresh(anyString(), anyLong());
+  }
+
+  @Test
+  void broadcastPut_serializationFails_degradesToRefresh() {
+    BroadcastBuffer buf = new BroadcastBuffer(scheduler, publisher, 5000L, 2_000L, null);
+    when(publisher.serializePutPayload("v")).thenReturn(null);
+
+    buf.put("key10", "v", 6L, null);
+    buf.flush();
+
+    verify(publisher).broadcastRefresh("key10", 6L);
+    verify(publisher, never()).broadcastPut(anyString(), anyLong(), any());
+  }
+
+  @Test
+  void broadcastPut_withoutPublisher_isNoOp() {
+    BroadcastBuffer buf = new BroadcastBuffer(scheduler, null, 5000L, 2_000L, null);
+    assertThatCode(() -> buf.put("key11", "v", 7L, null)).doesNotThrowAnyException();
   }
 }

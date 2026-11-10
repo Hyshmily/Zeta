@@ -15,61 +15,71 @@
  */
 package io.github.hyshmily.zeta.cache;
 
+import com.github.benmanes.caffeine.cache.Cache;
 import io.github.hyshmily.zeta.cache.cachesupport.lifecycle.EntryLifecycle;
 import io.github.hyshmily.zeta.cache.cachesupport.loader.CacheLoader;
+import io.github.hyshmily.zeta.cache.cachesupport.loader.singleflight.SingleFlight;
 import io.github.hyshmily.zeta.cache.cachesupport.raw.CacheEntry;
-import io.github.hyshmily.zeta.sync.local.DefaultSyncDecisionHandler;
+import io.github.hyshmily.zeta.sync.local.Batch;
+import io.github.hyshmily.zeta.sync.local.DefaultSyncContext;
 import io.github.hyshmily.zeta.sync.local.SyncHook;
 import io.github.hyshmily.zeta.sync.local.SyncMessage;
+import io.github.hyshmily.zeta.sync.local.SyncPolicy;
 import io.github.hyshmily.zeta.sync.local.SyncType;
 import java.util.List;
 import org.jspecify.annotations.Nullable;
 
 /**
- * Test facade over {@link DefaultSyncDecisionHandler} that keeps the
- * per-message call shape the semantic tests read best with. Every method wraps
- * its message in a one-element batch; the handler's own contract is unchanged.
+ * Test facade over {@link DefaultSyncContext} that keeps the per-message call shape the
+ * semantic tests read best with. Every method wraps its message in the matching one-element
+ * batch and calls the framework's default {@link SyncPolicy}.
  */
-final class TestSyncHandler {
+final class TestSync {
 
-  private final DefaultSyncDecisionHandler delegate;
+  private final DefaultSyncContext context;
 
-  TestSyncHandler(
-    com.github.benmanes.caffeine.cache.Cache<String, CacheEntry> cache,
+  private final SyncPolicy policy = new SyncPolicy() {};
+
+  TestSync(
+    Cache<String, CacheEntry> cache,
     @Nullable CacheLoader<String, Object> loader,
     EntryLifecycle lifecycle,
     List<SyncHook> hooks
   ) {
-    this.delegate = new DefaultSyncDecisionHandler(cache, loader, lifecycle, hooks, null, null);
+    this.context = new DefaultSyncContext(cache, loader, lifecycle, hooks, null, null);
   }
 
-  TestSyncHandler(
-    com.github.benmanes.caffeine.cache.Cache<String, CacheEntry> cache,
+  TestSync(
+    Cache<String, CacheEntry> cache,
     @Nullable CacheLoader<String, Object> loader,
     EntryLifecycle lifecycle,
     List<SyncHook> hooks,
-    io.github.hyshmily.zeta.cache.cachesupport.loader.singleflight.SingleFlight singleFlight
+    SingleFlight singleFlight
   ) {
-    this.delegate = new DefaultSyncDecisionHandler(cache, loader, lifecycle, hooks, singleFlight, null);
+    this.context = new DefaultSyncContext(cache, loader, lifecycle, hooks, singleFlight, null);
   }
 
   void handleRefresh(SyncMessage message) {
-    delegate.handleBatch(List.of(message));
+    policy.value(value(message), context);
   }
 
   void handlePut(SyncMessage message) {
-    delegate.handleBatch(List.of(message));
+    policy.value(value(message), context);
   }
 
   void handleLocalInvalidate(SyncMessage message) {
-    delegate.handleBatch(List.of(message));
+    policy.invalidate(value(message), context);
   }
 
   void handleClearAll(long stamp) {
-    delegate.handleBatch(List.of(new SyncMessage(0L, "clear-all", SyncType.INVALIDATE_ALL, stamp)));
+    policy.clear(new Batch.Clear(List.of(new SyncMessage(0L, "clear-all", SyncType.INVALIDATE_ALL, stamp))), context);
   }
 
   void handleClearPrefix(String prefix, long stamp) {
-    delegate.handleBatch(List.of(new SyncMessage(0L, prefix, SyncType.INVALIDATE_PREFIX, stamp)));
+    policy.clear(new Batch.Clear(List.of(new SyncMessage(0L, prefix, SyncType.INVALIDATE_PREFIX, stamp))), context);
+  }
+
+  private static Batch.Value value(SyncMessage message) {
+    return new Batch.Value(List.of(message), message, List.of(), null);
   }
 }

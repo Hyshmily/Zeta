@@ -144,12 +144,8 @@ class HotKeyCacheWriteGuardRegressionTest {
       singleFlight,
       entryLifecycle,
       backgroundRefresher,
-      new CentralDispatcher(
-        accessCounter,
-        publisher,
-        new BroadcastBuffer(scheduler, publisher, 500, 2_000, null),
-        null
-      ),
+      accessCounter,
+      new BroadcastBuffer(scheduler, publisher, 500, 2_000, null),
       stampClock,
       healthView
     );

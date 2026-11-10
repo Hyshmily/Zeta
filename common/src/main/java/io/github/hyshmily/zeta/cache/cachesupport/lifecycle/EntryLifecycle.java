@@ -94,20 +94,22 @@ public interface EntryLifecycle {
    * <p>A successful demotion fires the demoted sink registered via
    * {@link #setDemotedSink(java.util.function.Consumer)} — one owner of the
    * "re-queue the locally-hot key for the promoter" follow-up, shared by the
-   * read paths and the background sweeper.
+   * read paths and the background sweeper. A resident whose hard deadline has
+   * passed is removed in the same compute instead of demoted.
    *
    * @param cacheKey the cache key
    * @param raw      the L1 entry (may be {@code null})
-   * @return the applied pre/post-images, or {@code null} when no demotion applied
+   * @param now      the per-call epoch-millis sample
+   * @return the images the bin lock observed; {@link Applied#changed()} is
+   *         {@code false} when no demotion applied
    */
-  @Nullable
-  Applied demoteIfRemoteNodeIdInvalid(String cacheKey, @Nullable CacheEntry raw);
+  Applied demoteIfRemoteNodeIdInvalid(String cacheKey, @Nullable CacheEntry raw, long now);
 
   /**
    * Read-only Decision-Validity check: whether {@code raw} is a Worker-sourced
    * {@link KeyState#HOT} entry whose issuing incarnation is no longer
    * authoritative. The read path uses it to decide whether a hit must enter
-   * reconciliation; {@link #demoteIfRemoteNodeIdInvalid(String, CacheEntry)}
+   * reconciliation; {@link #demoteIfRemoteNodeIdInvalid(String, CacheEntry, long)}
    * performs the rewrite.
    *
    * @param raw the L1 entry to inspect (never {@code null})

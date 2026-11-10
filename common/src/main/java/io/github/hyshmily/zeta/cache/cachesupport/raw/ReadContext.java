@@ -21,7 +21,6 @@ import io.github.hyshmily.zeta.cache.cachesupport.policy.GetPolicy;
 import io.github.hyshmily.zeta.cache.cachesupport.policy.StalePolicy;
 import io.github.hyshmily.zeta.util.Internal;
 import java.util.function.LongSupplier;
-import java.util.function.Predicate;
 import java.util.function.Supplier;
 import org.jspecify.annotations.Nullable;
 
@@ -40,10 +39,16 @@ import org.jspecify.annotations.Nullable;
  * {@link GetPolicy} contract — allocates nothing extra.
  *
  * <p>
+ * A loader-backed call keeps the loader and its key by reference instead of
+ * building per-call {@code load}/{@code reload}/{@code isCacheable} adapters, so
+ * the miss path allocates only the context. A plain or batch call keeps its
+ * reader, which serves both the foreground load and the background refresh.
+ *
+ * <p>
  * One instance per read call. The mutable memoization is confined to the
- * calling thread; a scheduled background refresh consumes only the
- * {@link #refreshReader() refresh reader} and the immutable admission
- * predicate, never the memoized TTLs (which are resolved before scheduling).
+ * calling thread; a scheduled background refresh consumes only the reload source
+ * and the immutable loader admission predicate, never the memoized TTLs (which
+ * are resolved before scheduling).
  */
 @Internal
 public final class ReadContext {
@@ -63,11 +68,15 @@ public final class ReadContext {
    */
   private final @Nullable LongSupplier rawHardTtlMs;
   private final @Nullable LongSupplier rawSoftTtlMs;
-  /** The background-refresh reader, or {@code null} for "same reader" ({@link #refreshReader()}). */
-  private final @Nullable Supplier<?> refreshReader;
-  private final @Nullable Predicate<Object> cacheFilter;
+
+  /** The loader and its bound key, or both {@code null} for a plain/batch reader. */
+  private final @Nullable CacheLoader<String, Object> loader;
+  private final @Nullable String loaderKey;
+
   private final StalePolicy stalePolicy;
-  private final Supplier<?> reader;
+
+  /** The plain reader, or {@code null} when the call is loader-backed. */
+  private final @Nullable Supplier<?> reader;
 
   private final boolean callerRunsLoader;
   private final boolean report;
@@ -75,10 +84,10 @@ public final class ReadContext {
   private long hardTtl = UNRESOLVED;
   private long softTtl = UNRESOLVED;
 
-  public ReadContext(
-    Supplier<?> reader,
-    @Nullable Supplier<?> refreshReader,
-    @Nullable Predicate<Object> cacheFilter,
+  private ReadContext(
+    @Nullable Supplier<?> reader,
+    @Nullable CacheLoader<String, Object> loader,
+    @Nullable String loaderKey,
     StalePolicy stalePolicy,
     boolean report,
     boolean callerRunsLoader,
@@ -86,11 +95,11 @@ public final class ReadContext {
     @Nullable LongSupplier rawSoftTtlMs
   ) {
     this.reader = reader;
+    this.loader = loader;
+    this.loaderKey = loaderKey;
     this.report = report;
-    this.cacheFilter = cacheFilter;
     this.rawHardTtlMs = rawHardTtlMs;
     this.rawSoftTtlMs = rawSoftTtlMs;
-    this.refreshReader = refreshReader;
     this.callerRunsLoader = callerRunsLoader;
     // Engine boundary for the tri-state policy: an unspecified (null) policy
     // becomes the default here, as in the read path's hit classification. The
@@ -102,7 +111,7 @@ public final class ReadContext {
   /**
    * Single-key read path with a plain reader: the TTL suppliers stay lazy and are memoized once
    * per call, so SpEL-backed expressions are evaluated at most once regardless of how many
-   * downstream methods consume them. A plain supplier serves both the foreground load and the
+   * downstream methods consume them. The reader serves both the foreground load and the
    * background refresh, and admits every non-{@code null} value.
    *
    * @param reader  the foreground miss reader (may be {@code null} = no load)
@@ -123,22 +132,20 @@ public final class ReadContext {
   }
 
   /**
-   * Loader-backed single-key read: the two readers and the admission predicate are derived
-   * from the loader when — and only when — this context is actually built, so a plain hit
-   * allocates none of them.
+   * Loader-backed single-key read: the loader and the key it is bound to travel
+   * by reference, so a miss allocates only the context.
    *
    * @param loader   the typed loader carried by the call
    * @param cacheKey the key the loader is bound to
    * @param options  the resolved per-invocation read options
    * @return the per-call context
    */
-  @SuppressWarnings({ "unchecked", "rawtypes" })
+  @SuppressWarnings("unchecked")
   public static ReadContext ofLoader(CacheLoader<String, ?> loader, String cacheKey, GetPolicy options) {
-    CacheLoader<String, Object> typed = (CacheLoader) loader;
     return new ReadContext(
-      () -> typed.load(cacheKey),
-      () -> typed.reload(cacheKey),
-      typed::isCacheable,
+      null,
+      (CacheLoader<String, Object>) loader,
+      cacheKey,
       options.stalePolicy(),
       options.report(),
       options.callerRunsLoader(),
@@ -153,54 +160,59 @@ public final class ReadContext {
    * object and no lazy indirection is allocated per key. The batch path never
    * asks for caller-runs, so its readers run on the load executor.
    *
-   * <p>The batch path has no separate refresh reader and no admission filter:
+   * <p>The batch path has no separate refresh source and no admission filter:
    * the same reader serves a soft-expire background refresh, and every
    * non-{@code null} value is stored.
    */
   public static ReadContext ofBatch(
-    Supplier<?> reader,
+    @Nullable Supplier<?> reader,
     long hardTtlMs,
     long softTtlMs,
     boolean report,
     StalePolicy stalePolicy
   ) {
-    ReadContext ctx = new ReadContext(reader, reader, null, stalePolicy, report, false, null, null);
+    ReadContext ctx = new ReadContext(reader, null, null, stalePolicy, report, false, null, null);
     ctx.hardTtl = hardTtlMs;
     ctx.softTtl = softTtlMs;
     return ctx;
   }
 
-  public Supplier<?> reader() {
-    return reader;
+  /** Whether this call has a value source (a loader or a plain reader). */
+  public boolean hasSource() {
+    return loader != null || reader != null;
   }
 
   /**
-   * The reader the engine uses when arming a background refresh. It is
-   * separate from {@link #reader()} because a loader's refresh path may not
-   * resume caller-bound state (a one-shot invocation chain, a thread-confined
-   * transaction or security context); a {@code null} refresh reader means the
-   * plain reader serves both paths.
+   * Loads the foreground miss value: {@code loader.load(key)} for a
+   * loader-backed call, the plain reader otherwise.
+   *
+   * @return the loaded value; {@code null} when the source produced none
    */
-  public Supplier<?> refreshReader() {
-    return refreshReader != null ? refreshReader : reader;
+  public @Nullable Object loadValue() {
+    return loader != null ? loader.load(loaderKey) : reader != null ? reader.get() : null;
   }
 
   /**
-   * Admission predicate for non-{@code null} loader results ({@code null} =
-   * admit all): derived from the effective loader's {@code isCacheable}, never
-   * settable per call.
+   * Loads a background refresh value: {@code loader.reload(key)} for a
+   * loader-backed call — a refresh may not resume caller-bound state — and the
+   * plain reader otherwise.
+   *
+   * @return the refreshed value; {@code null} when the source produced none
    */
-  public @Nullable Predicate<Object> cacheFilter() {
-    return cacheFilter;
+  public @Nullable Object refreshValue() {
+    return loader != null ? loader.reload(loaderKey) : reader != null ? reader.get() : null;
   }
 
   /**
    * Whether the given non-{@code null} loaded value may be stored in L1.
    * A {@code null} value is never admitted (never cached regardless of the
-   * filter); a {@code null} filter admits everything.
+   * loader); a call with no loader admits everything.
+   *
+   * @param value the loaded value
+   * @return {@code true} when the value may take L1 residency
    */
   public boolean admits(Object value) {
-    return value != null && (cacheFilter == null || cacheFilter.test(value));
+    return value != null && (loader == null || loader.isCacheable(value));
   }
 
   public StalePolicy stalePolicy() {

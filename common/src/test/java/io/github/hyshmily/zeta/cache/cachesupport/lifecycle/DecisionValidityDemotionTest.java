@@ -31,6 +31,7 @@ import io.github.hyshmily.zeta.cache.cachesupport.raw.EntryMutations;
 import io.github.hyshmily.zeta.model.DecisionStamp;
 import io.github.hyshmily.zeta.model.KeyState;
 import io.github.hyshmily.zeta.sharding.HealthView;
+import io.github.hyshmily.zeta.util.TimeSource;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -98,9 +99,9 @@ class DecisionValidityDemotionTest {
 
     EntryLifecycleImpl em = entryLifecycle();
     CacheEntry raw = caffeineCache.getIfPresent("k");
-    EntryMutations.Applied demoted = em.demoteIfRemoteNodeIdInvalid("k", raw);
+    EntryMutations.Applied demoted = em.demoteIfRemoteNodeIdInvalid("k", raw, TimeSource.currentTimeMillis());
 
-    assertThat(demoted).isNotNull();
+    assertThat(demoted.changed()).as("demotion applies").isTrue();
     CacheEntry entry = (CacheEntry) caffeineCache.getIfPresent("k");
     assertThat(entry.getKeyState()).isEqualTo(KeyState.NORMAL);
     assertThat(entry.getDecisionNodeId()).isNull();
@@ -120,9 +121,13 @@ class DecisionValidityDemotionTest {
     caffeineCache.put("k", hotEntry("w1", 5L, 60_000, 15_000));
 
     EntryLifecycleImpl em = entryLifecycle();
-    EntryMutations.Applied demoted = em.demoteIfRemoteNodeIdInvalid("k", caffeineCache.getIfPresent("k"));
+    EntryMutations.Applied demoted = em.demoteIfRemoteNodeIdInvalid(
+      "k",
+      caffeineCache.getIfPresent("k"),
+      TimeSource.currentTimeMillis()
+    );
 
-    assertThat(demoted).isNull();
+    assertThat(demoted.changed()).as("no demotion applies").isFalse();
     CacheEntry entry = (CacheEntry) caffeineCache.getIfPresent("k");
     assertThat(entry.getKeyState()).isEqualTo(KeyState.HOT);
     assertThat(entry.getDecisionNodeId()).isEqualTo("w1");
@@ -134,9 +139,13 @@ class DecisionValidityDemotionTest {
     caffeineCache.put("k", hotEntry("w1", 5L, 60_000, 15_000));
 
     EntryLifecycleImpl em = entryLifecycle();
-    EntryMutations.Applied demoted = em.demoteIfRemoteNodeIdInvalid("k", caffeineCache.getIfPresent("k"));
+    EntryMutations.Applied demoted = em.demoteIfRemoteNodeIdInvalid(
+      "k",
+      caffeineCache.getIfPresent("k"),
+      TimeSource.currentTimeMillis()
+    );
 
-    assertThat(demoted).isNotNull();
+    assertThat(demoted.changed()).as("demotion applies").isTrue();
     CacheEntry entry = (CacheEntry) caffeineCache.getIfPresent("k");
     assertThat(entry.getKeyState()).isEqualTo(KeyState.NORMAL);
     assertThat(entry.getDecisionNodeId()).isNull();
@@ -148,9 +157,13 @@ class DecisionValidityDemotionTest {
     caffeineCache.put("k", hotEntry("w1", 5L, 60_000, 15_000));
 
     EntryLifecycleImpl em = entryLifecycle();
-    EntryMutations.Applied demoted = em.demoteIfRemoteNodeIdInvalid("k", caffeineCache.getIfPresent("k"));
+    EntryMutations.Applied demoted = em.demoteIfRemoteNodeIdInvalid(
+      "k",
+      caffeineCache.getIfPresent("k"),
+      TimeSource.currentTimeMillis()
+    );
 
-    assertThat(demoted).isNotNull();
+    assertThat(demoted.changed()).as("demotion applies").isTrue();
     assertThat(((CacheEntry) caffeineCache.getIfPresent("k")).getKeyState()).isEqualTo(KeyState.NORMAL);
   }
 
@@ -159,9 +172,13 @@ class DecisionValidityDemotionTest {
     caffeineCache.put("k", hotEntry(null, 0L, 60_000, 15_000));
 
     EntryLifecycleImpl em = entryLifecycle();
-    EntryMutations.Applied demoted = em.demoteIfRemoteNodeIdInvalid("k", caffeineCache.getIfPresent("k"));
+    EntryMutations.Applied demoted = em.demoteIfRemoteNodeIdInvalid(
+      "k",
+      caffeineCache.getIfPresent("k"),
+      TimeSource.currentTimeMillis()
+    );
 
-    assertThat(demoted).isNull();
+    assertThat(demoted.changed()).as("no demotion applies").isFalse();
     assertThat(((CacheEntry) caffeineCache.getIfPresent("k")).getKeyState()).isEqualTo(KeyState.HOT);
   }
 
@@ -172,9 +189,13 @@ class DecisionValidityDemotionTest {
     caffeineCache.put("k", cool);
 
     EntryLifecycleImpl em = entryLifecycle();
-    EntryMutations.Applied demoted = em.demoteIfRemoteNodeIdInvalid("k", caffeineCache.getIfPresent("k"));
+    EntryMutations.Applied demoted = em.demoteIfRemoteNodeIdInvalid(
+      "k",
+      caffeineCache.getIfPresent("k"),
+      TimeSource.currentTimeMillis()
+    );
 
-    assertThat(demoted).isNull();
+    assertThat(demoted.changed()).as("no demotion applies").isFalse();
     assertThat(((CacheEntry) caffeineCache.getIfPresent("k")).getKeyState()).isEqualTo(KeyState.COOL);
   }
 
@@ -184,9 +205,13 @@ class DecisionValidityDemotionTest {
     caffeineCache.put("k", normalEntry());
 
     EntryLifecycleImpl em = entryLifecycle();
-    EntryMutations.Applied demoted = em.demoteIfRemoteNodeIdInvalid("k", caffeineCache.getIfPresent("k"));
+    EntryMutations.Applied demoted = em.demoteIfRemoteNodeIdInvalid(
+      "k",
+      caffeineCache.getIfPresent("k"),
+      TimeSource.currentTimeMillis()
+    );
 
-    assertThat(demoted).isNull();
+    assertThat(demoted.changed()).as("no demotion applies").isFalse();
     assertThat(caffeineCache.getIfPresent("k").getKeyState()).isEqualTo(KeyState.NORMAL);
   }
 
@@ -195,9 +220,13 @@ class DecisionValidityDemotionTest {
     caffeineCache.put("k", hotEntry("w1", 5L, 60_000, 15_000));
 
     EntryLifecycleImpl em = entryLifecycleWithoutHealthView();
-    EntryMutations.Applied demoted = em.demoteIfRemoteNodeIdInvalid("k", caffeineCache.getIfPresent("k"));
+    EntryMutations.Applied demoted = em.demoteIfRemoteNodeIdInvalid(
+      "k",
+      caffeineCache.getIfPresent("k"),
+      TimeSource.currentTimeMillis()
+    );
 
-    assertThat(demoted).isNull();
+    assertThat(demoted.changed()).as("no demotion applies").isFalse();
     assertThat(((CacheEntry) caffeineCache.getIfPresent("k")).getKeyState()).isEqualTo(KeyState.HOT);
   }
 
@@ -212,9 +241,9 @@ class DecisionValidityDemotionTest {
 
     CacheEntry staleRaw = hotEntry("w1", 5L, 60_000, 15_000);
     EntryLifecycleImpl em = entryLifecycle();
-    EntryMutations.Applied demoted = em.demoteIfRemoteNodeIdInvalid("k", staleRaw);
+    EntryMutations.Applied demoted = em.demoteIfRemoteNodeIdInvalid("k", staleRaw, TimeSource.currentTimeMillis());
 
-    assertThat(demoted).isNull();
+    assertThat(demoted.changed()).as("no demotion applies").isFalse();
     CacheEntry entry = (CacheEntry) caffeineCache.getIfPresent("k");
     assertThat(entry.getKeyState()).isEqualTo(KeyState.HOT);
     assertThat(entry.getDecisionNodeId()).isEqualTo("w2");
@@ -226,10 +255,14 @@ class DecisionValidityDemotionTest {
     caffeineCache.put("k", hotEntry("w1", 5L, 60_000, 15_000));
 
     EntryLifecycleImpl em = entryLifecycle();
-    em.demoteIfRemoteNodeIdInvalid("k", caffeineCache.getIfPresent("k"));
-    EntryMutations.Applied second = em.demoteIfRemoteNodeIdInvalid("k", caffeineCache.getIfPresent("k"));
+    em.demoteIfRemoteNodeIdInvalid("k", caffeineCache.getIfPresent("k"), TimeSource.currentTimeMillis());
+    EntryMutations.Applied second = em.demoteIfRemoteNodeIdInvalid(
+      "k",
+      caffeineCache.getIfPresent("k"),
+      TimeSource.currentTimeMillis()
+    );
 
-    assertThat(second).isNull();
+    assertThat(second.changed()).as("no second demotion").isFalse();
     assertThat(((CacheEntry) caffeineCache.getIfPresent("k")).getKeyState()).isEqualTo(KeyState.NORMAL);
   }
 
@@ -239,9 +272,13 @@ class DecisionValidityDemotionTest {
     caffeineCache.put("k", hotEntry("w1", 5L, 0, 0));
 
     EntryLifecycleImpl em = entryLifecycle();
-    EntryMutations.Applied demoted = em.demoteIfRemoteNodeIdInvalid("k", caffeineCache.getIfPresent("k"));
+    EntryMutations.Applied demoted = em.demoteIfRemoteNodeIdInvalid(
+      "k",
+      caffeineCache.getIfPresent("k"),
+      TimeSource.currentTimeMillis()
+    );
 
-    assertThat(demoted).isNotNull();
+    assertThat(demoted.changed()).as("demotion applies").isTrue();
     CacheEntry entry = (CacheEntry) caffeineCache.getIfPresent("k");
     assertThat(entry.getHardTtlMs()).isEqualTo(ttlConfig.getHardTtlMs());
     assertThat(entry.getSoftTtlMs()).isEqualTo(ttlConfig.getSoftTtlMs());
@@ -258,7 +295,12 @@ class DecisionValidityDemotionTest {
     CacheEntry hot = hotEntry("w1", 5L, 60_000, 15_000);
     caffeineCache.put("k", hot);
 
-    assertThat(entryLifecycle().demoteIfRemoteNodeIdInvalid("k", caffeineCache.getIfPresent("k"))).isNotNull();
+    EntryMutations.Applied applied = entryLifecycle().demoteIfRemoteNodeIdInvalid(
+      "k",
+      caffeineCache.getIfPresent("k"),
+      TimeSource.currentTimeMillis()
+    );
+    assertThat(applied.changed()).as("demotion applies").isTrue();
 
     CacheEntry demoted = (CacheEntry) caffeineCache.getIfPresent("k");
     assertThat(demoted.getHardExpireAtMs()).isLessThan(hot.getHardExpireAtMs());
@@ -284,7 +326,12 @@ class DecisionValidityDemotionTest {
       .build();
     caffeineCache.put("k", hot);
 
-    assertThat(entryLifecycle().demoteIfRemoteNodeIdInvalid("k", caffeineCache.getIfPresent("k"))).isNotNull();
+    EntryMutations.Applied applied = entryLifecycle().demoteIfRemoteNodeIdInvalid(
+      "k",
+      caffeineCache.getIfPresent("k"),
+      TimeSource.currentTimeMillis()
+    );
+    assertThat(applied.changed()).as("demotion applies").isTrue();
 
     CacheEntry demoted = (CacheEntry) caffeineCache.getIfPresent("k");
     assertThat(demoted.getKeyState()).isEqualTo(KeyState.NORMAL);

@@ -530,17 +530,25 @@ class TtlPolicyTest {
 
   /**
    * Jitter is symmetric and closed on both ends. With a 1 ms base the offsets are
-   * {@code 10 + jitter - clockDrift} for {@code jitter ∈ [-1, 1]}, so both 9 and 11 must
+   * {@code 10 + jitter} for {@code jitter ∈ [-1, 1]}, so both 9 and 11 must
    * appear.
+   *
+   * <p>A sample is kept only when the cached clock did not tick between the policy's own read and
+   * the one that measures it — otherwise the subtraction mixes two different instants and drops by
+   * a whole tick (or more under a stalled thread), which says nothing about the jitter.
    */
   @Test
   void computeTtlJitter_withOneMillisecondBase_shouldSpanBothSigns() {
     Set<Long> offsets = new HashSet<>();
-    for (int i = 0; i < 500; i++) {
-      offsets.add(ttlPolicy.hardExpireAt(10, 0.1) - TimeSource.currentTimeMillis());
+    for (int i = 0; i < 2_000; i++) {
+      long before = TimeSource.currentTimeMillis();
+      long expireAt = ttlPolicy.hardExpireAt(10, 0.1);
+      if (TimeSource.currentTimeMillis() == before) {
+        offsets.add(expireAt - before);
+      }
     }
 
-    assertThat(offsets).allMatch(offset -> offset >= 8 && offset <= 11);
+    assertThat(offsets).isNotEmpty().allMatch(offset -> offset >= 9 && offset <= 11);
     assertThat(offsets).contains(9L, 11L);
   }
 }

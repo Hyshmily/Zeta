@@ -30,7 +30,7 @@ import java.util.List;
  * through {@link #validKeys} (invalid elements are skipped); the annotation
  * integration rejects a null logical key and prefixes a non-blank namespace;
  * and the sync layer guards the wire. Engine methods ({@link HotKeyCache},
- * {@link CentralDispatcher}) therefore assume valid keys on every path —
+ * {@link AccessCounter}) therefore assume valid keys on every path —
  * single-key and collection alike.
  */
 @Internal

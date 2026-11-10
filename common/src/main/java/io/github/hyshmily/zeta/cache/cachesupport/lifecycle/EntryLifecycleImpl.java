@@ -165,6 +165,7 @@ public class EntryLifecycleImpl implements EntryLifecycle {
    * @return the surviving resident, or {@code null} when the key is now absent
    */
   @Override
+  @SuppressWarnings("all")
   public @Nullable CacheEntry evictIfExpired(String cacheKey, @Nullable CacheEntry raw, long now) {
     if (raw == null || !ttlPolicy.isLogicallyExpired(raw, now)) {
       return raw;
@@ -202,24 +203,28 @@ public class EntryLifecycleImpl implements EntryLifecycle {
    * health record is mutable, so a Worker heartbeat may have arrived between
    * the outer check and the bin lock, and a recovered HOT lease must not be
    * clobbered by the stale outer verdict. With no health view configured,
-   * demotion is disabled (no-op, {@code false}).
+   * demotion is disabled and reports the entry unchanged.
    *
    * @param key   the cache key
    * @param entry the L1 entry (may be {@code null})
-   * @return the applied pre/post-images, or {@code null} when no demotion applied
+   * @param now   the per-call epoch-millis sample
+   * @return the images the bin lock observed; {@link Applied#changed()} is
+   *         {@code false} when no demotion applied
    */
   @Override
-  public @Nullable Applied demoteIfRemoteNodeIdInvalid(String key, @Nullable CacheEntry entry) {
-    if (entry == null || !needsDemotion(entry)) {
-      return null;
+  public Applied demoteIfRemoteNodeIdInvalid(String key, @Nullable CacheEntry entry, long now) {
+    if (entry == null || (!ttlPolicy.isLogicallyExpired(entry, now) && !needsDemotion(entry))) {
+      return EntryMutations.unchanged(entry);
     }
 
     // Build the rewrite inside the callback: a demotion storm (a dead Worker's HOT set read
     // concurrently) would otherwise allocate one candidate per reader and discard every loser.
     // The callback is single-threaded per key, so only the winner copies the entry; the losers
-    // exit on the re-judged state without touching the draft.
+    // exit on the re-judged state without touching the draft. An expired resident is removed
+    // rather than rewritten: demoteToNormal keeps the earlier deadline, so a rewritten entry
+    // would still be dead and the caller would have to evict it a second time.
     Applied applied = EntryMutations.apply(caffeineCache, key, resident -> {
-      if (resident == null) {
+      if (resident == null || ttlPolicy.isLogicallyExpired(resident, now)) {
         return null;
       }
       // Re-judge under the bin lock even when the reference is unchanged: the health record is
@@ -227,23 +232,24 @@ public class EntryLifecycleImpl implements EntryLifecycle {
       // A recovered Worker's HOT lease must not be clobbered by the stale outer verdict.
       return needsDemotion(resident) ? demoteToNormal(resident) : resident;
     });
-    if (applied == null) {
-      return null;
-    }
-
-    if (log.isDebugEnabled()) {
-      // This mutation never creates an entry, so the pre-image is present.
-      CacheEntry demotedFrom = applied.previous();
-      log.debug(
-        "Decision-Validity demotion: key={} nodeId={} epoch={} reverted to NORMAL lifecycle",
-        key,
-        demotedFrom.getDecisionNodeId(),
-        demotedFrom.getDecisionEpoch()
-      );
-    }
-    Consumer<String> sink = demotedSink;
-    if (sink != null) {
-      sink.accept(key);
+    // A null post-image is an expiry removal, not a demotion: no sink, no demotion log.
+    if (applied.changed() && applied.current() != null) {
+      if (log.isDebugEnabled()) {
+        // This mutation never creates an entry, so the pre-image is present.
+        CacheEntry demotedFrom = applied.previous();
+        if (demotedFrom != null) {
+          log.debug(
+            "Decision-Validity demotion: key={} nodeId={} epoch={} reverted to NORMAL lifecycle",
+            key,
+            demotedFrom.getDecisionNodeId(),
+            demotedFrom.getDecisionEpoch()
+          );
+        }
+      }
+      Consumer<String> sink = demotedSink;
+      if (sink != null) {
+        sink.accept(key);
+      }
     }
     return applied;
   }
@@ -367,7 +373,7 @@ public class EntryLifecycleImpl implements EntryLifecycle {
   /**
    * The demotion rewrite: normal TTLs, NORMAL state and the decision stamp cleared in one draft
    * copy. The caller supplies the judgment through
-   * {@link #demoteIfRemoteNodeIdInvalid(String, CacheEntry)}, which re-runs the full predicate
+   * {@link #demoteIfRemoteNodeIdInvalid(String, CacheEntry, long)}, which re-runs the full predicate
    * under the bin lock.
    *
    * <p>Demotion is not a refresh: the value keeps its age, so the normal-life deadline caps the
@@ -515,16 +521,12 @@ public class EntryLifecycleImpl implements EntryLifecycle {
       return;
     }
 
-    boolean evicted = false;
-    boolean folded = false;
-    long foldStamp = 0L;
-    int remaining = 0;
     synchronized (watermarkLock) {
       long globalWatermark = clearWatermark.get();
       PrefixWatermarks snapshot = prefixClearWatermarks;
-      Map<String, Long> current = snapshot.stamps();
-      Map<String, Long> updated = pruneSubsumedPrefixes(current, globalWatermark, current.size() + clears.size());
-      boolean changed = updated.size() != current.size();
+      Map<String, Long> previous = snapshot.stamps();
+      Map<String, Long> updated = new HashMap<>(previous);
+      boolean changed = updated.values().removeIf(stamp -> stamp <= globalWatermark);
 
       long maxStamp = snapshot.maxStamp();
       for (Map.Entry<String, Long> clear : clears.entrySet()) {
@@ -546,46 +548,36 @@ public class EntryLifecycleImpl implements EntryLifecycle {
       }
 
       if (updated.size() > MAX_PREFIX_WATERMARKS) {
-        Map<String, Long> survivors = evictExpiredPrefixes(updated, current, clears, globalWatermark);
-        remaining = survivors.size();
-        if (remaining > MAX_PREFIX_WATERMARKS) {
-          // The age escape did not reclaim enough room: the historical fold is
-          // the last resort. The table-wide watermark must cover every live
-          // stamp, at the cost of refusing pre-clear fills in unrelated
-          // namespaces for the fold's in-flight window. Publish the empty
-          // snapshot directly instead of re-entering recordClear with a
-          // snapshot this thread is about to replace.
-          for (long stamp : updated.values()) {
-            foldStamp = Math.max(foldStamp, stamp);
-          }
+        long expireAtMs =
+          TimeSource.currentTimeMillis() - TimeUnit.SECONDS.toMillis(cacheConfig.getTombstoneTtlSeconds());
+        updated
+          .entrySet()
+          .removeIf(mark -> {
+            Long recorded = clears.get(mark.getKey());
+            // A stamp this call adds or raises is that call's own in-flight window:
+            // its encoded wall clock may lag a peer's, so it is never age-evicted.
+            boolean recordedHere =
+              recorded != null && recorded > globalWatermark && recorded > previous.getOrDefault(mark.getKey(), 0L);
+            return !recordedHere && StampClock.timestampOf(mark.getValue()) <= expireAtMs;
+          });
+        if (updated.size() > MAX_PREFIX_WATERMARKS) {
+          // The age escape did not reclaim enough room: fold the whole live set
+          // into the table-wide watermark at the highest stamp involved. Folding
+          // refuses strictly more writes, which is the safe direction.
+          long foldStamp = updated.values().stream().mapToLong(Long::longValue).max().orElse(globalWatermark);
           clearWatermark.accumulateAndGet(foldStamp, Math::max);
           prefixClearWatermarks = new PrefixWatermarks(Map.of(), maxStamp);
-          folded = true;
-        } else {
-          updated = survivors;
-          evicted = true;
+          log.debug(
+            "Prefix clear watermarks saturated at {} with {} still live; folding into the table-wide watermark at stamp {}",
+            MAX_PREFIX_WATERMARKS,
+            updated.size(),
+            foldStamp
+          );
+          return;
         }
       }
 
-      if (!folded) {
-        Map<String, Long> next = updated.isEmpty() ? Map.of() : Map.copyOf(updated);
-        prefixClearWatermarks = new PrefixWatermarks(next, maxStamp);
-      }
-    }
-
-    if (folded) {
-      log.debug(
-        "Prefix clear watermarks saturated at {} with {} still live; folding into the table-wide watermark at stamp {}",
-        MAX_PREFIX_WATERMARKS,
-        remaining,
-        foldStamp
-      );
-    } else if (evicted) {
-      log.debug(
-        "Prefix clear watermarks saturated at {}; expired watermarks evicted, {} remain",
-        MAX_PREFIX_WATERMARKS,
-        remaining
-      );
+      prefixClearWatermarks = new PrefixWatermarks(updated.isEmpty() ? Map.of() : Map.copyOf(updated), maxStamp);
     }
   }
 
@@ -641,96 +633,16 @@ public class EntryLifecycleImpl implements EntryLifecycle {
         prefixClearWatermarks = new PrefixWatermarks(Map.of(), globalWatermark);
         return;
       }
-      if (!hasSubsumedPrefix(current, globalWatermark)) {
+      Map<String, Long> pruned = new HashMap<>(current);
+      if (!pruned.values().removeIf(stamp -> stamp <= globalWatermark)) {
         return;
       }
-      Map<String, Long> pruned = pruneSubsumedPrefixes(current, globalWatermark, current.size());
-
-      Map<String, Long> next = pruned.isEmpty() ? Map.of() : Map.copyOf(pruned);
       // The max is monotonic: a pruned stamp still bounds every future walk, so
       // the fast path survives the clear that removed it.
-      prefixClearWatermarks = new PrefixWatermarks(next, snapshot.maxStamp());
+      prefixClearWatermarks = new PrefixWatermarks(
+        pruned.isEmpty() ? Map.of() : Map.copyOf(pruned),
+        snapshot.maxStamp()
+      );
     }
-  }
-
-  /**
-   * Sheds prefix watermarks that no longer protect an in-flight window: a
-   * watermark only has to outlive the tombstone TTL, because the write it
-   * guards has either landed or failed by then. Stamps this call added or
-   * raised are always kept — they are the protection for the writes in flight
-   * right now, and their encoded wall clock may lag this node's.
-   *
-   * @param marks    the merged watermarks, all above the table-wide one
-   * @param prev     the watermarks live before this call
-   * @param incoming the clears this call is recording
-   * @param global   the table-wide clear watermark
-   * @return a mutable map holding the surviving watermarks
-   */
-  private Map<String, Long> evictExpiredPrefixes(
-    Map<String, Long> marks,
-    Map<String, Long> prev,
-    Map<String, Long> incoming,
-    long global
-  ) {
-    long expireAtMs = TimeSource.currentTimeMillis() - TimeUnit.SECONDS.toMillis(cacheConfig.getTombstoneTtlSeconds());
-    Map<String, Long> survivors = newWatermarkMap(marks.size());
-    for (Map.Entry<String, Long> mark : marks.entrySet()) {
-      String prefix = mark.getKey();
-      Long recorded = incoming.get(prefix);
-      boolean recordedHere = recorded != null && recorded > global && recorded > prev.getOrDefault(prefix, 0L);
-      if (recordedHere || StampClock.timestampOf(mark.getValue()) > expireAtMs) {
-        survivors.put(prefix, mark.getValue());
-      }
-    }
-    return survivors;
-  }
-
-  /**
-   * Whether the table-wide watermark subsumes at least one live prefix stamp. The caller uses it
-   * to skip the copy-and-prune allocation when a clear changes nothing.
-   *
-   * @param current         the live prefix watermarks
-   * @param globalWatermark the table-wide clear watermark
-   * @return {@code true} when at least one entry would be pruned
-   */
-  private static boolean hasSubsumedPrefix(Map<String, Long> current, long globalWatermark) {
-    for (long stamp : current.values()) {
-      if (stamp <= globalWatermark) {
-        return true;
-      }
-    }
-    return false;
-  }
-
-  /**
-   * Copies the live prefix watermarks, dropping every entry the table-wide watermark
-   * subsumes: such a stamp already refuses every write it could, so keeping it would
-   * only burden the write-path walk.
-   *
-   * @param current         the live prefix watermarks
-   * @param globalWatermark the table-wide clear watermark
-   * @param expectedEntries the capacity the caller needs after adding its own entries
-   * @return a mutable map holding the surviving entries
-   */
-  private static Map<String, Long> pruneSubsumedPrefixes(
-    Map<String, Long> current,
-    long globalWatermark,
-    int expectedEntries
-  ) {
-    Map<String, Long> kept = newWatermarkMap(expectedEntries);
-    for (Map.Entry<String, Long> entry : current.entrySet()) {
-      if (entry.getValue() > globalWatermark) {
-        kept.put(entry.getKey(), entry.getValue());
-      }
-    }
-    return kept;
-  }
-
-  /**
-   * A fresh {@link HashMap} pre-sized so {@code expectedEntries} puts cannot
-   * trigger an intermediate rehash before the immutable {@code Map.copyOf}.
-   */
-  private static Map<String, Long> newWatermarkMap(int expectedEntries) {
-    return new HashMap<>((int) (expectedEntries / 0.75f) + 1);
   }
 }

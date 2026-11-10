@@ -25,6 +25,7 @@ import io.github.hyshmily.zeta.model.DecisionStamp;
 import io.github.hyshmily.zeta.model.KeyState;
 import io.github.hyshmily.zeta.sharding.HealthView;
 import io.github.hyshmily.zeta.util.Internal;
+import io.github.hyshmily.zeta.util.TimeSource;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
 import org.jspecify.annotations.Nullable;
@@ -102,12 +103,14 @@ public final class LocalPromotion {
    * @param cacheKey the cache key
    * @param ctx      the per-call read context (TTL overrides memoized, at most
    *                 once per call)
-   * @return the applied pre/post-images ({@code current == null} means the
-   *         resident was removed as hard-expired), or {@code null} when the
-   *         resident was absent, already promoted, or not promotable
+   * @param now      the per-call epoch-millis sample
+   * @return the images the bin lock observed ({@code current == null} means the
+   *         resident was removed as hard-expired); {@link Applied#changed()} is
+   *         {@code false} when the resident was absent, already promoted, or not
+   *         promotable
    */
-  public @Nullable Applied promoteDegraded(String cacheKey, ReadContext ctx) {
-    return promoteIfAllowed(cacheKey, ctx);
+  public Applied promoteDegraded(String cacheKey, ReadContext ctx, long now) {
+    return promoteIfAllowed(cacheKey, ctx, now);
   }
 
   /**
@@ -175,15 +178,20 @@ public final class LocalPromotion {
    *
    * @param cacheKey the key to reconcile
    * @param raw      the resident entry read by the caller
-   * @return the applied rewrite, or {@code null} when nothing changed
+   * @param now      the per-call epoch-millis sample
+   * @return the images the bin lock observed; {@link Applied#changed()} is
+   *         {@code false} when the lease needs no reassertion
    */
-  public @Nullable Applied reassertIfNeeded(String cacheKey, CacheEntry raw) {
-    if (!needsReassert(raw)) {
-      return null;
+  public Applied reassertIfNeeded(String cacheKey, CacheEntry raw, long now) {
+    if (!ttlPolicy.isLogicallyExpired(raw, now) && !needsReassert(raw)) {
+      return EntryMutations.unchanged(raw);
     }
 
     return EntryMutations.apply(caffeineCache, cacheKey, existing -> {
-      if (existing == null || !existing.isLocalOverrideHot() || !healthView.isClusterHealthy()) {
+      if (existing == null || ttlPolicy.isLogicallyExpired(existing, now)) {
+        return null;
+      }
+      if (!existing.isLocalOverrideHot() || !healthView.isClusterHealthy()) {
         return existing;
       }
 
@@ -248,7 +256,7 @@ public final class LocalPromotion {
 
       if (hotKeyDetector.contains(cacheKey)) {
         Applied applied = promote(cacheKey);
-        if (applied != null && applied.current() != null) {
+        if (applied.changed() && applied.current() != null) {
           promoted++;
         }
       }
@@ -271,21 +279,23 @@ public final class LocalPromotion {
    * and is advisory, so it is not probed there.
    *
    * @param key the key to promote
-   * @return the applied pre/post-images, or {@code null} when nothing changed
+   * @return the images the bin lock observed; {@link Applied#changed()} is
+   *         {@code false} when nothing changed
    */
-  private @Nullable Applied promote(String key) {
+  private Applied promote(String key) {
     CacheEntry snapshot = quietCache.getIfPresent(key);
     if (snapshot == null) {
-      return null;
+      return EntryMutations.unchanged(null);
     }
+    long now = TimeSource.currentTimeMillis();
     // A live non-promotable resident (already HOT, COOL while healthy, or
     // NORMAL with a COOL lease while healthy) is the common admission duplicate
     // and must not take the bin lock. An expired resident of any state still
     // reaches the compute, which removes it.
-    if (!ttlPolicy.isLogicallyExpired(snapshot) && !mayPromoteLocally(snapshot)) {
-      return null;
+    if (!ttlPolicy.isLogicallyExpired(snapshot, now) && !mayPromoteLocally(snapshot)) {
+      return EntryMutations.unchanged(snapshot);
     }
-    return promoteIfAllowed(key, null);
+    return promoteIfAllowed(key, null, now);
   }
 
   /**
@@ -295,11 +305,13 @@ public final class LocalPromotion {
    *
    * @param key the key to promote
    * @param ctx the per-call read context supplying lazy TTL overrides, or {@code null} for none
-   * @return the applied pre/post-images, or {@code null} when nothing changed
+   * @param now the per-call epoch-millis sample
+   * @return the images the bin lock observed; {@link Applied#changed()} is
+   *         {@code false} when nothing changed
    */
-  private @Nullable Applied promoteIfAllowed(String key, @Nullable ReadContext ctx) {
+  private Applied promoteIfAllowed(String key, @Nullable ReadContext ctx, long now) {
     return EntryMutations.apply(caffeineCache, key, entry -> {
-      if (entry == null || ttlPolicy.isLogicallyExpired(entry)) {
+      if (entry == null || ttlPolicy.isLogicallyExpired(entry, now)) {
         return null;
       }
       if (!mayPromoteLocally(entry)) {
@@ -330,10 +342,11 @@ public final class LocalPromotion {
   private CacheEntry promotedEntry(CacheEntry entry, long hardTtlOverrideMs, long softTtlOverrideMs) {
     long normalHard = entry.getNormalHardTtlMs() > 0L ? entry.getNormalHardTtlMs() : ttlPolicy.effectiveHardTtlMs();
     long normalSoft = entry.getNormalSoftTtlMs() > 0L ? entry.getNormalSoftTtlMs() : ttlPolicy.effectiveSoftTtlMs();
-    // A resolved normal baseline of 0 is permanent (hard) or disabled (soft); a positive override
-    // must not turn it into a bounded/enabled value. Both sides are already resolved TTLs.
+    // A resolved normal hard baseline of 0 is permanent: a positive override must not turn it into
+    // a bounded lifetime. A soft baseline of 0 only means the normal regime was disabled — the hot
+    // default may re-enable it — so the caller's override still raises the window.
     long baseHard = normalHard == 0L ? 0L : Math.max(hardTtlOverrideMs, normalHard);
-    long baseSoft = normalSoft == 0L ? 0L : Math.max(softTtlOverrideMs, normalSoft);
+    long baseSoft = Math.max(softTtlOverrideMs, normalSoft);
     long hotHardTtl = ttlPolicy.resolveEffectiveHotHard(baseHard);
     long hotSoftTtl = ttlPolicy.resolveEffectiveHotSoft(baseSoft);
     return entryLifecycle.editEntry(entry).ttl(hotHardTtl, hotSoftTtl).keyState(KeyState.HOT).build();
