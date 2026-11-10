@@ -28,8 +28,8 @@ import org.slf4j.Logger;
  *
  * <p>Both planes load the authoritative value through the same optional
  * {@link CacheLoader} and run the same "one terminal callback per message"
- * hook contract; keeping the two rules here stops the handlers from drifting
- * apart.
+ * hook contract; keeping the two rules here stops the sync and Worker contexts
+ * from drifting apart.
  */
 @Internal
 public final class DecisionPlaneSupport {

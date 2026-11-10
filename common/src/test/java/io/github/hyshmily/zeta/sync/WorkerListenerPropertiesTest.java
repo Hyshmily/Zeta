@@ -36,9 +36,7 @@ class WorkerListenerPropertiesTest {
     assertThat(props.isEnabled()).isFalse();
     assertThat(props.getExchangeName()).isEqualTo(ZetaConstants.Exchange.BROADCAST);
     assertThat(props.getQueuePrefix()).isEqualTo("zeta.worker");
-    // warmupJitterMs was removed: it was never read (WorkerListener applies
-    // broadcastJitterMs only); Boot ignores unknown properties, so removal is safe.
-    assertThat(props.getBroadcastJitterMs()).isZero();
+    assertThat(props.getJitterMs()).isZero();
   }
 
   /**

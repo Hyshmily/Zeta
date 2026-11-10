@@ -18,10 +18,6 @@ package io.github.hyshmily.zeta.sync.local;
 import static io.github.hyshmily.zeta.cache.CacheKeysPolicy.invalidCacheKey;
 import static io.github.hyshmily.zeta.constants.ZetaConstants.Amqp.*;
 
-import com.fasterxml.jackson.annotation.JsonTypeInfo;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.json.JsonMapper;
-import com.fasterxml.jackson.databind.jsontype.BasicPolymorphicTypeValidator;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import io.github.hyshmily.zeta.sync.worker.WorkerListener;
@@ -29,13 +25,11 @@ import io.github.hyshmily.zeta.util.Internal;
 import io.github.hyshmily.zeta.util.NodeIdentity;
 import io.github.hyshmily.zeta.util.TimeSource;
 import io.github.hyshmily.zeta.util.clock.StampClock;
-import java.io.Serial;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.LongAdder;
 import lombok.extern.slf4j.Slf4j;
-import org.jspecify.annotations.NonNull;
 import org.jspecify.annotations.Nullable;
 import org.springframework.amqp.core.Message;
 import org.springframework.amqp.core.MessageProperties;
@@ -92,17 +86,8 @@ public class CacheSyncPublisher {
   private final CacheSyncProperties properties;
   private final RabbitTemplate rabbitTemplate;
 
-  /**
-   * Jackson mapper for the value-carrying {@code PUT} payload: default typing on
-   * <b>every</b> type ({@code EVERYTHING} + {@code WRAPPER_ARRAY}), so a final type such
-   * as {@code Long}, {@code BigDecimal} or {@code byte[]} carries its type marker and
-   * round-trips as the exact runtime class the writer stored. Deserialization enforces
-   * a polymorphic whitelist — JDK value types plus {@code io.github.hyshmily.zeta.*} plus
-   * the configured {@code zeta.sync.put-allowed-packages} (design decisions:
-   * invalidation); a business DTO outside it fails closed and the receiver degrades to a
-   * versioned INVALIDATE.
-   */
-  private final ObjectMapper putMapper;
+  /** Serializes the value-carrying {@code PUT} body; the receive side decodes with the same codec. */
+  private final PutPayloadCodec putPayloadCodec;
 
   /**
    * This application's {@code zeta.app-name}, stamped onto every sync
@@ -147,12 +132,18 @@ public class CacheSyncPublisher {
    * Spring and replace the dedup cache and the PUT mapper built here.
    *
    * @param rabbitTemplate the RabbitMQ template for the sync fanout exchange
-   * @param properties     sync configuration (dedup window/size, PUT whitelist)
+   * @param properties     sync configuration (dedup window/size)
+   * @param putPayloadCodec the PUT payload serializer shared with the receive side
    * @param appName        this application's name, or {@code null}/blank for none
    */
-  public CacheSyncPublisher(RabbitTemplate rabbitTemplate, CacheSyncProperties properties, String appName) {
+  public CacheSyncPublisher(
+    RabbitTemplate rabbitTemplate,
+    CacheSyncProperties properties,
+    PutPayloadCodec putPayloadCodec,
+    String appName
+  ) {
     this.properties = properties;
-    this.putMapper = buildPutMapper();
+    this.putPayloadCodec = putPayloadCodec;
     this.rabbitTemplate = rabbitTemplate;
     this.appName = (appName != null && !appName.isBlank()) ? appName : null;
     this.recentBroadcasts = Caffeine.newBuilder()
@@ -185,12 +176,12 @@ public class CacheSyncPublisher {
    * INVALIDATE / REFRESH / PUT out to <em>every</em> instance on the broker — including instances
    * of other applications (see the receiver-side filter in {@link CacheSyncListener}).
    *
-   * @param type the sync message type header value
+   * @param type the sync message type
    * @return the prepared message properties
    */
-  private MessageProperties newSyncMessageProperties(String type) {
+  private MessageProperties newSyncMessageProperties(SyncType type) {
     MessageProperties props = new MessageProperties();
-    props.setHeader(HEADER_TYPE, type);
+    props.setHeader(HEADER_TYPE, type.code());
     // No-op when this instance declares no application name, so the header is absent and
     // receivers process the message (rolling-upgrade compatibility).
     if (appName != null) {
@@ -207,227 +198,22 @@ public class CacheSyncPublisher {
   }
 
   /**
-   * A builder pre-loaded with the baseline PUT whitelist — the one place the
-   * prefix list
-   * is written. The instance mapper appends the configured
-   * {@code zeta.sync.put-allowed-packages} on top.
-   */
-  private static BasicPolymorphicTypeValidator.Builder basePutPtv() {
-    return BasicPolymorphicTypeValidator.builder()
-      .allowIfSubType(String.class)
-      .allowIfSubType(Number.class)
-      .allowIfSubType(Boolean.class)
-      .allowIfSubType(Character.class)
-      .allowIfSubType(CharSequence.class)
-      .allowIfSubType("java.util.")
-      .allowIfSubType("java.time.")
-      .allowIfSubType("java.math.")
-      .allowIfSubType("io.github.hyshmily.zeta.")
-      .allowIfSubTypeIsArray();
-  }
-
-  /**
-   * Builds the instance PUT payload mapper: the baseline whitelist prefixes
-   * plus the configured {@code zeta.sync.put-allowed-packages} (design
-   * decisions: invalidation). The whitelist participates in both directions on
-   * this node — serializePutPayload admits the classes, parsePutPayload
-   * instantiates them. Blank/invalid prefixes are ignored; the baseline
-   * whitelist always stays in force.
-   */
-  private ObjectMapper buildPutMapper() {
-    BasicPolymorphicTypeValidator.Builder ptv = basePutPtv();
-    List<String> allowed = properties.getPutAllowedPackages();
-    if (allowed != null) {
-      for (String pkg : allowed) {
-        if (pkg != null && !pkg.isBlank()) {
-          ptv.allowIfSubType(pkg.trim());
-        }
-      }
-    }
-    return JsonMapper.builder()
-      .activateDefaultTyping(ptv.build(), ObjectMapper.DefaultTyping.EVERYTHING, JsonTypeInfo.As.WRAPPER_ARRAY)
-      .build();
-  }
-
-  /**
    * Serializes a value for the value-carrying {@code PUT} broadcast into an
    * immutable byte payload. Called on the <em>writer</em> thread (the
    * transaction-commit thread for a transactional put) so the buffer holds a
    * frozen snapshot: later mutation of the caller's object by business code
    * cannot change what peers receive.
    *
-   * <p>
-   * The payload is the typed value alone: the cache key travels in the
-   * {@code HEADER_CACHE_KEY} header, so no JSON envelope is assembled and the
-   * receiver deserializes the bytes in one step instead of parsing an envelope
-   * and re-reading its nested value.
-   *
-   * <p>
-   * Returns {@code null} when the value cannot be carried — not JSON
-   * serializable, or the payload exceeds {@code zeta.sync.put-max-bytes} — and
-   * the caller degrades to a value-less REFRESH (each peer reloads through its
-   * cluster loader, keeping the type-safe round-trip those values already have).
+   * <p>The payload is the typed value alone: the cache key travels in the
+   * {@code HEADER_CACHE_KEY} header. A value that cannot be carried degrades to
+   * a value-less REFRESH; {@link PutPayloadCodec#encode(Object)} owns that rule.
    *
    * @param value the freshly written value; {@code null} yields {@code null}
    * @return the serialized payload bytes, or {@code null} to signal "degrade to
    *         REFRESH"
    */
-  public byte[] serializePutPayload(Object value) {
-    if (value == null) {
-      return null;
-    }
-
-    int maxBytes = properties.getPutMaxBytes();
-    // A non-positive cap disables value-carrying PUTs entirely: no payload can
-    // fit, so skip the Jackson pass (a large DTO would otherwise be fully
-    // serialized only to be discarded by the length check).
-    if (maxBytes <= 0) {
-      return null;
-    }
-    // O(1) size short-circuit for self-sizing types: a payload that cannot fit
-    // under put-max-bytes even before encoding must not pay the full Jackson
-    // pass just to be discarded. byte[] travels Base64-encoded (4/3×
-    // expansion), so the exact pre-encoding limit is 3/4 of the cap; a String's
-    // UTF-8 form is never shorter than its char add, so the char add is the
-    // conservative bound. A DTO has no such bound — the bounded stream below is
-    // what stops it at the cap.
-    long base64Bytes = (maxBytes * 3L) / 4L;
-    if (value instanceof byte[] bytes && bytes.length > base64Bytes) {
-      log.debug("Put payload byte[] length {} exceeds put-max-bytes {}, degrading to REFRESH", bytes.length, maxBytes);
-      return null;
-    }
-    if (value instanceof String text && text.length() > maxBytes) {
-      log.debug("Put payload String length {} exceeds put-max-bytes {}, degrading to REFRESH", text.length(), maxBytes);
-      return null;
-    }
-
-    // Stream into a capped buffer: a mis-sized business object (a 5 MB collection,
-    // say) aborts
-    // the serialization at the cap instead of materializing the whole array here on
-    // the
-    // writer's commit thread only to throw it away.
-    BoundedByteArrayOutputStream buffer = new BoundedByteArrayOutputStream(maxBytes);
-    try {
-      putMapper.writeValue(buffer, value);
-      return buffer.toByteArray();
-    } catch (RuntimeException | java.io.IOException e) {
-      if (buffer.exceeded()) {
-        // Jackson may wrap the stream failure in its own exception; the buffer records
-        // it.
-        log.debug("Put payload exceeds put-max-bytes {}, degrading to REFRESH", maxBytes);
-      } else {
-        // Jackson's serialization failures are JsonProcessingException subtypes;
-        // RuntimeException covers cycles and other unsupported types. Either way
-        // the caller degrades to REFRESH.
-        log.debug("Put payload serialization failed, degrading to REFRESH");
-      }
-      return null;
-    }
-  }
-
-  /**
-   * Thrown by {@link BoundedByteArrayOutputStream} when a payload would grow
-   * past the cap.
-   */
-  private static final class PayloadTooLargeException extends RuntimeException {
-
-    @Serial
-    private static final long serialVersionUID = 1L;
-
-    /** Shared stackless instance: the condition is control flow and every throw site is identical. */
-    private static final PayloadTooLargeException INSTANCE = new PayloadTooLargeException();
-
-    PayloadTooLargeException() {
-      // No stack trace and no suppression: this is control flow, not an error to
-      // diagnose,
-      // and the caller discards it immediately.
-      super("put payload exceeds put-max-bytes", null, false, false);
-    }
-  }
-
-  /**
-   * A {@link java.io.ByteArrayOutputStream} that refuses to grow past
-   * {@code limit}, so Jackson
-   * aborts the moment the payload would pass the cap. It bounds the bytes
-   * materialized on the writer's commit thread to the configured budget.
-   */
-  private static final class BoundedByteArrayOutputStream extends java.io.ByteArrayOutputStream {
-
-    private final int limit;
-
-    private boolean exceeded;
-
-    BoundedByteArrayOutputStream(int limit) {
-      // Start small: a PUT payload is usually a few dozen bytes, and
-      // ByteArrayOutputStream grows geometrically. The 8 KB default (or the full
-      // 32 KB cap) would allocate and copy a buffer most small writes never fill.
-      super(Math.min(limit, 256));
-      this.limit = limit;
-    }
-
-    @Override
-    public void write(int b) {
-      guard(1);
-      super.write(b);
-    }
-
-    @Override
-    public void write(byte@NonNull [] b, int off, int len) {
-      guard(len);
-      super.write(b, off, len);
-    }
-
-    @Override
-    public void writeBytes(byte[] b) {
-      guard(b.length);
-      super.writeBytes(b);
-    }
-
-    /**
-     * Whether the cap was hit. Jackson can wrap a stream failure in its own
-     * exception, so the
-     * cause chain is not a reliable signal — the buffer records it instead.
-     *
-     * @return {@code true} once a write was refused
-     */
-    boolean exceeded() {
-      return exceeded;
-    }
-
-    private void guard(int len) {
-      if (count + len > limit) {
-        exceeded = true;
-        throw PayloadTooLargeException.INSTANCE;
-      }
-    }
-  }
-
-  /**
-   * Deserializes a received {@code PUT} value payload into its original runtime
-   * type, using
-   * this node's whitelist (baseline + {@code zeta.sync.put-allowed-packages}).
-   *
-   * <p>
-   * Return contract: {@code null} means the value could not be read (a foreign
-   * producer,
-   * a class the whitelist refuses, a rolling upgrade that removed the class). The
-   * receiver
-   * then degrades to a versioned INVALIDATE so the next read reloads through the
-   * application reader.
-   *
-   * @param payload the raw AMQP body of a PUT message
-   * @return the value, or {@code null} when it cannot be read
-   */
-  public Object parsePutPayload(byte[] payload) {
-    if (payload == null || payload.length == 0) {
-      return null;
-    }
-    try {
-      return putMapper.readValue(payload, Object.class);
-    } catch (RuntimeException | java.io.IOException e) {
-      log.debug("Put payload value deserialization failed, degrading to INVALIDATE: {}", e.toString());
-      return null;
-    }
+  public byte@Nullable [] serializePutPayload(@Nullable Object value) {
+    return putPayloadCodec.encode(value);
   }
 
   /**
@@ -558,14 +344,14 @@ public class CacheSyncPublisher {
    * @param cacheKey the affected cache key; must not be null or empty
    * @param version  the {@code dataVersion} at which the invalidation occurred
    */
-  public void broadcastLocalInvalidate(String cacheKey, long version) {
+  public void broadcastInvalidate(String cacheKey, long version) {
     sendDeduped(cacheKey, SyncType.INVALIDATE, version);
   }
 
   /**
    * Unified sync-plane publish contract shared by every send site (the deduped
    * single-key INVALIDATE/REFRESH send, the value-carrying PUT and the clear family):
-   * build the common {@link #newSyncMessageProperties(String) sync properties},
+   * build the common {@link #newSyncMessageProperties(SyncType) sync properties},
    * stamp the version and — for PUT — the cache-key header, publish on the fanout
    * exchange, and swallow any publish failure into one WARN — the
    * documented contract is "failures are logged and do not propagate to the caller".
@@ -581,7 +367,7 @@ public class CacheSyncPublisher {
    */
   private boolean publishSync(SyncType type, byte[] body, long version, @Nullable String cacheKey) {
     try {
-      MessageProperties props = newSyncMessageProperties(type.code());
+      MessageProperties props = newSyncMessageProperties(type);
       if (version > 0L) {
         props.setHeader(HEADER_VERSION, version);
       }

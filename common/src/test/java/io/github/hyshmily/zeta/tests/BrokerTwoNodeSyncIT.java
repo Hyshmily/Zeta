@@ -27,7 +27,9 @@ import io.github.hyshmily.zeta.model.KeyState;
 import io.github.hyshmily.zeta.sync.local.CacheSyncListener;
 import io.github.hyshmily.zeta.sync.local.CacheSyncProperties;
 import io.github.hyshmily.zeta.sync.local.CacheSyncPublisher;
-import io.github.hyshmily.zeta.sync.local.DefaultSyncDecisionHandler;
+import io.github.hyshmily.zeta.sync.local.DefaultSyncContext;
+import io.github.hyshmily.zeta.sync.local.PutPayloadCodec;
+import io.github.hyshmily.zeta.sync.local.SyncPolicy;
 import io.github.hyshmily.zeta.sync.local.SyncMessage;
 import java.io.IOException;
 import java.util.List;
@@ -87,16 +89,18 @@ class BrokerTwoNodeSyncIT {
 
     Node(String appName) {
       RabbitTemplate template = new RabbitTemplate(connectionFactory);
-      publisher = new CacheSyncPublisher(template, PROPS, appName);
-      var handler = new DefaultSyncDecisionHandler(
+      PutPayloadCodec codec = new PutPayloadCodec(PROPS);
+      publisher = new CacheSyncPublisher(template, PROPS, codec, appName);
+      var context = new DefaultSyncContext(
         l1,
         null,
         new EntryLifecycleImpl(l1, new ZetaProperties(), null),
         List.of(),
         null,
-        publisher
+        codec
       );
-      var listener = new CacheSyncListener(PROPS, Executors.newScheduledThreadPool(2), handler, appName, null);
+      var handler = new SyncPolicy() {};
+      var listener = new CacheSyncListener(PROPS, Executors.newScheduledThreadPool(2), handler, context, appName, null);
       // The listener acks through the AMQP channel; the container auto-acks,
       // so the channel calls only need to be safe no-ops under test.
       com.rabbitmq.client.Channel noopChannel = (com.rabbitmq.client.Channel) java.lang.reflect.Proxy.newProxyInstance(
@@ -113,7 +117,7 @@ class BrokerTwoNodeSyncIT {
       container.setQueueNames(queue.getName());
       container.setMessageListener(m -> {
         try {
-          listener.handleSyncMessage(noopChannel, m);
+          listener.onMessage(noopChannel, m);
         } catch (IOException e) {
           throw new IllegalStateException(e);
         }
@@ -183,7 +187,7 @@ class BrokerTwoNodeSyncIT {
   @DisplayName("INVALIDATE published on A removes the entry on B through the real broker")
   void invalidateCrossesTheBroker() throws Exception {
     nodeB.l1.put("it::k1", entry("v", 1L));
-    nodeA.publisher.broadcastLocalInvalidate("it::k1", 5L);
+    nodeA.publisher.broadcastInvalidate("it::k1", 5L);
 
     await(() -> nodeB.l1.getIfPresent("it::k1") == null);
   }

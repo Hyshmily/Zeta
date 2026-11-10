@@ -31,11 +31,13 @@ import io.github.hyshmily.zeta.cache.cachesupport.raw.CacheEntry;
 import io.github.hyshmily.zeta.cache.cachesupport.raw.EntryDraft;
 import io.github.hyshmily.zeta.model.DecisionStamp;
 import io.github.hyshmily.zeta.model.KeyState;
+import io.github.hyshmily.zeta.sync.local.Batch;
 import io.github.hyshmily.zeta.sync.local.CacheSyncProperties;
-import io.github.hyshmily.zeta.sync.local.CacheSyncPublisher;
-import io.github.hyshmily.zeta.sync.local.DefaultSyncDecisionHandler;
+import io.github.hyshmily.zeta.sync.local.DefaultSyncContext;
+import io.github.hyshmily.zeta.sync.local.PutPayloadCodec;
 import io.github.hyshmily.zeta.sync.local.SyncHook;
 import io.github.hyshmily.zeta.sync.local.SyncMessage;
+import io.github.hyshmily.zeta.sync.local.SyncPolicy;
 import io.github.hyshmily.zeta.sync.local.SyncType;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
@@ -46,27 +48,45 @@ import org.springframework.amqp.core.Message;
 import org.springframework.amqp.core.MessageProperties;
 
 /**
- * Contract tests for {@link DefaultSyncDecisionHandler}: one granted batch in,
+ * Contract tests for {@link DefaultSyncContext}: one granted batch in,
  * the highest-version message applied under the version/tombstone guards, one
  * terminal hook per message.
  */
-class DefaultSyncDecisionHandlerTest {
+class DefaultSyncContextTest {
 
   private Cache<String, CacheEntry> cache;
   private EntryLifecycleImpl entryLifecycle;
-  private CacheSyncPublisher publisher;
-  private DefaultSyncDecisionHandler handler;
+  private PutPayloadCodec codec;
+  private DefaultSyncContext context;
 
   @BeforeEach
   void setUp() {
     cache = Caffeine.newBuilder().maximumSize(100).build();
     entryLifecycle = new EntryLifecycleImpl(cache, new ZetaProperties(), null);
-    publisher = new CacheSyncPublisher(null, new CacheSyncProperties(), null);
-    handler = handler(k -> "refreshed", List.of());
+    codec = new PutPayloadCodec(new CacheSyncProperties());
+    context = newContext(k -> "refreshed", List.of());
   }
 
-  private DefaultSyncDecisionHandler handler(CacheLoader<String, Object> loader, List<SyncHook> hooks) {
-    return new DefaultSyncDecisionHandler(cache, loader, entryLifecycle, hooks, null, publisher);
+  private DefaultSyncContext newContext(CacheLoader<String, Object> loader, List<SyncHook> hooks) {
+    return new DefaultSyncContext(cache, loader, entryLifecycle, hooks, null, codec);
+  }
+
+  private final SyncPolicy policy = new SyncPolicy() {};
+
+  private void handleBatch(List<SyncMessage> messages) {
+    Batch batch = Batch.reduce(messages);
+    if (batch instanceof Batch.Value value) {
+      for (SyncMessage covered : value.covered()) {
+        context.skip(covered);
+      }
+      if (value.winner().type() == SyncType.INVALIDATE) {
+        policy.invalidate(value, context);
+      } else {
+        policy.value(value, context);
+      }
+      return;
+    }
+    policy.clear((Batch.Clear) batch, context);
   }
 
   private static SyncMessage msg(String key, String type, long version) {
@@ -78,7 +98,7 @@ class DefaultSyncDecisionHandlerTest {
   }
 
   private SyncMessage put(String key, Object value, long version) {
-    byte[] payload = publisher.serializePutPayload(value);
+    byte[] payload = codec.encode(value);
     MessageProperties props = new MessageProperties();
     props.setHeader(HEADER_TYPE, SyncType.PUT.code());
     props.setHeader(HEADER_VERSION, version);
@@ -102,49 +122,47 @@ class DefaultSyncDecisionHandlerTest {
   void refresh_reloadsAndFiresTheAppliedHook() {
     cache.put("key1", entry(1, KeyState.NORMAL));
     SyncHook hook = mock(SyncHook.class);
-    handler = handler(k -> "refreshed", List.of(hook));
+    context = newContext(k -> "refreshed", List.of(hook));
 
-    handler.handleBatch(List.of(msg("key1", SyncType.REFRESH.code(), 2L)));
+    handleBatch(List.of(msg("key1", SyncType.REFRESH.code(), 2L)));
 
     CacheEntry applied = cache.getIfPresent("key1");
     assertThat(applied).isNotNull();
     assertThat(applied.getValue()).isEqualTo("refreshed");
     assertThat(applied.getDataVersion()).isEqualTo(2L);
-    verify(hook).afterRefresh(eq("key1"), any(), any());
+    verify(hook).afterRefresh(any(), any());
   }
 
   @Test
   void refresh_staleThanResident_skipsAndReports() {
     cache.put("key1", entry(5, KeyState.NORMAL));
     SyncHook hook = mock(SyncHook.class);
-    handler = handler(k -> "refreshed", List.of(hook));
+    context = newContext(k -> "refreshed", List.of(hook));
 
-    handler.handleBatch(List.of(msg("key1", SyncType.REFRESH.code(), 3L)));
+    handleBatch(List.of(msg("key1", SyncType.REFRESH.code(), 3L)));
 
     assertThat(cache.getIfPresent("key1").getValue()).isEqualTo("v");
-    verify(hook).onRefreshSkipped(eq("key1"), any());
+    verify(hook).onRefreshSkipped(any());
   }
 
   @Test
   void refresh_withoutValue_invalidatesLocally() {
     cache.put("key1", entry(1, KeyState.NORMAL));
     SyncHook hook = mock(SyncHook.class);
-    handler = handler(k -> null, List.of(hook));
+    context = newContext(k -> null, List.of(hook));
 
-    handler.handleBatch(List.of(msg("key1", SyncType.REFRESH.code(), 2L)));
+    handleBatch(List.of(msg("key1", SyncType.REFRESH.code(), 2L)));
 
     assertThat(cache.getIfPresent("key1")).isNull();
-    verify(hook).onRefreshSkipped(eq("key1"), any());
+    verify(hook).onRefreshSkipped(any());
   }
 
   @Test
   void refreshFailureAfterExplicitInvalidate_hardRemovesWorkerManagedEntry() {
     cache.put("key1", entry(1, KeyState.HOT));
-    handler = handler(k -> null, List.of());
+    context = newContext(k -> null, List.of());
 
-    handler.handleBatch(
-      List.of(msg("key1", SyncType.INVALIDATE.code(), 10L), msg("key1", SyncType.REFRESH.code(), 11L))
-    );
+    handleBatch(List.of(msg("key1", SyncType.INVALIDATE.code(), 10L), msg("key1", SyncType.REFRESH.code(), 11L)));
 
     // The covered INVALIDATE still condemns the value: the newer REFRESH's
     // no-value fallback must not soft-expire the HOT entry and keep serving it.
@@ -154,9 +172,9 @@ class DefaultSyncDecisionHandlerTest {
   @Test
   void refreshFailureWithoutExplicitInvalidate_softExpiresWorkerManagedEntry() {
     cache.put("key1", entry(1, KeyState.HOT));
-    handler = handler(k -> null, List.of());
+    context = newContext(k -> null, List.of());
 
-    handler.handleBatch(List.of(msg("key1", SyncType.REFRESH.code(), 2L)));
+    handleBatch(List.of(msg("key1", SyncType.REFRESH.code(), 2L)));
 
     CacheEntry entry = cache.getIfPresent("key1");
     assertThat(entry).isNotNull();
@@ -167,19 +185,19 @@ class DefaultSyncDecisionHandlerTest {
   void refresh_declinedByLoaderAdmission_invalidatesLocally() {
     cache.put("key1", entry(1, KeyState.NORMAL));
     SyncHook hook = mock(SyncHook.class);
-    handler = handler(decliningLoader(), List.of(hook));
+    context = newContext(decliningLoader(), List.of(hook));
 
-    handler.handleBatch(List.of(msg("key1", SyncType.REFRESH.code(), 2L)));
+    handleBatch(List.of(msg("key1", SyncType.REFRESH.code(), 2L)));
 
     assertThat(cache.getIfPresent("key1")).isNull();
-    verify(hook).onRefreshSkipped(eq("key1"), any());
+    verify(hook).onRefreshSkipped(any());
   }
 
   @Test
   void refresh_batchKeepsOnlyTheHighestVersion() {
     cache.put("key1", entry(1, KeyState.NORMAL));
     AtomicInteger loads = new AtomicInteger();
-    handler = handler(
+    context = newContext(
       k -> {
         loads.incrementAndGet();
         return "v" + loads.get();
@@ -187,7 +205,7 @@ class DefaultSyncDecisionHandlerTest {
       List.of()
     );
 
-    handler.handleBatch(
+    handleBatch(
       List.of(
         msg("key1", SyncType.REFRESH.code(), 2L),
         msg("key1", SyncType.REFRESH.code(), 4L),
@@ -201,7 +219,7 @@ class DefaultSyncDecisionHandlerTest {
 
   @Test
   void put_absentKey_createsANormalEntry() {
-    handler.handleBatch(List.of(put("key1", "carried", 5L)));
+    handleBatch(List.of(put("key1", "carried", 5L)));
 
     CacheEntry applied = cache.getIfPresent("key1");
     assertThat(applied).isNotNull();
@@ -214,7 +232,7 @@ class DefaultSyncDecisionHandlerTest {
   void put_staleVersion_neverRegresses() {
     cache.put("key1", entry(7, KeyState.NORMAL));
 
-    handler.handleBatch(List.of(put("key1", "carried", 5L)));
+    handleBatch(List.of(put("key1", "carried", 5L)));
 
     assertThat(cache.getIfPresent("key1").getValue()).isEqualTo("v");
     assertThat(cache.getIfPresent("key1").getDataVersion()).isEqualTo(7L);
@@ -224,10 +242,10 @@ class DefaultSyncDecisionHandlerTest {
   @Test
   void put_staleVersion_shouldNotDeserializeThePayload() {
     cache.put("key1", entry(7, KeyState.NORMAL));
-    CacheSyncPublisher parser = mock(CacheSyncPublisher.class);
-    handler = new DefaultSyncDecisionHandler(cache, k -> "refreshed", entryLifecycle, List.of(), null, parser);
+    PutPayloadCodec parser = mock(PutPayloadCodec.class);
+    context = new DefaultSyncContext(cache, k -> "refreshed", entryLifecycle, List.of(), null, parser);
 
-    handler.handleBatch(List.of(put("key1", "carried", 5L)));
+    handleBatch(List.of(put("key1", "carried", 5L)));
 
     verifyNoInteractions(parser);
     assertThat(cache.getIfPresent("key1").getValue()).isEqualTo("v");
@@ -237,16 +255,16 @@ class DefaultSyncDecisionHandlerTest {
   void put_equalVersion_applies() {
     cache.put("key1", entry(5, KeyState.NORMAL));
 
-    handler.handleBatch(List.of(put("key1", "carried", 5L)));
+    handleBatch(List.of(put("key1", "carried", 5L)));
 
     assertThat(cache.getIfPresent("key1").getValue()).isEqualTo("carried");
   }
 
   @Test
   void put_afterInvalidate_doesNotRewarm() {
-    handler.handleBatch(List.of(msg("key1", SyncType.INVALIDATE.code(), 6L)));
+    handleBatch(List.of(msg("key1", SyncType.INVALIDATE.code(), 6L)));
 
-    handler.handleBatch(List.of(put("key1", "carried", 5L)));
+    handleBatch(List.of(put("key1", "carried", 5L)));
 
     assertThat(cache.getIfPresent("key1")).isNull();
   }
@@ -259,16 +277,16 @@ class DefaultSyncDecisionHandlerTest {
   void put_unreadablePayload_firesOnlyTheSkippedHook() {
     cache.put("key1", entry(1, KeyState.NORMAL));
     SyncHook hook = mock(SyncHook.class);
-    CacheSyncPublisher unreadable = mock(CacheSyncPublisher.class);
-    when(unreadable.parsePutPayload(any())).thenReturn(null);
-    handler = new DefaultSyncDecisionHandler(cache, k -> "refreshed", entryLifecycle, List.of(hook), null, unreadable);
+    PutPayloadCodec unreadable = mock(PutPayloadCodec.class);
+    when(unreadable.decode(any())).thenReturn(null);
+    context = new DefaultSyncContext(cache, k -> "refreshed", entryLifecycle, List.of(hook), null, unreadable);
 
-    handler.handleBatch(List.of(put("key1", "carried", 2L)));
+    handleBatch(List.of(put("key1", "carried", 2L)));
 
     assertThat(cache.getIfPresent("key1")).isNull();
-    verify(hook).onRefreshSkipped(eq("key1"), any());
-    verify(hook, never()).afterInvalidate(any(), any());
-    verify(hook, never()).afterRefresh(any(), any(), any());
+    verify(hook).onRefreshSkipped(any());
+    verify(hook, never()).afterInvalidate(any());
+    verify(hook, never()).afterRefresh(any(), any());
   }
 
   /**
@@ -280,56 +298,51 @@ class DefaultSyncDecisionHandlerTest {
   void refresh_emptyLoad_withResident_firesOnlyTheSkippedHook() {
     cache.put("key1", entry(1, KeyState.NORMAL));
     SyncHook hook = mock(SyncHook.class);
-    handler = handler(k -> null, List.of(hook));
+    context = newContext(k -> null, List.of(hook));
 
-    handler.handleBatch(List.of(msg("key1", SyncType.REFRESH.code(), 2L)));
+    handleBatch(List.of(msg("key1", SyncType.REFRESH.code(), 2L)));
 
     assertThat(cache.getIfPresent("key1")).isNull();
-    verify(hook).onRefreshSkipped(eq("key1"), any());
-    verify(hook, never()).afterInvalidate(any(), any());
+    verify(hook).onRefreshSkipped(any());
+    verify(hook, never()).afterInvalidate(any());
   }
 
   @Test
   void invalidate_removesAndFiresTheHook() {
     cache.put("key1", entry(1, KeyState.NORMAL));
     SyncHook hook = mock(SyncHook.class);
-    handler = handler(k -> "refreshed", List.of(hook));
+    context = newContext(k -> "refreshed", List.of(hook));
 
-    handler.handleBatch(List.of(msg("key1", SyncType.INVALIDATE.code(), 2L)));
+    handleBatch(List.of(msg("key1", SyncType.INVALIDATE.code(), 2L)));
 
     assertThat(cache.getIfPresent("key1")).isNull();
-    verify(hook).afterInvalidate(eq("key1"), any());
+    verify(hook).afterInvalidate(any());
   }
 
   @Test
   void invalidate_staleVersion_keepsTheNewerEntry() {
     cache.put("key1", entry(7, KeyState.NORMAL));
 
-    handler.handleBatch(List.of(msg("key1", SyncType.INVALIDATE.code(), 3L)));
+    handleBatch(List.of(msg("key1", SyncType.INVALIDATE.code(), 3L)));
 
     assertThat(cache.getIfPresent("key1")).isNotNull();
   }
 
   /**
-   * At the same version the INVALIDATE outranks the REFRESH, matching the publisher's
+   * At the same version the INVALIDATE outranks the REFRESH, matching the codec's
    * {@code BroadcastClaim} rule; arrival order inside the batch must not flip the winner.
    */
   @Test
   void sameVersionInvalidateOutranksRefreshInEitherOrder() {
     cache.put("key1", entry(1, KeyState.NORMAL));
     SyncHook hook = mock(SyncHook.class);
-    handler = handler(k -> "refreshed", List.of(hook));
+    context = newContext(k -> "refreshed", List.of(hook));
 
-    handler.handleBatch(
-      List.of(
-        msg("key1", SyncType.INVALIDATE.code(), 5L),
-        msg("key1", SyncType.REFRESH.code(), 5L)
-      )
-    );
+    handleBatch(List.of(msg("key1", SyncType.INVALIDATE.code(), 5L), msg("key1", SyncType.REFRESH.code(), 5L)));
 
     assertThat(cache.getIfPresent("key1")).isNull();
-    verify(hook).afterInvalidate(eq("key1"), any());
-    verify(hook, never()).afterRefresh(any(), any(), any());
+    verify(hook).afterInvalidate(any());
+    verify(hook, never()).afterRefresh(any(), any());
   }
 
   /**
@@ -340,18 +353,13 @@ class DefaultSyncDecisionHandlerTest {
   void coveredInvalidateFiresAfterAFallbackEviction() {
     cache.put("key1", entry(1, KeyState.NORMAL));
     SyncHook hook = mock(SyncHook.class);
-    handler = handler(k -> null, List.of(hook));
+    context = newContext(k -> null, List.of(hook));
 
-    handler.handleBatch(
-      List.of(
-        msg("key1", SyncType.INVALIDATE.code(), 2L),
-        msg("key1", SyncType.REFRESH.code(), 3L)
-      )
-    );
+    handleBatch(List.of(msg("key1", SyncType.INVALIDATE.code(), 2L), msg("key1", SyncType.REFRESH.code(), 3L)));
 
     assertThat(cache.getIfPresent("key1")).isNull();
-    verify(hook).afterInvalidate(eq("key1"), any());
-    verify(hook).onRefreshSkipped(eq("key1"), any());
+    verify(hook).afterInvalidate(any());
+    verify(hook).onRefreshSkipped(any());
   }
 
   @Test
@@ -359,7 +367,7 @@ class DefaultSyncDecisionHandlerTest {
     cache.put("low", entry(3, KeyState.NORMAL));
     cache.put("high", entry(12, KeyState.NORMAL));
 
-    handler.handleBatch(List.of(msg("clear", SyncType.INVALIDATE_ALL.code(), 9L)));
+    handleBatch(List.of(msg("clear", SyncType.INVALIDATE_ALL.code(), 9L)));
 
     assertThat(cache.getIfPresent("low")).isNull();
     assertThat(cache.getIfPresent("high")).isNotNull();
@@ -371,7 +379,7 @@ class DefaultSyncDecisionHandlerTest {
     cache.put("users\u0000b", entry(2, KeyState.NORMAL));
     cache.put("orders\u0000a", entry(1, KeyState.NORMAL));
 
-    handler.handleBatch(List.of(msg("users\u0000", SyncType.INVALIDATE_PREFIX.code(), 5L)));
+    handleBatch(List.of(msg("users\u0000", SyncType.INVALIDATE_PREFIX.code(), 5L)));
 
     assertThat(cache.getIfPresent("users\u0000a")).isNull();
     assertThat(cache.getIfPresent("users\u0000b")).isNull();
@@ -381,9 +389,9 @@ class DefaultSyncDecisionHandlerTest {
   @Test
   void remoteInvalidateDropsAColdKeysInFlightLoad() {
     SingleFlight flight = mock(SingleFlight.class);
-    handler = new DefaultSyncDecisionHandler(cache, k -> "refreshed", entryLifecycle, List.of(), flight, publisher);
+    context = new DefaultSyncContext(cache, k -> "refreshed", entryLifecycle, List.of(), flight, codec);
 
-    handler.handleBatch(List.of(msg("cold", SyncType.INVALIDATE.code(), 5L)));
+    handleBatch(List.of(msg("cold", SyncType.INVALIDATE.code(), 5L)));
 
     verify(flight).invalidate("cold");
   }
@@ -391,10 +399,10 @@ class DefaultSyncDecisionHandlerTest {
   @Test
   void remoteStaleInvalidateLeavesANewerResidentsFlightAlone() {
     SingleFlight flight = mock(SingleFlight.class);
-    handler = new DefaultSyncDecisionHandler(cache, k -> "refreshed", entryLifecycle, List.of(), flight, publisher);
+    context = new DefaultSyncContext(cache, k -> "refreshed", entryLifecycle, List.of(), flight, codec);
     cache.put("key1", entry(7, KeyState.NORMAL));
 
-    handler.handleBatch(List.of(msg("key1", SyncType.INVALIDATE.code(), 3L)));
+    handleBatch(List.of(msg("key1", SyncType.INVALIDATE.code(), 3L)));
 
     verify(flight, never()).invalidate("key1");
   }
@@ -402,9 +410,9 @@ class DefaultSyncDecisionHandlerTest {
   @Test
   void remoteClearDropsTheMatchingDedupFlights() {
     SingleFlight flight = mock(SingleFlight.class);
-    handler = new DefaultSyncDecisionHandler(cache, k -> "refreshed", entryLifecycle, List.of(), flight, publisher);
+    context = new DefaultSyncContext(cache, k -> "refreshed", entryLifecycle, List.of(), flight, codec);
 
-    handler.handleBatch(
+    handleBatch(
       List.of(
         msg("clear", SyncType.INVALIDATE_ALL.code(), 9L),
         msg("users\u0000", SyncType.INVALIDATE_PREFIX.code(), 7L)
@@ -420,9 +428,9 @@ class DefaultSyncDecisionHandlerTest {
   @Test
   void remotePrefixClearDropsOnlyThatNamespacesFlights() {
     SingleFlight flight = mock(SingleFlight.class);
-    handler = new DefaultSyncDecisionHandler(cache, k -> "refreshed", entryLifecycle, List.of(), flight, publisher);
+    context = new DefaultSyncContext(cache, k -> "refreshed", entryLifecycle, List.of(), flight, codec);
 
-    handler.handleBatch(List.of(msg("users\u0000", SyncType.INVALIDATE_PREFIX.code(), 7L)));
+    handleBatch(List.of(msg("users\u0000", SyncType.INVALIDATE_PREFIX.code(), 7L)));
 
     verify(flight).invalidatePrefix("users\u0000");
     verify(flight, never()).invalidateAll();

@@ -18,9 +18,6 @@ package io.github.hyshmily.zeta.sync.worker;
 /**
  * Why a HOT Worker decision was not applied — the argument
  * {@link WorkerDecisionHook#onHotSkipped} reports.
- *
- * <p>Top-level so a custom {@link WorkerDecisionHandler} can name a reason without
- * depending on the default implementation.
  */
 public enum HotSkipReason {
   /** The resident entry already carries a decision that outranks or duplicates the incoming one. */
@@ -31,4 +28,7 @@ public enum HotSkipReason {
    * a tombstone refused the create.
    */
   VALUE_NOT_FOUND,
+
+  /** A custom handler refused the promotion by policy. */
+  POLICY_REJECTED,
 }

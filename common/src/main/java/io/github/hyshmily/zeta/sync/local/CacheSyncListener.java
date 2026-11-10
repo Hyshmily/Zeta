@@ -19,9 +19,10 @@ import static io.github.hyshmily.zeta.constants.ZetaConstants.Amqp.*;
 import static io.github.hyshmily.zeta.sync.local.SyncMessage.from;
 
 import com.rabbitmq.client.Channel;
-import io.github.hyshmily.zeta.sync.dispatcher.PerKeyOrderedDispatcher;
+import io.github.hyshmily.zeta.sync.dispatcher.KeyDispatcher;
 import io.github.hyshmily.zeta.sync.worker.WorkerListener;
-import io.github.hyshmily.zeta.util.*;
+import io.github.hyshmily.zeta.util.Internal;
+import io.github.hyshmily.zeta.util.NodeIdentity;
 import io.github.hyshmily.zeta.util.amqp.AmqpConsume;
 import io.github.hyshmily.zeta.util.amqp.AmqpMessageReader;
 import io.github.hyshmily.zeta.util.amqp.AmqpMessageReader.AppIsolationFilter;
@@ -40,7 +41,7 @@ import org.springframework.amqp.core.MessageProperties;
 /**
  * Listens for cache synchronization messages (INVALIDATE / REFRESH / PUT and the
  * clear family) from peer application instances via the {@code zeta.sync.exchange}
- * FanoutExchange and processes them via {@link SyncDecisionHandler}.
+ * FanoutExchange and applies them through {@link SyncPolicy} and {@link SyncContext}.
  *
  * <p>This is the inbound half of the instance-to-instance cache coherence protocol.
  * The outbound half is {@link CacheSyncPublisher}. Together they ensure that a data
@@ -50,12 +51,12 @@ import org.springframework.amqp.core.MessageProperties;
  * {@link com.github.benmanes.caffeine.cache.Cache#asMap()}{@code .compute()} for
  * atomic per-key updates. A message is acknowledged at the consumer boundary; an accepted
  * message's mutation runs asynchronously on the ordered dispatcher, and a REFRESH's first
- * cycle is parked for a random start-jitter delay (see {@link PerKeyOrderedDispatcher}) to
+ * cycle is parked for a random start-jitter delay (see {@link KeyDispatcher}) to
  * spread cluster-loader load across instances.
  *
  * @see CacheSyncPublisher
  * @see SyncMessage
- * @see SyncDecisionHandler
+ * @see SyncPolicy
  * @see WorkerListener
  */
 @Slf4j
@@ -66,7 +67,7 @@ public class CacheSyncListener {
    * Dispatch key shared by every clear ({@code INVALIDATE_ALL} / {@code INVALIDATE_PREFIX}):
    * clearing is table- or namespace-wide, so two clears of unrelated namespaces compete for the
    * same L1 table. One key puts them on one worker thread — one sweep at a time instead of N
-   * concurrent full scans starving the per-key tasks — and lets the handler coalesce the clears
+   * concurrent full scans starving the per-key tasks — and lets the context coalesce the clears
    * of one batch into a single pass.
    *
    * <p>An {@link Object} rather than a magic String on purpose: the dispatcher map is keyed by
@@ -99,7 +100,7 @@ public class CacheSyncListener {
    * {@code volatile} buys nothing once the reference is safely published by the
    * constructor.
    */
-  private final PerKeyOrderedDispatcher<SyncMessage> dispatcher;
+  private final KeyDispatcher<SyncMessage> dispatcher;
 
   /**
    * Cumulative inbound messages observed from a peer instance sharing this
@@ -112,8 +113,11 @@ public class CacheSyncListener {
    */
   private final LongAdder nodeIdCollisions = new LongAdder();
 
-  /** Strategy that applies REFRESH, INVALIDATE, PUT and the clear family. */
-  private final SyncDecisionHandler decisionHandler;
+  /** Strategy that decides how REFRESH, INVALIDATE, PUT and the clear family are applied. */
+  private final SyncPolicy policy;
+
+  /** Framework-owned guarded write path passed to the policy. */
+  private final SyncContext context;
 
   /**
    * Shared-broker appName isolation (design decisions: sync messages, see {@link AppIsolationFilter}):
@@ -150,8 +154,8 @@ public class CacheSyncListener {
    *
    * <p><b>Throughput ceiling of the supplied scheduler:</b> a REFRESH task submitted
    * by this listener holds a scheduler thread for the duration of its synchronous
-   * cluster-loader load inside the decision handler — the
-   * {@code zeta.sync.warmup-jitter-ms} delay (default max 50ms) is a scheduler-side
+   * cluster-loader load inside the sync context — the
+   * {@code zeta.sync.jitter-ms} delay (default max 50ms) is a scheduler-side
    * park, NOT a {@code Thread.sleep} inside the task, so it does not consume a pool
    * thread. Under REFRESH storms the pool therefore processes at most
    * {@code poolSize / loadTimeMs} load-bearing sync tasks per second; sizing the shared
@@ -161,30 +165,31 @@ public class CacheSyncListener {
    * @param properties      the sync configuration backing the dispatcher bounds and start jitter
    * @param scheduler       executor shared by the ordered dispatcher's cycle execution and its
    *                        start-jitter park
-   * @param decisionHandler strategy that applies the decoded REFRESH, INVALIDATE, PUT
-   *                        and clear messages
-   * @param appName         this application's {@code zeta.app-name}; {@code null}/blank disables
-   *                        foreign-app filtering
-   * @param stampClock      the node's data-stamp clock, or {@code null} to skip observation
+   * @param policy    strategy that decides how the decoded REFRESH, INVALIDATE, PUT
+   *                  and clear messages are applied
+   * @param context   framework-owned guarded write path handed to the policy
+   * @param appName   this application's {@code zeta.app-name}; {@code null}/blank disables
+   *                  foreign-app filtering
+   * @param stampClock the node's data-stamp clock, or {@code null} to skip observation
    */
   public CacheSyncListener(
     CacheSyncProperties properties,
     ScheduledExecutorService scheduler,
-    SyncDecisionHandler decisionHandler,
+    SyncPolicy policy,
+    SyncContext context,
     String appName,
     @Nullable StampClock stampClock
   ) {
     this.stampClock = stampClock;
-    this.decisionHandler = decisionHandler;
+    this.policy = policy;
+    this.context = context;
     this.isolation = new AppIsolationFilter(appName);
-    this.dispatcher = new PerKeyOrderedDispatcher<>(
+    this.dispatcher = new KeyDispatcher<>(
       scheduler,
       "cache-sync",
       this::dispatchBatch,
-      PerKeyOrderedDispatcher.DEFAULT_MAX_QUEUE_PER_KEY,
-      PerKeyOrderedDispatcher.DEFAULT_MAX_TASKS_PER_CYCLE,
       properties.getMaxPendingUnits(),
-      properties.getWarmupJitterMs()
+      properties.getJitterMs()
     );
   }
 
@@ -254,7 +259,7 @@ public class CacheSyncListener {
    *                must not be null
    * @throws IOException if the channel's basicAck or basicNack call fails
    */
-  public void handleSyncMessage(Channel channel, Message msg) throws IOException {
+  public void onMessage(Channel channel, Message msg) throws IOException {
     AmqpConsume.ackOrNack(channel, msg, log, "CacheSync", () -> {
       // Ack, not nack: a foreign message is valid, it just is not ours. Nacking
       // would requeue it into a poison loop.
@@ -262,7 +267,7 @@ public class CacheSyncListener {
         return;
       }
       // One header read and one origin read for both the self-filter and the collision
-      // diagnostic; the parsed type travels into processSync so it is converted once.
+      // diagnostic; the parsed type travels into process so it is converted once.
       MessageProperties props = msg.getMessageProperties();
       Object typeHeader = props.getHeader(HEADER_TYPE);
       SyncType type = SyncType.parse(typeHeader);
@@ -281,9 +286,9 @@ public class CacheSyncListener {
         return;
       }
       if (!own) {
-        checkIfNodeIdCollision(props, origin);
+        detectNodeIdCollision(props, origin);
       }
-      processSync(msg, type);
+      process(msg, type);
     });
   }
 
@@ -310,7 +315,7 @@ public class CacheSyncListener {
    * @param props  the sender's message properties (already read by the caller)
    * @param origin the already-read origin-instance header, used only for the warning
    */
-  private void checkIfNodeIdCollision(MessageProperties props, @Nullable String origin) {
+  private void detectNodeIdCollision(MessageProperties props, @Nullable String origin) {
     long peer = AmqpMessageReader.readLongHeader(props, HEADER_ORIGIN_NODE_ID, -1L);
     if (peer != NodeIdentity.getNodeId()) {
       return;
@@ -330,56 +335,49 @@ public class CacheSyncListener {
   /**
    * Decodes the raw AMQP message into a {@link SyncMessage} and submits it to the ordered
    * dispatcher. The dispatcher applies a random start-jitter park within
-   * {@link CacheSyncProperties#getWarmupJitterMs()} to the key's worker before its first
+   * {@link CacheSyncProperties#getJitterMs()} to the key's worker before its first
    * cycle, spreading cluster-loader reads when multiple peers process the same sync send
    * simultaneously.
    *
-   * <p>Messages are submitted as their decoded {@link SyncMessage}: the dispatcher hands
-   * the whole granted batch of a key to the decision handler at once, which reduces it
-   * (one loader call for a REFRESH burst, one sweep for a clear burst, one apply for a
-   * chain of superseded PUTs) before touching L1.
+   * <p>Messages are submitted as their decoded {@link SyncMessage}: the dispatcher hands the
+   * whole granted batch of a key to the listener at once, which reduces it (one loader call
+   * for a REFRESH burst, one sweep for a clear burst, one apply for a chain of superseded
+   * PUTs) before calling the typed handler method.
    *
    * @param msg  the raw AMQP message; if the body is null, empty, or cannot be
    *             parsed into a valid {@link SyncMessage}, the message is dropped
    *             without scheduling any task
    * @param type the type parsed and validated at the listener boundary
    */
-  @SuppressWarnings("ConstantConditions")
-  private void processSync(Message msg, SyncType type) {
+  private void process(Message msg, SyncType type) {
+    // A batched INVALIDATE (design decisions: invalidation) is a wire frame: it decomposes
+    // into per-key tasks at the boundary, so every entry keeps its own ordered queue and
+    // still orders against that key's PUT/REFRESH messages exactly as a single-key
+    // INVALIDATE would. The entries are already the INVALIDATE tasks to submit, so only a
+    // refused stamp needs a new message. Each decomposed entry captures only key + version
+    // (no payload), so its budget weight stays at the 1 floor; the batch body's byte length
+    // is not attributable to any single entry. A refused frame's entries share one local
+    // stamp: each targets a distinct key, so the per-key guards never compare them against
+    // each other.
+    if (type == SyncType.INVALIDATE_BATCH) {
+      SyncMessage.ParsedBatch batch = SyncMessage.parseBatch(msg);
+      if (batch == null) {
+        log.debug("Received an unusable INVALIDATE_BATCH frame");
+        return;
+      }
+
+      long localStamp = observe(batch.maxVersion());
+      for (SyncMessage entry : batch.entries()) {
+        submit(restamped(entry, localStamp), 0);
+      }
+      return;
+    }
+
     SyncMessage message = from(msg, type);
     if (message == null) {
       // Includes the unorderable (non-positive version) case, rejected at the parse
       // boundary before any clock merge or dispatcher admission.
       log.debug("Received sync message with an empty body, an invalid key or a non-positive data version");
-      return;
-    }
-    long version = message.version();
-    // design decisions: version stamps decision 7: merge the peer's stamp into the local clock before
-    // any guard runs. Observing only applied messages is too late — a message
-    // rejected as stale still proves the peer's clock is ahead, and without the
-    // merge this node's later writes stay numerically below it forever.
-    // A refused merge gets one fresh LOCAL stamp for the mutation: persisting the
-    // over-drift peer version as a dataVersion would blind every later local write
-    // to the key until wall time caught up with the poisoned stamp.
-    // A batch's version is the highest stamp among its entries, so this single merge
-    // reaches the same clock floor as observing every entry.
-    long localStamp = (stampClock == null || stampClock.observe(version)) ? 0L : stampClock.nextStamp();
-
-    // A batched INVALIDATE (design decisions: invalidation) decomposes into per-key tasks: every
-    // entry keeps its own ordered queue, so a key's batch entry still orders
-    // against that key's PUT/REFRESH messages exactly as a single-key
-    // INVALIDATE would.
-    if (message.type() == SyncType.INVALIDATE_BATCH) {
-      // from() guarantees a decoded list for INVALIDATE_BATCH; the entries are already
-      // the INVALIDATE tasks to submit, so only a refused stamp needs a new message.
-      // Each decomposed entry task captures only key + version (no payload), so
-      // its budget weight stays at the 1 floor; the batch body's byte length is
-      // not attributable to any single entry. A refused message's entries share
-      // one local stamp: each targets a distinct key, so the per-key guards never
-      // compare them against each other.
-      for (SyncMessage entry : message.batch()) {
-        submitSyncTask(restamped(entry, localStamp), 0);
-      }
       return;
     }
 
@@ -389,7 +387,23 @@ public class CacheSyncListener {
     // serialize the sweep against per-key work on the same namespace — the clear channel and
     // the full-key queues are independent; anti-resurrection is carried entirely by
     // EntryLifecycle's clear watermarks, not by dispatcher ordering.
-    submitSyncTask(restamped(message, localStamp), msg.getBody().length);
+    submit(restamped(message, observe(message.version())), msg.getBody().length);
+  }
+
+  /**
+   * Merge one peer stamp into the local clock before any guard runs (design decisions:
+   * version stamps decision 7). Observing only applied messages is too late — a message
+   * rejected as stale still proves the peer's clock is ahead, and without the merge this
+   * node's later writes stay numerically below it forever. A refused merge gets one fresh
+   * LOCAL stamp for the mutation: persisting the over-drift peer version as a dataVersion
+   * would blind every later local write to the key until wall time caught up with the
+   * poisoned stamp.
+   *
+   * @param version the peer stamp (a batch's highest entry/header stamp)
+   * @return {@code 0} when the peer stamp was accepted, otherwise one fresh local stamp
+   */
+  private long observe(long version) {
+    return (stampClock == null || stampClock.observe(version)) ? 0L : stampClock.nextStamp();
   }
 
   /** The message at the local replacement stamp, or unchanged when the peer stamp was accepted. */
@@ -405,13 +419,13 @@ public class CacheSyncListener {
    * @param bodyBytes the AMQP body length (0 when unknown) — weighted into the
    *                  dispatcher's global pending budget (~1 unit per KB)
    */
-  private void submitSyncTask(SyncMessage message, int bodyBytes) {
+  private void submit(SyncMessage message, int bodyBytes) {
     // Only a REFRESH touches the cluster loader; every other type is a pure in-memory
     // apply, so it skips the anti-herd park and starts immediately (FIFO order is
-    // preserved either way — a worker already parked for the key runs first).
+    // preserved either way — a worker already parked for the key runs first). Clears are
+    // O(1) control signals: a value storm must not lock them out.
     boolean accepted = message.type().isClear()
-      ? // Clears are O(1) control signals: a value storm must not lock them out.
-        dispatcher.submitControl(CLEAR_DISPATCH_KEY, message)
+      ? dispatcher.submitControl(CLEAR_DISPATCH_KEY, message)
       : dispatcher.submit(message.cacheKey(), message, 1 + (bodyBytes >> BYTE_WEIGHT), message.type().needsJitter());
     if (!accepted) {
       onDispatchRejected(message);
@@ -420,21 +434,35 @@ public class CacheSyncListener {
 
   /**
    * Runs one granted batch: every queued message of one key (or of the clear channel) is
-   * handed to the handler at once, which reduces it before touching L1.
+   * reduced to its effective message, covered value messages are reported, and the typed
+   * handler method runs the guarded apply.
    *
-   * @param batch the granted batch, in submission order
+   * @param messages the granted batch, in submission order
    */
-  private void dispatchBatch(List<SyncMessage> batch) {
+  private void dispatchBatch(List<SyncMessage> messages) {
     try {
-      decisionHandler.handleBatch(batch);
+      Batch batch = Batch.reduce(messages);
+      if (batch instanceof Batch.Value value) {
+        for (SyncMessage covered : value.covered()) {
+          context.skip(covered);
+        }
+
+        if (value.winner().type() == SyncType.INVALIDATE) {
+          policy.invalidate(value, context);
+        } else {
+          policy.value(value, context);
+        }
+        return;
+      }
+      policy.clear((Batch.Clear) batch, context);
     } catch (Exception e) {
-      SyncMessage first = batch.get(0);
+      SyncMessage first = messages.get(0);
       log.error(
         "Sync batch failed: type={}, key={}, version={}, batchSize={}",
         first.type(),
         first.cacheKey(),
         first.version(),
-        batch.size(),
+        messages.size(),
         e
       );
     }
@@ -451,7 +479,12 @@ public class CacheSyncListener {
    */
   private void onDispatchRejected(SyncMessage message) {
     try {
-      decisionHandler.handle(message.asInvalidate());
+      SyncMessage fallback = message.asInvalidate();
+      if (fallback.type().isClear()) {
+        context.clear(new Batch.Clear(List.of(fallback)));
+      } else {
+        context.invalidate(fallback);
+      }
     } catch (Exception e) {
       log.warn("Sync drop fallback failed: type={}, key={}", message.type(), message.cacheKey(), e);
     }

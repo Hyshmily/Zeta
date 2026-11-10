@@ -90,13 +90,14 @@ class SyncMessageTest {
    * clear-all body is the shared marker and is never decoded into a second String.
    */
   @Test
-  void from_batchWithoutHeaderVersionAndClearAllMarker_shouldParse() {
+  void parseBatch_withoutHeaderVersionAndClearAllMarker_shouldParse() {
     byte[] body = SyncMessage.encodeBatchBody(List.of(new SyncMessage.Entry("a", 7L)));
     MessageProperties batchProps = new MessageProperties();
     batchProps.setHeader(HEADER_TYPE, SyncType.INVALIDATE_BATCH.code());
-    SyncMessage batch = SyncMessage.from(new Message(body, batchProps));
+    SyncMessage.ParsedBatch batch = SyncMessage.parseBatch(new Message(body, batchProps));
     assertThat(batch).isNotNull();
-    assertThat(batch.version()).isEqualTo(7L);
+    assertThat(batch.maxVersion()).isEqualTo(7L);
+    assertThat(batch.entries()).hasSize(1);
 
     MessageProperties clearProps = new MessageProperties();
     clearProps.setHeader(HEADER_TYPE, SyncType.INVALIDATE_ALL.code());
@@ -180,30 +181,30 @@ class SyncMessageTest {
   }
 
   /**
-   * A batch carries one stamp per entry; the decoded message exposes the highest
+   * A batch carries one stamp per entry; the decoded frame exposes the highest
    * so the receiver can merge a single clock floor without rescanning the list.
    */
   @Test
-  void from_batch_shouldExposeTheHighestEntryVersion() {
+  void parseBatch_shouldExposeTheHighestEntryVersion() {
     byte[] body = SyncMessage.encodeBatchBody(List.of(new SyncMessage.Entry("a", 7L), new SyncMessage.Entry("b", 9L)));
     MessageProperties props = new MessageProperties();
     props.setHeader(HEADER_TYPE, SyncType.INVALIDATE_BATCH.code());
-    SyncMessage syncMessage = SyncMessage.from(new Message(body, props));
+    SyncMessage.ParsedBatch batch = SyncMessage.parseBatch(new Message(body, props));
 
-    assertThat(syncMessage).isNotNull();
-    assertThat(syncMessage.version()).isEqualTo(9L);
-    assertThat(syncMessage.batch()).hasSize(2);
+    assertThat(batch).isNotNull();
+    assertThat(batch.maxVersion()).isEqualTo(9L);
+    assertThat(batch.entries()).hasSize(2);
   }
 
   @Test
-  void from_batch_skipsMalformedEntriesWithoutEatingTheRest() {
+  void parseBatch_skipsMalformedEntriesWithoutEatingTheRest() {
     byte[] body = "[[] , [\"a\"], [\"b\", 5], [[\"nested\"], 6], [\"c\", 7], [\"d\", 8]]".getBytes(StandardCharsets.UTF_8);
     MessageProperties props = new MessageProperties();
     props.setHeader(HEADER_TYPE, SyncType.INVALIDATE_BATCH.code());
-    SyncMessage syncMessage = SyncMessage.from(new Message(body, props));
+    SyncMessage.ParsedBatch batch = SyncMessage.parseBatch(new Message(body, props));
 
-    assertThat(syncMessage).isNotNull();
-    assertThat(syncMessage.batch()).extracting(SyncMessage::cacheKey).containsExactly("b", "c", "d");
+    assertThat(batch).isNotNull();
+    assertThat(batch.entries()).extracting(SyncMessage::cacheKey).containsExactly("b", "c", "d");
   }
 
   /** The parser switch is exhaustive over the enum's wire codes; unknown values are null. */

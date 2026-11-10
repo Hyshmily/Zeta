@@ -21,7 +21,6 @@ import static io.github.hyshmily.zeta.constants.ZetaConstants.Version.VERSION_DE
 
 import io.github.hyshmily.zeta.model.DecisionKind;
 import io.github.hyshmily.zeta.model.DecisionStamp;
-import io.github.hyshmily.zeta.sync.local.SyncMessage;
 import io.github.hyshmily.zeta.util.amqp.AmqpMessageReader;
 import java.nio.charset.StandardCharsets;
 import java.util.Objects;
@@ -30,20 +29,16 @@ import org.springframework.amqp.core.Message;
 import org.springframework.amqp.core.MessageProperties;
 
 /**
- * Message from Worker to app instances carrying hot/cool decisions for a single cache key.
- * Travels via the {@code zeta.send.exchange} direct exchange under the routing key
- * {@code send.<appName>}, so each decision reaches one bound queue per instance of this
- * application, with at-most-once delivery.
+ * One Worker HOT/COOL decision for a single cache key.
  *
- * <p>Each {@code WorkerMessage} carries the Worker's monotonically increasing
- * {@link DecisionStamp}: the {@code decisionVersion} lets receivers order decisions
- * idempotently, while {@code nodeId} and {@code epoch} partition the version
- * space per Worker incarnation. This version space is orthogonal to the application-level
- * {@code dataVersion} (design decisions: version stamps).
+ * <p>Each decision carries the Worker's monotonically increasing {@link DecisionStamp}: the
+ * decision version orders decisions idempotently, while {@code nodeId} and {@code epoch}
+ * partition the version space per Worker incarnation. This version space is orthogonal to the
+ * application-level {@code dataVersion} (design decisions: version stamps).
  *
- * <p>Unlike {@link SyncMessage}, this message carries no data stamp: the Worker-path guard
- * orders on the decision stamp only, and {@code dataVersion} is allocated independently by
- * the receiving node's stamp clock (design decisions: version stamps).
+ * <p>The decision carries no data stamp: the Worker-path guard orders on the decision stamp
+ * only, and {@code dataVersion} is allocated independently by the receiving node's stamp
+ * clock (design decisions: version stamps).
  *
  * @param id       message trace identifier — cached wall-clock value from the originating
  *                 Worker; time-sortable but orders nothing and may coincide across messages
@@ -52,30 +47,26 @@ import org.springframework.amqp.core.MessageProperties;
  * @param type     the decision type; never {@code null}
  * @param stamp    the Worker decision stamp (version, node id and epoch)
  */
-public record WorkerMessage(long id, String cacheKey, WorkerDecisionType type, DecisionStamp stamp) {
+public record WorkerDecision(long id, String cacheKey, WorkerType type, DecisionStamp stamp) {
   /** The type and the lease kind are one contract, not two independently writable facts. */
-  public WorkerMessage {
+  public WorkerDecision {
     Objects.requireNonNull(cacheKey, "cacheKey must not be null");
     Objects.requireNonNull(type, "type must not be null");
     Objects.requireNonNull(stamp, "stamp must not be null");
-    if ((type == WorkerDecisionType.HOT) != stamp.isHot()) {
-      throw new IllegalArgumentException("WorkerMessage type and DecisionStamp kind disagree");
+    if ((type == WorkerType.HOT) != stamp.isHot()) {
+      throw new IllegalArgumentException("WorkerDecision type and DecisionStamp kind disagree");
     }
   }
 
   /**
-   * Deserializes a {@code WorkerMessage} from an AMQP message body and headers.
-   *
-   * <p>The cache key is read from the message body (UTF-8 decoded). The type and the
-   * decision stamp fields are read from AMQP headers; missing or non-numeric numeric
-   * headers default to {@code 0L}.
+   * Deserializes a {@code WorkerDecision} from an AMQP message body and headers.
    *
    * @param msg the incoming AMQP message; must not be null
-   * @return a parsed {@link WorkerMessage}, or {@code null} if the body is empty, the
-   *         cache key is invalid or the type header is unknown
+   * @return a parsed decision, or {@code null} if the body is empty, the cache key is
+   *         invalid or the type header is unknown
    */
-  public static @Nullable WorkerMessage from(Message msg) {
-    return from(msg, WorkerDecisionType.parse(msg.getMessageProperties().getHeader(HEADER_TYPE)));
+  public static @Nullable WorkerDecision from(Message msg) {
+    return from(msg, WorkerType.parse(msg.getMessageProperties().getHeader(HEADER_TYPE)));
   }
 
   /**
@@ -84,16 +75,16 @@ public record WorkerMessage(long id, String cacheKey, WorkerDecisionType type, D
    *
    * <p>This is the decision plane's validation boundary: a message that survives it is
    * orderable. A non-positive {@code decisionVersion} is unorderable and is dropped here,
-   * before the body is decoded or the message enters the per-key dispatcher — the handler
+   * before the body is decoded or the message enters the per-key dispatcher — the context
    * below assumes a positive stamp. A missing node id is accepted on arrival against a
    * named node: epoch and version counters are node-local and not comparable across nodes.
    *
    * @param msg  the incoming AMQP message; must not be null
    * @param type the parsed type; {@code null} for an unknown/missing header
-   * @return the decoded message, or {@code null} when the type is null, the decision
+   * @return the decoded decision, or {@code null} when the type is null, the decision
    *         version is non-positive, or the body or cache key is invalid
    */
-  public static @Nullable WorkerMessage from(Message msg, @Nullable WorkerDecisionType type) {
+  public static @Nullable WorkerDecision from(Message msg, @Nullable WorkerType type) {
     if (type == null) {
       return null;
     }
@@ -117,7 +108,7 @@ public record WorkerMessage(long id, String cacheKey, WorkerDecisionType type, D
     long epoch = AmqpMessageReader.readLongHeader(props, HEADER_EPOCH, 0L);
     long id = AmqpMessageReader.readLongHeader(props, HEADER_MESSAGE_ID, 0L);
 
-    DecisionKind kind = type == WorkerDecisionType.HOT ? DecisionKind.HOT : DecisionKind.COOL;
-    return new WorkerMessage(id, cacheKey, type, new DecisionStamp(decisionVersion, nodeId, epoch, kind));
+    DecisionKind kind = type == WorkerType.HOT ? DecisionKind.HOT : DecisionKind.COOL;
+    return new WorkerDecision(id, cacheKey, type, new DecisionStamp(decisionVersion, nodeId, epoch, kind));
   }
 }

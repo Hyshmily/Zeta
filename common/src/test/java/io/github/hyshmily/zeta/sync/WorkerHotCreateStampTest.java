@@ -35,9 +35,9 @@ import io.github.hyshmily.zeta.cache.cachesupport.loader.CacheLoader;
 import io.github.hyshmily.zeta.cache.cachesupport.raw.CacheEntry;
 import io.github.hyshmily.zeta.model.DecisionStamp;
 import io.github.hyshmily.zeta.model.KeyState;
-import io.github.hyshmily.zeta.sync.worker.DefaultWorkerDecisionHandler;
-import io.github.hyshmily.zeta.sync.worker.WorkerDecisionType;
-import io.github.hyshmily.zeta.sync.worker.WorkerMessage;
+import io.github.hyshmily.zeta.sync.worker.DefaultWorkerContext;
+import io.github.hyshmily.zeta.sync.worker.WorkerDecision;
+import io.github.hyshmily.zeta.sync.worker.WorkerType;
 import io.github.hyshmily.zeta.util.clock.StampClock;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
@@ -76,9 +76,10 @@ class WorkerHotCreateStampTest {
       return "fresh";
     };
 
-    DefaultWorkerDecisionHandler handler = new DefaultWorkerDecisionHandler(cache, loader, lifecycle, clock, List.of());
+    DefaultWorkerContext context = new DefaultWorkerContext(cache, loader, lifecycle, clock, List.of());
 
-    handler.handleHot(hotMessage("k"));
+    WorkerDecision decision = hotMessage("k");
+    context.settleHot(decision, context.resolveHot(decision));
 
     CacheEntry created = (CacheEntry) cache.getIfPresent("k");
     assertThat(created).isNotNull();
@@ -105,8 +106,9 @@ class WorkerHotCreateStampTest {
       return "stale";
     };
 
-    DefaultWorkerDecisionHandler handler = new DefaultWorkerDecisionHandler(cache, loader, lifecycle, clock, List.of());
-    handler.handleHot(hotMessage("k"));
+    DefaultWorkerContext context = new DefaultWorkerContext(cache, loader, lifecycle, clock, List.of());
+    WorkerDecision decision = hotMessage("k");
+    context.settleHot(decision, context.resolveHot(decision));
 
     assertThat(cache.getIfPresent("k")).isNull();
   }
@@ -135,8 +137,9 @@ class WorkerHotCreateStampTest {
       return "fresh";
     };
 
-    DefaultWorkerDecisionHandler handler = new DefaultWorkerDecisionHandler(cache, loader, lifecycle, clock, List.of());
-    handler.handleHot(hotMessage("k"));
+    DefaultWorkerContext context = new DefaultWorkerContext(cache, loader, lifecycle, clock, List.of());
+    WorkerDecision decision = hotMessage("k");
+    context.settleHot(decision, context.resolveHot(decision));
 
     assertThat(cache.getIfPresent("k")).isNull();
   }
@@ -163,8 +166,9 @@ class WorkerHotCreateStampTest {
       .build();
     cache.put("k", lifecycle.editEntry(hot).keyState(KeyState.NORMAL).build());
 
-    DefaultWorkerDecisionHandler handler = new DefaultWorkerDecisionHandler(cache, null, lifecycle, clock, List.of());
-    handler.handleHot(hotMessage("k", 5L));
+    DefaultWorkerContext context = new DefaultWorkerContext(cache, null, lifecycle, clock, List.of());
+    WorkerDecision decision = hotMessage("k", 5L);
+    context.settleHot(decision, context.resolveHot(decision));
 
     CacheEntry promoted = (CacheEntry) cache.getIfPresent("k");
     assertThat(promoted).isNotNull();
@@ -203,7 +207,7 @@ class WorkerHotCreateStampTest {
 
     StampClock clock = mock(StampClock.class);
     when(clock.nextStamp()).thenReturn(7L);
-    DefaultWorkerDecisionHandler handler = new DefaultWorkerDecisionHandler(
+    DefaultWorkerContext context = new DefaultWorkerContext(
       cache,
       key -> null,
       lifecycle,
@@ -211,24 +215,25 @@ class WorkerHotCreateStampTest {
       List.of()
     );
 
-    handler.handleHot(hotMessage("k"));
+    WorkerDecision decision = hotMessage("k");
+    context.settleHot(decision, context.resolveHot(decision));
 
     assertThat(stored.get())
       .as("a pre-invalidation fallback value must not be re-signed with the pre-load stamp")
       .isNull();
   }
 
-  private static WorkerMessage hotMessage(String key) {
+  private static WorkerDecision hotMessage(String key) {
     return hotMessage(key, 1L);
   }
 
-  private static WorkerMessage hotMessage(String key, long decisionVersion) {
+  private static WorkerDecision hotMessage(String key, long decisionVersion) {
     MessageProperties props = new MessageProperties();
-    props.setHeader(HEADER_TYPE, WorkerDecisionType.HOT.code());
+    props.setHeader(HEADER_TYPE, WorkerType.HOT.code());
     props.setHeader(HEADER_VERSION, decisionVersion);
     props.setHeader(HEADER_NODE_ID, "w1");
     props.setHeader(HEADER_EPOCH, 1L);
     props.setHeader(HEADER_MESSAGE_ID, 1L);
-    return WorkerMessage.from(new Message(key.getBytes(StandardCharsets.UTF_8), props));
+    return WorkerDecision.from(new Message(key.getBytes(StandardCharsets.UTF_8), props));
   }
 }

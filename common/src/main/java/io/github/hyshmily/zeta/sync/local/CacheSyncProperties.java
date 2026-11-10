@@ -17,7 +17,7 @@ package io.github.hyshmily.zeta.sync.local;
 
 import io.github.hyshmily.zeta.constants.ZetaConstants;
 import io.github.hyshmily.zeta.sync.AmqpConsumerProperties;
-import io.github.hyshmily.zeta.sync.dispatcher.PerKeyOrderedDispatcher;
+import io.github.hyshmily.zeta.sync.dispatcher.KeyDispatcher;
 import io.github.hyshmily.zeta.util.Internal;
 import io.github.hyshmily.zeta.util.NodeIdentity;
 import jakarta.validation.constraints.NotBlank;
@@ -123,7 +123,7 @@ public class CacheSyncProperties implements AmqpConsumerProperties {
    * spreads the cluster-loader reads of peers processing the same REFRESH instead of
    * letting them all hit the data source at once. */
   @PositiveOrZero
-  private int warmupJitterMs = 50;
+  private int jitterMs = 50;
 
   /** Number of concurrent RabbitMQ consumers for the sync queue.
    * Higher values increase throughput under load at the cost of more broker connections. */
@@ -143,7 +143,7 @@ public class CacheSyncProperties implements AmqpConsumerProperties {
 
   /**
    * Global cap (in weighted units) on tasks pending in the per-key sync dispatcher
-   * ({@link PerKeyOrderedDispatcher}). One unit approximates 1 KB of AMQP payload:
+   * ({@link KeyDispatcher}). One unit approximates 1 KB of AMQP payload:
    * single-key messages charge 1 unit, payload messages (PUT) charge by body
    * size ({@code 1 + bodyBytes/1024}). When the budget is exhausted, new per-key
    * tasks are dropped — the message was already acked (at-most-once, design

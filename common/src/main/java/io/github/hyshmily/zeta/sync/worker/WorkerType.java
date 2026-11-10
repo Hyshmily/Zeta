@@ -18,7 +18,7 @@ package io.github.hyshmily.zeta.sync.worker;
 import org.jspecify.annotations.Nullable;
 
 /**
- * The wire operation of a {@link WorkerMessage}, parsed once at the AMQP boundary.
+ * The operation of a {@link WorkerDecision}, parsed once at the AMQP boundary.
  *
  * <p>Every downstream decision asks the constant itself instead of re-comparing the header
  * string: {@link #isControl()} marks the O(1) COOL control signal that bypasses the global
@@ -28,7 +28,7 @@ import org.jspecify.annotations.Nullable;
  * <p>The enum name is the wire value; {@link #parse(Object)} is the one place the header
  * string becomes an operation.
  */
-public enum WorkerDecisionType {
+public enum WorkerType {
   HOT,
   COOL;
 
@@ -51,9 +51,9 @@ public enum WorkerDecisionType {
    * Parses the AMQP type header.
    *
    * @param header the header value; may be {@code null} or a non-String type
-   * @return the matching decision type, or {@code null} for an unknown value
+   * @return the matching operation, or {@code null} for an unknown value
    */
-  public static @Nullable WorkerDecisionType parse(@Nullable Object header) {
+  public static @Nullable WorkerType parse(@Nullable Object header) {
     return header instanceof String value
       ? switch (value) {
           case "HOT" -> HOT;

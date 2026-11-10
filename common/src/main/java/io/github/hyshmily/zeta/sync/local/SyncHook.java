@@ -30,22 +30,20 @@ import io.github.hyshmily.zeta.cache.cachesupport.raw.CacheEntry;
 public interface SyncHook {
   /**
    * Called after a peer value has been applied to L1 — a REFRESH reload or a
-   * value-carrying PUT (the same hook surface; {@code syncMessage.type()} distinguishes
+   * value-carrying PUT (the same hook surface; {@code message.type()} distinguishes
    * them).
    *
-   * @param cacheKey the refreshed cache key
-   * @param syncMessage       the sync message that triggered the refresh
-   * @param entry    the updated {@link CacheEntry} (never null)
+   * @param message the sync message that triggered the refresh
+   * @param entry   the updated {@link CacheEntry} (never null)
    */
-  default void afterRefresh(String cacheKey, SyncMessage syncMessage, CacheEntry entry) {}
+  default void afterRefresh(SyncMessage message, CacheEntry entry) {}
 
   /**
    * Called after a key has been removed from the local cache via an INVALIDATE sync message.
    *
-   * @param cacheKey the invalidated cache key
-   * @param syncMessage       the sync message that triggered the invalidation
+   * @param message the sync message that triggered the invalidation
    */
-  default void afterInvalidate(String cacheKey, SyncMessage syncMessage) {}
+  default void afterInvalidate(SyncMessage message) {}
 
   /**
    * Called when a REFRESH or PUT sync message produced no effect: the local entry already
@@ -56,8 +54,7 @@ public interface SyncHook {
    * <p>Every REFRESH/PUT therefore receives exactly one terminal callback: this one, or
    * {@link #afterRefresh}.
    *
-   * @param cacheKey the cache key whose refresh was skipped
-   * @param syncMessage       the sync message that would have triggered the refresh
+   * @param message the sync message that would have triggered the refresh
    */
-  default void onRefreshSkipped(String cacheKey, SyncMessage syncMessage) {}
+  default void onRefreshSkipped(SyncMessage message) {}
 }

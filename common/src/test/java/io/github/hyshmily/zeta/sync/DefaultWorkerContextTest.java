@@ -31,12 +31,15 @@ import io.github.hyshmily.zeta.model.DecisionStamp;
 import io.github.hyshmily.zeta.model.KeyState;
 import io.github.hyshmily.zeta.sharding.ConsistentHashRing;
 import io.github.hyshmily.zeta.sharding.HealthView;
-import io.github.hyshmily.zeta.sync.worker.DefaultWorkerDecisionHandler;
+import io.github.hyshmily.zeta.sync.worker.DefaultWorkerContext;
+import io.github.hyshmily.zeta.sync.worker.HotAction;
 import io.github.hyshmily.zeta.sync.worker.HotSkipReason;
-import io.github.hyshmily.zeta.sync.worker.WorkerDecisionHandler;
+import io.github.hyshmily.zeta.sync.worker.HotValue;
+import io.github.hyshmily.zeta.sync.worker.WorkerDecision;
 import io.github.hyshmily.zeta.sync.worker.WorkerDecisionHook;
-import io.github.hyshmily.zeta.sync.worker.WorkerDecisionType;
-import io.github.hyshmily.zeta.sync.worker.WorkerMessage;
+import io.github.hyshmily.zeta.sync.worker.WorkerPolicy;
+import io.github.hyshmily.zeta.sync.worker.WorkerType;
+import io.github.hyshmily.zeta.util.TimeSource;
 import io.github.hyshmily.zeta.util.clock.StampClock;
 import java.nio.charset.StandardCharsets;
 import java.util.Collections;
@@ -51,10 +54,10 @@ import org.mockito.ArgumentCaptor;
 import org.springframework.amqp.core.Message;
 import org.springframework.amqp.core.MessageProperties;
 
-class DefaultWorkerDecisionHandlerTest {
+class DefaultWorkerContextTest {
 
   private Cache<String, CacheEntry> cache;
-  private DefaultWorkerDecisionHandler handler;
+  private DefaultWorkerContext context;
   private CacheLoader loader;
   private EntryLifecycleImpl entryLifecycle;
   private StampClock stampClock;
@@ -68,21 +71,36 @@ class DefaultWorkerDecisionHandlerTest {
     stampClock = org.mockito.Mockito.mock(StampClock.class);
     org.mockito.Mockito.when(stampClock.nextStamp()).thenReturn(1L);
     org.mockito.Mockito.when(stampClock.nextStamps(org.mockito.ArgumentMatchers.anyInt())).thenReturn(1L);
-    handler = new DefaultWorkerDecisionHandler(cache, loader, entryLifecycle, stampClock, Collections.emptyList());
+    context = new DefaultWorkerContext(cache, loader, entryLifecycle, stampClock, Collections.emptyList());
   }
 
-  private static WorkerMessage workerMessage(String key, String type, long dv) {
+  private void handleHot(WorkerDecision decision) {
+    HotAction prepared = context.resolveHot(decision);
+    context.settleHot(decision, prepared);
+  }
+
+  private void handleCool(WorkerDecision decision) {
+    context.cool(decision);
+  }
+
+  private void handleCoolBatch(List<WorkerDecision> batch) {
+    for (WorkerDecision effective : context.reduceCool(batch)) {
+      handleCool(effective);
+    }
+  }
+
+  private static WorkerDecision wireMessage(String key, String type, long dv) {
     return workerMessageFrom(key, type, dv, "node");
   }
 
-  private static WorkerMessage workerMessageFrom(String key, String type, long dv, String nodeId) {
+  private static WorkerDecision workerMessageFrom(String key, String type, long dv, String nodeId) {
     MessageProperties props = new MessageProperties();
     props.setHeader(HEADER_TYPE, type);
     props.setHeader(HEADER_VERSION, dv);
     props.setHeader(HEADER_NODE_ID, nodeId);
     props.setHeader(HEADER_EPOCH, 1L);
     props.setHeader(HEADER_MESSAGE_ID, 1L);
-    return WorkerMessage.from(new Message(key.getBytes(StandardCharsets.UTF_8), props));
+    return WorkerDecision.from(new Message(key.getBytes(StandardCharsets.UTF_8), props));
   }
 
   private static CacheEntry hotEntryOwnedBy(String owner, long dv) {
@@ -101,29 +119,52 @@ class DefaultWorkerDecisionHandlerTest {
   }
 
   @Test
+  void handleHot_logicallyExpiredResidentDoesNotVetoAFreshLoad() {
+    CacheEntry dead = EntryDraft.blank(null)
+      .value("stale")
+      .version(999)
+      .decision(DecisionStamp.hot(1, "node", 1L))
+      .ttl(300_000, 30_000, 300_000, 30_000)
+      .hardExpiryAt(TimeSource.currentTimeMillis() - 1L)
+      .keyState(KeyState.NORMAL)
+      .build();
+    cache.put("key1", dead);
+    WorkerDecisionHook hook = mock(WorkerDecisionHook.class);
+    context = new DefaultWorkerContext(cache, loader, entryLifecycle, stampClock, List.of(hook));
+
+    handleHot(wireMessage("key1", WorkerType.HOT.code(), 2L));
+
+    CacheEntry promoted = cache.getIfPresent("key1");
+    assertThat(promoted).isNotNull();
+    assertThat(promoted.getValue()).isEqualTo("fresh");
+    assertThat(promoted.getKeyState()).isEqualTo(KeyState.HOT);
+    verify(hook).afterHotPromotion(any(), any());
+    verify(hook, never()).onHotSkipped(any(), any());
+  }
+
+  @Test
   void handleHot_shouldInvokeAfterHotPromotionHook() {
     cache.put("key1", entry(1, KeyState.NORMAL));
     WorkerDecisionHook hook = mock(WorkerDecisionHook.class);
-    handler = new DefaultWorkerDecisionHandler(cache, loader, entryLifecycle, stampClock, List.of(hook));
+    context = new DefaultWorkerContext(cache, loader, entryLifecycle, stampClock, List.of(hook));
 
-    handler.handleHot(workerMessage("key1", WorkerDecisionType.HOT.code(), 2L));
+    handleHot(wireMessage("key1", WorkerType.HOT.code(), 2L));
 
-    verify(hook).afterHotPromotion(eq("key1"), any(), any());
+    verify(hook).afterHotPromotion(any(), any());
   }
 
   /**
    * A no-loader promotion writes no loaded value, so an older per-key tombstone must not
-   * block the metadata-only promotion of the live resident. Regression: the tombstone probe
-   * used the zero {@code hotStamp} and reported "invalidated during load" for every key that
-   * had ever been invalidated, leaving the resident NORMAL forever.
+   * block the metadata-only promotion of the live resident: the tombstone probe belongs to
+   * the value-rewrite guard only, never to the metadata-only promotion.
    */
   @Test
   void handleHot_withoutLoaderPromotesALiveResidentEvenAfterAPerKeyTombstone() {
     cache.put("key1", entry(1, KeyState.NORMAL));
     entryLifecycle.recordInvalidation("key1", 10L);
-    handler = new DefaultWorkerDecisionHandler(cache, null, entryLifecycle, stampClock, List.of());
+    context = new DefaultWorkerContext(cache, null, entryLifecycle, stampClock, List.of());
 
-    handler.handleHot(workerMessage("key1", WorkerDecisionType.HOT.code(), 2L));
+    handleHot(wireMessage("key1", WorkerType.HOT.code(), 2L));
 
     CacheEntry promoted = cache.asMap().get("key1");
     assertThat(promoted).isNotNull();
@@ -141,18 +182,18 @@ class DefaultWorkerDecisionHandlerTest {
   void handleCoolBatch_keepsTheHighestDecisionAndReportsTheCoveredOne() {
     cache.put("key1", entry(1, KeyState.HOT));
     WorkerDecisionHook hook = mock(WorkerDecisionHook.class);
-    handler = new DefaultWorkerDecisionHandler(cache, loader, entryLifecycle, stampClock, List.of(hook));
-    WorkerMessage cool10 = workerMessage("key1", WorkerDecisionType.COOL.code(), 10L);
-    WorkerMessage cool7 = workerMessage("key1", WorkerDecisionType.COOL.code(), 7L);
+    context = new DefaultWorkerContext(cache, loader, entryLifecycle, stampClock, List.of(hook));
+    WorkerDecision cool10 = wireMessage("key1", WorkerType.COOL.code(), 10L);
+    WorkerDecision cool7 = wireMessage("key1", WorkerType.COOL.code(), 7L);
 
-    handler.handleCoolBatch(List.of(cool10, cool7));
+    handleCoolBatch(List.of(cool10, cool7));
 
     CacheEntry cooled = cache.asMap().get("key1");
     assertThat(cooled).isNotNull();
     assertThat(cooled.getKeyState()).isEqualTo(KeyState.COOL);
     assertThat(cooled.getDecisionVersion()).isEqualTo(10L);
-    verify(hook).afterCoolDowngrade(eq("key1"), eq(cool10), any());
-    verify(hook).onCoolSkipped(eq("key1"), eq(cool7));
+    verify(hook).afterCoolDowngrade(eq(cool10), any());
+    verify(hook).onCoolSkipped(eq(cool7));
   }
 
   /** A later, higher decision supersedes the earlier winner before either touches L1. */
@@ -160,17 +201,17 @@ class DefaultWorkerDecisionHandlerTest {
   void handleCoolBatch_laterHigherDecisionSupersedesTheEarlierWinner() {
     cache.put("key1", entry(1, KeyState.HOT));
     WorkerDecisionHook hook = mock(WorkerDecisionHook.class);
-    handler = new DefaultWorkerDecisionHandler(cache, loader, entryLifecycle, stampClock, List.of(hook));
-    WorkerMessage cool10 = workerMessage("key1", WorkerDecisionType.COOL.code(), 10L);
-    WorkerMessage cool12 = workerMessage("key1", WorkerDecisionType.COOL.code(), 12L);
+    context = new DefaultWorkerContext(cache, loader, entryLifecycle, stampClock, List.of(hook));
+    WorkerDecision cool10 = wireMessage("key1", WorkerType.COOL.code(), 10L);
+    WorkerDecision cool12 = wireMessage("key1", WorkerType.COOL.code(), 12L);
 
-    handler.handleCoolBatch(List.of(cool10, cool12));
+    handleCoolBatch(List.of(cool10, cool12));
 
     CacheEntry cooled = cache.asMap().get("key1");
     assertThat(cooled).isNotNull();
     assertThat(cooled.getDecisionVersion()).isEqualTo(12L);
-    verify(hook).onCoolSkipped(eq("key1"), eq(cool10));
-    verify(hook).afterCoolDowngrade(eq("key1"), eq(cool12), any());
+    verify(hook).onCoolSkipped(eq(cool10));
+    verify(hook).afterCoolDowngrade(eq(cool12), any());
   }
 
   /** When the resident already outranks the whole run, every message is skipped. */
@@ -178,19 +219,19 @@ class DefaultWorkerDecisionHandlerTest {
   void handleCoolBatch_reportsEveryMessageWhenTheResidentOutranksTheRun() {
     cache.put("key1", hotEntryOwnedBy("node", 100L));
     WorkerDecisionHook hook = mock(WorkerDecisionHook.class);
-    handler = new DefaultWorkerDecisionHandler(cache, loader, entryLifecycle, stampClock, List.of(hook));
-    WorkerMessage cool10 = workerMessage("key1", WorkerDecisionType.COOL.code(), 10L);
-    WorkerMessage cool7 = workerMessage("key1", WorkerDecisionType.COOL.code(), 7L);
+    context = new DefaultWorkerContext(cache, loader, entryLifecycle, stampClock, List.of(hook));
+    WorkerDecision cool10 = wireMessage("key1", WorkerType.COOL.code(), 10L);
+    WorkerDecision cool7 = wireMessage("key1", WorkerType.COOL.code(), 7L);
 
-    handler.handleCoolBatch(List.of(cool10, cool7));
+    handleCoolBatch(List.of(cool10, cool7));
 
     CacheEntry resident = cache.asMap().get("key1");
     assertThat(resident).isNotNull();
     assertThat(resident.getKeyState()).isEqualTo(KeyState.HOT);
     assertThat(resident.getDecisionVersion()).isEqualTo(100L);
-    verify(hook).onCoolSkipped(eq("key1"), eq(cool10));
-    verify(hook).onCoolSkipped(eq("key1"), eq(cool7));
-    verify(hook, never()).afterCoolDowngrade(any(), any(), any());
+    verify(hook).onCoolSkipped(eq(cool10));
+    verify(hook).onCoolSkipped(eq(cool7));
+    verify(hook, never()).afterCoolDowngrade(any(), any());
   }
 
   /**
@@ -206,28 +247,20 @@ class DefaultWorkerDecisionHandlerTest {
     when(ring.locateNode(eq("key1"), any(HealthView.class))).thenReturn("worker-B");
     when(healthView.isCurrentIncarnation("worker-B", 1L)).thenReturn(true);
     WorkerDecisionHook hook = mock(WorkerDecisionHook.class);
-    handler = new DefaultWorkerDecisionHandler(
-      cache,
-      loader,
-      entryLifecycle,
-      stampClock,
-      List.of(hook),
-      ring,
-      healthView
-    );
-    WorkerMessage cool20 = workerMessageFrom("key1", WorkerDecisionType.COOL.code(), 20L, "worker-A");
-    WorkerMessage cool30 = workerMessageFrom("key1", WorkerDecisionType.COOL.code(), 30L, "worker-A");
+    context = new DefaultWorkerContext(cache, loader, entryLifecycle, stampClock, List.of(hook), ring, healthView);
+    WorkerDecision cool20 = workerMessageFrom("key1", WorkerType.COOL.code(), 20L, "worker-A");
+    WorkerDecision cool30 = workerMessageFrom("key1", WorkerType.COOL.code(), 30L, "worker-A");
 
-    handler.handleCoolBatch(List.of(cool20, cool30));
+    handleCoolBatch(List.of(cool20, cool30));
 
     CacheEntry after = cache.asMap().get("key1");
     assertThat(after).isNotNull();
     assertThat(after.getKeyState()).isEqualTo(KeyState.HOT);
     assertThat(after.getDecisionVersion()).isEqualTo(10L);
     assertThat(after.getDecisionNodeId()).isEqualTo("worker-B");
-    verify(hook).onCoolSkipped(eq("key1"), eq(cool20));
-    verify(hook).onCoolSkipped(eq("key1"), eq(cool30));
-    verify(hook, never()).afterCoolDowngrade(any(), any(), any());
+    verify(hook).onCoolSkipped(eq(cool20));
+    verify(hook).onCoolSkipped(eq(cool30));
+    verify(hook, never()).afterCoolDowngrade(any(), any());
   }
 
   /**
@@ -239,19 +272,19 @@ class DefaultWorkerDecisionHandlerTest {
   void handleCoolBatch_mixedNodeRunFallsBackToSequential() {
     cache.put("key1", entry(1, KeyState.HOT));
     WorkerDecisionHook hook = mock(WorkerDecisionHook.class);
-    handler = new DefaultWorkerDecisionHandler(cache, loader, entryLifecycle, stampClock, List.of(hook));
-    WorkerMessage fromA = workerMessageFrom("key1", WorkerDecisionType.COOL.code(), 10L, "worker-A");
-    WorkerMessage fromB = workerMessageFrom("key1", WorkerDecisionType.COOL.code(), 9L, "worker-B");
+    context = new DefaultWorkerContext(cache, loader, entryLifecycle, stampClock, List.of(hook));
+    WorkerDecision fromA = workerMessageFrom("key1", WorkerType.COOL.code(), 10L, "worker-A");
+    WorkerDecision fromB = workerMessageFrom("key1", WorkerType.COOL.code(), 9L, "worker-B");
 
-    handler.handleCoolBatch(List.of(fromA, fromB));
+    handleCoolBatch(List.of(fromA, fromB));
 
     CacheEntry cooled = cache.asMap().get("key1");
     assertThat(cooled).isNotNull();
     assertThat(cooled.getDecisionNodeId()).isEqualTo("worker-B");
     assertThat(cooled.getDecisionVersion()).isEqualTo(9L);
-    verify(hook).afterCoolDowngrade(eq("key1"), eq(fromA), any());
-    verify(hook).afterCoolDowngrade(eq("key1"), eq(fromB), any());
-    verify(hook, never()).onCoolSkipped(any(), any());
+    verify(hook).afterCoolDowngrade(eq(fromA), any());
+    verify(hook).afterCoolDowngrade(eq(fromB), any());
+    verify(hook, never()).onCoolSkipped(any());
   }
 
   /**
@@ -262,7 +295,7 @@ class DefaultWorkerDecisionHandlerTest {
    */
   @Test
   void handleHot_entryAbsent_shouldPreserveDecisionIdentity() {
-    handler.handleHot(workerMessage("newkey", WorkerDecisionType.HOT.code(), 1L));
+    handleHot(wireMessage("newkey", WorkerType.HOT.code(), 1L));
 
     CacheEntry ce = (CacheEntry) cache.getIfPresent("newkey");
     assertThat(ce).isNotNull();
@@ -279,11 +312,11 @@ class DefaultWorkerDecisionHandlerTest {
    */
   @Test
   void handleHot_olderDecisionFromSameNode_shouldNotOverwriteCreatedEntry() {
-    handler.handleHot(workerMessage("newkey", WorkerDecisionType.HOT.code(), 5L));
+    handleHot(wireMessage("newkey", WorkerType.HOT.code(), 5L));
     CacheEntry before = (CacheEntry) cache.getIfPresent("newkey");
     assertThat(before.getDecisionVersion()).isEqualTo(5L);
 
-    handler.handleHot(workerMessage("newkey", WorkerDecisionType.HOT.code(), 3L));
+    handleHot(wireMessage("newkey", WorkerType.HOT.code(), 3L));
 
     CacheEntry after = (CacheEntry) cache.getIfPresent("newkey");
     assertThat(after.getDecisionVersion()).isEqualTo(5L);
@@ -293,21 +326,21 @@ class DefaultWorkerDecisionHandlerTest {
   void handleHot_staleVersion_shouldInvokeOnHotSkippedStale() {
     cache.put("key1", entry(5, KeyState.NORMAL));
     WorkerDecisionHook hook = mock(WorkerDecisionHook.class);
-    handler = new DefaultWorkerDecisionHandler(cache, loader, entryLifecycle, stampClock, List.of(hook));
+    context = new DefaultWorkerContext(cache, loader, entryLifecycle, stampClock, List.of(hook));
 
-    handler.handleHot(workerMessage("key1", WorkerDecisionType.HOT.code(), 3L));
+    handleHot(wireMessage("key1", WorkerType.HOT.code(), 3L));
 
-    verify(hook).onHotSkipped(eq("key1"), any(), eq(HotSkipReason.VERSION_STALE));
+    verify(hook).onHotSkipped(any(), eq(HotSkipReason.VERSION_STALE));
   }
 
   @Test
   void handleHot_valueNotFound_shouldInvokeOnHotSkippedValueNotFound() {
     WorkerDecisionHook hook = mock(WorkerDecisionHook.class);
-    handler = new DefaultWorkerDecisionHandler(cache, k -> null, entryLifecycle, stampClock, List.of(hook));
+    context = new DefaultWorkerContext(cache, k -> null, entryLifecycle, stampClock, List.of(hook));
 
-    handler.handleHot(workerMessage("missing", WorkerDecisionType.HOT.code(), 1L));
+    handleHot(wireMessage("missing", WorkerType.HOT.code(), 1L));
 
-    verify(hook).onHotSkipped(eq("missing"), any(), eq(HotSkipReason.VALUE_NOT_FOUND));
+    verify(hook).onHotSkipped(any(), eq(HotSkipReason.VALUE_NOT_FOUND));
   }
 
   /**
@@ -331,12 +364,12 @@ class DefaultWorkerDecisionHandlerTest {
     WorkerDecisionHook hook = mock(WorkerDecisionHook.class);
     Cache<String, CacheEntry> lifecycleCache = Caffeine.newBuilder().build();
     EntryLifecycleImpl lifecycle = new EntryLifecycleImpl(lifecycleCache, new ZetaProperties(), null);
-    handler = new DefaultWorkerDecisionHandler(mockedCache, k -> null, lifecycle, stampClock, List.of(hook));
+    context = new DefaultWorkerContext(mockedCache, k -> null, lifecycle, stampClock, List.of(hook));
 
-    handler.handleHot(workerMessage("key1", WorkerDecisionType.HOT.code(), 2L));
+    handleHot(wireMessage("key1", WorkerType.HOT.code(), 2L));
 
-    verify(hook).onHotSkipped(eq("key1"), any(), eq(HotSkipReason.VALUE_NOT_FOUND));
-    verify(hook, never()).afterHotPromotion(any(), any(), any());
+    verify(hook).onHotSkipped(any(), eq(HotSkipReason.VALUE_NOT_FOUND));
+    verify(hook, never()).afterHotPromotion(any(), any());
   }
 
   /**
@@ -347,18 +380,12 @@ class DefaultWorkerDecisionHandlerTest {
   @Test
   void handleHot_admissionDeclined_shouldNotWriteEntryAndSkipHot() {
     WorkerDecisionHook hook = mock(WorkerDecisionHook.class);
-    handler = new DefaultWorkerDecisionHandler(
-      cache,
-      decliningLoader("rejected"),
-      entryLifecycle,
-      stampClock,
-      List.of(hook)
-    );
+    context = new DefaultWorkerContext(cache, decliningLoader("rejected"), entryLifecycle, stampClock, List.of(hook));
 
-    handler.handleHot(workerMessage("declined", WorkerDecisionType.HOT.code(), 1L));
+    handleHot(wireMessage("declined", WorkerType.HOT.code(), 1L));
 
     assertThat(cache.getIfPresent("declined")).as("a declined value must not enter L1").isNull();
-    verify(hook).onHotSkipped(eq("declined"), any(), eq(HotSkipReason.VALUE_NOT_FOUND));
+    verify(hook).onHotSkipped(any(), eq(HotSkipReason.VALUE_NOT_FOUND));
   }
 
   /**
@@ -368,7 +395,7 @@ class DefaultWorkerDecisionHandlerTest {
   @Test
   void handleHot_admissionDeclined_shouldPromoteExistingEntryInsteadOfRejectedValue() {
     cache.put("key1", entry(1, KeyState.NORMAL));
-    handler = new DefaultWorkerDecisionHandler(
+    context = new DefaultWorkerContext(
       cache,
       decliningLoader("rejected"),
       entryLifecycle,
@@ -376,7 +403,7 @@ class DefaultWorkerDecisionHandlerTest {
       Collections.emptyList()
     );
 
-    handler.handleHot(workerMessage("key1", WorkerDecisionType.HOT.code(), 2L));
+    handleHot(wireMessage("key1", WorkerType.HOT.code(), 2L));
 
     CacheEntry promoted = cache.getIfPresent("key1");
     assertThat(promoted).isNotNull();
@@ -401,7 +428,7 @@ class DefaultWorkerDecisionHandlerTest {
 
   /**
    * Verifies the afterHotPromotion gate (F4): when the inner DCL guard rejects
-   * the promotion as stale (a newer decision landed during the Redis fetch),
+   * the promotion as stale (a newer decision landed during the loader read),
    * the hook may not fire. The loader bumps the
    * entry's decisionVersion between the outer pre-check and the atomic
    * compute, deterministically reproducing the stale-rejection interleaving.
@@ -411,15 +438,15 @@ class DefaultWorkerDecisionHandlerTest {
     WorkerDecisionHook hook = mock(WorkerDecisionHook.class);
     cache.put("key1", entry(1, KeyState.NORMAL));
     CacheLoader bumpingLoader = k -> {
-      // Simulates a concurrent newer decision landing during the Redis fetch.
+      // Simulates a concurrent newer decision landing during the loader read.
       cache.put("key1", entry(10, KeyState.NORMAL));
       return "fresh";
     };
-    handler = new DefaultWorkerDecisionHandler(cache, bumpingLoader, entryLifecycle, stampClock, List.of(hook));
+    context = new DefaultWorkerContext(cache, bumpingLoader, entryLifecycle, stampClock, List.of(hook));
 
-    handler.handleHot(workerMessage("key1", WorkerDecisionType.HOT.code(), 2L));
+    handleHot(wireMessage("key1", WorkerType.HOT.code(), 2L));
 
-    verify(hook, never()).afterHotPromotion(any(), any(), any());
+    verify(hook, never()).afterHotPromotion(any(), any());
     // The newer decision is preserved — nothing was overwritten.
     assertThat(((CacheEntry) cache.getIfPresent("key1")).getDecisionVersion()).isEqualTo(10L);
   }
@@ -432,29 +459,29 @@ class DefaultWorkerDecisionHandlerTest {
   @Test
   void handleHot_shouldPassPromotedEntryFromComputeToHook() {
     WorkerDecisionHook hook = mock(WorkerDecisionHook.class);
-    handler = new DefaultWorkerDecisionHandler(cache, loader, entryLifecycle, stampClock, List.of(hook));
+    context = new DefaultWorkerContext(cache, loader, entryLifecycle, stampClock, List.of(hook));
 
-    handler.handleHot(workerMessage("newkey", WorkerDecisionType.HOT.code(), 2L));
+    handleHot(wireMessage("newkey", WorkerType.HOT.code(), 2L));
 
     ArgumentCaptor<CacheEntry> entryCaptor = ArgumentCaptor.forClass(CacheEntry.class);
-    verify(hook).afterHotPromotion(eq("newkey"), any(), entryCaptor.capture());
+    verify(hook).afterHotPromotion(any(), entryCaptor.capture());
     assertThat(entryCaptor.getValue().getDecisionVersion()).isEqualTo(2L);
     assertThat(entryCaptor.getValue().getKeyState()).isEqualTo(KeyState.HOT);
   }
 
   /**
-   * Verifies the Redis-outage fallback (design decisions: version stamps): when the loader fails and the
+   * Verifies the source-outage fallback (design decisions: version stamps): when the loader fails and the
    * L1 entry is a normal entry, its value is used for promotion.
    */
   @Test
-  void handleHot_redisDown_shouldPromoteFromNormalL1Entry() {
+  void handleHot_loaderFailure_shouldPromoteFromNormalL1Entry() {
     cache.put("key1", entry(1, KeyState.NORMAL));
     WorkerDecisionHook hook = mock(WorkerDecisionHook.class);
-    handler = new DefaultWorkerDecisionHandler(cache, k -> null, entryLifecycle, stampClock, List.of(hook));
+    context = new DefaultWorkerContext(cache, k -> null, entryLifecycle, stampClock, List.of(hook));
 
-    handler.handleHot(workerMessage("key1", WorkerDecisionType.HOT.code(), 2L));
+    handleHot(wireMessage("key1", WorkerType.HOT.code(), 2L));
 
-    verify(hook).afterHotPromotion(eq("key1"), any(), any());
+    verify(hook).afterHotPromotion(any(), any());
     CacheEntry promoted = (CacheEntry) cache.getIfPresent("key1");
     assertThat(promoted).isNotNull();
     assertThat(promoted.getKeyState()).isEqualTo(KeyState.HOT);
@@ -478,9 +505,9 @@ class DefaultWorkerDecisionHandlerTest {
       .keyState(KeyState.NORMAL)
       .build();
     cache.put("key1", resident);
-    handler = new DefaultWorkerDecisionHandler(cache, k -> null, entryLifecycle, stampClock, List.of());
+    context = new DefaultWorkerContext(cache, k -> null, entryLifecycle, stampClock, List.of());
 
-    handler.handleHot(workerMessage("key1", WorkerDecisionType.HOT.code(), 2L));
+    handleHot(wireMessage("key1", WorkerType.HOT.code(), 2L));
 
     CacheEntry promoted = (CacheEntry) cache.getIfPresent("key1");
     assertThat(promoted.getKeyState()).isEqualTo(KeyState.HOT);
@@ -489,20 +516,20 @@ class DefaultWorkerDecisionHandlerTest {
   }
 
   /**
-   * Redis-outage fallback: the L1 value is stored as-is (no codec) and the
+   * Source-outage fallback: the L1 value is stored as-is (no codec) and the
    * promotion must preserve the exact instance.
    */
   @Test
-  void handleHot_redisDown_shouldPreserveStoredFallbackValue() {
+  void handleHot_loaderFailure_shouldPreserveStoredFallbackValue() {
     String original = "zeta-fallback-value-".repeat(60);
     CacheEntry l1Entry = EntryDraft.of(entry(1, KeyState.NORMAL)).value(original).build();
     cache.put("key1", l1Entry);
     WorkerDecisionHook hook = mock(WorkerDecisionHook.class);
-    handler = new DefaultWorkerDecisionHandler(cache, k -> null, entryLifecycle, stampClock, List.of(hook));
+    context = new DefaultWorkerContext(cache, k -> null, entryLifecycle, stampClock, List.of(hook));
 
-    handler.handleHot(workerMessage("key1", WorkerDecisionType.HOT.code(), 2L));
+    handleHot(wireMessage("key1", WorkerType.HOT.code(), 2L));
 
-    verify(hook).afterHotPromotion(eq("key1"), any(), any());
+    verify(hook).afterHotPromotion(any(), any());
     CacheEntry promoted = (CacheEntry) cache.getIfPresent("key1");
     assertThat(promoted).isNotNull();
     assertThat(promoted.getKeyState()).isEqualTo(KeyState.HOT);
@@ -511,64 +538,20 @@ class DefaultWorkerDecisionHandlerTest {
   }
 
   /**
-   * Verifies that a source outage fallback promotes any existing L1 entry.
-   */
-  @Test
-  void handleHot_sourceDown_shouldPromoteFromExistingL1Entry() {
-    CacheEntry existing = entry(1L, KeyState.NORMAL);
-    cache.put("key1", existing);
-    WorkerDecisionHook hook = mock(WorkerDecisionHook.class);
-    handler = new DefaultWorkerDecisionHandler(cache, k -> null, entryLifecycle, stampClock, List.of(hook));
-
-    handler.handleHot(workerMessage("key1", WorkerDecisionType.HOT.code(), 2L));
-
-    verify(hook).afterHotPromotion(eq("key1"), any(), any());
-  }
-
-  /**
-   * Verifies that a Redis outage with no L1 fallback value aborts the HOT
+   * Verifies that a source outage with no L1 fallback value aborts the HOT
    * promotion — there is nothing of value to promote.
    */
   @Test
-  void handleHot_redisDown_withoutFallback_shouldAbort() {
+  void handleHot_loaderFailure_withoutFallback_shouldAbort() {
     cache.put("key1", entry(1, KeyState.NORMAL));
     cache.invalidate("key1");
     WorkerDecisionHook hook = mock(WorkerDecisionHook.class);
-    handler = new DefaultWorkerDecisionHandler(cache, k -> null, entryLifecycle, stampClock, List.of(hook));
+    context = new DefaultWorkerContext(cache, k -> null, entryLifecycle, stampClock, List.of(hook));
 
-    handler.handleHot(workerMessage("key1", WorkerDecisionType.HOT.code(), 2L));
+    handleHot(wireMessage("key1", WorkerType.HOT.code(), 2L));
 
-    verify(hook).onHotSkipped(eq("key1"), any(), eq(HotSkipReason.VALUE_NOT_FOUND));
+    verify(hook).onHotSkipped(any(), eq(HotSkipReason.VALUE_NOT_FOUND));
     assertThat(cache.getIfPresent("key1")).isNull();
-  }
-
-  /**
-   * Verifies that a Redis outage promotes the existing L1 entry's value —
-   * the outage fallback keeps the last known value (v2: no sentinel
-   * exclusion; any non-null L1 value is promotable).
-   */
-  @Test
-  void handleHot_redisDown_shouldPromoteExistingL1Value() {
-    CacheEntry existing = entry(1, KeyState.NORMAL);
-    cache.put("key1", existing);
-    WorkerDecisionHook hook = mock(WorkerDecisionHook.class);
-    handler = new DefaultWorkerDecisionHandler(cache, k -> null, entryLifecycle, stampClock, List.of(hook));
-
-    handler.handleHot(workerMessage("key1", WorkerDecisionType.HOT.code(), 2L));
-
-    CacheEntry after = (CacheEntry) cache.getIfPresent("key1");
-    assertThat(after.getKeyState()).isEqualTo(KeyState.HOT);
-  }
-
-  @Test
-  void handleCool_shouldInvokeAfterCoolDowngradeHook() {
-    cache.put("key1", entry(5, KeyState.HOT));
-    WorkerDecisionHook hook = mock(WorkerDecisionHook.class);
-    handler = new DefaultWorkerDecisionHandler(cache, loader, entryLifecycle, stampClock, List.of(hook));
-
-    handler.handleCool(workerMessage("key1", WorkerDecisionType.COOL.code(), 6L));
-
-    verify(hook).afterCoolDowngrade(eq("key1"), any(), any());
   }
 
   @Test
@@ -585,7 +568,7 @@ class DefaultWorkerDecisionHandlerTest {
         .build()
     );
 
-    handler.handleCool(workerMessage("key1", WorkerDecisionType.COOL.code(), 2L));
+    handleCool(wireMessage("key1", WorkerType.COOL.code(), 2L));
 
     CacheEntry ce = (CacheEntry) cache.getIfPresent("key1");
     assertThat(ce.getKeyState()).isEqualTo(KeyState.COOL);
@@ -597,11 +580,11 @@ class DefaultWorkerDecisionHandlerTest {
   @Test
   void handleCool_noEntry_shouldInvokeOnCoolSkipped() {
     WorkerDecisionHook hook = mock(WorkerDecisionHook.class);
-    handler = new DefaultWorkerDecisionHandler(cache, loader, entryLifecycle, stampClock, List.of(hook));
+    context = new DefaultWorkerContext(cache, loader, entryLifecycle, stampClock, List.of(hook));
 
-    handler.handleCool(workerMessage("missing", WorkerDecisionType.COOL.code(), 1L));
+    handleCool(wireMessage("missing", WorkerType.COOL.code(), 1L));
 
-    verify(hook).onCoolSkipped(eq("missing"), any());
+    verify(hook).onCoolSkipped(any());
   }
 
   /**
@@ -622,15 +605,15 @@ class DefaultWorkerDecisionHandlerTest {
       .build();
     cache.put("key1", expired);
     WorkerDecisionHook hook = mock(WorkerDecisionHook.class);
-    handler = new DefaultWorkerDecisionHandler(cache, loader, entryLifecycle, stampClock, List.of(hook));
+    context = new DefaultWorkerContext(cache, loader, entryLifecycle, stampClock, List.of(hook));
 
-    handler.handleCool(workerMessage("key1", WorkerDecisionType.COOL.code(), 6L));
+    handleCool(wireMessage("key1", WorkerType.COOL.code(), 6L));
 
     CacheEntry after = (CacheEntry) cache.getIfPresent("key1");
     assertThat(after).isSameAs(expired);
     assertThat(after.getKeyState()).isEqualTo(KeyState.HOT);
-    verify(hook).onCoolSkipped(eq("key1"), any());
-    verify(hook, never()).afterCoolDowngrade(eq("key1"), any(), any());
+    verify(hook).onCoolSkipped(any());
+    verify(hook, never()).afterCoolDowngrade(any(), any());
   }
 
   /**
@@ -641,13 +624,13 @@ class DefaultWorkerDecisionHandlerTest {
   void handleCool_liveEntry_shouldStillCool() {
     cache.put("key1", entry(5, KeyState.HOT));
     WorkerDecisionHook hook = mock(WorkerDecisionHook.class);
-    handler = new DefaultWorkerDecisionHandler(cache, loader, entryLifecycle, stampClock, List.of(hook));
+    context = new DefaultWorkerContext(cache, loader, entryLifecycle, stampClock, List.of(hook));
 
-    handler.handleCool(workerMessage("key1", WorkerDecisionType.COOL.code(), 6L));
+    handleCool(wireMessage("key1", WorkerType.COOL.code(), 6L));
 
     CacheEntry ce = (CacheEntry) cache.getIfPresent("key1");
     assertThat(ce.getKeyState()).isEqualTo(KeyState.COOL);
-    verify(hook).afterCoolDowngrade(eq("key1"), any(), any());
+    verify(hook).afterCoolDowngrade(any(), any());
   }
 
   /**
@@ -667,15 +650,15 @@ class DefaultWorkerDecisionHandlerTest {
       .build();
     cache.put("key1", dead);
     WorkerDecisionHook hook = mock(WorkerDecisionHook.class);
-    handler = new DefaultWorkerDecisionHandler(cache, loader, entryLifecycle, stampClock, List.of(hook));
+    context = new DefaultWorkerContext(cache, loader, entryLifecycle, stampClock, List.of(hook));
 
-    handler.handleCool(workerMessage("key1", WorkerDecisionType.COOL.code(), 2L));
+    handleCool(wireMessage("key1", WorkerType.COOL.code(), 2L));
 
     CacheEntry after = (CacheEntry) cache.getIfPresent("key1");
     assertThat(after).isSameAs(dead);
     assertThat(after.getKeyState()).isEqualTo(KeyState.NORMAL);
-    verify(hook).onCoolSkipped(eq("key1"), any());
-    verify(hook, never()).afterCoolDowngrade(eq("key1"), any(), any());
+    verify(hook).onCoolSkipped(any());
+    verify(hook, never()).afterCoolDowngrade(any(), any());
   }
 
   @Test
@@ -683,12 +666,12 @@ class DefaultWorkerDecisionHandlerTest {
     cache.put("key1", entry(1, KeyState.NORMAL));
     WorkerDecisionHook h1 = mock(WorkerDecisionHook.class);
     WorkerDecisionHook h2 = mock(WorkerDecisionHook.class);
-    handler = new DefaultWorkerDecisionHandler(cache, loader, entryLifecycle, stampClock, List.of(h1, h2));
+    context = new DefaultWorkerContext(cache, loader, entryLifecycle, stampClock, List.of(h1, h2));
 
-    handler.handleHot(workerMessage("key1", WorkerDecisionType.HOT.code(), 2L));
+    handleHot(wireMessage("key1", WorkerType.HOT.code(), 2L));
 
-    verify(h1).afterHotPromotion(eq("key1"), any(), any());
-    verify(h2).afterHotPromotion(eq("key1"), any(), any());
+    verify(h1).afterHotPromotion(any(), any());
+    verify(h2).afterHotPromotion(any(), any());
   }
 
   @Test
@@ -697,48 +680,45 @@ class DefaultWorkerDecisionHandlerTest {
     AtomicInteger count = new AtomicInteger(0);
     WorkerDecisionHook failingHook = new WorkerDecisionHook() {
       @Override
-      public void afterHotPromotion(String k, WorkerMessage workerMessage, CacheEntry e) {
+      public void afterHotPromotion(WorkerDecision decision, CacheEntry e) {
         throw new RuntimeException("fail");
       }
     };
     WorkerDecisionHook countingHook = new WorkerDecisionHook() {
       @Override
-      public void afterHotPromotion(String k, WorkerMessage workerMessage, CacheEntry e) {
+      public void afterHotPromotion(WorkerDecision decision, CacheEntry e) {
         count.incrementAndGet();
       }
     };
-    handler = new DefaultWorkerDecisionHandler(
-      cache,
-      loader,
-      entryLifecycle,
-      stampClock,
-      List.of(failingHook, countingHook)
-    );
+    context = new DefaultWorkerContext(cache, loader, entryLifecycle, stampClock, List.of(failingHook, countingHook));
 
-    handler.handleHot(workerMessage("key1", WorkerDecisionType.HOT.code(), 2L));
+    handleHot(wireMessage("key1", WorkerType.HOT.code(), 2L));
 
     assertThat(count.get()).isEqualTo(1);
   }
 
   @Test
-  void customHandler_shouldReplaceDefaultBehavior() {
-    WorkerDecisionHandler custom = new WorkerDecisionHandler() {
+  void customPolicy_shouldReplaceThePromotedValueAndRefuseCool() {
+    WorkerPolicy custom = new WorkerPolicy() {
       @Override
-      public void handleHot(WorkerMessage workerMessage) {
-        cache.put(workerMessage.cacheKey(), valuedEntry("custom-hot"));
+      public HotAction hot(WorkerDecision decision, HotValue value) {
+        return new HotAction.Promote(HotValue.loaded("custom-hot", value.dataVersion()));
       }
 
       @Override
-      public void handleCool(WorkerMessage workerMessage) {
-        cache.put(workerMessage.cacheKey(), valuedEntry("custom-cool"));
+      public boolean cool(WorkerDecision decision) {
+        return false;
       }
     };
 
-    custom.handleHot(workerMessage("k", WorkerDecisionType.HOT.code(), 1L));
-    assertThat(cache.getIfPresent("k").getValue()).isEqualTo("custom-hot");
+    WorkerDecision hot = wireMessage("k", WorkerType.HOT.code(), 1L);
+    HotAction prepared = context.resolveHot(hot);
+    HotAction action =
+      prepared instanceof HotAction.Skip ? prepared : custom.hot(hot, ((HotAction.Promote) prepared).value());
+    context.settleHot(hot, action);
 
-    custom.handleCool(workerMessage("k", WorkerDecisionType.COOL.code(), 2L));
-    assertThat(cache.getIfPresent("k").getValue()).isEqualTo("custom-cool");
+    assertThat(cache.getIfPresent("k").getValue()).isEqualTo("custom-hot");
+    assertThat(custom.cool(wireMessage("k", WorkerType.COOL.code(), 2L))).isFalse();
   }
 
   // ── P0 scale re-balance ghost-COOL kill ──
@@ -757,29 +737,22 @@ class DefaultWorkerDecisionHandlerTest {
     when(ring.locateNode(eq("key1"), any(HealthView.class))).thenReturn("worker-B");
     when(healthView.isCurrentIncarnation("worker-B", 1L)).thenReturn(true);
     WorkerDecisionHook hook = mock(WorkerDecisionHook.class);
-    handler = new DefaultWorkerDecisionHandler(
-      cache,
-      loader,
-      entryLifecycle,
-      stampClock,
-      List.of(hook),
-      ring,
-      healthView
-    );
+    context = new DefaultWorkerContext(cache, loader, entryLifecycle, stampClock, List.of(hook), ring, healthView);
 
-    handler.handleCool(workerMessageFrom("key1", WorkerDecisionType.COOL.code(), 3L, "worker-A"));
+    handleCool(workerMessageFrom("key1", WorkerType.COOL.code(), 3L, "worker-A"));
 
     CacheEntry after = (CacheEntry) cache.getIfPresent("key1");
     assertThat(after.getKeyState()).isEqualTo(KeyState.HOT);
     assertThat(after.getDecisionVersion()).isEqualTo(10L);
     assertThat(after.getDecisionNodeId()).isEqualTo("worker-B");
-    verify(hook).onCoolSkipped(eq("key1"), any());
-    verify(hook, never()).afterCoolDowngrade(eq("key1"), any(), any());
+    verify(hook).onCoolSkipped(any());
+    verify(hook, never()).afterCoolDowngrade(any(), any());
   }
 
   /**
-   * A dead owner's HOT is legitimately coolable: the ownership guard stays out
-   * of the way and the cross-Worker COOL applies.
+   * A dead or restarted owner's HOT is legitimately coolable: both report
+   * {@code isCurrentIncarnation == false}, so the ownership guard stays out of
+   * the way and the cross-Worker COOL applies.
    */
   @Test
   void handleCool_crossNodeCoolWhenOwnerDead_shouldApply() {
@@ -789,52 +762,13 @@ class DefaultWorkerDecisionHandlerTest {
     when(ring.locateNode(eq("key1"), any(HealthView.class))).thenReturn("worker-B");
     when(healthView.isCurrentIncarnation("worker-B", 1L)).thenReturn(false);
     WorkerDecisionHook hook = mock(WorkerDecisionHook.class);
-    handler = new DefaultWorkerDecisionHandler(
-      cache,
-      loader,
-      entryLifecycle,
-      stampClock,
-      List.of(hook),
-      ring,
-      healthView
-    );
+    context = new DefaultWorkerContext(cache, loader, entryLifecycle, stampClock, List.of(hook), ring, healthView);
 
-    handler.handleCool(workerMessageFrom("key1", WorkerDecisionType.COOL.code(), 3L, "worker-A"));
+    handleCool(workerMessageFrom("key1", WorkerType.COOL.code(), 3L, "worker-A"));
 
     CacheEntry after = (CacheEntry) cache.getIfPresent("key1");
     assertThat(after.getKeyState()).isEqualTo(KeyState.COOL);
-    verify(hook).afterCoolDowngrade(eq("key1"), any(), any());
-  }
-
-  /**
-   * A restarted owner is no longer the incarnation that issued the HOT: the
-   * ownership guard must fail open and let the cross-Worker COOL apply even while
-   * the new incarnation of the same node is alive and the ring still routes the
-   * key to it.
-   */
-  @Test
-  void handleCool_crossNodeCoolWhenOwnerRestarted_shouldApply() {
-    cache.put("key1", hotEntryOwnedBy("worker-B", 10L));
-    ConsistentHashRing ring = mock(ConsistentHashRing.class);
-    HealthView healthView = mock(HealthView.class);
-    when(ring.locateNode(eq("key1"), any(HealthView.class))).thenReturn("worker-B");
-    when(healthView.isCurrentIncarnation("worker-B", 1L)).thenReturn(false);
-    WorkerDecisionHook hook = mock(WorkerDecisionHook.class);
-    handler = new DefaultWorkerDecisionHandler(
-      cache,
-      loader,
-      entryLifecycle,
-      stampClock,
-      List.of(hook),
-      ring,
-      healthView
-    );
-
-    handler.handleCool(workerMessageFrom("key1", WorkerDecisionType.COOL.code(), 3L, "worker-A"));
-
-    CacheEntry after = (CacheEntry) cache.getIfPresent("key1");
-    assertThat(after.getKeyState()).isEqualTo(KeyState.COOL);
-    verify(hook).afterCoolDowngrade(eq("key1"), any(), any());
+    verify(hook).afterCoolDowngrade(any(), any());
   }
 
   /**
@@ -849,22 +783,14 @@ class DefaultWorkerDecisionHandlerTest {
     when(ring.locateNode(eq("key1"), any(HealthView.class))).thenReturn("worker-A");
     when(healthView.isCurrentIncarnation("worker-B", 1L)).thenReturn(true);
     WorkerDecisionHook hook = mock(WorkerDecisionHook.class);
-    handler = new DefaultWorkerDecisionHandler(
-      cache,
-      loader,
-      entryLifecycle,
-      stampClock,
-      List.of(hook),
-      ring,
-      healthView
-    );
+    context = new DefaultWorkerContext(cache, loader, entryLifecycle, stampClock, List.of(hook), ring, healthView);
 
-    handler.handleCool(workerMessageFrom("key1", WorkerDecisionType.COOL.code(), 3L, "worker-A"));
+    handleCool(workerMessageFrom("key1", WorkerType.COOL.code(), 3L, "worker-A"));
 
     CacheEntry after = (CacheEntry) cache.getIfPresent("key1");
     assertThat(after.getKeyState()).isEqualTo(KeyState.COOL);
     assertThat(after.getDecisionNodeId()).isEqualTo("worker-A");
-    verify(hook).afterCoolDowngrade(eq("key1"), any(), any());
+    verify(hook).afterCoolDowngrade(any(), any());
   }
 
   /**
@@ -875,24 +801,12 @@ class DefaultWorkerDecisionHandlerTest {
   void handleCool_crossNodeCoolWithoutShardingBeans_shouldApply() {
     cache.put("key1", hotEntryOwnedBy("worker-B", 10L));
     WorkerDecisionHook hook = mock(WorkerDecisionHook.class);
-    handler = new DefaultWorkerDecisionHandler(cache, loader, entryLifecycle, stampClock, List.of(hook));
+    context = new DefaultWorkerContext(cache, loader, entryLifecycle, stampClock, List.of(hook));
 
-    handler.handleCool(workerMessageFrom("key1", WorkerDecisionType.COOL.code(), 3L, "worker-A"));
+    handleCool(workerMessageFrom("key1", WorkerType.COOL.code(), 3L, "worker-A"));
 
     CacheEntry after = (CacheEntry) cache.getIfPresent("key1");
     assertThat(after.getKeyState()).isEqualTo(KeyState.COOL);
-    verify(hook).afterCoolDowngrade(eq("key1"), any(), any());
-  }
-
-  /** NORMAL entry carrying an identifiable value (F1: slots hold {@link CacheEntry} only). */
-  private static CacheEntry valuedEntry(String value) {
-    return EntryDraft.blank(null)
-      .value(value)
-      .version(1)
-      .decision(DecisionStamp.hot(0, null, 0L))
-      .ttl(300_000, 0, 300_000, 0)
-      .expiryAt(Long.MAX_VALUE, 0)
-      .keyState(KeyState.NORMAL)
-      .build();
+    verify(hook).afterCoolDowngrade(any(), any());
   }
 }

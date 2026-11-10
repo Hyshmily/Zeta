@@ -19,7 +19,6 @@ import static io.github.hyshmily.zeta.constants.ZetaConstants.Amqp.*;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.anyBoolean;
-import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.*;
 
@@ -33,12 +32,13 @@ import io.github.hyshmily.zeta.cache.cachesupport.raw.CacheEntry;
 import io.github.hyshmily.zeta.cache.cachesupport.raw.EntryDraft;
 import io.github.hyshmily.zeta.model.DecisionStamp;
 import io.github.hyshmily.zeta.model.KeyState;
-import io.github.hyshmily.zeta.sync.worker.DefaultWorkerDecisionHandler;
-import io.github.hyshmily.zeta.sync.worker.WorkerDecisionHandler;
-import io.github.hyshmily.zeta.sync.worker.WorkerDecisionType;
+import io.github.hyshmily.zeta.sync.worker.DefaultWorkerContext;
+import io.github.hyshmily.zeta.sync.worker.HotAction;
+import io.github.hyshmily.zeta.sync.worker.WorkerDecision;
 import io.github.hyshmily.zeta.sync.worker.WorkerListener;
 import io.github.hyshmily.zeta.sync.worker.WorkerListenerProperties;
-import io.github.hyshmily.zeta.sync.worker.WorkerMessage;
+import io.github.hyshmily.zeta.sync.worker.WorkerPolicy;
+import io.github.hyshmily.zeta.sync.worker.WorkerType;
 import io.github.hyshmily.zeta.util.TimeSource;
 import io.github.hyshmily.zeta.util.clock.StampClock;
 import java.io.IOException;
@@ -68,20 +68,21 @@ class WorkerListenerTest {
   private ScheduledExecutorService scheduler;
   private EntryLifecycleImpl entryLifecycle;
   private StampClock stampClock;
+  private DefaultWorkerContext context;
 
   @BeforeEach
   void setUp() throws IOException {
     cache = Caffeine.newBuilder().maximumSize(100).build();
     WorkerListenerProperties properties = new WorkerListenerProperties();
-    properties.setBroadcastJitterMs(0);
+    properties.setJitterMs(0);
     scheduler = Executors.newSingleThreadScheduledExecutor();
     ZetaProperties ttlConfig = new ZetaProperties();
     entryLifecycle = new EntryLifecycleImpl(cache, ttlConfig, null);
     stampClock = org.mockito.Mockito.mock(StampClock.class);
     org.mockito.Mockito.when(stampClock.nextStamp()).thenReturn(1L);
     org.mockito.Mockito.when(stampClock.nextStamps(org.mockito.ArgumentMatchers.anyInt())).thenReturn(1L);
-    WorkerDecisionHandler handler = handler(k -> "refreshed");
-    listener = new WorkerListener(properties, scheduler, handler, null);
+    WorkerPolicy policy = newPolicy(k -> "refreshed");
+    listener = new WorkerListener(properties, scheduler, policy, context, null);
     channel = mock(Channel.class);
   }
 
@@ -92,8 +93,9 @@ class WorkerListenerTest {
     TimeSource.setTimeOffsetForTest(0, 0);
   }
 
-  private WorkerDecisionHandler handler(CacheLoader loader) {
-    return new DefaultWorkerDecisionHandler(cache, loader, entryLifecycle, stampClock, Collections.emptyList());
+  private WorkerPolicy newPolicy(CacheLoader loader) {
+    context = new DefaultWorkerContext(cache, loader, entryLifecycle, stampClock, Collections.emptyList());
+    return new WorkerPolicy() {};
   }
 
   private void awaitWorkerTasks() throws InterruptedException {
@@ -119,8 +121,8 @@ class WorkerListenerTest {
    * Verifies that a HOT worker decision acknowledges and promotes the key to HOT status.
    */
   @Test
-  void handleWorkerMessage_hot_shouldAckAndPromote() throws IOException, InterruptedException {
-    listener.handleWorkerMessage(channel, workerMessage("key1", WorkerDecisionType.HOT.code(), 1L));
+  void onMessage_hot_shouldAckAndPromote() throws IOException, InterruptedException {
+    listener.onMessage(channel, wireMessage("key1", WorkerType.HOT.code(), 1L));
     verify(channel).basicAck(anyLong(), anyBoolean());
     awaitWorkerTasks();
     assertThat(cache.getIfPresent("key1")).satisfies(o -> {
@@ -136,9 +138,9 @@ class WorkerListenerTest {
    * Verifies that a COOL worker decision acknowledges and downgrades the key to COOL status.
    */
   @Test
-  void handleWorkerMessage_cool_shouldAckAndDowngrade() throws IOException, InterruptedException {
+  void onMessage_cool_shouldAckAndDowngrade() throws IOException, InterruptedException {
     cache.put("key1", hotEntry());
-    listener.handleWorkerMessage(channel, workerMessage("key1", WorkerDecisionType.COOL.code(), 2L));
+    listener.onMessage(channel, wireMessage("key1", WorkerType.COOL.code(), 2L));
     verify(channel).basicAck(anyLong(), anyBoolean());
     awaitWorkerTasks();
     assertThat(cache.getIfPresent("key1")).satisfies(o -> {
@@ -150,25 +152,25 @@ class WorkerListenerTest {
   }
 
   /**
-   * Consecutive COOL messages for one key are handed to the handler as one run; HOT stays
-   * one call per message because it creates entries and runs the cluster loader.
+   * A consecutive COOL run is reduced to the decision that survives the version guard; the
+   * policy sees one effective COOL, not one call per queued message.
    */
   @Test
-  void dispatchBatch_shouldHandAConsecutiveCoolRunToTheHandlerAsOneBatch() throws Exception {
-    WorkerDecisionHandler batchHandler = mock(WorkerDecisionHandler.class);
-    CountDownLatch batchSeen = new CountDownLatch(1);
-    AtomicReference<List<WorkerMessage>> captured = new AtomicReference<>();
+  void dispatchBatch_shouldReduceACoolRunToItsEffectiveDecision() throws Exception {
+    WorkerPolicy batchPolicy = mock(WorkerPolicy.class);
+    CountDownLatch coolSeen = new CountDownLatch(1);
+    AtomicReference<WorkerDecision> captured = new AtomicReference<>();
     doAnswer(invocation -> {
       captured.set(invocation.getArgument(0));
-      batchSeen.countDown();
-      return null;
+      coolSeen.countDown();
+      return true;
     })
-      .when(batchHandler)
-      .handleCoolBatch(anyList());
+      .when(batchPolicy)
+      .cool(any());
 
     WorkerListenerProperties properties = new WorkerListenerProperties();
-    properties.setBroadcastJitterMs(0);
-    WorkerListener batchListener = new WorkerListener(properties, scheduler, batchHandler, null);
+    properties.setJitterMs(0);
+    WorkerListener batchListener = new WorkerListener(properties, scheduler, batchPolicy, context, null);
 
     // Keep the single scheduler thread busy so both submissions land in the same key worker
     // before its first cycle grants; this makes the run deterministic instead of timing-based.
@@ -180,44 +182,47 @@ class WorkerListenerTest {
         Thread.currentThread().interrupt();
       }
     });
-    batchListener.handleWorkerMessage(channel, workerMessage("key1", WorkerDecisionType.COOL.code(), 2L));
-    batchListener.handleWorkerMessage(channel, workerMessage("key1", WorkerDecisionType.COOL.code(), 3L));
+    Message cool1Wire = wireMessage("key1", WorkerType.COOL.code(), 2L);
+    Message cool2Wire = wireMessage("key1", WorkerType.COOL.code(), 3L);
+    WorkerDecision cool1 = WorkerDecision.from(cool1Wire);
+    WorkerDecision cool2 = WorkerDecision.from(cool2Wire);
+    batchListener.onMessage(channel, cool1Wire);
+    batchListener.onMessage(channel, cool2Wire);
     release.countDown();
 
-    assertThat(batchSeen.await(5, TimeUnit.SECONDS)).isTrue();
-    assertThat(captured.get())
-      .hasSize(2)
-      .allSatisfy(msg -> assertThat(msg.type()).isEqualTo(WorkerDecisionType.COOL));
-    verify(batchHandler).handleCoolBatch(anyList());
-    verify(batchHandler, never()).handleCool(any());
+    assertThat(coolSeen.await(5, TimeUnit.SECONDS)).isTrue();
+    assertThat(captured.get()).isEqualTo(cool2);
+    verify(batchPolicy).cool(eq(cool2));
+    verify(batchPolicy, never()).cool(eq(cool1));
+    verify(batchPolicy, never()).hot(any(), any());
   }
 
   /**
-   * A COOL run followed by a HOT must still deliver the HOT after the folded run; the
-   * listener must advance past the run instead of dropping the tail of the batch.
+   * A COOL run followed by a HOT must still deliver the HOT after the run; the listener
+   * must advance past the run instead of dropping the tail of the batch.
    */
   @Test
-  void dispatchBatch_shouldContinueWithHotAfterAFoldedCoolRun() throws Exception {
-    WorkerDecisionHandler batchHandler = mock(WorkerDecisionHandler.class);
+  void dispatchBatch_shouldContinueWithHotAfterCoolRun() throws Exception {
+    WorkerPolicy batchPolicy = mock(WorkerPolicy.class);
     CountDownLatch bothCalls = new CountDownLatch(2);
-    AtomicReference<List<WorkerMessage>> capturedCool = new AtomicReference<>();
+    AtomicReference<WorkerDecision> capturedCool = new AtomicReference<>();
     doAnswer(invocation -> {
       capturedCool.set(invocation.getArgument(0));
       bothCalls.countDown();
-      return null;
+      return true;
     })
-      .when(batchHandler)
-      .handleCoolBatch(anyList());
+      .when(batchPolicy)
+      .cool(any());
     doAnswer(invocation -> {
       bothCalls.countDown();
-      return null;
+      return new HotAction.Promote(invocation.getArgument(1));
     })
-      .when(batchHandler)
-      .handleHot(any());
+      .when(batchPolicy)
+      .hot(any(), any());
 
     WorkerListenerProperties properties = new WorkerListenerProperties();
-    properties.setBroadcastJitterMs(0);
-    WorkerListener batchListener = new WorkerListener(properties, scheduler, batchHandler, null);
+    properties.setJitterMs(0);
+    WorkerListener batchListener = new WorkerListener(properties, scheduler, batchPolicy, context, null);
 
     CountDownLatch release = new CountDownLatch(1);
     scheduler.execute(() -> {
@@ -227,21 +232,22 @@ class WorkerListenerTest {
         Thread.currentThread().interrupt();
       }
     });
-    Message cool1Wire = workerMessage("key1", WorkerDecisionType.COOL.code(), 2L);
-    Message cool2Wire = workerMessage("key1", WorkerDecisionType.COOL.code(), 3L);
-    Message hotWire = workerMessage("key1", WorkerDecisionType.HOT.code(), 4L);
-    WorkerMessage cool1 = WorkerMessage.from(cool1Wire);
-    WorkerMessage cool2 = WorkerMessage.from(cool2Wire);
-    WorkerMessage hot = WorkerMessage.from(hotWire);
-    batchListener.handleWorkerMessage(channel, cool1Wire);
-    batchListener.handleWorkerMessage(channel, cool2Wire);
-    batchListener.handleWorkerMessage(channel, hotWire);
+    Message cool1Wire = wireMessage("key1", WorkerType.COOL.code(), 2L);
+    Message cool2Wire = wireMessage("key1", WorkerType.COOL.code(), 3L);
+    Message hotWire = wireMessage("key1", WorkerType.HOT.code(), 4L);
+    WorkerDecision cool1 = WorkerDecision.from(cool1Wire);
+    WorkerDecision cool2 = WorkerDecision.from(cool2Wire);
+    WorkerDecision hot = WorkerDecision.from(hotWire);
+    batchListener.onMessage(channel, cool1Wire);
+    batchListener.onMessage(channel, cool2Wire);
+    batchListener.onMessage(channel, hotWire);
     release.countDown();
 
     assertThat(bothCalls.await(5, TimeUnit.SECONDS)).isTrue();
-    assertThat(capturedCool.get()).containsExactly(cool1, cool2);
-    verify(batchHandler).handleHot(hot);
-    verify(batchHandler, never()).handleCool(any());
+    assertThat(capturedCool.get()).isEqualTo(cool2);
+    verify(batchPolicy).hot(eq(hot), any());
+    verify(batchPolicy).cool(eq(cool2));
+    verify(batchPolicy, never()).cool(eq(cool1));
   }
 
   /**
@@ -250,18 +256,18 @@ class WorkerListenerTest {
    * sent on the same already-closed channel.
    */
   @Test
-  void handleWorkerMessage_ackFailure_shouldPropagateWithoutNack() throws IOException {
+  void onMessage_ackFailure_shouldPropagateWithoutNack() throws IOException {
     MessageProperties props = new MessageProperties();
     props.setHeader(HEADER_TYPE, "HOT");
     Message msg = new Message("key1".getBytes(StandardCharsets.UTF_8), props);
     doThrow(new RuntimeException("forced error")).when(channel).basicAck(anyLong(), anyBoolean());
-    assertThatThrownBy(() -> listener.handleWorkerMessage(channel, msg))
+    assertThatThrownBy(() -> listener.onMessage(channel, msg))
       .isInstanceOf(RuntimeException.class)
       .hasMessageContaining("forced error");
     verify(channel, never()).basicNack(anyLong(), anyBoolean(), anyBoolean());
   }
 
-  private static Message workerMessage(String key, String type, long version) {
+  private static Message wireMessage(String key, String type, long version) {
     MessageProperties props = new MessageProperties();
     props.setHeader(HEADER_TYPE, type);
     props.setHeader(HEADER_VERSION, version);
@@ -269,26 +275,26 @@ class WorkerListenerTest {
   }
 
   /**
-   * Same shape as {@link #workerMessage}, but the type header carries a fresh String
+   * Same shape as {@link #wireMessage}, but the type header carries a fresh String
    * instance instead of the compile-time constant — what Spring AMQP hands the
    * listener for a message that came off the wire.
    */
   private static Message workerMessageOffWire(String key, String type, long version) {
-    return workerMessage(key, new String(type.toCharArray()), version);
+    return wireMessage(key, new String(type.toCharArray()), version);
   }
 
   /**
    * Verifies that a HOT decision with no source value and no existing entry returns without promoting.
    */
   @Test
-  void handleWorkerMessage_hot_withNoSourceValueAndNoEntry_shouldReturn() throws IOException {
+  void onMessage_hot_withNoSourceValueAndNoEntry_shouldReturn() throws IOException {
     WorkerListenerProperties props = new WorkerListenerProperties();
-    props.setBroadcastJitterMs(0);
+    props.setJitterMs(0);
     ScheduledExecutorService sched = Executors.newSingleThreadScheduledExecutor();
-    WorkerDecisionHandler h = handler(k -> null);
-    WorkerListener nullLoader = new WorkerListener(props, sched, h, null);
+    WorkerPolicy h = newPolicy(k -> null);
+    WorkerListener nullLoader = new WorkerListener(props, sched, h, context, null);
 
-    nullLoader.handleWorkerMessage(channel, workerMessage("missing", WorkerDecisionType.HOT.code(), 1L));
+    nullLoader.onMessage(channel, wireMessage("missing", WorkerType.HOT.code(), 1L));
     verify(channel).basicAck(anyLong(), anyBoolean());
     assertThat(cache.getIfPresent("missing")).isNull();
   }
@@ -297,8 +303,7 @@ class WorkerListenerTest {
    * Verifies that a HOT decision with a source exception and an existing entry falls back to its value.
    */
   @Test
-  void handleWorkerMessage_hot_withSourceExceptionAndExistingEntry_shouldUseIt()
-    throws IOException, InterruptedException {
+  void onMessage_hot_withSourceExceptionAndExistingEntry_shouldUseIt() throws IOException, InterruptedException {
     cache.put(
       "key1",
       EntryDraft.blank(null)
@@ -312,14 +317,14 @@ class WorkerListenerTest {
     );
 
     WorkerListenerProperties props = new WorkerListenerProperties();
-    props.setBroadcastJitterMs(0);
+    props.setJitterMs(0);
     ScheduledExecutorService sched = Executors.newSingleThreadScheduledExecutor();
-    WorkerDecisionHandler h = handler(k -> {
-      throw new RuntimeException("Redis down");
+    WorkerPolicy h = newPolicy(k -> {
+      throw new RuntimeException("source down");
     });
-    WorkerListener failingLoader = new WorkerListener(props, sched, h, null);
+    WorkerListener failingLoader = new WorkerListener(props, sched, h, context, null);
 
-    failingLoader.handleWorkerMessage(channel, workerMessage("key1", WorkerDecisionType.HOT.code(), 2L));
+    failingLoader.onMessage(channel, wireMessage("key1", WorkerType.HOT.code(), 2L));
     verify(channel).basicAck(anyLong(), anyBoolean());
     awaitWorkerTasks(sched);
     sched.shutdown();
@@ -334,9 +339,9 @@ class WorkerListenerTest {
    * Verifies that a HOT decision with stale decision version is skipped via version guard.
    */
   @Test
-  void handleWorkerMessage_hot_withStaleDecisionVersion_shouldSkip() throws IOException, InterruptedException {
+  void onMessage_hot_withStaleDecisionVersion_shouldSkip() throws IOException, InterruptedException {
     cache.put("key1", hotEntry());
-    listener.handleWorkerMessage(channel, workerMessage("key1", WorkerDecisionType.HOT.code(), 1L));
+    listener.onMessage(channel, wireMessage("key1", WorkerType.HOT.code(), 1L));
     verify(channel).basicAck(anyLong(), anyBoolean());
     awaitWorkerTasks();
     assertThat(((CacheEntry) cache.getIfPresent("key1")).getDecisionVersion()).isEqualTo(1);
@@ -346,8 +351,8 @@ class WorkerListenerTest {
    * Verifies that a COOL decision with no existing entry is a no-op.
    */
   @Test
-  void handleWorkerMessage_cool_withNoExistingEntry_shouldBeNoOp() throws IOException, InterruptedException {
-    listener.handleWorkerMessage(channel, workerMessage("nonexistent", WorkerDecisionType.COOL.code(), 2L));
+  void onMessage_cool_withNoExistingEntry_shouldBeNoOp() throws IOException, InterruptedException {
+    listener.onMessage(channel, wireMessage("nonexistent", WorkerType.COOL.code(), 2L));
     verify(channel).basicAck(anyLong(), anyBoolean());
     awaitWorkerTasks();
     assertThat(cache.getIfPresent("nonexistent")).isNull();
@@ -357,9 +362,9 @@ class WorkerListenerTest {
    * Verifies that a COOL decision with stale decision version is skipped.
    */
   @Test
-  void handleWorkerMessage_cool_withStaleDecisionVersion_shouldSkip() throws IOException, InterruptedException {
+  void onMessage_cool_withStaleDecisionVersion_shouldSkip() throws IOException, InterruptedException {
     cache.put("key1", hotEntry());
-    listener.handleWorkerMessage(channel, workerMessage("key1", WorkerDecisionType.COOL.code(), 0L));
+    listener.onMessage(channel, wireMessage("key1", WorkerType.COOL.code(), 0L));
     verify(channel).basicAck(anyLong(), anyBoolean());
     awaitWorkerTasks();
     assertThat(((CacheEntry) cache.getIfPresent("key1")).getKeyState()).isEqualTo(KeyState.HOT);
@@ -377,10 +382,10 @@ class WorkerListenerTest {
    * headers are never interned).
    */
   @Test
-  void handleWorkerMessage_cool_dispatchRejected_shouldApplyInline() throws IOException {
+  void onMessage_cool_dispatchRejected_shouldApplyInline() throws IOException {
     cache.put("key1", hotEntry());
     listener.destroy();
-    listener.handleWorkerMessage(channel, workerMessageOffWire("key1", WorkerDecisionType.COOL.code(), 2L));
+    listener.onMessage(channel, workerMessageOffWire("key1", WorkerType.COOL.code(), 2L));
     verify(channel).basicAck(anyLong(), anyBoolean());
     assertThat(cache.getIfPresent("key1")).satisfies(o -> {
       CacheEntry ce = (CacheEntry) o;
@@ -396,15 +401,15 @@ class WorkerListenerTest {
    * decision out. The per-key queue still orders it.
    */
   @Test
-  void handleWorkerMessage_cool_budgetExhausted_shouldBypassTheGlobalBudget() throws Exception {
+  void onMessage_cool_budgetExhausted_shouldBypassTheGlobalBudget() throws Exception {
     WorkerListenerProperties props = new WorkerListenerProperties();
-    props.setBroadcastJitterMs(0);
+    props.setJitterMs(0);
     props.setMaxPendingUnits(0);
     ScheduledExecutorService sched = Executors.newScheduledThreadPool(2);
-    WorkerListener starving = new WorkerListener(props, sched, handler(k -> "v"), null);
+    WorkerListener starving = new WorkerListener(props, sched, newPolicy(k -> "v"), context, null);
 
     cache.put("key1", hotEntry());
-    starving.handleWorkerMessage(channel, workerMessageOffWire("key1", WorkerDecisionType.COOL.code(), 2L));
+    starving.onMessage(channel, workerMessageOffWire("key1", WorkerType.COOL.code(), 2L));
     verify(channel).basicAck(anyLong(), anyBoolean());
 
     long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
@@ -426,7 +431,7 @@ class WorkerListenerTest {
    * Verifies that a COOL decision on an existing entry is accepted and downgrades.
    */
   @Test
-  void handleWorkerMessage_cool_onExistingEntry_shouldDowngrade() throws IOException, InterruptedException {
+  void onMessage_cool_onExistingEntry_shouldDowngrade() throws IOException, InterruptedException {
     cache.put(
       "key1",
       EntryDraft.blank(null)
@@ -438,7 +443,7 @@ class WorkerListenerTest {
         .keyState(KeyState.NORMAL)
         .build()
     );
-    listener.handleWorkerMessage(channel, workerMessage("key1", WorkerDecisionType.COOL.code(), 1L));
+    listener.onMessage(channel, wireMessage("key1", WorkerType.COOL.code(), 1L));
     verify(channel).basicAck(anyLong(), anyBoolean());
     awaitWorkerTasks();
     assertThat(cache.getIfPresent("key1")).satisfies(o -> {
@@ -453,9 +458,9 @@ class WorkerListenerTest {
    * Verifies that an empty body worker message is acknowledged without cache interaction.
    */
   @Test
-  void handleWorkerMessage_emptyBody_shouldAck() throws IOException {
+  void onMessage_emptyBody_shouldAck() throws IOException {
     Message msg = new Message(new byte[0], new MessageProperties());
-    listener.handleWorkerMessage(channel, msg);
+    listener.onMessage(channel, msg);
     verify(channel).basicAck(anyLong(), anyBoolean());
   }
 
@@ -463,10 +468,10 @@ class WorkerListenerTest {
    * Verifies that a null type header is handled gracefully.
    */
   @Test
-  void handleWorkerMessage_nullType_shouldAck() throws IOException {
+  void onMessage_nullType_shouldAck() throws IOException {
     MessageProperties props = new MessageProperties();
     Message msg = new Message("key1".getBytes(StandardCharsets.UTF_8), props);
-    listener.handleWorkerMessage(channel, msg);
+    listener.onMessage(channel, msg);
     verify(channel).basicAck(anyLong(), anyBoolean());
   }
 
@@ -474,24 +479,21 @@ class WorkerListenerTest {
    * Verifies that an unknown worker message type is acknowledged and ignored.
    */
   @Test
-  void handleWorkerMessage_unknownType_shouldAck() throws IOException {
-    Message msg = workerMessage("key1", "UNKNOWN", 1L);
-    listener.handleWorkerMessage(channel, msg);
+  void onMessage_unknownType_shouldAck() throws IOException {
+    Message msg = wireMessage("key1", "UNKNOWN", 1L);
+    listener.onMessage(channel, msg);
     verify(channel).basicAck(anyLong(), anyBoolean());
   }
 
   // ── P0-2: decisionNodeId/decisionEpoch propagation ──
 
   /**
-   * Verifies that handleHot propagates nodeId and epoch from WorkerMessage into CacheEntry.
+   * Verifies that handleHot propagates nodeId and epoch from WorkerDecision into CacheEntry.
    */
   @Test
-  void handleWorkerMessage_hot_shouldSetDecisionNodeIdAndEpoch() throws IOException, InterruptedException {
+  void onMessage_hot_shouldSetDecisionNodeIdAndEpoch() throws IOException, InterruptedException {
     cache.put("key1", normalEntry());
-    listener.handleWorkerMessage(
-      channel,
-      workerMessageWithNodeIdEpoch("key1", WorkerDecisionType.HOT.code(), 2L, "worker-A", 3L)
-    );
+    listener.onMessage(channel, workerMessageWithNodeIdEpoch("key1", WorkerType.HOT.code(), 2L, "worker-A", 3L));
     verify(channel).basicAck(anyLong(), anyBoolean());
     awaitWorkerTasks();
     assertThat(cache.getIfPresent("key1")).satisfies(o -> {
@@ -502,15 +504,12 @@ class WorkerListenerTest {
   }
 
   /**
-   * Verifies that handleCool propagates nodeId and epoch from WorkerMessage into CacheEntry.
+   * Verifies that handleCool propagates nodeId and epoch from WorkerDecision into CacheEntry.
    */
   @Test
-  void handleWorkerMessage_cool_shouldSetDecisionNodeIdAndEpoch() throws IOException, InterruptedException {
+  void onMessage_cool_shouldSetDecisionNodeIdAndEpoch() throws IOException, InterruptedException {
     cache.put("key1", hotEntry());
-    listener.handleWorkerMessage(
-      channel,
-      workerMessageWithNodeIdEpoch("key1", WorkerDecisionType.COOL.code(), 2L, "worker-B", 5L)
-    );
+    listener.onMessage(channel, workerMessageWithNodeIdEpoch("key1", WorkerType.COOL.code(), 2L, "worker-B", 5L));
     verify(channel).basicAck(anyLong(), anyBoolean());
     awaitWorkerTasks();
     assertThat(cache.getIfPresent("key1")).satisfies(o -> {
@@ -527,13 +526,13 @@ class WorkerListenerTest {
    * never dispatched (no cache mutation) when the listener has a configured appName.
    */
   @Test
-  void handleWorkerMessage_foreignAppName_shouldAckButNotApply() throws IOException, InterruptedException {
+  void onMessage_foreignAppName_shouldAckButNotApply() throws IOException, InterruptedException {
     WorkerListenerProperties props = new WorkerListenerProperties();
-    props.setBroadcastJitterMs(0);
+    props.setJitterMs(0);
     ScheduledExecutorService sched = Executors.newSingleThreadScheduledExecutor();
-    WorkerListener isolated = new WorkerListener(props, sched, handler(k -> "v"), "appA");
+    WorkerListener isolated = new WorkerListener(props, sched, newPolicy(k -> "v"), context, "appA");
 
-    isolated.handleWorkerMessage(channel, workerMessageWithAppName("key1", WorkerDecisionType.HOT.code(), 2L, "appB"));
+    isolated.onMessage(channel, workerMessageWithAppName("key1", WorkerType.HOT.code(), 2L, "appB"));
     verify(channel).basicAck(anyLong(), anyBoolean());
     awaitWorkerTasks(sched);
     assertThat(cache.getIfPresent("key1")).isNull();
@@ -545,13 +544,13 @@ class WorkerListenerTest {
    * applied normally.
    */
   @Test
-  void handleWorkerMessage_matchingAppName_shouldApply() throws IOException, InterruptedException {
+  void onMessage_matchingAppName_shouldApply() throws IOException, InterruptedException {
     WorkerListenerProperties props = new WorkerListenerProperties();
-    props.setBroadcastJitterMs(0);
+    props.setJitterMs(0);
     ScheduledExecutorService sched = Executors.newSingleThreadScheduledExecutor();
-    WorkerListener isolated = new WorkerListener(props, sched, handler(k -> "v"), "appA");
+    WorkerListener isolated = new WorkerListener(props, sched, newPolicy(k -> "v"), context, "appA");
 
-    isolated.handleWorkerMessage(channel, workerMessageWithAppName("key1", WorkerDecisionType.HOT.code(), 2L, "appA"));
+    isolated.onMessage(channel, workerMessageWithAppName("key1", WorkerType.HOT.code(), 2L, "appA"));
     verify(channel).basicAck(anyLong(), anyBoolean());
     awaitWorkerTasks(sched);
     assertThat(((CacheEntry) cache.getIfPresent("key1")).getKeyState()).isEqualTo(KeyState.HOT);
@@ -563,13 +562,13 @@ class WorkerListenerTest {
    * (pre-0068 Worker) is processed even when the listener has a configured appName.
    */
   @Test
-  void handleWorkerMessage_absentAppNameHeader_shouldApply() throws IOException, InterruptedException {
+  void onMessage_absentAppNameHeader_shouldApply() throws IOException, InterruptedException {
     WorkerListenerProperties props = new WorkerListenerProperties();
-    props.setBroadcastJitterMs(0);
+    props.setJitterMs(0);
     ScheduledExecutorService sched = Executors.newSingleThreadScheduledExecutor();
-    WorkerListener isolated = new WorkerListener(props, sched, handler(k -> "v"), "appA");
+    WorkerListener isolated = new WorkerListener(props, sched, newPolicy(k -> "v"), context, "appA");
 
-    isolated.handleWorkerMessage(channel, workerMessage("key1", WorkerDecisionType.HOT.code(), 2L));
+    isolated.onMessage(channel, wireMessage("key1", WorkerType.HOT.code(), 2L));
     verify(channel).basicAck(anyLong(), anyBoolean());
     awaitWorkerTasks(sched);
     assertThat(((CacheEntry) cache.getIfPresent("key1")).getKeyState()).isEqualTo(KeyState.HOT);
@@ -593,17 +592,17 @@ class WorkerListenerTest {
   @Test
   void foreignAppDrops_shouldCountOnlyMismatches() throws IOException, InterruptedException {
     WorkerListenerProperties props = new WorkerListenerProperties();
-    props.setBroadcastJitterMs(0);
+    props.setJitterMs(0);
     ScheduledExecutorService sched = Executors.newSingleThreadScheduledExecutor();
-    WorkerListener isolated = new WorkerListener(props, sched, handler(k -> "v"), "appA");
+    WorkerListener isolated = new WorkerListener(props, sched, newPolicy(k -> "v"), context, "appA");
 
     assertThat(isolated.foreignAppDrops()).isZero();
     assertThat(isolated.lastForeignApp()).isNull();
 
-    isolated.handleWorkerMessage(channel, workerMessageWithAppName("k1", WorkerDecisionType.HOT.code(), 2L, "appB"));
-    isolated.handleWorkerMessage(channel, workerMessageWithAppName("k2", WorkerDecisionType.COOL.code(), 3L, "appB"));
-    isolated.handleWorkerMessage(channel, workerMessageWithAppName("k3", WorkerDecisionType.HOT.code(), 4L, "appA"));
-    isolated.handleWorkerMessage(channel, workerMessage("k4", WorkerDecisionType.HOT.code(), 5L));
+    isolated.onMessage(channel, workerMessageWithAppName("k1", WorkerType.HOT.code(), 2L, "appB"));
+    isolated.onMessage(channel, workerMessageWithAppName("k2", WorkerType.COOL.code(), 3L, "appB"));
+    isolated.onMessage(channel, workerMessageWithAppName("k3", WorkerType.HOT.code(), 4L, "appA"));
+    isolated.onMessage(channel, wireMessage("k4", WorkerType.HOT.code(), 5L));
     awaitWorkerTasks(sched);
 
     assertThat(isolated.foreignAppDrops()).isEqualTo(2);
@@ -634,17 +633,6 @@ class WorkerListenerTest {
       .ttl(3_600_000, 300_000, 300_000, 30_000)
       .expiryAt(Long.MAX_VALUE, System.currentTimeMillis() + 300_000)
       .keyState(KeyState.HOT)
-      .build();
-  }
-
-  private static CacheEntry entry(long dataVersion, long decisionVersion) {
-    return EntryDraft.blank(null)
-      .value("v")
-      .version(dataVersion)
-      .decision(DecisionStamp.hot(decisionVersion, null, 0L))
-      .ttl(300_000, 30_000, 300_000, 30_000)
-      .expiryAt(Long.MAX_VALUE, 30_000)
-      .keyState(KeyState.NORMAL)
       .build();
   }
 

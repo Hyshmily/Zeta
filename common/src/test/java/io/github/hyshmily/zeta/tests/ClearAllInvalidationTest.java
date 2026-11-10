@@ -27,7 +27,6 @@ import com.github.benmanes.caffeine.cache.Caffeine;
 import io.github.hyshmily.zeta.autoconfigure.ZetaProperties;
 import io.github.hyshmily.zeta.cache.AccessCounter;
 import io.github.hyshmily.zeta.cache.BroadcastBuffer;
-import io.github.hyshmily.zeta.cache.CentralDispatcher;
 import io.github.hyshmily.zeta.cache.HotKeyCache;
 import io.github.hyshmily.zeta.cache.cachesupport.lifecycle.EntryLifecycleImpl;
 import io.github.hyshmily.zeta.cache.cachesupport.loader.singleflight.SingleFlight;
@@ -39,7 +38,11 @@ import io.github.hyshmily.zeta.model.DecisionStamp;
 import io.github.hyshmily.zeta.model.KeyState;
 import io.github.hyshmily.zeta.scheduler.DefaultBackgroundRefresher;
 import io.github.hyshmily.zeta.sharding.HealthView;
-import io.github.hyshmily.zeta.sync.local.DefaultSyncDecisionHandler;
+import io.github.hyshmily.zeta.sync.local.DefaultSyncContext;
+import io.github.hyshmily.zeta.sync.local.PutPayloadCodec;
+import io.github.hyshmily.zeta.sync.local.Batch;
+import io.github.hyshmily.zeta.sync.local.SyncPolicy;
+import io.github.hyshmily.zeta.sync.local.SyncType;
 import io.github.hyshmily.zeta.util.clock.StampClock;
 import java.util.List;
 import java.util.concurrent.Executors;
@@ -64,7 +67,7 @@ class ClearAllInvalidationTest {
   private HotKeyCache cache;
   private SingleFlight singleFlight;
   private List<byte[]> sentBodies;
-  private DefaultSyncDecisionHandler receiver;
+  private DefaultSyncContext receiver;
   private Cache<String, CacheEntry> peerL1;
 
   @BeforeEach
@@ -86,9 +89,8 @@ class ClearAllInvalidationTest {
     var lifecycle = new EntryLifecycleImpl(l1, props, mock(HealthView.class));
     var refresher = new DefaultBackgroundRefresher(l1, Runnable::run, lifecycle, 10);
     var accessCounter = new AccessCounter(detector, null, scheduler, 50L, 500L);
-    var buffer = new BroadcastBuffer(scheduler, null, 5_000, 10_000, null);
 
-    // Capture every clear/batch broadcast body the dispatcher hands to the
+    // Capture every clear/batch broadcast body the buffer hands to the
     // (stubbed) publisher — the shape the broker would carry.
     sentBodies = new java.util.ArrayList<>();
     var publisher = mock(io.github.hyshmily.zeta.sync.local.CacheSyncPublisher.class);
@@ -98,6 +100,7 @@ class ClearAllInvalidationTest {
     })
       .when(publisher)
       .broadcastInvalidateAll(anyLong());
+    var buffer = new BroadcastBuffer(scheduler, publisher, 5_000, 10_000, Runnable::run);
 
     singleFlight = mock(SingleFlight.class);
     cache = new HotKeyCache(
@@ -106,22 +109,35 @@ class ClearAllInvalidationTest {
       singleFlight,
       lifecycle,
       refresher,
-      new CentralDispatcher(accessCounter, publisher, buffer, Runnable::run),
+      accessCounter,
+      buffer,
       clock,
       mock(HealthView.class)
     );
 
     // The receiving peer: its own L1 + the default decision handler.
     peerL1 = Caffeine.newBuilder().maximumSize(1_000).build();
-    when(publisher.parsePutPayload(any())).thenReturn("fresh");
-    receiver = new DefaultSyncDecisionHandler(
+    PutPayloadCodec codec = mock(PutPayloadCodec.class);
+    when(codec.decode(any())).thenReturn("fresh");
+    receiver = new DefaultSyncContext(
       peerL1,
       null,
       new EntryLifecycleImpl(peerL1, props, mock(HealthView.class)),
       List.of(),
       null,
-      publisher
+      codec
     );
+  }
+
+  private void receive(io.github.hyshmily.zeta.sync.local.SyncMessage message) {
+    SyncPolicy dispatcher = new SyncPolicy() {};
+    if (message.type().isClear()) {
+      dispatcher.clear(new Batch.Clear(List.of(message)), receiver);
+    } else if (message.type() == SyncType.INVALIDATE) {
+      dispatcher.invalidate(new Batch.Value(List.of(message), message, List.of(), null), receiver);
+    } else {
+      dispatcher.value(new Batch.Value(List.of(message), message, List.of(), null), receiver);
+    }
   }
 
   @AfterEach
@@ -206,7 +222,7 @@ class ClearAllInvalidationTest {
     peerL1.put("a", entry("old", 5L));
     peerL1.put("fresh", entry("fresh", 11L));
 
-    receiver.handle(
+    receive(
       new io.github.hyshmily.zeta.sync.local.SyncMessage(
         0L,
         io.github.hyshmily.zeta.sync.local.SyncMessage.CLEAR_ALL_BODY,
@@ -224,7 +240,7 @@ class ClearAllInvalidationTest {
   void receiverWatermark_suppressesStalePutReWarm() {
     // Receiver holds a pre-clear entry; the clear arrives and removes it.
     peerL1.put("a", entry("stale", 5L));
-    receiver.handle(
+    receive(
       new io.github.hyshmily.zeta.sync.local.SyncMessage(
         0L,
         io.github.hyshmily.zeta.sync.local.SyncMessage.CLEAR_ALL_BODY,
@@ -243,7 +259,7 @@ class ClearAllInvalidationTest {
       5L,
       "[\"java.lang.String\",\"stale\"]".getBytes(java.nio.charset.StandardCharsets.UTF_8)
     );
-    receiver.handle(stalePut);
+    receive(stalePut);
 
     assertThat(peerL1.getIfPresent("a")).isNull();
   }
@@ -251,7 +267,7 @@ class ClearAllInvalidationTest {
   @Test
   @DisplayName("a post-clear PUT still applies (newer than the stamp)")
   void receiverWatermark_allowsNewerPut() {
-    receiver.handle(
+    receive(
       new io.github.hyshmily.zeta.sync.local.SyncMessage(
         0L,
         io.github.hyshmily.zeta.sync.local.SyncMessage.CLEAR_ALL_BODY,
@@ -267,7 +283,7 @@ class ClearAllInvalidationTest {
       11L,
       "[\"java.lang.String\",\"fresh\"]".getBytes(java.nio.charset.StandardCharsets.UTF_8)
     );
-    receiver.handle(freshPut);
+    receive(freshPut);
 
     assertThat(peerL1.getIfPresent("b")).isNotNull();
   }

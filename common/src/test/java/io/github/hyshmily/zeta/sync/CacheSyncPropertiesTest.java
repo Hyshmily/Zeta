@@ -38,7 +38,7 @@ class CacheSyncPropertiesTest {
     assertThat(props.getQueuePrefix()).isEqualTo("zeta.sync");
     assertThat(props.getDedupWindowSeconds()).isEqualTo(10);
     assertThat(props.getDedupMaxSize()).isEqualTo(10_000);
-    assertThat(props.getWarmupJitterMs()).isEqualTo(50);
+    assertThat(props.getJitterMs()).isEqualTo(50);
   }
 
   /**
@@ -71,10 +71,10 @@ class CacheSyncPropertiesTest {
     props.setEnabled(true);
     props.setDedupWindowSeconds(30);
     props.setDedupMaxSize(50_000);
-    props.setWarmupJitterMs(200);
+    props.setJitterMs(200);
     assertThat(props.isEnabled()).isTrue();
     assertThat(props.getDedupWindowSeconds()).isEqualTo(30);
     assertThat(props.getDedupMaxSize()).isEqualTo(50_000);
-    assertThat(props.getWarmupJitterMs()).isEqualTo(200);
+    assertThat(props.getJitterMs()).isEqualTo(200);
   }
 }

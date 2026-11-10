@@ -17,7 +17,7 @@ package io.github.hyshmily.zeta.sync.worker;
 
 import io.github.hyshmily.zeta.constants.ZetaConstants;
 import io.github.hyshmily.zeta.sync.AmqpConsumerProperties;
-import io.github.hyshmily.zeta.sync.dispatcher.PerKeyOrderedDispatcher;
+import io.github.hyshmily.zeta.sync.dispatcher.KeyDispatcher;
 import io.github.hyshmily.zeta.util.Internal;
 import io.github.hyshmily.zeta.util.NodeIdentity;
 import jakarta.validation.constraints.NotBlank;
@@ -72,7 +72,7 @@ public class WorkerListenerProperties implements AmqpConsumerProperties {
    * update task. Default 0 — no jitter; the mutation is submitted without a start-jitter
    * park. */
   @PositiveOrZero
-  private int broadcastJitterMs = 0;
+  private int jitterMs = 0;
 
   /** Number of concurrent RabbitMQ consumers for the Worker decision queue.
    * Higher values increase throughput under load at the cost of more broker connections. */
@@ -92,7 +92,7 @@ public class WorkerListenerProperties implements AmqpConsumerProperties {
 
   /**
    * Global cap (in weighted units) on tasks pending in the per-key Worker-decision
-   * dispatcher ({@link PerKeyOrderedDispatcher}). Worker decisions carry small payloads
+   * dispatcher ({@link KeyDispatcher}). Worker decisions carry small payloads
    * (weight 1 each). The budget is kept higher than the cache-sync budget because a
    * dropped HOT/COOL decision has real cost and nothing re-sends it, so this budget trades memory
    * against decision loss.

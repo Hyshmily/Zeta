@@ -27,16 +27,16 @@ import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 
 /**
- * Tests for {@link PerKeyOrderedDispatcher} covering basic execution, per-key FIFO ordering, parallel execution for
+ * Tests for {@link KeyDispatcher} covering basic execution, per-key FIFO ordering, parallel execution for
  * different keys, delayed submission, graceful close, backpressure rejection, executor rejection recovery, and key
  * cleanup.
  */
-class PerKeyOrderedDispatcherTest {
+class KeyDispatcherTest {
 
   private ScheduledExecutorService executor;
-  private PerKeyOrderedDispatcher<Runnable> dispatcher;
+  private KeyDispatcher<Runnable> dispatcher;
 
-  private static PerKeyOrderedDispatcher<Runnable> newDispatcher(
+  private static KeyDispatcher<Runnable> newDispatcher(
     ScheduledExecutorService executor,
     String name,
     int maxQueuePerKey,
@@ -44,7 +44,7 @@ class PerKeyOrderedDispatcherTest {
     long maxGlobalPendingUnits,
     long jitterMs
   ) {
-    return new PerKeyOrderedDispatcher<>(
+    return new KeyDispatcher<>(
       executor,
       name,
       batch -> batch.forEach(Runnable::run),
@@ -61,9 +61,9 @@ class PerKeyOrderedDispatcherTest {
     dispatcher = newDispatcher(
       executor,
       "test",
-      PerKeyOrderedDispatcher.DEFAULT_MAX_QUEUE_PER_KEY,
-      PerKeyOrderedDispatcher.DEFAULT_MAX_TASKS_PER_CYCLE,
-      PerKeyOrderedDispatcher.DEFAULT_MAX_GLOBAL_PENDING_UNITS,
+      KeyDispatcher.DEFAULT_MAX_QUEUE_PER_KEY,
+      KeyDispatcher.DEFAULT_MAX_TASKS_PER_CYCLE,
+      KeyDispatcher.DEFAULT_MAX_GLOBAL_PENDING_UNITS,
       0
     );
   }
@@ -172,8 +172,8 @@ class PerKeyOrderedDispatcherTest {
       executor,
       "test",
       1,
-      PerKeyOrderedDispatcher.DEFAULT_MAX_TASKS_PER_CYCLE,
-      PerKeyOrderedDispatcher.DEFAULT_MAX_GLOBAL_PENDING_UNITS,
+      KeyDispatcher.DEFAULT_MAX_TASKS_PER_CYCLE,
+      KeyDispatcher.DEFAULT_MAX_GLOBAL_PENDING_UNITS,
       0
     );
 
@@ -220,12 +220,12 @@ class PerKeyOrderedDispatcherTest {
    */
   @Test
   void submit_firstTaskStillPending_shouldCountAgainstThePerKeyBound() {
-    PerKeyOrderedDispatcher<Runnable> jittered = newDispatcher(
+    KeyDispatcher<Runnable> jittered = newDispatcher(
       executor,
       "jitter-bound",
       1,
-      PerKeyOrderedDispatcher.DEFAULT_MAX_TASKS_PER_CYCLE,
-      PerKeyOrderedDispatcher.DEFAULT_MAX_GLOBAL_PENDING_UNITS,
+      KeyDispatcher.DEFAULT_MAX_TASKS_PER_CYCLE,
+      KeyDispatcher.DEFAULT_MAX_GLOBAL_PENDING_UNITS,
       5_000
     );
     try {
@@ -278,36 +278,6 @@ class PerKeyOrderedDispatcherTest {
   }
 
   /**
-   * A rejection retires the worker: the rejected cycle's tasks are dropped with
-   * it, and the next submission creates a fresh worker instead of queueing
-   * behind a cycle that will never run.
-   */
-  @Test
-  void runTask_withRejectedExecution_retiresWorkerAndAcceptsTheNextSubmission() throws InterruptedException {
-    ScheduledExecutorService rejectingExec = new SingleShotRejectingExecutor();
-    PerKeyOrderedDispatcher<Runnable> rejectingDispatcher = newDispatcher(
-      rejectingExec,
-      "rejecting",
-      PerKeyOrderedDispatcher.DEFAULT_MAX_QUEUE_PER_KEY,
-      PerKeyOrderedDispatcher.DEFAULT_MAX_TASKS_PER_CYCLE,
-      PerKeyOrderedDispatcher.DEFAULT_MAX_GLOBAL_PENDING_UNITS,
-      0
-    );
-
-    CountDownLatch task1Ran = new CountDownLatch(1);
-    CountDownLatch task2Ran = new CountDownLatch(1);
-
-    rejectingDispatcher.submit("key", task1Ran::countDown, 1, true);
-    rejectingDispatcher.submit("key", task2Ran::countDown, 1, true);
-
-    assertThat(task1Ran.await(300, TimeUnit.MILLISECONDS)).as("rejected cycle dropped").isFalse();
-    assertThat(task2Ran.await(5, TimeUnit.SECONDS)).as("fresh worker serves the key").isTrue();
-
-    rejectingDispatcher.close();
-    rejectingExec.shutdownNow();
-  }
-
-  /**
    * Verifies that after a single task completes and the queue is empty, the key is removed from the internal map.
    */
   @Test
@@ -320,7 +290,7 @@ class PerKeyOrderedDispatcherTest {
     // Give scheduleNext time to run and remove the key
     Thread.sleep(100);
 
-    Field queuesField = PerKeyOrderedDispatcher.class.getDeclaredField("queues");
+    Field queuesField = KeyDispatcher.class.getDeclaredField("queues");
     queuesField.setAccessible(true);
     @SuppressWarnings("unchecked")
     ConcurrentHashMap<Object, ?> queues = (ConcurrentHashMap<Object, ?>) queuesField.get(dispatcher);
@@ -342,12 +312,12 @@ class PerKeyOrderedDispatcherTest {
   @Test
   void submit_sameKeyBurst_shouldBatch() throws InterruptedException {
     GatedCountingExecutor countingExecutor = new GatedCountingExecutor(4);
-    PerKeyOrderedDispatcher<Runnable> batchingDispatcher = newDispatcher(
+    KeyDispatcher<Runnable> batchingDispatcher = newDispatcher(
       countingExecutor,
       "test",
-      PerKeyOrderedDispatcher.DEFAULT_MAX_QUEUE_PER_KEY,
-      PerKeyOrderedDispatcher.DEFAULT_MAX_TASKS_PER_CYCLE,
-      PerKeyOrderedDispatcher.DEFAULT_MAX_GLOBAL_PENDING_UNITS,
+      KeyDispatcher.DEFAULT_MAX_QUEUE_PER_KEY,
+      KeyDispatcher.DEFAULT_MAX_TASKS_PER_CYCLE,
+      KeyDispatcher.DEFAULT_MAX_GLOBAL_PENDING_UNITS,
       0
     );
 
@@ -378,12 +348,12 @@ class PerKeyOrderedDispatcherTest {
   @Test
   void submit_maxTasksPerCycle_shouldSplitBatches() throws InterruptedException {
     CountingExecutor countingExecutor = new CountingExecutor(4);
-    PerKeyOrderedDispatcher<Runnable> batchingDispatcher = newDispatcher(
+    KeyDispatcher<Runnable> batchingDispatcher = newDispatcher(
       countingExecutor,
       "test",
-      PerKeyOrderedDispatcher.DEFAULT_MAX_QUEUE_PER_KEY,
+      KeyDispatcher.DEFAULT_MAX_QUEUE_PER_KEY,
       8,
-      PerKeyOrderedDispatcher.DEFAULT_MAX_GLOBAL_PENDING_UNITS,
+      KeyDispatcher.DEFAULT_MAX_GLOBAL_PENDING_UNITS,
       0
     );
 
@@ -408,12 +378,12 @@ class PerKeyOrderedDispatcherTest {
   @Test
   void submit_batch_shouldPreserveFifoOrder() throws InterruptedException {
     CountingExecutor countingExecutor = new CountingExecutor(4);
-    PerKeyOrderedDispatcher<Runnable> batchingDispatcher = newDispatcher(
+    KeyDispatcher<Runnable> batchingDispatcher = newDispatcher(
       countingExecutor,
       "test",
-      PerKeyOrderedDispatcher.DEFAULT_MAX_QUEUE_PER_KEY,
-      PerKeyOrderedDispatcher.DEFAULT_MAX_TASKS_PER_CYCLE,
-      PerKeyOrderedDispatcher.DEFAULT_MAX_GLOBAL_PENDING_UNITS,
+      KeyDispatcher.DEFAULT_MAX_QUEUE_PER_KEY,
+      KeyDispatcher.DEFAULT_MAX_TASKS_PER_CYCLE,
+      KeyDispatcher.DEFAULT_MAX_GLOBAL_PENDING_UNITS,
       0
     );
 
@@ -450,12 +420,12 @@ class PerKeyOrderedDispatcherTest {
   @Test
   void runTask_withRejectedExecution_shouldDropWithTheRetiredWorker() throws InterruptedException {
     ScheduledExecutorService rejectingExec = new SingleShotRejectingExecutor();
-    PerKeyOrderedDispatcher<Runnable> rejectingDispatcher = newDispatcher(
+    KeyDispatcher<Runnable> rejectingDispatcher = newDispatcher(
       rejectingExec,
       "rejecting",
-      PerKeyOrderedDispatcher.DEFAULT_MAX_QUEUE_PER_KEY,
-      PerKeyOrderedDispatcher.DEFAULT_MAX_TASKS_PER_CYCLE,
-      PerKeyOrderedDispatcher.DEFAULT_MAX_GLOBAL_PENDING_UNITS,
+      KeyDispatcher.DEFAULT_MAX_QUEUE_PER_KEY,
+      KeyDispatcher.DEFAULT_MAX_TASKS_PER_CYCLE,
+      KeyDispatcher.DEFAULT_MAX_GLOBAL_PENDING_UNITS,
       0
     );
 
@@ -497,11 +467,11 @@ class PerKeyOrderedDispatcherTest {
    */
   @Test
   void submit_globalCap_shouldDropAndRecoverAfterDrain() throws InterruptedException {
-    PerKeyOrderedDispatcher<Runnable> capped = newDispatcher(
+    KeyDispatcher<Runnable> capped = newDispatcher(
       executor,
       "capped",
-      PerKeyOrderedDispatcher.DEFAULT_MAX_QUEUE_PER_KEY,
-      PerKeyOrderedDispatcher.DEFAULT_MAX_TASKS_PER_CYCLE,
+      KeyDispatcher.DEFAULT_MAX_QUEUE_PER_KEY,
+      KeyDispatcher.DEFAULT_MAX_TASKS_PER_CYCLE,
       1,
       0
     );
@@ -559,15 +529,14 @@ class PerKeyOrderedDispatcherTest {
    */
   @Test
   void submit_midBatch_shouldChargeWholeBatchUntilSettled() throws InterruptedException {
-    PerKeyOrderedDispatcher<Runnable> capped = newDispatcher(
+    KeyDispatcher<Runnable> capped = newDispatcher(
       executor,
       "batch-settle",
-      PerKeyOrderedDispatcher.DEFAULT_MAX_QUEUE_PER_KEY,
-      PerKeyOrderedDispatcher.DEFAULT_MAX_TASKS_PER_CYCLE,
-      2,
-      // A start-jitter park keeps both submissions pending before the first grant, so
-      // they deterministically share one batch. Without it the worker can grant task1
-      // alone, settle its unit, and let the mid-batch assertion see a half-empty budget.
+      KeyDispatcher.DEFAULT_MAX_QUEUE_PER_KEY,
+      KeyDispatcher.DEFAULT_MAX_TASKS_PER_CYCLE,
+      3,
+      // A start-jitter park keeps the queued submissions pending while the pre-granted
+      // first task runs, so the next batch deterministically contains both of them.
       100
     );
 
@@ -575,51 +544,32 @@ class PerKeyOrderedDispatcherTest {
     CountDownLatch t1Release = new CountDownLatch(1);
     CountDownLatch t2Started = new CountDownLatch(1);
     CountDownLatch t2Release = new CountDownLatch(1);
-    CountDownLatch batchDone = new CountDownLatch(2);
+    CountDownLatch t3Started = new CountDownLatch(1);
+    CountDownLatch t3Release = new CountDownLatch(1);
+    CountDownLatch batchDone = new CountDownLatch(3);
     CountDownLatch afterDrainRan = new CountDownLatch(1);
 
     try {
-      // Both tasks share one key, so both are granted in a single batch
-      // (maxTasksPerCycle = 64) and both units are charged at submission.
-      capped.submit(
-        "key",
-        () -> {
-          t1Started.countDown();
-          try {
-            assertThat(t1Release.await(10, TimeUnit.SECONDS)).isTrue();
-          } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-          }
-          batchDone.countDown();
-        },
-        1,
-        true
-      );
-      capped.submit(
-        "key",
-        () -> {
-          t2Started.countDown();
-          try {
-            assertThat(t2Release.await(10, TimeUnit.SECONDS)).isTrue();
-          } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-          }
-          batchDone.countDown();
-        },
-        1,
-        true
-      );
+      // The first task is pre-granted alone; t2 and t3 are queued while it runs and become
+      // the next pre-granted batch, so both of their units are charged together.
+      capped.submit("key", blockedTask(t1Started, t1Release, batchDone), 1, true);
+      capped.submit("key", blockedTask(t2Started, t2Release, batchDone), 1, true);
+      capped.submit("key", blockedTask(t3Started, t3Release, batchDone), 1, true);
 
       assertThat(t1Started.await(5, TimeUnit.SECONDS)).isTrue();
-      // Release t1: it completes, but the batch is not settled yet — t2 runs next.
+      // Release t1: it completes, and the next batch (t2 + t3) is granted.
       t1Release.countDown();
       assertThat(t2Started.await(5, TimeUnit.SECONDS)).isTrue();
+      // The consumer runs the batch sequentially: release t2 so t3 starts and blocks.
+      t2Release.countDown();
+      assertThat(t3Started.await(5, TimeUnit.SECONDS)).isTrue();
 
-      // Mid-batch, both units are still charged: the third submission is dropped.
-      assertThat(capped.submit("key", afterDrainRan::countDown, 1, true)).isFalse();
+      // Mid-batch, both units of the next batch are still charged: a two-unit submission
+      // would exceed the three-unit budget and is dropped.
+      assertThat(capped.submit("key", afterDrainRan::countDown, 2, true)).isFalse();
 
       // Finish the batch: the settlement discharges both units at once.
-      t2Release.countDown();
+      t3Release.countDown();
       assertThat(batchDone.await(5, TimeUnit.SECONDS)).isTrue();
 
       // The drain races with the next submission, so retry until it lands.
@@ -634,8 +584,21 @@ class PerKeyOrderedDispatcherTest {
     } finally {
       t1Release.countDown();
       t2Release.countDown();
+      t3Release.countDown();
       capped.close();
     }
+  }
+
+  private static Runnable blockedTask(CountDownLatch started, CountDownLatch release, CountDownLatch done) {
+    return () -> {
+      started.countDown();
+      try {
+        assertThat(release.await(10, TimeUnit.SECONDS)).isTrue();
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+      }
+      done.countDown();
+    };
   }
 
   /**
@@ -644,11 +607,11 @@ class PerKeyOrderedDispatcherTest {
    */
   @Test
   void submit_consumerThrows_shouldReleaseBatchWeight() throws InterruptedException {
-    PerKeyOrderedDispatcher<Runnable> capped = newDispatcher(
+    KeyDispatcher<Runnable> capped = newDispatcher(
       executor,
       "throwing",
-      PerKeyOrderedDispatcher.DEFAULT_MAX_QUEUE_PER_KEY,
-      PerKeyOrderedDispatcher.DEFAULT_MAX_TASKS_PER_CYCLE,
+      KeyDispatcher.DEFAULT_MAX_QUEUE_PER_KEY,
+      KeyDispatcher.DEFAULT_MAX_TASKS_PER_CYCLE,
       1,
       0
     );
@@ -685,11 +648,11 @@ class PerKeyOrderedDispatcherTest {
    */
   @Test
   void submit_weighted_shouldChargeByWeight() throws InterruptedException {
-    PerKeyOrderedDispatcher<Runnable> capped = newDispatcher(
+    KeyDispatcher<Runnable> capped = newDispatcher(
       executor,
       "weighted",
-      PerKeyOrderedDispatcher.DEFAULT_MAX_QUEUE_PER_KEY,
-      PerKeyOrderedDispatcher.DEFAULT_MAX_TASKS_PER_CYCLE,
+      KeyDispatcher.DEFAULT_MAX_QUEUE_PER_KEY,
+      KeyDispatcher.DEFAULT_MAX_TASKS_PER_CYCLE,
       10,
       0
     );
@@ -722,11 +685,11 @@ class PerKeyOrderedDispatcherTest {
    */
   @Test
   void submit_weighted_shouldDropWhenBudgetOccupied() throws InterruptedException {
-    PerKeyOrderedDispatcher<Runnable> capped = newDispatcher(
+    KeyDispatcher<Runnable> capped = newDispatcher(
       executor,
       "weighted",
-      PerKeyOrderedDispatcher.DEFAULT_MAX_QUEUE_PER_KEY,
-      PerKeyOrderedDispatcher.DEFAULT_MAX_TASKS_PER_CYCLE,
+      KeyDispatcher.DEFAULT_MAX_QUEUE_PER_KEY,
+      KeyDispatcher.DEFAULT_MAX_TASKS_PER_CYCLE,
       10,
       0
     );
@@ -772,12 +735,12 @@ class PerKeyOrderedDispatcherTest {
   @Test
   void submit_singleTask_shouldUseSingleExecutorSubmission() throws InterruptedException {
     CountingExecutor countingExecutor = new CountingExecutor(4);
-    PerKeyOrderedDispatcher<Runnable> batchingDispatcher = newDispatcher(
+    KeyDispatcher<Runnable> batchingDispatcher = newDispatcher(
       countingExecutor,
       "test",
-      PerKeyOrderedDispatcher.DEFAULT_MAX_QUEUE_PER_KEY,
-      PerKeyOrderedDispatcher.DEFAULT_MAX_TASKS_PER_CYCLE,
-      PerKeyOrderedDispatcher.DEFAULT_MAX_GLOBAL_PENDING_UNITS,
+      KeyDispatcher.DEFAULT_MAX_QUEUE_PER_KEY,
+      KeyDispatcher.DEFAULT_MAX_TASKS_PER_CYCLE,
+      KeyDispatcher.DEFAULT_MAX_GLOBAL_PENDING_UNITS,
       0
     );
 
@@ -805,11 +768,11 @@ class PerKeyOrderedDispatcherTest {
   @Test
   void submit_withJitter_shouldParkBeforeFirstCycle() throws InterruptedException {
     CountingExecutor countingExecutor = new CountingExecutor(4);
-    PerKeyOrderedDispatcher<Runnable> jittered = newDispatcher(
+    KeyDispatcher<Runnable> jittered = newDispatcher(
       countingExecutor,
       "jitter",
-      PerKeyOrderedDispatcher.DEFAULT_MAX_QUEUE_PER_KEY,
-      PerKeyOrderedDispatcher.DEFAULT_MAX_TASKS_PER_CYCLE,
+      KeyDispatcher.DEFAULT_MAX_QUEUE_PER_KEY,
+      KeyDispatcher.DEFAULT_MAX_TASKS_PER_CYCLE,
       50_000,
       150
     );
@@ -854,11 +817,11 @@ class PerKeyOrderedDispatcherTest {
   @Test
   void submit_withJitter_shouldPreserveFifoOrder() throws InterruptedException {
     CountingExecutor countingExecutor = new CountingExecutor(4);
-    PerKeyOrderedDispatcher<Runnable> jittered = newDispatcher(
+    KeyDispatcher<Runnable> jittered = newDispatcher(
       countingExecutor,
       "jitter",
-      PerKeyOrderedDispatcher.DEFAULT_MAX_QUEUE_PER_KEY,
-      PerKeyOrderedDispatcher.DEFAULT_MAX_TASKS_PER_CYCLE,
+      KeyDispatcher.DEFAULT_MAX_QUEUE_PER_KEY,
+      KeyDispatcher.DEFAULT_MAX_TASKS_PER_CYCLE,
       50_000,
       50
     );
@@ -898,12 +861,12 @@ class PerKeyOrderedDispatcherTest {
   @Test
   void runTask_whenRetryIsRejectedToo_shouldRetireWorkerAndAcceptFreshSubmission() throws InterruptedException {
     ScheduledExecutorService twiceRejecting = new TwiceRejectingExecutor();
-    PerKeyOrderedDispatcher<Runnable> twiceRejectingDispatcher = newDispatcher(
+    KeyDispatcher<Runnable> twiceRejectingDispatcher = newDispatcher(
       twiceRejecting,
       "twice",
-      PerKeyOrderedDispatcher.DEFAULT_MAX_QUEUE_PER_KEY,
-      PerKeyOrderedDispatcher.DEFAULT_MAX_TASKS_PER_CYCLE,
-      PerKeyOrderedDispatcher.DEFAULT_MAX_GLOBAL_PENDING_UNITS,
+      KeyDispatcher.DEFAULT_MAX_QUEUE_PER_KEY,
+      KeyDispatcher.DEFAULT_MAX_TASKS_PER_CYCLE,
+      KeyDispatcher.DEFAULT_MAX_GLOBAL_PENDING_UNITS,
       0
     );
     try {
