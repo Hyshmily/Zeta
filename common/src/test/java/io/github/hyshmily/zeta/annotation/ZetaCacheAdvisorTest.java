@@ -367,9 +367,13 @@ class ZetaCacheAdvisorTest {
 
     assertThat(matches(implementation)).isTrue();
 
-    Field classPlans = ZetaCacheInterceptor.class.getDeclaredField("classPlans");
+    Field resolverField = ZetaCacheInterceptor.class.getDeclaredField("resolver");
+    resolverField.setAccessible(true);
+    Object resolver = resolverField.get(interceptor);
+
+    Field classPlans = PlanResolver.class.getDeclaredField("classPlans");
     classPlans.setAccessible(true);
-    Map<?, ?> plans = (Map<?, ?>) ((ClassValue<?>) classPlans.get(interceptor)).get(DualKeyReaderImpl.class);
+    Map<?, ?> plans = (Map<?, ?>) ((ClassValue<?>) classPlans.get(resolver)).get(DualKeyReaderImpl.class);
 
     assertThat(plans).hasSize(2);
     assertThat(plans.get(declared))

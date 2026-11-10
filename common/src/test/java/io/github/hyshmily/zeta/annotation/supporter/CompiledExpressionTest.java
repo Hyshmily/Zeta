@@ -165,24 +165,33 @@ class CompiledExpressionTest {
   }
 
   @Test
-  @DisplayName("an expression that assigns its own variable skips only the unknown-name check")
-  void assignmentSkipsUnknownNameValidation() {
-    assertThat(compiled("#x = 1").absent()).isFalse();
-    assertThat(compiled("#x = #id").absent()).isFalse();
-    assertThatThrownBy(() -> compiled("#x = #p1"))
+  @DisplayName("every assignment form is rejected: cache expressions are read-only")
+  void assignmentsAreRejected() {
+    assertThatThrownBy(() -> compiled("#x = 1"))
       .isInstanceOf(IllegalStateException.class)
-      .hasMessageContaining("addresses parameter 1");
+      .hasMessageContaining("must not contain assignments")
+      .hasMessageContaining("read-only");
+    assertThatThrownBy(() -> compiled("#result = 1"))
+      .isInstanceOf(IllegalStateException.class)
+      .hasMessageContaining("must not contain assignments");
+    assertThatThrownBy(() -> compiled("#id.foo = #typo"))
+      .isInstanceOf(IllegalStateException.class)
+      .hasMessageContaining("must not contain assignments");
+    assertThatThrownBy(() -> compiled("(#x = 1) + #x"))
+      .isInstanceOf(IllegalStateException.class)
+      .hasMessageContaining("must not contain assignments");
   }
 
   @Test
-  @DisplayName("a property assignment does not exempt its right-hand side from validation")
-  void propertyAssignmentStillValidatesUnknownNames() {
-    assertThatThrownBy(() -> compiled("#id.foo = #typo"))
-      .isInstanceOf(IllegalStateException.class)
-      .hasMessageContaining("unknown variable '#typo'");
-    assertThatThrownBy(() -> compiled("#x = #typo"))
-      .isInstanceOf(IllegalStateException.class)
-      .hasMessageContaining("unknown variable '#typo'");
+  @DisplayName("a context-free expression is marked constant; any variable or access keeps it dynamic")
+  void constantExpressionsAreMarked() {
+    assertThat(compiled("60000L").constant()).isTrue();
+    assertThat(compiled("60 * 1000").constant()).isTrue();
+    assertThat(compiled("'literal'").constant()).isTrue();
+    assertThat(compiled("#p0").constant()).isFalse();
+    assertThat(compiled("#p0 + 1").constant()).isFalse();
+    assertThat(compiled("T(java.lang.Long).MAX_VALUE").constant()).isFalse();
+    assertThat(compiled("new java.lang.String('x')").constant()).isFalse();
   }
 
   @Test
@@ -192,7 +201,7 @@ class CompiledExpressionTest {
       .isInstanceOf(IllegalStateException.class)
       .hasMessageContaining("cache key")
       .hasMessageContaining("#result")
-      .hasMessageContaining("before the method body");
+      .hasMessageContaining("does not bind a method result");
   }
 
   @Test
@@ -255,6 +264,6 @@ class CompiledExpressionTest {
   }
 
   private CompiledExpression unchecked(String raw) {
-    return new CompiledExpression(raw, parser.parseExpression(raw), Set.of("resultX"));
+    return new CompiledExpression(raw, parser.parseExpression(raw), Set.of("resultX"), false);
   }
 }

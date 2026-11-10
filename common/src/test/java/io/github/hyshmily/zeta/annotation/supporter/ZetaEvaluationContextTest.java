@@ -16,6 +16,7 @@
 package io.github.hyshmily.zeta.annotation.supporter;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.lang.reflect.Method;
 import org.junit.jupiter.api.BeforeEach;
@@ -118,12 +119,13 @@ class ZetaEvaluationContextTest {
   }
 
   @Test
-  @DisplayName("an assigned null shadows the same-named argument")
-  void assignedNullShadowsArgument() {
+  @DisplayName("the context rejects variable writes")
+  void setVariableIsRejected() {
     ZetaEvaluationContext context = context();
 
-    assertThat(parser.parseExpression("#id = null").getValue(context)).isNull();
-    assertThat(parser.parseExpression("#id").getValue(context)).isNull();
+    assertThatThrownBy(() -> context.setVariable("id", null))
+      .isInstanceOf(UnsupportedOperationException.class)
+      .hasMessageContaining("read-only");
   }
 
   @Test

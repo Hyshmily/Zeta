@@ -32,14 +32,12 @@ import org.springframework.util.ClassUtils;
  *
  * <p><b>Variables resolve against the invocation.</b> {@code #root} and
  * {@code #this} are answered by SpEL from the root object and never reach this
- * context's lookup. {@code #result} is answered first, then any variable the
- * expression assigned itself, and only then {@code #pN}, {@code #aN} or a
- * parameter name. An argument reference is read straight from the argument
- * array using the parameter names discovered once at plan resolution: the
- * lookup is O(1) in the number of references, allocates nothing, performs no
- * reflection and writes no map entry. A variable the expression assigned itself
- * lives in a lazily created map, so an expression that never assigns one pays
- * no map allocation of its own.
+ * context's lookup. {@code #result} is answered first, then {@code #pN},
+ * {@code #aN} or a parameter name. An argument reference is read straight from
+ * the argument array using the parameter names discovered once at plan
+ * resolution: the lookup is O(1) in the number of references, allocates nothing,
+ * performs no reflection and writes no map entry. The context is read-only;
+ * an expression assignment is rejected when the expression is compiled.
  *
  * <p><b>Root object.</b> {@code #root} is a {@link Root}, not the target bean:
  * rooting at the bean would silently break every property below, and an
@@ -84,9 +82,8 @@ import org.springframework.util.ClassUtils;
  * converter, comparator and operator overloader are shared for the same reason.
  * The support uses the interceptor's classloader, so its type cache is released
  * with the Spring context instead of pinning application classes from a static
- * field. It implements {@link EvaluationContext} directly; the lazily created
- * assignment map below is its only variable storage, and it can tell an assigned
- * {@code null} from a missing variable.
+ * field. It implements {@link EvaluationContext} directly and stores no
+ * per-expression variable state.
  */
 @Internal
 public final class ZetaEvaluationContext implements EvaluationContext {
@@ -146,8 +143,6 @@ public final class ZetaEvaluationContext implements EvaluationContext {
   private boolean hasResult;
 
   private @Nullable Object result;
-
-  private @Nullable Map<String, Object> assigned;
 
   private ZetaEvaluationContext(
     Root root,
@@ -273,32 +268,22 @@ public final class ZetaEvaluationContext implements EvaluationContext {
   }
 
   /**
-   * Record a variable the expression assigned. A {@code null} value is kept as
-   * a binding rather than removed, so a later {@code #name} reads the assigned
-   * {@code null} instead of falling back to the argument of the same name.
+   * Reject a write: the context is read-only, and an expression assignment is
+   * rejected when the expression is compiled.
    */
   @Override
   public void setVariable(@NonNull String name, @Nullable Object value) {
-    Map<String, Object> variables = assigned;
-    if (variables == null) {
-      variables = new HashMap<>(4);
-      assigned = variables;
-    }
-    variables.put(name, value);
+    throw new UnsupportedOperationException("cache expressions are read-only: cannot assign #" + name);
   }
 
   /**
-   * Resolve {@code #result}, an assigned variable, or an invocation argument.
-   * Called by the interpreted evaluator and by compiled SpEL bytecode alike.
+   * Resolve {@code #result} or an invocation argument. Called by the interpreted
+   * evaluator and by compiled SpEL bytecode alike.
    */
   @Override
   public @Nullable Object lookupVariable(@NonNull String name) {
     if (hasResult && "result".equals(name)) {
       return result;
-    }
-    Map<String, Object> variables = assigned;
-    if (variables != null && variables.containsKey(name)) {
-      return variables.get(name);
     }
     Object[] arguments = root.args;
     int index = CompiledExpression.argumentIndex(name, parameterNames);

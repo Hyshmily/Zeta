@@ -33,6 +33,7 @@ import io.github.hyshmily.zeta.cache.cachesupport.loader.CacheLoader;
 import io.github.hyshmily.zeta.cache.cachesupport.policy.*;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.lang.reflect.Proxy;
 import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.util.ArrayList;
@@ -48,6 +49,8 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.springframework.aop.TargetSource;
+import org.springframework.aop.framework.Advised;
 import org.springframework.aop.framework.AopConfigException;
 import org.springframework.aop.framework.ProxyFactory;
 import org.springframework.aop.support.DefaultPointcutAdvisor;
@@ -59,6 +62,11 @@ import org.springframework.expression.spel.SpelEvaluationException;
 class ZetaCacheInterceptorTest {
 
   private static final String NS = "\u0000";
+
+  /** The physical key an explicit single-value expression produces: one default-key argument. */
+  private static String key(String cache, Object value) {
+    return (cache + NS + io.github.hyshmily.zeta.annotation.supporter.DefaultKey.encode(new Object[] { value }));
+  }
 
   private Zeta zeta;
   private ZetaCacheInterceptor interceptor;
@@ -162,7 +170,7 @@ class ZetaCacheInterceptorTest {
 
     assertThat(proxy(target).load("42")).isEqualTo("real-42");
     assertThat(target.calls).hasValue(1);
-    assertThat(lastKey).isEqualTo("users" + NS + "42");
+    assertThat(lastKey).isEqualTo(key("users", "42"));
     assertThat(lastOptions.stalePolicy()).isEqualTo(StalePolicy.SOFT_REFRESH);
     assertThat(lastOptions.report()).isTrue();
     assertThat(lastOptions.callerRunsLoader()).isTrue();
@@ -178,7 +186,7 @@ class ZetaCacheInterceptorTest {
 
     assertThat(proxy(target).load("42")).isEqualTo("cached-42");
     assertThat(target.calls).hasValue(0);
-    assertThat(lastKey).isEqualTo("users" + NS + "42");
+    assertThat(lastKey).isEqualTo(key("users", "42"));
   }
 
   static class TtlService {
@@ -333,7 +341,7 @@ class ZetaCacheInterceptorTest {
     missRunsBody();
     proxy(new LiteralKeyReader()).load("42");
 
-    assertThat(lastKey).isEqualTo("users" + NS + "fixed");
+    assertThat(lastKey).isEqualTo(key("users", "fixed"));
   }
 
   @Test
@@ -434,6 +442,27 @@ class ZetaCacheInterceptorTest {
     }
   }
 
+  static class RootArgsMultiKeyReader {
+
+    @ZetaCached(cache = "users", key = "#root.args")
+    public String load(String a, String b) {
+      return "v";
+    }
+  }
+
+  @Test
+  @DisplayName("#root.args and an absent key address the same multi-argument entry")
+  void rootArgsKeyMatchesDefaultKey() {
+    missRunsBody();
+    proxy(new DefaultKeyMultipleArgs()).load("a", "b");
+    String defaultKey = lastKey;
+
+    missRunsBody();
+    proxy(new RootArgsMultiKeyReader()).load("a", "b");
+
+    assertThat(lastKey).isEqualTo(defaultKey);
+  }
+
   @Test
   @DisplayName("#root.args encodes an array argument by content")
   void rootArgsKeyEncodesArrayContent() {
@@ -528,7 +557,7 @@ class ZetaCacheInterceptorTest {
     missRunsBody();
     proxy(new MethodNameKey()).load("ACME");
 
-    assertThat(lastKey).isEqualTo("quotes" + NS + "load:ACME");
+    assertThat(lastKey).isEqualTo(key("quotes", "load:ACME"));
   }
 
   static class RootAccessorsKey {
@@ -545,7 +574,7 @@ class ZetaCacheInterceptorTest {
     missRunsBody();
     proxy(new RootAccessorsKey()).load("ACME");
 
-    assertThat(lastKey).isEqualTo("quotes" + NS + "load:ACME:RootAccessorsKey");
+    assertThat(lastKey).isEqualTo(key("quotes", "load:ACME:RootAccessorsKey"));
   }
 
   static class KeyHelper {
@@ -573,7 +602,7 @@ class ZetaCacheInterceptorTest {
 
     proxy(new BeanReferenceKey()).load("42");
 
-    assertThat(lastKey).isEqualTo("users" + NS + "k-42");
+    assertThat(lastKey).isEqualTo(key("users", "k-42"));
   }
 
   static class UnlessService {
@@ -774,8 +803,8 @@ class ZetaCacheInterceptorTest {
     missRunsBody();
     proxy(new OrdersService()).load("1");
 
-    assertThat(usersKey).isEqualTo("users" + NS + "1");
-    assertThat(lastKey).isEqualTo("orders" + NS + "1");
+    assertThat(usersKey).isEqualTo(key("users", "1"));
+    assertThat(lastKey).isEqualTo(key("orders", "1"));
   }
 
   static class BackgroundRefreshService {
@@ -799,7 +828,7 @@ class ZetaCacheInterceptorTest {
     assertThat(target.calls).hasValue(1);
 
     CacheLoader<String, Object> refresh = lastLoader;
-    Thread refresher = new Thread(() -> refresh.reload("users" + NS + "42"));
+    Thread refresher = new Thread(() -> refresh.reload(key("users", "42")));
     refresher.start();
     refresher.join(5_000);
 
@@ -827,7 +856,7 @@ class ZetaCacheInterceptorTest {
     chain.setAccessible(true);
 
     assertThat(chain.get(refresh)).as("the foreground read released the advice chain").isNull();
-    assertThat(refresh.reload("users" + NS + "42")).as("a refresh never needs the chain").isEqualTo("v-42");
+    assertThat(refresh.reload(key("users", "42"))).as("a refresh never needs the chain").isEqualTo("v-42");
     assertThat(chain.get(refresh)).as("a refresh cannot re-pin the chain").isNull();
   }
 
@@ -898,7 +927,7 @@ class ZetaCacheInterceptorTest {
     assertThat(service.load("42")).isEqualTo("stale-42");
 
     CacheLoader<String, Object> refresh = lastLoader;
-    assertThatThrownBy(() -> refresh.reload("users" + NS + "42"))
+    assertThatThrownBy(() -> refresh.reload(key("users", "42")))
       .isInstanceOf(IllegalStateException.class)
       .hasMessage("source down: 42");
   }
@@ -933,7 +962,7 @@ class ZetaCacheInterceptorTest {
     // The engine's refresh entry point (reload), even invoked inline on the
     // invocation thread, must go reflectively: the inner advice is not re-entered.
     CacheLoader<String, Object> refresh = lastLoader;
-    assertThat(refresh.reload("users" + NS + "42")).isEqualTo("real-42");
+    assertThat(refresh.reload(key("users", "42"))).isEqualTo("real-42");
     assertThat(target.calls).hasValue(1);
     assertThat(chain).hasValue(0);
   }
@@ -965,7 +994,7 @@ class ZetaCacheInterceptorTest {
     assertThat(service.getClass()).isNotSameAs(InterfaceReaderImpl.class);
     assertThat(service.load("42")).isEqualTo("impl-42");
     assertThat(target.calls).hasValue(1);
-    assertThat(lastKey).isEqualTo("users" + NS + "42");
+    assertThat(lastKey).isEqualTo(key("users", "42"));
   }
 
   interface CachedVerb {
@@ -1087,7 +1116,7 @@ class ZetaCacheInterceptorTest {
 
     missRunsBody();
     assertThat(service.fetch("42")).isEqualTo("proxied-42");
-    assertThat(lastKey).isEqualTo("users" + NS + "42");
+    assertThat(lastKey).isEqualTo(key("users", "42"));
   }
 
   interface DefaultCachedReader {
@@ -1112,7 +1141,7 @@ class ZetaCacheInterceptorTest {
     DefaultCachedReader service = jdkProxy(new ImplCachedReader(), DefaultCachedReader.class);
 
     assertThat(service.load("42")).isEqualTo("impl-42");
-    assertThat(lastKey).isEqualTo("impl-cache" + NS + "fixed");
+    assertThat(lastKey).isEqualTo(key("impl-cache", "fixed"));
   }
 
   static class BaseCachedReader {
@@ -1137,7 +1166,7 @@ class ZetaCacheInterceptorTest {
     missRunsBody();
 
     assertThat(proxy(new OverridingCachedReader()).load("42")).isEqualTo("override-42");
-    assertThat(lastKey).isEqualTo("base" + NS + "42");
+    assertThat(lastKey).isEqualTo(key("base", "42"));
   }
 
   interface BaseApi {
@@ -1169,7 +1198,7 @@ class ZetaCacheInterceptorTest {
 
     BaseApi service = jdkProxy(new AuditedApi(), BaseApi.class);
     assertThat(service.load("42")).isEqualTo("audited-base-42");
-    assertThat(lastKey).isEqualTo("base" + NS + "42");
+    assertThat(lastKey).isEqualTo(key("base", "42"));
   }
 
   static class ParentCached {
@@ -1203,7 +1232,7 @@ class ZetaCacheInterceptorTest {
     missRunsBody();
 
     assertThat(proxy(new GrandChildCached()).load("42")).isEqualTo("grandchild-child-42");
-    assertThat(lastKey).isEqualTo("child" + NS + "42");
+    assertThat(lastKey).isEqualTo(key("child", "42"));
   }
 
   interface SuperApi {
@@ -1232,12 +1261,67 @@ class ZetaCacheInterceptorTest {
 
     SubApi service = jdkProxy(new SubApiImpl(), SubApi.class);
     assertThat(service.load("42")).isEqualTo("impl-42");
-    assertThat(lastKey).isEqualTo("sub" + NS + "42");
+    assertThat(lastKey).isEqualTo(key("sub", "42"));
+  }
+
+  interface DiamondSuper {
+    @ZetaCached(cache = "v1")
+    String load(String id);
+  }
+
+  interface DiamondSub extends DiamondSuper {
+    @Override
+    @ZetaCached(cache = "v2")
+    String load(String id);
+  }
+
+  interface DiamondOther {
+    @ZetaCached(cache = "v1")
+    String load(String id);
+  }
+
+  static class DiamondImpl implements DiamondSub, DiamondOther {
+
+    @Override
+    public String load(String id) {
+      return "impl-" + id;
+    }
+  }
+
+  @Test
+  @DisplayName("a maximal annotated view still conflicts with an unrelated interface after a dominating view")
+  void maximalViewsConflictIndependentOfTraversalOrder() throws NoSuchMethodException {
+    Method load = DiamondImpl.class.getMethod("load", String.class);
+
+    assertThatThrownBy(() -> interceptor.matches(load, DiamondImpl.class))
+      .isInstanceOf(IllegalStateException.class)
+      .hasMessageContaining("conflicting @ZetaCached")
+      .hasMessageContaining("v1")
+      .hasMessageContaining("v2");
+  }
+
+  static class AnnotatedUnrelatedDiamondImpl implements DiamondSub, DiamondOther {
+
+    @Deprecated
+    @Override
+    public String load(String id) {
+      return "impl-" + id;
+    }
+  }
+
+  @Test
+  @DisplayName("an unrelated implementation annotation does not hide an interface verb conflict")
+  void unrelatedImplementationAnnotationDoesNotHideAConflict() throws NoSuchMethodException {
+    Method load = AnnotatedUnrelatedDiamondImpl.class.getMethod("load", String.class);
+
+    assertThatThrownBy(() -> interceptor.matches(load, AnnotatedUnrelatedDiamondImpl.class))
+      .isInstanceOf(IllegalStateException.class)
+      .hasMessageContaining("conflicting @ZetaCached");
   }
 
   interface RenamedParameterReader {
     /** The interface declares {@code id}; the implementation declares {@code value}. */
-    @ZetaCached(cache = "users", key = "#value + ':' + #root.method.declaringClass.simpleName")
+    @ZetaCached(cache = "users", key = "#id + ':' + #root.method.declaringClass.simpleName")
     String load(String id);
   }
 
@@ -1250,14 +1334,42 @@ class ZetaCacheInterceptorTest {
   }
 
   @Test
-  @DisplayName("SpEL parameter names and #root.method come from the most-specific implementation method")
-  void parameterNamesComeFromTheImplementationMethod() {
+  @DisplayName("SpEL parameter names come from the method that declares the annotation")
+  void parameterNamesComeFromTheAnnotatedMethod() {
     missRunsBody();
 
     RenamedParameterReader service = jdkProxy(new RenamedParameterReaderImpl(), RenamedParameterReader.class);
 
     assertThat(service.load("42")).isEqualTo("impl-42");
-    assertThat(lastKey).isEqualTo("users" + NS + "42:RenamedParameterReaderImpl");
+    assertThat(lastKey).isEqualTo(key("users", "42:RenamedParameterReaderImpl"));
+  }
+
+  interface DeprecatedRenamedParameterReader {
+    @ZetaCached(cache = "users", key = "#id")
+    String load(String id);
+  }
+
+  static class DeprecatedRenamedParameterReaderImpl implements DeprecatedRenamedParameterReader {
+
+    @Deprecated
+    @Override
+    public String load(String value) {
+      return "impl-" + value;
+    }
+  }
+
+  @Test
+  @DisplayName("an unrelated implementation annotation does not steal parameter names from the interface")
+  void unrelatedImplementationAnnotationDoesNotStealParameterNames() {
+    missRunsBody();
+
+    DeprecatedRenamedParameterReader service = jdkProxy(
+      new DeprecatedRenamedParameterReaderImpl(),
+      DeprecatedRenamedParameterReader.class
+    );
+
+    assertThat(service.load("42")).isEqualTo("impl-42");
+    assertThat(lastKey).isEqualTo(key("users", "42"));
   }
 
   /** A proxy with no advice: models a FactoryBean product or a scoped target that is itself a proxy. */
@@ -1305,8 +1417,61 @@ class ZetaCacheInterceptorTest {
     // A refresh must invoke the underlying target, not the inner proxy, so the
     // inner proxy's advice chain (if any) is not re-entered.
     CacheLoader<String, Object> refresh = lastLoader;
-    assertThat(refresh.reload("users" + NS + "42")).isEqualTo("real-42");
+    assertThat(refresh.reload(key("users", "42"))).isEqualTo("real-42");
     assertThat(target.calls).hasValue(2);
+  }
+
+  interface RepositoryView {
+    @ZetaCached(cache = "users", key = "#id")
+    String load(String id);
+  }
+
+  /** The Spring Data shape: the interface proxy's singleton target does not implement the interface. */
+  static class RepositoryTarget {
+
+    final AtomicInteger calls = new AtomicInteger();
+
+    String load(String id) {
+      calls.incrementAndGet();
+      return "real-" + id;
+    }
+  }
+
+  @Test
+  @DisplayName("an interface proxy whose target does not implement the interface still caches and reloads")
+  void interfaceProxyTargetDoesNotBypassThePlan() throws Throwable {
+    RepositoryTarget repositoryTarget = new RepositoryTarget();
+    TargetSource targetSource = mock(TargetSource.class);
+    when(targetSource.isStatic()).thenReturn(true);
+    when(targetSource.getTarget()).thenReturn(repositoryTarget);
+    RepositoryView nested = (RepositoryView) Proxy.newProxyInstance(
+      RepositoryView.class.getClassLoader(),
+      new Class<?>[] { RepositoryView.class, Advised.class },
+      (proxy, method, args) -> {
+        if ("getTargetSource".equals(method.getName())) {
+          return targetSource;
+        }
+        if ("getTargetClass".equals(method.getName())) {
+          return null;
+        }
+        return repositoryTarget.load((String) args[0]);
+      }
+    );
+
+    Method method = RepositoryView.class.getMethod("load", String.class);
+    MethodInvocation invocation = mock(MethodInvocation.class);
+    when(invocation.getMethod()).thenReturn(method);
+    when(invocation.getThis()).thenReturn(nested);
+    when(invocation.getArguments()).thenReturn(new Object[] { "42" });
+    when(invocation.proceed()).thenAnswer(ignored -> nested.load("42"));
+
+    missRunsBody();
+    assertThat(interceptor.invoke(invocation)).isEqualTo("real-42");
+    assertThat(lastKey).isEqualTo(key("users", "42"));
+
+    CacheLoader<String, Object> refresh = lastLoader;
+    assertThat(refresh.reload(key("users", "42"))).isEqualTo("real-42");
+    assertThat(repositoryTarget.calls).hasValue(2);
   }
 
   static class ConflictService {
@@ -1380,7 +1545,20 @@ class ZetaCacheInterceptorTest {
     missRunsBody();
     proxy(new NamedKeyReader()).load("42");
 
-    assertThat(lastKey).isEqualTo("users" + NS + "42");
+    assertThat(lastKey).isEqualTo(key("users", "42"));
+  }
+
+  @Test
+  @DisplayName("an explicit single-argument key and the default key address the same entry")
+  void explicitSingleArgumentKeyMatchesDefaultKey() {
+    missRunsBody();
+    proxy(new DefaultKeySingleArg()).load("42");
+    String defaultKey = lastKey;
+
+    missRunsBody();
+    proxy(new NamedKeyReader()).load("42");
+
+    assertThat(lastKey).isEqualTo(defaultKey);
   }
 
   static class ResultNamedParameterReader {
@@ -1427,19 +1605,19 @@ class ZetaCacheInterceptorTest {
 
     missRunsBody();
     service.byAccount("acme", 9, "p1");
-    assertThat(lastKey).isEqualTo("users" + NS + "acme");
+    assertThat(lastKey).isEqualTo(key("users", "acme"));
 
     missRunsBody();
     service.byPage("acme", 9, "p1");
-    assertThat(lastKey).isEqualTo("users" + NS + "9");
+    assertThat(lastKey).isEqualTo(key("users", 9));
 
     missRunsBody();
     service.byNonCanonical("acme", 9, "p1");
-    assertThat(lastKey).isEqualTo("users" + NS + "p1");
+    assertThat(lastKey).isEqualTo(key("users", "p1"));
 
     missRunsBody();
     service.byPosition("acme", 9, "p1");
-    assertThat(lastKey).isEqualTo("users" + NS + "9");
+    assertThat(lastKey).isEqualTo(key("users", 9));
   }
 
   static class ShadowedPositionalNameReader {
@@ -1586,7 +1764,7 @@ class ZetaCacheInterceptorTest {
 
   static class UnaryPlusTtlReader {
 
-    @ZetaCached(cache = "users", key = "#p0", hardTtl = "+60000L", softTtl = "+1e3")
+    @ZetaCached(cache = "users", key = "#p0", hardTtl = "+60000L", softTtl = "+5000L")
     public String load(String id) {
       return "v";
     }
@@ -1604,7 +1782,7 @@ class ZetaCacheInterceptorTest {
     service.load("43");
 
     assertThat(first.hardTtlMs().getAsLong()).isEqualTo(60_000L);
-    assertThat(first.softTtlMs().getAsLong()).isEqualTo(1_000L);
+    assertThat(first.softTtlMs().getAsLong()).isEqualTo(5_000L);
     assertThat(lastOptions).as("unary-plus literals are constants").isSameAs(first);
   }
 
@@ -1617,9 +1795,41 @@ class ZetaCacheInterceptorTest {
   }
 
   @Test
-  @DisplayName("a real literal outside the long range fails startup like a digits-only overflow")
-  void hugeRealTtlLiteralFailsStartup() {
-    assertRejectedAtStartup(() -> proxy(new HugeRealTtlReader()), "hardTtl", "exceeds the long range");
+  @DisplayName("a floating-point TTL literal fails startup: milliseconds are discrete")
+  void floatingTtlLiteralFailsStartup() {
+    assertRejectedAtStartup(() -> proxy(new HugeRealTtlReader()), "hardTtl", "must be an integral number");
+  }
+
+  static class ExactTwoPow63TtlReader {
+
+    @ZetaCached(cache = "users", key = "#p0", hardTtl = "9223372036854775808e0")
+    public String load(String id) {
+      return "v";
+    }
+  }
+
+  @Test
+  @DisplayName("a floating-point literal is rejected before any narrowing can saturate")
+  void exactTwoPow63TtlLiteralFailsStartup() {
+    assertRejectedAtStartup(() -> proxy(new ExactTwoPow63TtlReader()), "hardTtl", "must be an integral number");
+  }
+
+  static class UnresolvedTtlPlaceholderReader {
+
+    @ZetaCached(cache = "users", key = "#p0", hardTtl = "${users.hardTtl}")
+    public String load(String id) {
+      return "v";
+    }
+  }
+
+  @Test
+  @DisplayName("an unresolved TTL placeholder names the attribute instead of reaching the SpEL parser")
+  void unresolvedTtlPlaceholderFailsStartup() {
+    assertRejectedAtStartup(
+      () -> proxy(new UnresolvedTtlPlaceholderReader()),
+      "hardTtl",
+      "placeholder was not resolved"
+    );
   }
 
   static class UnresolvedPlaceholderReader {
@@ -1656,7 +1866,7 @@ class ZetaCacheInterceptorTest {
 
     proxy(new PlaceholderReader()).load("42");
 
-    assertThat(lastKey).isEqualTo("users" + NS + "42");
+    assertThat(lastKey).isEqualTo(key("users", "42"));
     assertThat(lastOptions.hardTtlMs().getAsLong()).isEqualTo(60_000L);
     assertThat(lastOptions.softTtlMs().getAsLong()).isEqualTo(5_000L);
   }
@@ -1672,7 +1882,7 @@ class ZetaCacheInterceptorTest {
   @Test
   @DisplayName("a read key cannot use #result")
   void readKeyCannotUseResult() {
-    assertRejectedAtStartup(() -> proxy(new ResultKeyReader()), "#result", "before the method body");
+    assertRejectedAtStartup(() -> proxy(new ResultKeyReader()), "#result", "does not bind a method result");
   }
 
   static class ResultTtlReader {
@@ -1714,7 +1924,21 @@ class ZetaCacheInterceptorTest {
   @Test
   @DisplayName("a beforeInvocation invalidation key cannot use #result")
   void beforeInvocationKeyCannotUseResult() {
-    assertRejectedAtStartup(() -> proxy(new ResultBeforeInvalidator()), "#result", "before the method body");
+    assertRejectedAtStartup(() -> proxy(new ResultBeforeInvalidator()), "#result", "does not bind a method result");
+  }
+
+  static class VoidResultInvalidator {
+
+    @ZetaInvalidate(cache = "users", key = "#result")
+    public void rename(String id) {
+      // no result to bind
+    }
+  }
+
+  @Test
+  @DisplayName("a void invalidation cannot use #result, even after the body")
+  void voidInvalidationKeyCannotUseResult() {
+    assertRejectedAtStartup(() -> proxy(new VoidResultInvalidator()), "#result", "does not bind a method result");
   }
 
   static class LiteralResultKeyReader {
@@ -1739,7 +1963,7 @@ class ZetaCacheInterceptorTest {
     missRunsBody();
     proxy(new LiteralResultKeyReader()).load("42");
 
-    assertThat(lastKey).isEqualTo("users" + NS + "#result");
+    assertThat(lastKey).isEqualTo(key("users", "#result"));
   }
 
   @Test
@@ -1748,7 +1972,7 @@ class ZetaCacheInterceptorTest {
     missRunsBody();
     proxy(new DoubleQuotedLiteralResultKeyReader()).load("42");
 
-    assertThat(lastKey).isEqualTo("users" + NS + "#result");
+    assertThat(lastKey).isEqualTo(key("users", "#result"));
   }
 
   // ---------------------------------------------------------------------
@@ -1774,7 +1998,7 @@ class ZetaCacheInterceptorTest {
 
     assertThat(proxy(target).save("42")).isEqualTo("saved-42");
     assertThat(target.calls).hasValue(1);
-    verify(zeta).put(eq("users" + NS + "42"), eq("saved-42"), options.capture());
+    verify(zeta).put(eq(key("users", "42")), eq("saved-42"), options.capture());
     assertThat(options.getValue().sync()).isTrue();
     assertThat(options.getValue().hardTtlMs().getAsLong()).isZero();
   }
@@ -1793,7 +2017,7 @@ class ZetaCacheInterceptorTest {
     ArgumentCaptor<PutPolicy> options = ArgumentCaptor.forClass(PutPolicy.class);
     proxy(new TtlWriter()).save("42");
 
-    verify(zeta).put(eq("users" + NS + "42"), eq("v"), options.capture());
+    verify(zeta).put(eq(key("users", "42")), eq("v"), options.capture());
     assertThat(options.getValue().sync()).isFalse();
     assertThat(options.getValue().hardTtlMs().getAsLong()).isEqualTo(60_000L);
     assertThat(options.getValue().softTtlMs().getAsLong()).isEqualTo(5_000L);
@@ -1838,7 +2062,7 @@ class ZetaCacheInterceptorTest {
 
     assertThat(proxy(target).save("vip")).isEqualTo("v");
 
-    verify(zeta).put(eq("users" + NS + "vip"), eq("v"), options.capture());
+    verify(zeta).put(eq(key("users", "vip")), eq("v"), options.capture());
     assertThat(target.events).containsExactly("body", "ttl");
     assertThat(options.getValue().sync()).isFalse();
     assertThat(options.getValue().hardTtlMs().getAsLong()).isEqualTo(1000L);
@@ -2034,7 +2258,7 @@ class ZetaCacheInterceptorTest {
 
     proxy(new MutatingWriter()).save(entity);
 
-    verify(zeta).put(eq("users" + NS + "original"), eq(entity), any(PutPolicy.class));
+    verify(zeta).put(eq(key("users", "original")), eq(entity), any(PutPolicy.class));
   }
 
   static class HugeTtlReader {
@@ -2117,7 +2341,7 @@ class ZetaCacheInterceptorTest {
     ArgumentCaptor<PutPolicy> options = ArgumentCaptor.forClass(PutPolicy.class);
     Saved saved = proxy(new ResultKeyWriter()).save("u1");
 
-    verify(zeta).put(eq("users" + NS + "id-u1"), eq(saved), options.capture());
+    verify(zeta).put(eq(key("users", "id-u1")), eq(saved), options.capture());
     assertThat(options.getValue().hardTtlMs().getAsLong()).isEqualTo(60_000L);
   }
 
@@ -2134,7 +2358,7 @@ class ZetaCacheInterceptorTest {
   void wholeResultKeyUsesTheResult() {
     proxy(new WholeResultWriter()).save("42");
 
-    verify(zeta).put(eq("users" + NS + "saved-42"), eq("saved-42"), any(PutPolicy.class));
+    verify(zeta).put(eq(key("users", "saved-42")), eq("saved-42"), any(PutPolicy.class));
   }
 
   static class ConditionalWriter {
@@ -2151,7 +2375,7 @@ class ZetaCacheInterceptorTest {
     ConditionalWriter service = proxy(new ConditionalWriter());
 
     assertThat(service.save("ACTIVE").getId()).isEqualTo("id-ACTIVE");
-    verify(zeta, times(1)).put(eq("users" + NS + "id-ACTIVE"), any(), any(PutPolicy.class));
+    verify(zeta, times(1)).put(eq(key("users", "id-ACTIVE")), any(), any(PutPolicy.class));
 
     assertThat(service.save("ARCHIVED").getStatus()).isEqualTo("ARCHIVED");
     verify(zeta, times(1)).put(anyString(), any(), any(PutPolicy.class));
@@ -2170,7 +2394,7 @@ class ZetaCacheInterceptorTest {
   void runtimeWriteUnlessFailureFailsOpen() {
     proxy(new FailingUnlessWriter()).save("u1");
 
-    verify(zeta).put(eq("users" + NS + "u1"), any(Saved.class), any(PutPolicy.class));
+    verify(zeta).put(eq(key("users", "u1")), any(Saved.class), any(PutPolicy.class));
   }
 
   static class BrokenWriteUnless {
@@ -2214,7 +2438,7 @@ class ZetaCacheInterceptorTest {
     assertThat(proxy(target).rename("42")).isEqualTo("renamed-42");
 
     assertThat(target.events).containsExactly("body", "invalidate");
-    verify(zeta).invalidate(eq("users" + NS + "42"), options.capture());
+    verify(zeta).invalidate(eq(key("users", "42")), options.capture());
     assertThat(options.getValue().scope()).isEqualTo(InvalidatePolicy.Scope.BOTH);
     assertThat(options.getValue().immediate()).isFalse();
   }
@@ -2242,7 +2466,7 @@ class ZetaCacheInterceptorTest {
     proxy(target).rename("42");
 
     assertThat(target.events).containsExactly("invalidate", "body");
-    verify(zeta).invalidate(eq("users" + NS + "42"), options.capture());
+    verify(zeta).invalidate(eq(key("users", "42")), options.capture());
     assertThat(options.getValue().scope()).isEqualTo(InvalidatePolicy.Scope.LOCAL);
     assertThat(options.getValue().immediate()).isTrue();
   }
@@ -2260,7 +2484,7 @@ class ZetaCacheInterceptorTest {
   void invalidationResolvesResultInKey() {
     proxy(new ResultInvalidator()).rename("u1");
 
-    verify(zeta).invalidate(eq("users" + NS + "id-u1"), any(InvalidatePolicy.class));
+    verify(zeta).invalidate(eq(key("users", "id-u1")), any(InvalidatePolicy.class));
   }
 
   @Test
@@ -2322,7 +2546,7 @@ class ZetaCacheInterceptorTest {
   void nullResultRunsFallbackExpression() {
     assertThat(proxy(new FallbackInvalidator()).rename("u1")).isNull();
 
-    verify(zeta).invalidate(eq("users" + NS + "u1"), any(InvalidatePolicy.class));
+    verify(zeta).invalidate(eq(key("users", "u1")), any(InvalidatePolicy.class));
   }
 
   static class NullFallbackInvalidator {

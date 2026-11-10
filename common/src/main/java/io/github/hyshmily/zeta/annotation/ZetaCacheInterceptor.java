@@ -19,53 +19,37 @@ import io.github.hyshmily.zeta.Zeta;
 import io.github.hyshmily.zeta.annotation.supporter.CompiledExpression;
 import io.github.hyshmily.zeta.annotation.supporter.DefaultKey;
 import io.github.hyshmily.zeta.annotation.supporter.ZetaEvaluationContext;
-import io.github.hyshmily.zeta.cache.CacheKeysPolicy;
 import io.github.hyshmily.zeta.cache.cachesupport.loader.CacheLoader;
 import io.github.hyshmily.zeta.cache.cachesupport.policy.GetPolicy;
 import io.github.hyshmily.zeta.cache.cachesupport.policy.InvalidatePolicy;
 import io.github.hyshmily.zeta.cache.cachesupport.policy.PutPolicy;
 import io.github.hyshmily.zeta.cache.cachesupport.policy.StalePolicy;
 import io.github.hyshmily.zeta.util.Internal;
-import java.lang.annotation.Annotation;
 import java.lang.reflect.Array;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
-import java.lang.reflect.Modifier;
 import java.math.BigDecimal;
 import java.math.BigInteger;
-import java.util.*;
 import java.util.function.LongSupplier;
 import lombok.extern.slf4j.Slf4j;
 import org.aopalliance.intercept.MethodInterceptor;
 import org.aopalliance.intercept.MethodInvocation;
-import org.jspecify.annotations.NonNull;
 import org.jspecify.annotations.Nullable;
 import org.springframework.aop.TargetClassAware;
 import org.springframework.aop.framework.Advised;
 import org.springframework.aop.framework.AopProxyUtils;
 import org.springframework.aop.support.AopUtils;
 import org.springframework.beans.factory.BeanFactory;
-import org.springframework.beans.factory.config.ConfigurableBeanFactory;
-import org.springframework.context.expression.BeanFactoryResolver;
-import org.springframework.core.DefaultParameterNameDiscoverer;
-import org.springframework.core.ParameterNameDiscoverer;
-import org.springframework.core.annotation.AnnotatedElementUtils;
-import org.springframework.expression.BeanResolver;
-import org.springframework.expression.spel.SpelCompilerMode;
-import org.springframework.expression.spel.SpelParserConfiguration;
 import org.springframework.expression.spel.ast.Literal;
-import org.springframework.expression.spel.ast.OpMinus;
-import org.springframework.expression.spel.ast.OpPlus;
 import org.springframework.expression.spel.standard.SpelExpression;
 import org.springframework.expression.spel.standard.SpelExpressionParser;
-import org.springframework.util.ClassUtils;
-import org.springframework.util.ReflectionUtils;
+import org.springframework.expression.spel.support.StandardEvaluationContext;
 
 /**
  * The one advice behind {@link ZetaCached}, {@link ZetaPut} and
- * {@link ZetaInvalidate}: it resolves the method's plan once, resolves the key
- * once, and then performs exactly one data verb against the {@link Zeta}
- * facade.
+ * {@link ZetaInvalidate}: {@link PlanResolver} resolves the method's plan once,
+ * the advice resolves the key once, and then performs exactly one data verb
+ * against the {@link Zeta} facade.
  *
  * <p><b>No cache abstraction in the middle.</b> The annotations are not Spring
  * Cache operations, so there is no {@code CacheManager}, no {@code Cache}, no
@@ -80,19 +64,16 @@ import org.springframework.util.ReflectionUtils;
  * annotations is a configuration error and is rejected at resolution instead of
  * one annotation silently shadowing the other.
  *
- * <p><b>Resolution is the fail-fast boundary.</b> {@link ZetaCacheAdvisor}'s
- * pointcut calls {@link #matches} while Spring is deciding whether to proxy a
- * bean, so a blank namespace, a void/Void return, a conflicting verb, an
- * unparsable expression, an unknown or out-of-range variable, a pre-body
- * {@code #result} or a permanent synced write fails bean creation instead of
- * the first request. The first question about a class resolves every candidate
- * method of the target class once: {@code AopUtils.canApply} stops at the first
- * match, and a JDK proxy matches lazily per call, so without that scan a
- * malformed second verb would surface only in production. The table is a
- * {@link ClassValue} keyed by the target class, with a CGLIB proxy sharing the
- * user class's table, so a validated class answers every later question about
- * one of its views with one lookup and no annotation scan; a method outside an
- * annotated group is simply absent.
+ * <p><b>Resolution is the fail-fast boundary, and {@link PlanResolver} owns it.</b>
+ * {@link ZetaCacheAdvisor}'s pointcut calls {@link #matches} while Spring is deciding
+ * whether to proxy a bean, so a blank namespace, a void/Void return, a conflicting verb,
+ * an unparsable expression, an unknown or out-of-range variable, a pre-body
+ * {@code #result} or a permanent synced write fails bean creation instead of the first
+ * request. The resolver scans every candidate method of the target class once: a JDK proxy
+ * matches lazily per call, so without that scan a malformed second verb would surface only
+ * in production. Its table is keyed by the target class, with a CGLIB proxy sharing the
+ * user class's table, so a validated class answers every later question about one of its
+ * views with one lookup and no annotation scan.
  *
  * <p><b>One resolution, every view.</b> The most-specific implementation method
  * is resolved once per candidate, and it is stored in the plan: SpEL parameter
@@ -109,9 +90,8 @@ import org.springframework.util.ReflectionUtils;
  * single-argument expression ({@code #id}, {@code #p0}, {@code #a0}) resolves
  * straight from the argument array; a no-argument default key and a
  * whole-literal expression are precomputed at resolution. Anything else goes
- * through SpEL, whose parser runs in {@link SpelCompilerMode#MIXED} mode so a
- * repeatedly evaluated expression is compiled after its first few interpreted
- * evaluations.
+ * through SpEL, whose parser runs in MIXED mode so a repeatedly evaluated
+ * expression is compiled after its first few interpreted evaluations.
  *
  * <p><b>Body exceptions.</b> The read path returns a {@link BodyFailure}
  * sentinel from the loader instead of throwing, because a business exception
@@ -147,103 +127,13 @@ public final class ZetaCacheInterceptor implements MethodInterceptor {
 
   private static final BigDecimal MAX_LONG_DECIMAL = BigDecimal.valueOf(Long.MAX_VALUE);
 
-  /** Namespace delimiter: the first NUL separates the cache name from the key. */
-  private static final char NAMESPACE_DELIMITER = CacheKeysPolicy.NAMESPACE_DELIMITER;
-
   private static final Object[] NO_ARGS = new Object[0];
 
   private static final LongSupplier ZERO = () -> 0L;
 
-  /** The verb annotation names, shared by resolution roles and startup failure messages. */
-  private static final String ZETA_PUT = "@ZetaPut";
-
-  private static final String ZETA_CACHED = "@ZetaCached";
-
-  private static final String ZETA_INVALIDATE = "@ZetaInvalidate";
-
-  /** Embedded-value resolution for {@code ${...}} in {@code cache} and both TTL attributes. */
-  private final @Nullable ConfigurableBeanFactory beanFactory;
-
-  private final BeanResolver beanResolver;
-
   private final Zeta zeta;
 
-  /**
-   * SpEL parser in {@link SpelCompilerMode#MIXED} mode: an expression is
-   * interpreted first and compiled after the engine's evaluation threshold, so
-   * a key/TTL/unless on a steady-state path stops paying interpretation overhead
-   * without paying compilation for a method nobody calls.
-   */
-  private final SpelExpressionParser parser = new SpelExpressionParser(
-    new SpelParserConfiguration(SpelCompilerMode.MIXED, ClassUtils.getDefaultClassLoader())
-  );
-
-  /**
-   * The reflection machinery every evaluation phase of this interceptor shares.
-   * Per interceptor, not static: its caches must be released with the Spring
-   * context and its type locator must resolve against the same classloader as
-   * {@link #parser}.
-   */
-  private final ZetaEvaluationContext.Support expressionSupport = new ZetaEvaluationContext.Support(
-    ClassUtils.getDefaultClassLoader()
-  );
-
-  private final ParameterNameDiscoverer parameterNameDiscoverer = new DefaultParameterNameDiscoverer();
-
-  /**
-   * The per-target-class plan table. One lookup answers both the pointcut's
-   * "is this a verb method" and the invocation's plan, with no key allocation.
-   * The scan runs inside {@link ClassValue#computeValue}: a throwing scan
-   * installs nothing, so the class stays unvalidated and the next question
-   * retries it; a successful scan publishes one immutable table atomically.
-   */
-  private final ClassValue<Map<Method, Plan>> classPlans = new ClassValue<>() {
-    @Override
-    protected Map<Method, Plan> computeValue(@NonNull Class<?> targetClass) {
-      Class<?> userClass = ClassUtils.getUserClass(targetClass);
-      if (userClass != targetClass) {
-        // A CGLIB proxy shares the user class's immutable table instead of
-        // scanning the generated subclass.
-        return classPlans.get(userClass);
-      }
-      Set<Class<?>> classes = new LinkedHashSet<>();
-      classes.add(userClass);
-      classes.addAll(ClassUtils.getAllInterfacesForClassAsSet(userClass));
-
-      // One implementation method can be reached through the implementation, a
-      // bridge, a generic interface and several unrelated interfaces. Group
-      // every view by its most-specific method first, then resolve the whole
-      // group once; every view of an annotated group later answers with the
-      // same plan.
-      Map<Method, List<Method>> viewsBySpecific = new LinkedHashMap<>();
-      for (Class<?> candidateClass : classes) {
-        for (Method candidate : ReflectionUtils.getAllDeclaredMethods(candidateClass)) {
-          if (ignored(candidate)) {
-            continue;
-          }
-          Method specific = AopUtils.getMostSpecificMethod(candidate, userClass);
-          viewsBySpecific.computeIfAbsent(specific, key -> new ArrayList<>()).add(candidate);
-        }
-      }
-
-      Map<Method, Plan> resolved = new HashMap<>();
-      for (Map.Entry<Method, List<Method>> entry : viewsBySpecific.entrySet()) {
-        Method specific = entry.getKey();
-        List<Method> views = entry.getValue();
-        Plan plan = planFor(specific, views);
-        if (plan == null) {
-          continue;
-        }
-        // The grouping key is itself one of the views, so one pass stores and
-        // warms every view of the group.
-        for (Method view : views) {
-          resolved.put(view, plan);
-          prewarmAccess(view);
-        }
-      }
-      return Map.copyOf(resolved);
-    }
-  };
+  private final PlanResolver resolver;
 
   /**
    * Create the interceptor.
@@ -255,8 +145,12 @@ public final class ZetaCacheInterceptor implements MethodInterceptor {
    */
   public ZetaCacheInterceptor(Zeta zeta, @Nullable BeanFactory beanFactory) {
     this.zeta = zeta;
-    this.beanResolver = beanFactory == null ? null : new BeanFactoryResolver(beanFactory);
-    this.beanFactory = beanFactory instanceof ConfigurableBeanFactory configurable ? configurable : null;
+    this.resolver = new PlanResolver(beanFactory);
+  }
+
+  /** The pointcut decision, delegated to the resolved plan table. */
+  boolean matches(Method method, Class<?> targetClass) {
+    return resolver.matches(method, targetClass);
   }
 
   @Override
@@ -271,23 +165,27 @@ public final class ZetaCacheInterceptor implements MethodInterceptor {
     // FactoryBean returning a proxy, a scoped target — is the only case that
     // needs unwrapping. Unwrap once here: every SpEL context and a background
     // refresh reuse the same receiver instead of walking the proxy chain again.
-    Object target = findUltimateTargetObject(invocation.getThis());
-    Class<?> targetClass = findUltimateTargetObject(target, method);
+    // The unwrap stops at the first object that still implements the reported
+    // method's declaring type: an interface proxy (a Spring Data repository, a
+    // mapper) has a target implementation that does not implement the
+    // interface, and reflectively invoking that target would fail.
+    Object target = findUltimateTargetObject(invocation.getThis(), method);
+    Class<?> targetClass = planClass(target, method);
 
-    Plan plan = plan(method, targetClass);
+    Plan plan = resolver.plan(method, targetClass);
     if (plan == null) {
       return invocation.proceed();
-    } else {
-      Object[] args = invocation.getArguments();
-      if (plan instanceof Plan.Read read) {
-        return read(invocation, method, read, target, targetClass, args);
-      } else if (plan instanceof Plan.Write write) {
-        return write(invocation, write, target, targetClass, args);
-      } else if (plan instanceof Plan.Invalidate invalidation) {
-        return invalidate(invocation, invalidation, target, targetClass, args);
-      }
     }
-
+    Object[] args = invocation.getArguments();
+    if (plan instanceof Plan.Read read) {
+      return read(invocation, method, read, target, targetClass, args);
+    }
+    if (plan instanceof Plan.Write write) {
+      return write(invocation, write, target, targetClass, args);
+    }
+    if (plan instanceof Plan.Invalidate invalidation) {
+      return invalidate(invocation, invalidation, target, targetClass, args);
+    }
     throw new IllegalStateException("Unknown plan type: " + plan.getClass());
   }
 
@@ -296,13 +194,20 @@ public final class ZetaCacheInterceptor implements MethodInterceptor {
    * {@code invocation.getThis()} is already the target object, so this is a
    * no-op for every ordinary proxy; only a target that is itself an
    * {@link Advised} proxy needs the singleton-target unwrap, and a
-   * non-singleton {@code TargetSource} keeps the proxy it cannot unwrap.
+   * non-singleton {@code TargetSource} keeps the proxy it cannot unwrap. An
+   * interface proxy stops at the proxy itself when the next target no longer
+   * implements the reported method's declaring type: that object is the only
+   * one both the plan lookup and a reflective reload can use.
+   *
+   * @param candidate the invocation target
+   * @param method    the reported method the receiver must be able to invoke
+   * @return the deepest target that still implements the method's declaring type
    */
-  private static @Nullable Object findUltimateTargetObject(@Nullable Object candidate) {
+  private static @Nullable Object findUltimateTargetObject(@Nullable Object candidate, Method method) {
     Object current = candidate;
     while (current instanceof Advised advised) {
       Object next = AopProxyUtils.getSingletonTarget(advised);
-      if (next == null || next == current) {
+      if (next == null || next == current || !method.getDeclaringClass().isInstance(next)) {
         return current;
       }
       current = next;
@@ -310,60 +215,20 @@ public final class ZetaCacheInterceptor implements MethodInterceptor {
     return current;
   }
 
-  /** The class the plan table is keyed on: the target's class, else the declared class without a target. */
-  private static Class<?> findUltimateTargetObject(@Nullable Object target, Method method) {
-    return target == null
-      ? method.getDeclaringClass()
-      : target instanceof TargetClassAware
-        ? AopProxyUtils.ultimateTargetClass(target)
-        : target.getClass();
-  }
-
   /**
-   * The pointcut decision, and the startup fail-fast boundary. The first
-   * question about a class resolves every candidate method into its
-   * {@link ClassValue} table; later questions are one table lookup and no
-   * annotation scan. A miss means the method carries no verb.
-   *
-   * @param method      the method the pointcut was handed
-   * @param targetClass the bean class
-   * @return whether the method carries a verb
+   * The class the plan table is keyed on: the target's user class when it still
+   * implements the reported method, otherwise the method's declaring type. A
+   * Spring Data repository proxy's ultimate target is {@code SimpleJpaRepository},
+   * which does not implement the repository interface; keying on it would miss
+   * every plan and silently bypass the cache.
    */
-  boolean matches(Method method, Class<?> targetClass) {
-    return !ignored(method) && plan(method, targetClass) != null;
-  }
-
-  /**
-   * The plan for one invocation. A class's table is computed once and keyed by
-   * the user class, so a CGLIB proxy class and its target share one resolution;
-   * a method reported only by the proxy is mapped to its most-specific user-class
-   * method before the lookup. A class the advisor's pointcut never saw is
-   * resolved on its first call. Every view of an annotated group is stored in
-   * the table, so a method from a type the user class implements answers with
-   * the table lookup alone; the most-specific fallback is confined to a method
-   * reported by a proxy class the user class does not declare.
-   */
-  private @Nullable Plan plan(Method method, Class<?> targetClass) {
-    Map<Method, Plan> plans = classPlans.get(targetClass);
-    Plan plan = plans.get(method);
-    if (plan != null || plans.isEmpty()) {
-      return plan;
+  private static Class<?> planClass(@Nullable Object target, Method method) {
+    if (target == null) {
+      return method.getDeclaringClass();
     }
-    Class<?> userClass = ClassUtils.getUserClass(targetClass);
-    if (method.getDeclaringClass().isAssignableFrom(userClass)) {
-      return null;
-    }
-    Method specific = AopUtils.getMostSpecificMethod(method, userClass);
-    return specific == method ? null : plans.get(specific);
-  }
-
-  /** Methods Spring's pointcut and the class scan both exclude. */
-  private static boolean ignored(Method method) {
-    return (
-      Modifier.isStatic(method.getModifiers()) ||
-      Modifier.isPrivate(method.getModifiers()) ||
-      (method.isSynthetic() && !method.isBridge())
-    );
+    Class<?> ultimate =
+      target instanceof TargetClassAware ? AopProxyUtils.ultimateTargetClass(target) : target.getClass();
+    return method.getDeclaringClass().isAssignableFrom(ultimate) ? ultimate : method.getDeclaringClass();
   }
 
   /**
@@ -505,308 +370,6 @@ public final class ZetaCacheInterceptor implements MethodInterceptor {
   }
 
   /**
-   * Resolve one implementation method's annotations from the method itself and
-   * from every view that reaches it. A verb declared directly on the
-   * implementation wins over the same verb on an interface or superclass;
-   * every other verb is collected from the group, so a different verb on a view
-   * still conflicts and two views declaring the same verb with different
-   * attributes are ambiguous.
-   *
-   * @return the resolved plan, or {@code null} when the group carries no verb
-   */
-  private @Nullable Plan planFor(Method specific, List<Method> views) {
-    ZetaCached read = findVerb(specific, views, ZetaCached.class, ZETA_CACHED);
-    ZetaPut write = findVerb(specific, views, ZetaPut.class, ZETA_PUT);
-    ZetaInvalidate invalidate = findVerb(specific, views, ZetaInvalidate.class, ZETA_INVALIDATE);
-    int verbs = (read == null ? 0 : 1) + (write == null ? 0 : 1) + (invalidate == null ? 0 : 1);
-    if (verbs == 0) {
-      return null;
-    }
-    if (verbs > 1) {
-      throw new IllegalStateException(
-        ZETA_CACHED +
-          ", " +
-          ZETA_PUT +
-          " and " +
-          ZETA_INVALIDATE +
-          " are mutually exclusive, but " +
-          specific +
-          " declares " +
-          verbs
-      );
-    }
-    String[] parameterNames = parameterNames(specific, views);
-    if (read != null) {
-      return readPlan(specific, parameterNames, read);
-    }
-    if (write != null) {
-      return writePlan(specific, parameterNames, write);
-    }
-    return invalidatePlan(specific, parameterNames, invalidate);
-  }
-
-  /**
-   * Resolve one verb's annotation from the implementation method or from the views that reach
-   * it. The implementation method wins outright; among the remaining views the most specific
-   * declaration dominates its superclass and superinterface declarations, so an override in a
-   * base class or a sub-interface is not ambiguous with the declaration it overrides. Two
-   * unrelated views with different values are still ambiguous and rejected.
-   */
-  private static <A extends Annotation> @Nullable A findVerb(
-    Method specific,
-    List<Method> views,
-    Class<A> annotationType,
-    String role
-  ) {
-    if (specific.getDeclaredAnnotations().length > 0) {
-      A direct = AnnotatedElementUtils.getMergedAnnotation(specific, annotationType);
-      if (direct != null) {
-        return direct;
-      }
-    }
-    A found = null;
-    Method foundView = null;
-    for (Method view : views) {
-      if (view.equals(specific) || view.getDeclaredAnnotations().length == 0) {
-        continue;
-      }
-      A candidate = AnnotatedElementUtils.getMergedAnnotation(view, annotationType);
-      if (candidate == null) {
-        continue;
-      }
-      if (found == null) {
-        found = candidate;
-        foundView = view;
-        continue;
-      }
-      if (dominates(view, foundView)) {
-        found = candidate;
-        foundView = view;
-        continue;
-      }
-      if (!dominates(foundView, view) && !found.equals(candidate)) {
-        Set<A> conflicting = new LinkedHashSet<>(2);
-        conflicting.add(found);
-        conflicting.add(candidate);
-        throw new IllegalStateException(
-          "conflicting " +
-            role +
-            " declarations for " +
-            specific +
-            ": " +
-            conflicting +
-            "; declare one on the implementation method"
-        );
-      }
-    }
-    return found;
-  }
-
-  /**
-   * Whether {@code candidate}'s declaring type is a strict subtype of {@code other}'s: a class
-   * dominates its superclass and the interfaces it implements, and a sub-interface dominates its
-   * super-interface. Two sibling interfaces dominate nothing.
-   *
-   * @param candidate the view whose precedence is tested
-   * @param other     the current winner
-   * @return {@code true} when {@code candidate} is strictly more specific
-   */
-  private static boolean dominates(Method candidate, Method other) {
-    Class<?> candidateClass = candidate.getDeclaringClass();
-    Class<?> otherClass = other.getDeclaringClass();
-    return candidateClass != otherClass && otherClass.isAssignableFrom(candidateClass);
-  }
-
-  /** Resolve a {@code @ZetaCached} method into its read plan. */
-  private Plan.Read readPlan(Method specific, String@Nullable [] parameterNames, ZetaCached read) {
-    requireValueReturn(specific, ZETA_CACHED);
-    String namespace = namespace(specific, read.cache());
-    Ttls ttls = ttls(specific, parameterNames, read.hardTtl(), read.softTtl(), false);
-    GetPolicy prebuiltPolicy = ttls.bothConstant()
-      ? readPolicy(ttls.hard().constantSupplier(), ttls.soft().constantSupplier())
-      : null;
-    return new Plan.Read(
-      specific,
-      parameterNames,
-      keyOf(specific, parameterNames, read.key(), false, namespace),
-      unlessOf(specific, parameterNames, read.unless()),
-      ttls,
-      prebuiltPolicy
-    );
-  }
-
-  /** Resolve a {@code @ZetaPut} method into its write plan. */
-  private Plan.Write writePlan(Method specific, String@Nullable [] parameterNames, ZetaPut write) {
-    requireValueReturn(specific, ZETA_PUT);
-    String namespace = namespace(specific, write.cache());
-    Ttls ttls = ttls(specific, parameterNames, write.hardTtl(), write.softTtl(), true);
-    if (write.sync() && ttls.hard().isPermanent()) {
-      // A constant is knowable at resolution and must not let a business
-      // side effect happen before the configuration error surfaces. A
-      // dynamic hard TTL that resolves to permanent is checked before the
-      // body by write().
-      throw new IllegalStateException(
-        ZETA_PUT +
-          " sync=true cannot write a permanent entry (hardTtl = Long.MAX_VALUE): peers expire entries " +
-          "only through the hard TTL, so the value would stay stale on every peer: " +
-          specific
-      );
-    }
-    PutPolicy prebuiltPolicy = null;
-    if (ttls.bothConstant()) {
-      long hard = ttls.hard().literalMs();
-      long soft = ttls.soft().literalMs();
-      prebuiltPolicy =
-        hard == 0L && soft == 0L
-          ? (write.sync() ? PutPolicy.synced() : PutPolicy.defaults())
-          : PutPolicy.of(hard, soft, write.sync());
-    }
-    return new Plan.Write(
-      specific,
-      parameterNames,
-      keyOf(specific, parameterNames, write.key(), true, namespace),
-      unlessOf(specific, parameterNames, write.unless()),
-      ttls,
-      write.sync(),
-      prebuiltPolicy
-    );
-  }
-
-  /** Resolve a {@code @ZetaInvalidate} method into its invalidation plan. */
-  private Plan.Invalidate invalidatePlan(
-    Method specific,
-    String@Nullable [] parameterNames,
-    ZetaInvalidate invalidate
-  ) {
-    boolean before = invalidate.beforeInvocation();
-    String namespace = namespace(specific, invalidate.cache());
-    return new Plan.Invalidate(
-      specific,
-      parameterNames,
-      keyOf(specific, parameterNames, invalidate.key(), !before, namespace),
-      new InvalidatePolicy(invalidate.scope(), before)
-    );
-  }
-
-  /**
-   * Discover parameter names from the most-specific method, falling back to the declared method
-   * that carried the annotation. Among fallback views, a subclass/sub-interface declaration is
-   * preferred over the declaration it overrides, so a base class that has metadata is not
-   * shadowed by an unrelated interface view.
-   */
-  private String@Nullable [] parameterNames(Method specific, List<Method> views) {
-    String[] names = parameterNameDiscoverer.getParameterNames(specific);
-    if (names != null) {
-      return names;
-    }
-    Method foundView = null;
-    String[] foundNames = null;
-    for (Method view : views) {
-      if (view.equals(specific)) {
-        continue;
-      }
-      String[] candidate = parameterNameDiscoverer.getParameterNames(view);
-      if (candidate == null) {
-        continue;
-      }
-      if (foundView == null || dominates(view, foundView)) {
-        foundView = view;
-        foundNames = candidate;
-      }
-    }
-    return foundNames;
-  }
-
-  /** Resolve {@code ${...}} in an attribute; a null value stays absent. */
-  private @Nullable String resolvePlaceholders(@Nullable String raw) {
-    if (raw == null || beanFactory == null) {
-      return raw;
-    }
-    return beanFactory.resolveEmbeddedValue(raw);
-  }
-
-  /** Classify both TTL attributes of one verb once. */
-  private Ttls ttls(
-    Method method,
-    String@Nullable [] parameterNames,
-    String hardRaw,
-    String softRaw,
-    boolean resultAllowed
-  ) {
-    return new Ttls(
-      Ttl.of("hardTtl", resolvePlaceholders(hardRaw), parser, method, parameterNames, resultAllowed),
-      Ttl.of("softTtl", resolvePlaceholders(softRaw), parser, method, parameterNames, resultAllowed)
-    );
-  }
-
-  /** Compile the key expression and classify a simple single-argument form. */
-  private KeyPlan keyOf(
-    Method method,
-    String@Nullable [] parameterNames,
-    @Nullable String raw,
-    boolean resultAllowed,
-    String namespace
-  ) {
-    CompiledExpression compiled = CompiledExpression.of(
-      raw,
-      parser,
-      "cache key",
-      method,
-      parameterNames,
-      resultAllowed
-    );
-    return KeyPlan.of(namespace, method, compiled, parameterNames);
-  }
-
-  /** Compile {@code unless}; it is always evaluated after the body, so {@code #result} is available. */
-  private CompiledExpression unlessOf(Method method, String@Nullable [] parameterNames, String raw) {
-    return CompiledExpression.of(raw, parser, "unless", method, parameterNames, true);
-  }
-
-  /**
-   * Resolve {@code ${...}} in the cache name, then validate and encode the
-   * namespace delimiter. A blank or NUL-bearing name is a configuration error.
-   */
-  private String namespace(Method method, @Nullable String rawCache) {
-    String cache = resolvePlaceholders(rawCache);
-    if (cache == null || cache.isBlank()) {
-      throw new IllegalStateException("cache name must not be blank: " + method);
-    }
-    if (cache.contains("${")) {
-      throw new IllegalStateException(
-        "cache name placeholder was not resolved ('" +
-          cache +
-          "'): configure a ConfigurableBeanFactory or " +
-          "replace the placeholder, for " +
-          method
-      );
-    }
-    if (cache.indexOf(NAMESPACE_DELIMITER) >= 0) {
-      throw new IllegalStateException("cache name must not contain U+0000: " + method);
-    }
-    return cache + NAMESPACE_DELIMITER;
-  }
-
-  private static void requireValueReturn(Method method, String annotation) {
-    Class<?> returnType = method.getReturnType();
-    if (returnType == void.class || returnType == Void.class) {
-      throw new IllegalStateException(annotation + " needs a value to cache, but " + method + " returns " + returnType);
-    }
-  }
-
-  /**
-   * Claim reflective access once, at resolution, instead of on every background
-   * refresh. The call is unconditional: public visibility is not enough under
-   * JPMS when the package is opened but not exported, and an accessible flag
-   * also lets {@link Method#invoke} skip the per-call caller-sensitive access
-   * check. A target that cannot be opened is not fatal: the first refresh
-   * reports the {@link IllegalAccessException} in its own failure path.
-   */
-  private static void prewarmAccess(Method method) {
-    method.trySetAccessible();
-  }
-
-  /**
    * Logs one annotation-expression evaluation failure at DEBUG. A broken
    * expression sits on a hot path and must not become a per-call log storm.
    */
@@ -859,7 +422,7 @@ public final class ZetaCacheInterceptor implements MethodInterceptor {
   }
 
   /** The one read-policy shape every annotation read uses. */
-  private static GetPolicy readPolicy(LongSupplier hardTtlMs, LongSupplier softTtlMs) {
+  static GetPolicy readPolicy(LongSupplier hardTtlMs, LongSupplier softTtlMs) {
     return new GetPolicy(hardTtlMs, softTtlMs, StalePolicy.SOFT_REFRESH, true, true);
   }
 
@@ -885,7 +448,7 @@ public final class ZetaCacheInterceptor implements MethodInterceptor {
    */
   private ZetaEvaluationContext newContext(Plan plan, @Nullable Object target, Class<?> targetClass, Object[] args) {
     ZetaEvaluationContext.Root root = ZetaEvaluationContext.Root.of(target, targetClass, plan.specific(), args);
-    return ZetaEvaluationContext.of(root, plan.parameterNames(), beanResolver, expressionSupport);
+    return ZetaEvaluationContext.of(root, plan.parameterNames(), resolver.beanResolver(), resolver.expressionSupport());
   }
 
   /** A fresh context bound to the body's result for the post-body evaluation phase. */
@@ -972,17 +535,22 @@ public final class ZetaCacheInterceptor implements MethodInterceptor {
 
   /**
    * A key expression plus the zero-SpEL fast path. {@code argumentIndex >= 0}
-   * means the expression is exactly one argument reference and the key is
-   * {@code namespace + String.valueOf(args[argumentIndex])}; {@code expression}
-   * is {@code null} for the default-key, single-argument and constant forms, so
-   * their parsed AST is not retained. Otherwise the compiled expression is
-   * evaluated. {@code constantKey} is the full physical key when the expression
-   * cannot depend on the invocation.
+   * means the expression is exactly one argument reference; {@code rootArgs}
+   * means it is exactly {@code #root.args}; {@code expression} is {@code null}
+   * for those and the default-key/constant forms, so their parsed AST is not
+   * retained. Otherwise the compiled expression is evaluated. {@code constantKey}
+   * is the full physical key when the expression cannot depend on the invocation.
+   *
+   * <p>Every value an explicit expression selects is encoded as one default-key
+   * argument, so {@code key = "#id"} and an absent {@code key} address the same
+   * entry for a single-id method. A whole {@code #root.args} selects the argument
+   * list itself and uses the multi-argument default encoding instead.
    */
-  private record KeyPlan(
+  record KeyPlan(
     String namespace,
     Method method,
     int argumentIndex,
+    boolean rootArgs,
     boolean resultDependent,
     @Nullable String constantKey,
     @Nullable CompiledExpression expression,
@@ -1002,12 +570,14 @@ public final class ZetaCacheInterceptor implements MethodInterceptor {
       if (index >= 0 && method.isVarArgs() && index == method.getParameterCount() - 1) {
         index = -1;
       }
-      boolean defaultKey = expression.absent();
-      CompiledExpression retained = constantKey == null && index < 0 && !defaultKey ? expression : null;
+      boolean rootArgs = constantKey == null && index < 0 && expression.wholeRootArgs();
+      CompiledExpression retained =
+        constantKey == null && index < 0 && !rootArgs && !expression.absent() ? expression : null;
       return new KeyPlan(
         namespace,
         method,
         index,
+        rootArgs,
         expression.references("result"),
         constantKey,
         retained,
@@ -1028,7 +598,7 @@ public final class ZetaCacheInterceptor implements MethodInterceptor {
       if (compiled.expression() instanceof SpelExpression spel && spel.getAST() instanceof Literal literal) {
         Object value = literal.getLiteralValue().getValue();
         if (value != null) {
-          return namespace + value;
+          return DefaultKey.encodeSingle(namespace, value);
         }
       }
       return null;
@@ -1063,24 +633,24 @@ public final class ZetaCacheInterceptor implements MethodInterceptor {
       }
       if (argumentIndex >= 0) {
         Object argument = args[argumentIndex];
-        return argument == null ? null : appendKeyValue(namespace, argument);
+        return argument == null ? null : encodeValue(namespace, argument);
       }
-      if (expression == null) {
+      if (rootArgs || expression == null) {
         return defaultKey(args);
       }
       Object value = expression.getValue(context);
-      return value == null ? null : appendKeyValue(namespace, value);
+      return value == null ? null : encodeValue(namespace, value);
     }
 
     /**
-     * The physical key for one explicitly selected value. Arrays are encoded by
-     * content through the same canonical encoder the default key uses; the
-     * identity hash of {@code Object.toString()} would make every freshly built
-     * array a different key, so a read would never hit and an invalidation would
-     * never remove.
+     * The physical key for one explicitly selected value, encoded as one
+     * argument of the default key. That is what makes {@code key = "#id"} and an
+     * absent key address the same entry for a single-argument method, and it
+     * keeps arrays encoded by content instead of the identity hash of
+     * {@code Object.toString()}.
      */
-    private static String appendKeyValue(String namespace, Object value) {
-      return value.getClass().isArray() ? DefaultKey.encodeArray(namespace, value) : namespace + value;
+    private static String encodeValue(String namespace, Object value) {
+      return DefaultKey.encodeSingle(namespace, value);
     }
 
     /**
@@ -1129,25 +699,27 @@ public final class ZetaCacheInterceptor implements MethodInterceptor {
   }
 
   /** Both TTL attributes of one verb, classified at resolution. */
-  private record Ttls(Ttl hard, Ttl soft) {
+  record Ttls(Ttl hard, Ttl soft) {
     boolean bothConstant() {
       return hard.isConstant() && soft.isConstant();
     }
   }
 
   /**
-   * One TTL attribute classified at resolution. An integer literal — optionally
-   * signed, after stripping surrounding whitespace — and a numeric SpEL literal
-   * such as {@code 60000L} or {@code 1e3} are folded to a constant (negative
-   * values clamp to {@code 0}, the configured default) and to one prebuilt
-   * {@link LongSupplier}, so a static TTL costs no lambda and no SpEL per call.
-   * A digits-only literal outside the {@code long} range fails resolution with a
+   * One TTL attribute classified at resolution. An integral literal — optionally
+   * signed, after stripping surrounding whitespace — and a context-free SpEL
+   * expression such as {@code 60000L} or {@code 60 * 1000} are folded to a
+   * constant (negative values clamp to {@code 0}, the configured default) and to
+   * one prebuilt {@link LongSupplier}, so a static TTL costs no lambda and no
+   * SpEL per call. A floating-point literal is rejected: milliseconds are
+   * discrete, and accepting {@code 1e3} or {@code NaN} only buys precision
+   * hazards. A literal outside the {@code long} range fails resolution with a
    * range error. Anything else is SpEL compiled once and evaluated lazily;
    * {@code resultDependent} marks an expression that must wait for the body. A
    * parse failure fails resolution; only a runtime evaluation failure degrades
    * to the configured default, so a broken attribute can never fail a read.
    */
-  private record Ttl(
+  record Ttl(
     String role,
     long literalMs,
     @Nullable LongSupplier constantSupplier,
@@ -1177,79 +749,14 @@ public final class ZetaCacheInterceptor implements MethodInterceptor {
         }
       }
       CompiledExpression compiled = CompiledExpression.of(literal, parser, role, method, parameterNames, resultAllowed);
-      Long folded = literalValue(role, literal, method, compiled);
-      if (folded != null) {
-        return constant(role, folded);
+      if (compiled.constant()) {
+        Object value = compiled.getValue(new StandardEvaluationContext());
+        if (!(value instanceof Number number) || number instanceof Double || number instanceof Float) {
+          throw new IllegalStateException(role + " '" + literal + "' on " + method + " must be an integral number");
+        }
+        return constant(role, clampTtl(number));
       }
       return new Ttl(role, 0L, null, compiled, resultAllowed && compiled.references("result"));
-    }
-
-    /**
-     * A whole-AST numeric literal, folded through the same clamp as a runtime value. Unary
-     * plus/minus is folded too, so {@code +60000L} and {@code +1e3} are constants rather than
-     * dynamic expressions. A finite literal outside the {@code long} range fails resolution
-     * exactly like its digits-only spelling; only runtime expression results degrade/clamp.
-     */
-    private static @Nullable Long literalValue(
-      String role,
-      String literal,
-      Method method,
-      CompiledExpression compiled
-    ) {
-      if (!(compiled.expression() instanceof SpelExpression spel)) {
-        return null;
-      }
-      Number number = constantNumber(spel.getAST());
-      if (number == null) {
-        return null;
-      }
-      if (number instanceof Double value) {
-        return strictFloatingLiteral(role, literal, method, value);
-      }
-      if (number instanceof Float value) {
-        return strictFloatingLiteral(role, literal, method, value.doubleValue());
-      }
-      return clampTtl(number);
-    }
-
-    private static long strictFloatingLiteral(String role, String literal, Method method, double value) {
-      if (!Double.isFinite(value)) {
-        throw new IllegalStateException(role + " literal '" + literal + "' on " + method + " is not finite");
-      }
-      if (value > Long.MAX_VALUE) {
-        throw new IllegalStateException(role + " literal '" + literal + "' on " + method + " exceeds the long range");
-      }
-      return value <= 0.0d ? 0L : (long) value;
-    }
-
-    /** The numeric value of a whole-AST literal, including one unary sign. */
-    private static @Nullable Number constantNumber(org.springframework.expression.spel.SpelNode node) {
-      if (node instanceof Literal literal && literal.getLiteralValue().getValue() instanceof Number number) {
-        return number;
-      }
-      if (node instanceof OpPlus plus && plus.getChildCount() == 1) {
-        return constantNumber(plus.getChild(0));
-      }
-      if (node instanceof OpMinus minus && minus.getChildCount() == 1) {
-        Number value = constantNumber(minus.getChild(0));
-        if (value == null) {
-          return null;
-        }
-        if (value instanceof Double d) {
-          return -d;
-        }
-        if (value instanceof Float f) {
-          return -f;
-        }
-        if (value instanceof Long l) {
-          return -l;
-        }
-        if (value instanceof Integer i) {
-          return -i;
-        }
-        return new BigDecimal(value.toString()).negate();
-      }
-      return null;
     }
 
     private static Ttl constant(String role, long ms) {
@@ -1389,7 +896,7 @@ public final class ZetaCacheInterceptor implements MethodInterceptor {
 
     @Override
     public boolean isCacheable(Object value) {
-      if (value instanceof BodyFailure) {
+      if (value == null || value instanceof BodyFailure) {
         return false;
       }
       CompiledExpression unless = plan.unless();
@@ -1412,13 +919,20 @@ public final class ZetaCacheInterceptor implements MethodInterceptor {
           "cannot refresh " + method + " reflectively: the invocation has no target object"
         );
       }
-      // The plan's method is the implementation method; when the target is an
-      // unwrappable proxy that does not implement it (a nested proxy with a
-      // non-singleton TargetSource), fall back to the declared method the
-      // invocation reported, which that proxy does implement.
+      // The plan's method is the implementation method; when the target is an unwrappable proxy
+      // that does not implement it, fall back to the method the invocation reported. An interface
+      // proxy whose target implements a super-interface (Spring Data: SimpleJpaRepository for
+      // CrudRepository) implements neither, so the last resort is the most specific method on the
+      // target's own class — otherwise every background refresh fails with
+      // "object is not an instance of declaring class".
       Method invocable = plan.specific();
       if (!invocable.getDeclaringClass().isInstance(target)) {
-        invocable = method;
+        invocable = method.getDeclaringClass().isInstance(target)
+          ? method
+          : AopUtils.getMostSpecificMethod(method, target.getClass());
+        if (!invocable.getDeclaringClass().isInstance(target)) {
+          invocable = method;
+        }
       }
       try {
         return invocable.invoke(target, ZetaEvaluationContext.packArguments(invocable, args));

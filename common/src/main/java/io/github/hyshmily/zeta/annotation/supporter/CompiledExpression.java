@@ -24,6 +24,13 @@ import org.springframework.expression.EvaluationContext;
 import org.springframework.expression.Expression;
 import org.springframework.expression.spel.SpelNode;
 import org.springframework.expression.spel.ast.Assign;
+import org.springframework.expression.spel.ast.BeanReference;
+import org.springframework.expression.spel.ast.CompoundExpression;
+import org.springframework.expression.spel.ast.ConstructorReference;
+import org.springframework.expression.spel.ast.FunctionReference;
+import org.springframework.expression.spel.ast.MethodReference;
+import org.springframework.expression.spel.ast.PropertyOrFieldReference;
+import org.springframework.expression.spel.ast.TypeReference;
 import org.springframework.expression.spel.ast.VariableReference;
 import org.springframework.expression.spel.standard.SpelExpression;
 import org.springframework.expression.spel.standard.SpelExpressionParser;
@@ -31,48 +38,50 @@ import org.springframework.expression.spel.standard.SpelExpressionParser;
 /**
  * A SpEL expression compiled once per method, or the shared absent marker.
  *
- * <p>Resolution is the fail-fast boundary: a configured expression that cannot
- * be parsed throws with the attribute role and the method, so a typo fails
- * application startup instead of becoming a per-call log storm. Absent (a
- * null, empty or whitespace-only attribute) is not a failure and skips the tier
- * silently: {@code parseExpression("")} throws, so blankness is decided before
- * parsing and such an attribute is never compiled.
+ * <p><b>Read-only contract.</b> A cache expression is a pure function of the invocation:
+ * key, TTL and {@code unless} may read arguments and the result, never write. An assignment
+ * ({@code #x = ...}, {@code #user.name = ...}) is rejected at resolution, so an expression
+ * can neither mutate the caller's arguments nor change the evaluation context between
+ * phases.
  *
- * <p><b>AST inspection.</b> One walk of the parsed syntax tree collects every
- * variable reference and detects a user assignment ({@code #x = ...}); a
- * variable inside a string literal or a property name is therefore not mistaken
- * for a reference. Every positional reference ({@code #pN}/{@code #aN}) is
- * validated against the method's arity at resolution.
+ * <p>Resolution is the fail-fast boundary: a configured expression that cannot be parsed
+ * throws with the attribute role and the method, so a typo fails application startup
+ * instead of becoming a per-call log storm. Absent (a null, empty or whitespace-only
+ * attribute) is not a failure and skips the tier silently: {@code parseExpression("")}
+ * throws, so blankness is decided before parsing and such an attribute is never compiled.
  *
- * <p><b>Unknown variables fail resolution.</b> When the method's parameter names
- * are available, the legal variable set is statically known: {@code #root},
- * {@code #this}, every in-range {@code #pN}/{@code #aN}, every parameter name,
- * and {@code #result} only where the caller declares it available. A misspelled
- * name such as {@code #reslt} is rejected here instead of silently evaluating to
- * {@code null}. A direct variable assignment declares that variable for this
- * expression, so its own name is legal; every other unknown name — including the
- * right-hand side of an assignment and a property/index assignment such as
- * {@code #user.name = #typo} — is still rejected.
+ * <p><b>AST inspection.</b> One walk collects every variable reference and marks whether
+ * the expression is a compile-time constant: only literals and operators qualify, while a
+ * variable, bean, property, method, constructor or type access keeps the expression
+ * dynamic. A variable inside a string literal or a property name is therefore not mistaken
+ * for a reference. Every positional reference ({@code #pN}/{@code #aN}) is validated
+ * against the method's arity at resolution.
  *
- * <p><b>Reserved names cannot be parameter names.</b> {@code root},
- * {@code this}, {@code result} and canonical {@code pN}/{@code aN} belong to
- * the evaluation context. A method that declares a parameter with one of those
- * names is rejected as soon as any expression on it is compiled, so a parameter
- * can never shadow the binding an expression names.
+ * <p><b>Unknown variables fail resolution.</b> When the method's parameter names are
+ * available, the legal variable set is statically known: {@code #root}, {@code #this},
+ * every in-range {@code #pN}/{@code #aN}, every parameter name, and {@code #result} only
+ * where the caller declares it available. A misspelled name such as {@code #reslt} is
+ * rejected here instead of silently evaluating to {@code null}.
  *
- * <p><b>{@code #result} is declared, not guessed.</b> The caller states whether
- * the expression is evaluated before the body (a read key/TTL, a
- * pre-invocation invalidation) or after it. A pre-body expression that
- * references {@code #result} is rejected.
+ * <p><b>Reserved names cannot be parameter names.</b> {@code root}, {@code this},
+ * {@code result} and canonical {@code pN}/{@code aN} belong to the evaluation context. A
+ * method that declares a parameter with one of those names is rejected as soon as any
+ * expression on it is compiled, so a parameter can never shadow the binding an expression
+ * names.
+ *
+ * <p><b>{@code #result} is declared, not guessed.</b> The caller states whether the
+ * expression is evaluated before the body (a read key/TTL, a pre-invocation invalidation)
+ * or after it. A pre-body expression that references {@code #result} is rejected.
  *
  * @param raw        the raw attribute text ({@code null} for the absent state)
  * @param expression the compiled expression ({@code null} when absent)
  * @param variables  every variable the expression references, collected from the AST once
+ * @param constant   whether the expression evaluates without an invocation context
  */
 @Internal
-public record CompiledExpression(String raw, Expression expression, Set<String> variables) {
+public record CompiledExpression(String raw, Expression expression, Set<String> variables, boolean constant) {
   /** Shared carrier for a null/empty attribute — no expression, no failure. */
-  public static final CompiledExpression ABSENT = new CompiledExpression(null, null, Set.of());
+  public static final CompiledExpression ABSENT = new CompiledExpression(null, null, Set.of(), true);
 
   public CompiledExpression {
     variables = Set.copyOf(variables);
@@ -80,8 +89,8 @@ public record CompiledExpression(String raw, Expression expression, Set<String> 
 
   /**
    * Compile one attribute, classifying blank as absent and a parse failure as a
-   * configuration error. Surrounding whitespace is stripped at this entry point,
-   * so {@code unless = "   "} is the same absent attribute as {@code ""}.
+   * configuration error. Surrounding whitespace is stripped at this entry point, so
+   * {@code unless = "   "} is the same absent attribute as {@code ""}.
    *
    * @param raw            the raw attribute text (may be {@code null})
    * @param parser         the shared parser
@@ -91,9 +100,9 @@ public record CompiledExpression(String raw, Expression expression, Set<String> 
    * @param resultAllowed  whether {@code #result} is bound when this expression is evaluated
    * @return the compiled-or-absent carrier, never {@code null}
    * @throws IllegalStateException when the attribute was configured but cannot be parsed,
-   *                               addresses an out-of-range parameter, declares a reserved
-   *                               parameter name, references an unknown variable, or reads
-   *                               {@code #result} before the body has run
+   *                               contains an assignment, addresses an out-of-range parameter,
+   *                               declares a reserved parameter name, references an unknown
+   *                               variable, or reads {@code #result} before assignment
    */
   public static CompiledExpression of(
     @Nullable String raw,
@@ -103,37 +112,68 @@ public record CompiledExpression(String raw, Expression expression, Set<String> 
     String@Nullable [] parameterNames,
     boolean resultAllowed
   ) {
-    String expressionText = raw == null ? null : raw.strip();
-    if (expressionText == null || expressionText.isEmpty()) {
+    String text = raw == null ? null : raw.strip();
+    if (text == null || text.isEmpty()) {
       return ABSENT;
     }
     Expression expression;
     try {
-      expression = parser.parseExpression(expressionText);
+      expression = parser.parseExpression(text);
     } catch (RuntimeException e) {
-      throw new IllegalStateException(role + " '" + expressionText + "' cannot be parsed for " + method, e);
+      throw new IllegalStateException(role + " '" + text + "' cannot be parsed for " + method, e);
     }
     Set<String> variables = new LinkedHashSet<>();
-    Set<String> assigned = new LinkedHashSet<>();
-    collectVariables(expression, variables, assigned);
-    validateArguments(expressionText, role, method, variables, assigned, parameterNames, resultAllowed);
-    return new CompiledExpression(expressionText, expression, variables);
+    boolean constant = expression instanceof SpelExpression spel
+      ? inspectAst(spel.getAST(), variables, text, role, method)
+      : true;
+    validateArguments(text, role, method, variables, parameterNames, resultAllowed);
+    return new CompiledExpression(text, expression, variables, constant);
   }
 
   /**
-   * Reject a reserved parameter name, a positional reference the method cannot
-   * satisfy and, when the parameter names are known, a variable name the
-   * evaluation context cannot bind. A variable the expression assigns is
-   * declared by that assignment, so it is legal to reference; other unknown
-   * names are still rejected, including the right-hand side of an assignment and
-   * a property assignment such as {@code #user.name = #typo}.
+   * One ordered walk: reject an assignment, collect every variable, and decide whether the
+   * tree is context-free. A property or method access is dynamic even when its receiver is a
+   * literal, because the access itself is not part of the read-only literal subset.
+   */
+  private static boolean inspectAst(
+    SpelNode node,
+    Set<String> variables,
+    String text,
+    String role,
+    Method method
+  ) {
+    if (node instanceof Assign) {
+      throw new IllegalStateException(
+        role + " '" + text + "' on " + method + " must not contain assignments ('='): cache expressions are read-only"
+      );
+    }
+    boolean constant = !(
+      node instanceof VariableReference ||
+      node instanceof PropertyOrFieldReference ||
+      node instanceof MethodReference ||
+      node instanceof BeanReference ||
+      node instanceof ConstructorReference ||
+      node instanceof FunctionReference ||
+      node instanceof TypeReference
+    );
+    if (node instanceof VariableReference reference) {
+      variables.add(variableName(reference));
+    }
+    for (int i = 0; i < node.getChildCount(); i++) {
+      constant &= inspectAst(node.getChild(i), variables, text, role, method);
+    }
+    return constant;
+  }
+
+  /**
+   * Reject a reserved parameter name, a positional reference the method cannot satisfy and,
+   * when the parameter names are known, a variable name the evaluation context cannot bind.
    */
   private static void validateArguments(
     String text,
     String role,
     Method method,
     Set<String> variables,
-    Set<String> assigned,
     String@Nullable [] names,
     boolean resultAllowed
   ) {
@@ -148,7 +188,7 @@ public record CompiledExpression(String raw, Expression expression, Set<String> 
           text +
           "' on " +
           method +
-          " cannot use #result: the expression is resolved before the method body runs"
+          " cannot use #result: this evaluation phase does not bind a method result"
       );
     }
     int parameterCount = method.getParameterCount();
@@ -167,12 +207,7 @@ public record CompiledExpression(String raw, Expression expression, Set<String> 
             parameterCount
         );
       }
-      if (
-        index < 0 &&
-        !assigned.contains(variable) &&
-        names != null &&
-        !isKnownVariable(variable, names)
-      ) {
+      if (index < 0 && names != null && !isKnownVariable(variable, names)) {
         throw new IllegalStateException(
           role + " '" + text + "' on " + method + " references unknown variable '#" + variable + "'"
         );
@@ -229,33 +264,6 @@ public record CompiledExpression(String raw, Expression expression, Set<String> 
     );
   }
 
-  /**
-   * Collect every referenced variable in one walk and record the variables a direct
-   * {@code #x = ...} assignment declares. A property or index assignment
-   * ({@code #user.name = ...}) is not a variable declaration and leaves the
-   * unknown-name validation active for both sides.
-   */
-  private static void collectVariables(Expression expression, Set<String> names, Set<String> assigned) {
-    if (expression instanceof SpelExpression spel) {
-      collectVariables(spel.getAST(), names, assigned);
-    }
-  }
-
-  private static void collectVariables(SpelNode node, Set<String> names, Set<String> assigned) {
-    if (node instanceof Assign assign) {
-      SpelNode left = assign.getChildCount() > 0 ? assign.getChild(0) : null;
-      if (left instanceof VariableReference reference) {
-        assigned.add(variableName(reference));
-      }
-    }
-    if (node instanceof VariableReference reference) {
-      names.add(variableName(reference));
-    }
-    for (int i = 0; i < node.getChildCount(); i++) {
-      collectVariables(node.getChild(i), names, assigned);
-    }
-  }
-
   /** No expression configured (null/empty attribute): skip the tier silently. */
   public boolean absent() {
     return expression == null;
@@ -308,6 +316,26 @@ public record CompiledExpression(String raw, Expression expression, Set<String> 
       return variableName(reference);
     }
     return null;
+  }
+
+  /**
+   * Whether the whole expression is exactly {@code #root.args}, the argument list
+   * itself rather than one argument value. The key plan uses this to apply the
+   * multi-argument default encoding, so an explicit {@code key = "#root.args"}
+   * addresses the same entry as an absent {@code key}.
+   *
+   * @return {@code true} for a whole {@code #root.args} reference
+   */
+  public boolean wholeRootArgs() {
+    return (
+      expression instanceof SpelExpression spel &&
+      spel.getAST() instanceof CompoundExpression compound &&
+      compound.getChildCount() == 2 &&
+      compound.getChild(0) instanceof VariableReference root &&
+      "root".equals(variableName(root)) &&
+      compound.getChild(1) instanceof PropertyOrFieldReference property &&
+      "args".equals(property.getName())
+    );
   }
 
   /** {@link VariableReference} exposes no name accessor; {@code toStringAST()} is {@code "#" + name}. */

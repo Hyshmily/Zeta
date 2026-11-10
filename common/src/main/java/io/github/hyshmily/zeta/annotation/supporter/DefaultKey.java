@@ -16,10 +16,9 @@
 package io.github.hyshmily.zeta.annotation.supporter;
 
 import io.github.hyshmily.zeta.util.Internal;
-import org.jspecify.annotations.Nullable;
-
 import java.math.BigDecimal;
 import java.math.BigInteger;
+import org.jspecify.annotations.Nullable;
 
 /**
  * Canonical string encoding of a default cache key: the key an annotated method
@@ -145,18 +144,18 @@ public final class DefaultKey {
   }
 
   /**
-   * Encode one array value under an already resolved key prefix — the
-   * single-value form of {@link #encode(String, Object[])}, without the wrapper
-   * array and the intermediate unprefixed string.
+   * Encode one explicitly selected value under an already resolved key prefix,
+   * without allocating the one-element argument array {@link #encode(String, Object[])}
+   * would need.
    *
-   * @param prefix     the physical namespace prefix ({@code cache + delimiter})
-   * @param arrayValue the array value, never {@code null}
+   * @param prefix the physical namespace prefix ({@code cache + delimiter})
+   * @param value  the value to encode; never {@code null}
    * @return the physical key
    */
-  public static String encodeArray(String prefix, Object arrayValue) {
-    StringBuilder key = new StringBuilder(prefix.length() + 32);
+  public static String encodeSingle(String prefix, Object value) {
+    StringBuilder key = new StringBuilder(prefix.length() + 24);
     key.append(prefix).append('[');
-    array(key, arrayValue, 1, null);
+    part(key, value, 0, null);
     return key.append(']').toString();
   }
 
