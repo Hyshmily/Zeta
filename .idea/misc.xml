@@ -4,6 +4,9 @@
     <option name="pythonIntegrationState" value="YES" />
   </component>
   <component name="EntryPointsManager">
+    <list size="1">
+      <item index="0" class="java.lang.String" itemvalue="org.springframework.boot.autoconfigure.condition.ConditionalOnProperty" />
+    </list>
     <writeAnnotations>
       <writeAnnotation name="lombok.Getter" />
     </writeAnnotations>
