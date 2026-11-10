@@ -21,7 +21,6 @@ import com.github.benmanes.caffeine.cache.Expiry;
 import io.github.hyshmily.zeta.autoconfigure.ZetaProperties;
 import io.github.hyshmily.zeta.cache.AccessCounter;
 import io.github.hyshmily.zeta.cache.BroadcastBuffer;
-import io.github.hyshmily.zeta.cache.CentralDispatcher;
 import io.github.hyshmily.zeta.cache.HotKeyCache;
 import io.github.hyshmily.zeta.cache.cachesupport.lifecycle.EntryLifecycle;
 import io.github.hyshmily.zeta.cache.cachesupport.lifecycle.EntryLifecycleImpl;
@@ -232,7 +231,6 @@ public class HitPathAuditBenchmark {
     BroadcastBuffer broadcast = new BroadcastBuffer(scheduler, null, 500, 2_000, null);
     accessCounter = new AccessCounter(detector, null, scheduler, 50L, 500L);
     accessCounter.afterPropertiesSet();
-    CentralDispatcher dispatcher = new CentralDispatcher(accessCounter, null, broadcast, null);
     MonotonicStampClock clock = new MonotonicStampClock(1L, MonotonicStampClock.DEFAULT_MAX_FORWARD_DRIFT_MS);
     cache = new HotKeyCache(
       detector,
@@ -240,7 +238,8 @@ public class HitPathAuditBenchmark {
       new NoLoadFlight(),
       entryLifecycle,
       refresher,
-      dispatcher,
+      accessCounter,
+      broadcast,
       clock,
       healthView
     );

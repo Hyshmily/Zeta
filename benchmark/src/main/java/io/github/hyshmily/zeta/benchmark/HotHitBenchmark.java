@@ -19,7 +19,6 @@ import com.github.benmanes.caffeine.cache.Cache;
 import io.github.hyshmily.zeta.autoconfigure.ZetaProperties;
 import io.github.hyshmily.zeta.cache.AccessCounter;
 import io.github.hyshmily.zeta.cache.BroadcastBuffer;
-import io.github.hyshmily.zeta.cache.CentralDispatcher;
 import io.github.hyshmily.zeta.cache.HotKeyCache;
 import io.github.hyshmily.zeta.cache.cachesupport.lifecycle.EntryLifecycle;
 import io.github.hyshmily.zeta.cache.cachesupport.lifecycle.EntryLifecycleImpl;
@@ -206,7 +205,6 @@ public class HotHitBenchmark {
     // per-hit cost under test is exactly one buffered append.
     AccessCounter accessCounter = new AccessCounter(detector, reporter, scheduler, 50L, 500L);
     accessCounter.afterPropertiesSet();
-    CentralDispatcher dispatcher = new CentralDispatcher(accessCounter, null, broadcast, null);
     SingleFlight flight = new PassThroughFlight();
     cachePlain = new HotKeyCache(
       detector,
@@ -214,7 +212,8 @@ public class HotHitBenchmark {
       flight,
       entryLifecycle,
       refresher,
-      dispatcher,
+      accessCounter,
+      broadcast,
       stampClock,
       healthView
     );
