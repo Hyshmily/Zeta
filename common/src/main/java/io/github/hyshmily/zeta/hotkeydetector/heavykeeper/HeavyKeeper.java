@@ -312,6 +312,11 @@ public class HeavyKeeper implements TopK {
     Assert.isTrue(expelledQueueCapacity > 0, "expelledQueueCapacity must be > 0, but got: " + expelledQueueCapacity);
 
     if (autoAlignWidth && (width & (width - 1)) != 0) {
+      // highestOneBit(width - 1) << 1 overflows into the sign bit above 2^30.
+      Assert.isTrue(
+        width <= (1 << 30),
+        "width must be <= 1073741824 when autoAlignWidth is enabled, but got: " + width
+      );
       int original = width;
       width = Integer.highestOneBit(width - 1) << 1;
       log.info("Auto-aligned width from {} to {} to enable bitmask optimization", original, width);
@@ -759,29 +764,28 @@ public class HeavyKeeper implements TopK {
    * and mirror it into the slot sum, returning the running
    * {@code maxCount}.
    *
-   * <p><b>Saturation guard:</b> both counters saturate at
-   * {@link Integer#MAX_VALUE} instead of wrapping negative. A wrapped window
-   * would look "already decayed" to {@link #decayCollisionSlot}'s survivor
-   * check and be skipped by it; a wrapped slot sum would misrank the slot.
-   * Each guard is one comparison on the hot path, and saturation is a
-   * stop-condition rather than steady state — {@link #fading()} zeroes
-   * windows on rotation and {@code decayCollisionSlot} decays slot sums, so
-   * a slot can only reach the cap under extreme continuous traffic.
+   * <p><b>Saturation guard:</b> the increment is clamped against the slot sum's
+   * remaining headroom, so the active window and the slot sum stay in lockstep
+   * at {@link Integer#MAX_VALUE} instead of wrapping negative or drifting
+   * apart. A wrapped window would look "already decayed" to
+   * {@link #decayCollisionSlot}'s survivor check and be skipped by it; a slot
+   * sum below the sum of its windows would make the next window expiry subtract
+   * counts the sum never held, and {@code decayCollisionSlot}'s proportional
+   * decay (which assumes the windows add up to the sum) would over-subtract. A
+   * window can never exceed the sum, so clamping the sum also bounds the
+   * window. Saturation is a stop-condition rather than steady state —
+   * {@link #fading()} zeroes windows on rotation and {@code decayCollisionSlot}
+   * decays slot sums, so a slot can only reach the cap under extreme continuous
+   * traffic.
    *
    * <p>Callers pass a positive {@code delta} (all entry points reject
-   * non-positive values), so the guards only need the overflow comparison.
+   * non-positive values), so the guard only needs the upper bound.
    */
   private long applyIncrement(int base, int active, long delta, long maxCount) {
-    int off = base + 2 + active;
-    int window = table[off] + (int) delta;
-    if (window < 0) {
-      window = Integer.MAX_VALUE; // saturation guard: an overflowing window would decay-skip
-    }
-    table[off] = window;
-    int sum = table[base + 1] + (int) delta;
-    if (sum < 0) {
-      sum = Integer.MAX_VALUE;
-    }
+    int curSum = table[base + 1];
+    int actualDelta = (int) Math.min(delta, (long) Integer.MAX_VALUE - curSum);
+    int sum = curSum + actualDelta;
+    table[base + 2 + active] += actualDelta;
     table[base + 1] = sum;
     return Math.max(maxCount, sum);
   }
@@ -1218,10 +1222,10 @@ public class HeavyKeeper implements TopK {
   private AddResult admitOrEvict(String key, long maxCount, int itemFingerprint) {
     if (members.size() < k) {
       members.put(key, new Node(key, maxCount, itemFingerprint));
-      notifyAdmitted(key);
       if (maxCount < minMemberCount || members.size() == 1) {
         minMemberCount = maxCount;
       }
+      notifyAdmitted(key);
 
       return new AddResult(null, true, key);
     }
@@ -1231,44 +1235,50 @@ public class HeavyKeeper implements TopK {
     // second scan would double the O(k) work inside the admission lock for a
     // value one comparison carries.
     MinPair pair = findTwoSmallest();
-    Node min = pair.min();
-    if (maxCount < min.count) {
-      minMemberCount = min.count;
+    if (maxCount < pair.minCount()) {
+      // maxCount loses against the scan's snapshot, and member counts only grow between
+      // scans, so the snapshot is a valid lower bound for the fast-reject gate. Reading the
+      // node's live count here instead can put the gate above members it should admit.
+      minMemberCount = pair.minCount();
       return AddResult.cold();
     }
     // Staleness guard: raiseCount mutates member counts without the admission
-    // lock, so the minimum read a moment ago may since have been lifted above
-    // the newcomer. Evicting it would swap a hotter key out for a colder one,
-    // so re-resolve in that (rare) case.
-    if (isStaleMinimum(min, maxCount)) {
+    // lock, so the minimum resolved a moment ago may since have been lifted
+    // above the newcomer — or above the runner-up, which would evict a hotter
+    // key. Re-resolve in that (rare) case.
+    if (isStaleMinimum(pair, maxCount)) {
       pair = findTwoSmallest();
-      min = pair.min();
-      if (maxCount < min.count) {
-        minMemberCount = min.count;
+      if (maxCount < pair.minCount()) {
+        minMemberCount = pair.minCount();
         return AddResult.cold();
       }
     }
 
-    String expelledKey = evictMinAndPut(key, maxCount, itemFingerprint, min);
+    String expelledKey = evictMinAndPut(key, maxCount, itemFingerprint, pair.min());
     // The evicted member was the smallest and the newcomer takes its place at
     // maxCount, so the new minimum is the smaller of the runner-up and the
-    // newcomer.
+    // newcomer. Written before the admission callback runs, so an observer never
+    // sees the new member with the previous gate.
     minMemberCount = Math.min(maxCount, pair.secondCount());
+    notifyAdmitted(key);
     return new AddResult(expelledKey, true, key);
   }
 
   /**
-   * Whether {@code min} has been overtaken since it was resolved: a lock-free
-   * {@link #raiseCount} pushed its count above the newcomer's. Every membership
-   * removal runs under {@link #admissionLock}, so the node reference cannot be
-   * detached while this check runs.
+   * Whether the pair's minimum has been overtaken since it was resolved: a
+   * lock-free {@link #raiseCount} pushed its count above the newcomer's, or
+   * above the runner-up (in which case it is no longer the smallest member and
+   * evicting it would swap a hotter key out). Every membership removal runs
+   * under {@link #admissionLock}, so the node reference cannot be detached while
+   * this check runs.
    *
-   * @param min      the minimum node as resolved by {@link #findTwoSmallest}
+   * @param pair     the minimum and runner-up as resolved by {@link #findTwoSmallest}
    * @param maxCount the newcomer's count
-   * @return {@code true} when {@code min} must be re-resolved before evicting
+   * @return {@code true} when the pair must be re-resolved before evicting
    */
-  private boolean isStaleMinimum(Node min, long maxCount) {
-    return min.count > maxCount;
+  private boolean isStaleMinimum(MinPair pair, long maxCount) {
+    long liveMinCount = pair.min().count;
+    return liveMinCount > pair.secondCount() || liveMinCount > maxCount;
   }
 
   /**
@@ -1296,7 +1306,6 @@ public class HeavyKeeper implements TopK {
       offerExpelled(expelledKey, min.count, "expelled key");
     }
     members.put(key, new Node(key, count, itemFingerprint));
-    notifyAdmitted(key);
     return expelledKey;
   }
 
@@ -1325,19 +1334,21 @@ public class HeavyKeeper implements TopK {
   }
 
   /**
-   * Resolve the smallest member and the second-smallest count in one pass.
+   * Resolve the smallest member, its scanned count and the second-smallest
+   * count in one pass.
    *
-   * <p>Eviction needs both: the minimum picks the victim, and the runner-up is
-   * what the minimum becomes after that victim is replaced by the newcomer. One
-   * pass resolves both, so the runner-up costs no second O(k) walk under
-   * {@code admissionLock}.
+   * <p>Eviction needs all three: the minimum picks the victim, its scanned count
+   * is the only sound comparison against the newcomer (the live count may be
+   * raised concurrently), and the runner-up is what the minimum becomes after
+   * that victim is replaced by the newcomer. One pass resolves all three, so the
+   * runner-up costs no second O(k) walk under {@code admissionLock}.
    *
    * <p>{@code secondCount} stays {@link Long#MAX_VALUE} when fewer than two
    * members exist, so {@code min(newcomer, secondCount)} still yields the
    * newcomer. Ties are resolved on the key the same way as
    * {@link #findMinMember()}.
    *
-   * @return the minimum candidate plus the second-smallest count
+   * @return the minimum candidate plus its scanned count and the second-smallest count
    */
   private MinPair findTwoSmallest() {
     long minCount = Long.MAX_VALUE;
@@ -1358,7 +1369,7 @@ public class HeavyKeeper implements TopK {
         secondCount = c;
       }
     }
-    return new MinPair(min, secondCount);
+    return new MinPair(min, minCount, secondCount);
   }
 
   /**
@@ -1431,8 +1442,11 @@ public class HeavyKeeper implements TopK {
     }
   }
 
-  /** The two smallest members, resolved by {@link #findTwoSmallest()}. */
-  private record MinPair(Node min, long secondCount) {}
+  /**
+   * The two smallest members, resolved by {@link #findTwoSmallest()}: the
+   * minimum node, its count at scan time and the second-smallest count.
+   */
+  private record MinPair(Node min, long minCount, long secondCount) {}
 
   /**
    * Sample from a Binomial(n, p) distribution in O(1) expected time.
