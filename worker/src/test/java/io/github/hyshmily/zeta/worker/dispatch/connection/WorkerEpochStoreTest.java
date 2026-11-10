@@ -17,10 +17,13 @@ package io.github.hyshmily.zeta.worker.dispatch.connection;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.channels.FileLock;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
+import java.util.stream.Stream;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -41,6 +44,45 @@ class WorkerEpochStoreTest {
     assertThat(path.getFileName().toString()).isEqualTo("zeta-epoch-unknown");
   }
 
+  @Test
+  void fallsBackToAFixedNameForANullId() {
+    Path path = WorkerEpochStore.defaultEpochFile(null);
+
+    assertThat(path.getFileName().toString()).isEqualTo("zeta-epoch-unknown");
+  }
+
+  @Test
+  void fallsBackToAFixedNameForAnIdMadeOnlyOfSeparators() {
+    Path path = WorkerEpochStore.defaultEpochFile("///");
+
+    assertThat(path.getFileName().toString()).isEqualTo("zeta-epoch-unknown");
+  }
+
+  /** An underscore is a whitelisted identity character, not a sanitized separator. */
+  @Test
+  void keepsAnIdMadeOnlyOfUnderscores() {
+    Path path = WorkerEpochStore.defaultEpochFile("__");
+
+    assertThat(path.getFileName().toString()).isEqualTo("zeta-epoch-__");
+  }
+
+  /**
+   * A corrupt file holding {@link Long#MAX_VALUE} must saturate: incrementing it wraps to the
+   * minimum and silently steps the epoch back to the wall-clock floor.
+   */
+  @Test
+  void saturatesACorruptMaximumEpochInsteadOfWrappingIt(@TempDir Path dir) throws Exception {
+    Path path = dir.resolve("epoch");
+    try (FileChannel channel = FileChannel.open(path, StandardOpenOption.CREATE, StandardOpenOption.WRITE)) {
+      ByteBuffer buffer = ByteBuffer.allocate(Long.BYTES).putLong(Long.MAX_VALUE);
+      buffer.flip();
+      channel.write(buffer);
+    }
+
+    assertThat(WorkerEpochStore.initEpoch("worker-1", path)).isEqualTo(Long.MAX_VALUE);
+    assertThat(readEpoch(path)).isEqualTo(Long.MAX_VALUE);
+  }
+
   /**
    * The JVM rejects a second lock on a file this process already holds with
    * {@link java.nio.channels.OverlappingFileLockException}; that is not an I/O failure, but it
@@ -49,9 +91,10 @@ class WorkerEpochStoreTest {
   @Test
   void anOverlappingInJvmLockDegradesInsteadOfEscaping(@TempDir Path dir) throws Exception {
     Path path = dir.resolve("epoch");
+    Path lockFile = dir.resolve("epoch.lock");
     try (
       FileChannel holder = FileChannel.open(
-        path,
+        lockFile,
         StandardOpenOption.CREATE,
         StandardOpenOption.READ,
         StandardOpenOption.WRITE
@@ -60,5 +103,28 @@ class WorkerEpochStoreTest {
     ) {
       assertThat(WorkerEpochStore.initEpoch("worker-1", path)).isPositive();
     }
+  }
+
+  @Test
+  void rewritesTheEpochAsOneValueWithoutLeavingTemporaryFiles(@TempDir Path dir) throws Exception {
+    Path path = dir.resolve("epoch");
+
+    long first = WorkerEpochStore.initEpoch("worker-1", path);
+    long second = WorkerEpochStore.initEpoch("worker-1", path);
+
+    assertThat(second).isGreaterThan(first);
+    assertThat(Files.size(path)).isEqualTo(Long.BYTES);
+    assertThat(readEpoch(path)).isEqualTo(second);
+    try (Stream<Path> files = Files.list(dir)) {
+      assertThat(files.map(file -> file.getFileName().toString()).toList()).containsExactlyInAnyOrder(
+        "epoch",
+        "epoch.lock"
+      );
+    }
+  }
+
+  private static long readEpoch(Path path) throws Exception {
+    byte[] bytes = Files.readAllBytes(path);
+    return ByteBuffer.wrap(bytes).getLong();
   }
 }

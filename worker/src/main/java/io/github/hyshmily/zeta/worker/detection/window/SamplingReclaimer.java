@@ -53,15 +53,17 @@ import lombok.extern.slf4j.Slf4j;
  * <p>
  * The soft cap is approximate; the hard bound is a seat ledger. A {@code tryLock} failure means another admission is
  * sampling: the holder may be releasing the very seats this arrival needs, so the arrival may proceed, but only by
- * atomically reserving a seat below the hard limit. A completed pass that removes nothing opens a short saturation
+ * atomically reserving a seat below the hard limit. A fast-path admission reserves only <b>below</b> the cap; once the
+ * ledger reaches the cap, an arrival must take the sampling path or wait out the saturation window, so the hard headroom
+ * is spent only by admissions that reach that path. A completed pass that removes nothing opens a short saturation
  * window ({@value #SATURATION_COOLDOWN_MS} ms); while it lasts, other new keys at the cap are rejected without
  * another sample. Without that window the microsecond-scale sample could be outrun by nanosecond-scale admissions and the soft
- * cap would become a sustained bypass. The pass's own admission still reserves from the hard headroom: the thread that
- * paid for the walk is not the one admission the ledger should refuse while its contenders pass. The verdict is taken
- * only while the ledger is still at the cap: the periodic sweep does not take this lock, so it can release seats
- * during the walk, and an admission must not be rejected on a saturation that no longer holds. A pass that reclaims a
- * seat keeps its first freed seat for its own admission; every further seat the pass reclaims is returned to the
- * ledger.
+ * cap would become a sustained bypass. The pass's own admission reserves one hard-headroom seat <b>before</b> the
+ * walk: the thread that paid for the walk is not the one admission the ledger should refuse while its contenders pass,
+ * and a contender cannot take the seat during the scan. Every seat the pass reclaims is returned to the ledger; the
+ * reservation is consumed by the admission itself. The verdict is taken only while the ledger is still at the cap: the
+ * periodic sweep does not take this lock, so it can release seats during the walk, and an admission must not be
+ * rejected on a saturation that no longer holds.
  *
  * @param <V> the map's value type
  */
@@ -92,9 +94,9 @@ public final class SamplingReclaimer<V> {
 
   /**
    * Monotonic millisecond deadline until which a completed "nothing idle" pass suppresses admissions at the cap;
-   * {@code 0} when the last pass released a seat or no pass has run.
+   * {@link Long#MIN_VALUE} when the last pass released a seat or no pass has run.
    */
-  private final AtomicLong saturatedUntilMs = new AtomicLong();
+  private final AtomicLong saturatedUntilMs = new AtomicLong(Long.MIN_VALUE);
 
   /** Cumulative idle entries reclaimed to admit a new key at the cap. */
   private final LongAdder capacityEvictions = new LongAdder();
@@ -212,14 +214,17 @@ public final class SamplingReclaimer<V> {
    * A {@code true} verdict owns one seat, not a hint: creation consumes it, and a race that finds a live window
    * already published must return it with {@link #releaseSeat()}. The atomic ledger is the only size pre-check on the
    * admission fast path; {@code map.size()} is read only by a completed sampling pass, which needs the walk bound and
-   * re-checks the table after it.
+   * re-checks the table after it. The fast path reserves below the soft cap only; an arrival that loses the last
+   * below-cap seat falls through to the sampling path instead of consuming the hard headroom on an admission that
+   * never walks the table.
    *
    * <p>
-   * A pass that reclaims a seat keeps its first freed seat for this admission instead of returning it to the ledger,
-   * so a contended admission bypassing the lock cannot take the seat this pass freed and leave the pass's own
-   * admission rejected. Every further reclaimed seat is returned. A pass that removes nothing opens the saturation
-   * window for the arrivals behind it but still reserves its own seat from the hard headroom, so the thread that paid
-   * for the walk is not refused while its contenders pass.
+   * The sampling admission reserves one hard-headroom seat before the walk, so a contended admission bypassing the
+   * lock cannot take the seat this pass needs and leave the thread that paid for the scan rejected. Every reclaimed
+   * seat is returned to the ledger. A pass that removes nothing opens the saturation window for the arrivals behind
+   * it but still consumes the reservation it took before sampling. At the hard bound no reservation exists, so one
+   * uncontended pass runs without one; it admits only after reclaiming a seat, and a contender that loses the lock
+   * rejects.
    *
    * <p>
    * The evictor runs while the sampler lock is held, so it must perform only the component's own guarded removal and
@@ -240,76 +245,77 @@ public final class SamplingReclaimer<V> {
       return true;
     }
 
-    long seats = usedSeats.get();
-    if (seats >= hardLimit) {
-      return reject(key);
-    }
-    if (seats < cap) {
-      return reserve(key);
+    if (tryReserveBelowCap(cap)) {
+      return true;
     }
     if (isSaturated()) {
       return reject(key);
     }
-    if (!lock.tryLock()) {
-      // Another admission is sampling; it may be releasing the very seats this arrival needs. The hard ledger still
-      // bounds the bypass.
-      return reserve(key);
-    }
-    try {
-      if (sample(nowSlice, evict)) {
+    // Reserve before touching the sample lock: a contender can take the last hard-headroom seat at any time, and
+    // only the thread that already owns a seat is allowed to spend the walk.
+    if (reserveSeat()) {
+      if (!lock.tryLock()) {
+        // Another admission is sampling; the reservation is this admission's seat. The hard ledger still bounds
+        // the bypass.
         return true;
       }
+      try {
+        sample(nowSlice, evict);
+        return true;
+      } catch (RuntimeException | Error e) {
+        // Every reclaimed seat was already returned inside the pass; release the admission's reservation too.
+        releaseSeat();
+        throw e;
+      } finally {
+        lock.unlock();
+      }
+    }
+    // The ledger is at the hard bound. One uncontended pass may still reclaim an idle seat; a contender that
+    // loses the lock rejects, and a pass that finds nothing opens the saturation window.
+    if (!lock.tryLock()) {
+      return reject(key);
+    }
+    try {
+      if (isSaturated()) {
+        return reject(key);
+      }
+      sample(nowSlice, evict);
+      return reserveSeat() || reject(key);
     } finally {
       lock.unlock();
     }
-
-    // The pass's own admission still uses the hard headroom: it paid for the walk, and the window just opened
-    // suppresses the arrivals behind it, so the seat ledger remains the total bound.
-    return reserve(key);
   }
 
   /**
-   * One locked sampling pass: walk at most {@code sampleSize} entries, apply the caller's evictor, and account for
-   * every reclaimed seat. The first reclaimed seat is kept for this admission; every further one returns to the
-   * ledger. A pass that reclaims nothing opens the saturation window while the table is still at the cap, so the
-   * arrivals behind it reject without paying another walk.
+   * One locked sampling pass: walk at most {@code sampleSize} entries, apply the caller's evictor, and return every
+   * reclaimed seat to the ledger. When the admission could reserve, its own seat was taken before the walk, so it
+   * does not compete for a reclaimed seat; at the hard bound it reserves only after the walk. A pass that reclaims
+   * nothing opens the saturation window while the table is still at the cap, so the arrivals behind it reject
+   * without paying another walk.
    *
    * @param nowSlice the pass's clock sample, passed through to the evictor
    * @param evict    removes the candidate when it is still idle under its own guard
-   * @return {@code true} when this pass reclaimed at least one seat
    */
-  private boolean sample(long nowSlice, IdleEvictor<V> evict) {
+  private void sample(long nowSlice, IdleEvictor<V> evict) {
     boolean reclaimed = false;
-    try {
-      int steps = Math.min(sampleSize, map.size());
-      for (int i = 0; i < steps; i++) {
-        Map.Entry<String, V> entry = next();
-        if (entry == null) {
-          break;
-        }
-        if (evict.evictIfIdle(entry, nowSlice)) {
-          capacityEvictions.increment();
-          if (reclaimed) {
-            // The first reclaimed seat is kept for this admission; every further seat returns to the ledger.
-            usedSeats.decrementAndGet();
-          } else {
-            reclaimed = true;
-          }
-        }
+    int steps = Math.min(sampleSize, map.size());
+    for (int i = 0; i < steps; i++) {
+      Map.Entry<String, V> entry = next();
+      if (entry == null) {
+        break;
       }
-    } catch (RuntimeException | Error e) {
-      // The pass kept a freed seat for an admission that never reached creation: return it before propagating.
-      if (reclaimed) {
+      if (evict.evictIfIdle(entry, nowSlice)) {
+        capacityEvictions.increment();
         usedSeats.decrementAndGet();
+        reclaimed = true;
       }
-      throw e;
     }
 
     if (reclaimed) {
       // Both writes are usually no-ops: the saturation window is normally closed, and the table is only still at the
       // cap during a flood.
-      if (saturatedUntilMs.getOpaque() != 0L) {
-        saturatedUntilMs.set(0L);
+      if (saturatedUntilMs.getOpaque() != Long.MIN_VALUE) {
+        saturatedUntilMs.set(Long.MIN_VALUE);
       }
       if (usedSeats.get() >= maxTrackedKeys) {
         requestRelief();
@@ -322,7 +328,6 @@ public final class SamplingReclaimer<V> {
       // trickle of new keys would keep spending the hard headroom while the periodic scan stays at its slow cadence.
       requestRelief();
     }
-    return reclaimed;
   }
 
   /**
@@ -361,18 +366,10 @@ public final class SamplingReclaimer<V> {
   }
 
   /**
-   * Reserves one seat against the hard ledger, or records the rejection when the ledger is full.
-   *
-   * @param key the key being admitted; used only for the DEBUG line
-   * @return {@code true} when a seat is reserved
-   */
-  private boolean reserve(String key) {
-    return reserveSeat() || reject(key);
-  }
-
-  /**
-   * Atomically moves the live-seat ledger below the hard limit. The CAS loop is the admission bound
-   * shared by every report thread; the soft cap only decides when a sampling pass runs.
+   * Reserves one seat from the hard headroom. The CAS loop is the admission bound shared by every
+   * report thread; the soft cap only decides when a sampling pass runs. The below-cap fast path
+   * uses {@link #tryReserveBelowCap(long)}, so this method never spends headroom on an admission
+   * that could have been served by the soft cap.
    *
    * @return {@code true} when this call added one reserved seat
    */
@@ -380,6 +377,26 @@ public final class SamplingReclaimer<V> {
     for (;;) {
       long current = usedSeats.get();
       if (current >= hardLimit) {
+        return false;
+      }
+      if (usedSeats.compareAndSet(current, current + 1)) {
+        return true;
+      }
+    }
+  }
+
+  /**
+   * Reserves one seat only while the ledger is below the soft cap. Bounding the CAS here keeps a
+   * burst at the cap boundary from spending the sampling headroom without running a pass: only the
+   * arrivals that actually reach the sampling path may reserve above the cap.
+   *
+   * @param cap the soft cap
+   * @return {@code true} when this call added one reserved seat below the cap
+   */
+  private boolean tryReserveBelowCap(long cap) {
+    for (;;) {
+      long current = usedSeats.get();
+      if (current >= cap) {
         return false;
       }
       if (usedSeats.compareAndSet(current, current + 1)) {
@@ -397,7 +414,7 @@ public final class SamplingReclaimer<V> {
    */
   private boolean isSaturated() {
     long until = saturatedUntilMs.get();
-    return until != 0L && TimeSource.monotonicMillis() < until;
+    return until != Long.MIN_VALUE && TimeSource.monotonicMillis() < until;
   }
 
   /**

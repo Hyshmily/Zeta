@@ -26,7 +26,7 @@ import static org.mockito.Mockito.*;
 import com.github.benmanes.caffeine.cache.Cache;
 import io.github.hyshmily.zeta.constants.ZetaConstants;
 import io.github.hyshmily.zeta.model.ZetaDecision;
-import io.github.hyshmily.zeta.sync.worker.WorkerDecisionType;
+import io.github.hyshmily.zeta.sync.worker.WorkerType;
 import io.github.hyshmily.zeta.worker.dispatch.connection.WorkerIdentity;
 import io.github.hyshmily.zeta.worker.metrics.WorkerDetectionMetrics;
 import java.util.List;
@@ -69,29 +69,29 @@ class WorkerBroadcasterTest {
   }
 
   /**
-   * Verifies that a HOT tryBroadcast sends a message with the correct routing key and AMQP headers.
+   * Verifies that a HOT send sends a message with the correct routing key and AMQP headers.
    */
   @Test
   void shouldSendHotWithCorrectRoutingKeyAndHeaders() {
-    broadcaster.tryBroadcast(ZetaDecision.hot("myKey", 1L), false, Long.MAX_VALUE);
+    broadcaster.send(ZetaDecision.hot("myKey", 1L), Long.MAX_VALUE);
     verify(rabbitTemplate).send(eq(BROADCAST), eq(PREFIX_DECISION + "testApp"), messageCaptor.capture());
     Message sent = messageCaptor.getValue();
     assertThat(new String(sent.getBody())).isEqualTo("myKey");
-    assertThat(sent.getMessageProperties().getHeaders().get(HEADER_TYPE)).isEqualTo(WorkerDecisionType.HOT.code());
+    assertThat(sent.getMessageProperties().getHeaders().get(HEADER_TYPE)).isEqualTo(WorkerType.HOT.code());
     assertThat(sent.getMessageProperties().getHeaders().get(HEADER_APP_NAME)).isEqualTo("testApp");
     assertThat((Long) sent.getMessageProperties().getHeaders().get(HEADER_VERSION)).isPositive();
   }
 
   /**
-   * Verifies that a COOL tryBroadcast sends a message with the correct routing key and AMQP headers.
+   * Verifies that a COOL send sends a message with the correct routing key and AMQP headers.
    */
   @Test
   void shouldSendCoolWithCorrectRoutingKeyAndHeaders() {
-    broadcaster.tryBroadcast(ZetaDecision.cool("myKey", 2L), false, Long.MAX_VALUE);
+    broadcaster.send(ZetaDecision.cool("myKey", 2L), Long.MAX_VALUE);
     verify(rabbitTemplate).send(eq(BROADCAST), eq(PREFIX_DECISION + "testApp"), messageCaptor.capture());
     Message sent = messageCaptor.getValue();
     assertThat(new String(sent.getBody())).isEqualTo("myKey");
-    assertThat(sent.getMessageProperties().getHeaders().get(HEADER_TYPE)).isEqualTo(WorkerDecisionType.COOL.code());
+    assertThat(sent.getMessageProperties().getHeaders().get(HEADER_TYPE)).isEqualTo(WorkerType.COOL.code());
     assertThat(sent.getMessageProperties().getHeaders().get(HEADER_APP_NAME)).isEqualTo("testApp");
     assertThat((Long) sent.getMessageProperties().getHeaders().get(HEADER_VERSION)).isPositive();
   }
@@ -99,10 +99,10 @@ class WorkerBroadcasterTest {
   /** The funnel carries the version allocated by the transition; it never mints one. */
   @Test
   void carriesTheUpstreamDecisionVersion() {
-    broadcaster.tryBroadcast(ZetaDecision.cool("k0", 3L), false, Long.MAX_VALUE);
-    broadcaster.tryBroadcast(ZetaDecision.hot("k1", 4L), false, Long.MAX_VALUE);
-    broadcaster.tryBroadcast(ZetaDecision.hot("k2", 5L), false, Long.MAX_VALUE);
-    broadcaster.tryBroadcast(ZetaDecision.hot("k3", 6L), false, Long.MAX_VALUE);
+    broadcaster.send(ZetaDecision.cool("k0", 3L), Long.MAX_VALUE);
+    broadcaster.send(ZetaDecision.hot("k1", 4L), Long.MAX_VALUE);
+    broadcaster.send(ZetaDecision.hot("k2", 5L), Long.MAX_VALUE);
+    broadcaster.send(ZetaDecision.hot("k3", 6L), Long.MAX_VALUE);
 
     verify(rabbitTemplate, times(4)).send(any(), eq(PREFIX_DECISION + "testApp"), messageCaptor.capture());
     List<Message> messages = messageCaptor.getAllValues();
@@ -119,18 +119,18 @@ class WorkerBroadcasterTest {
    */
   @Test
   void shouldHandleEmptyKey() {
-    broadcaster.tryBroadcast(ZetaDecision.hot("", 7L), false, Long.MAX_VALUE);
+    broadcaster.send(ZetaDecision.hot("", 7L), Long.MAX_VALUE);
     verify(rabbitTemplate).send(any(), any(), messageCaptor.capture());
     assertThat(new String(messageCaptor.getValue().getBody())).isEmpty();
   }
 
   /**
-   * Verifies that a HOT tryBroadcast sets the {@link ZetaConstants.Amqp#HEADER_NODE_ID}
+   * Verifies that a HOT send sets the {@link ZetaConstants.Amqp#HEADER_NODE_ID}
    * header on the sent message.
    */
   @Test
   void sendBroadcast_shouldIncludeNodeIdHeader() {
-    broadcaster.tryBroadcast(ZetaDecision.hot("key", 11L), false, Long.MAX_VALUE);
+    broadcaster.send(ZetaDecision.hot("key", 11L), Long.MAX_VALUE);
     verify(rabbitTemplate).send(any(), any(), messageCaptor.capture());
     assertThat(messageCaptor.getValue().getMessageProperties().getHeaders()).containsEntry(HEADER_NODE_ID, "test-node");
   }
@@ -138,8 +138,8 @@ class WorkerBroadcasterTest {
   /** The epoch is fixed for the process, so every send carries the same value. */
   @Test
   void sendBroadcast_shouldIncludeTheWorkerEpoch() {
-    broadcaster.tryBroadcast(ZetaDecision.hot("key", 12L), false, Long.MAX_VALUE);
-    broadcaster.tryBroadcast(ZetaDecision.hot("key2", 13L), false, Long.MAX_VALUE);
+    broadcaster.send(ZetaDecision.hot("key", 12L), Long.MAX_VALUE);
+    broadcaster.send(ZetaDecision.hot("key2", 13L), Long.MAX_VALUE);
 
     verify(rabbitTemplate, times(2)).send(any(), any(), messageCaptor.capture());
     assertThat(messageCaptor.getAllValues()).hasSize(2);
@@ -162,13 +162,13 @@ class WorkerBroadcasterTest {
       .send(any(String.class), any(String.class), any(Message.class));
 
     // Should not throw — design decisions: sync messages fire-and-forget
-    assertThat(broadcaster.tryBroadcast(ZetaDecision.hot("key", 14L), false, Long.MAX_VALUE)).isEqualTo(
+    assertThat(broadcaster.send(ZetaDecision.hot("key", 14L), Long.MAX_VALUE)).isEqualTo(
       WorkerBroadcaster.Delivery.FAILED
     );
   }
 
   /**
-   * Verifies that a COOL tryBroadcast also swallows AMQP send failures.
+   * Verifies that a COOL send also swallows AMQP send failures.
    */
   @Test
   void broadcastCool_whenRabbitTemplateThrows_shouldSwallow() {
@@ -176,7 +176,7 @@ class WorkerBroadcasterTest {
       .when(rabbitTemplate)
       .send(any(String.class), any(String.class), any(Message.class));
 
-    broadcaster.tryBroadcast(ZetaDecision.cool("key", 15L), false, Long.MAX_VALUE);
+    broadcaster.send(ZetaDecision.cool("key", 15L), Long.MAX_VALUE);
   }
 
   /**
@@ -185,7 +185,7 @@ class WorkerBroadcasterTest {
    */
   @Test
   void broadcastCool_shouldSendExactlyOnce() {
-    assertThat(broadcaster.tryBroadcast(ZetaDecision.cool("k", 16L), false, Long.MAX_VALUE)).isEqualTo(
+    assertThat(broadcaster.send(ZetaDecision.cool("k", 16L), Long.MAX_VALUE)).isEqualTo(
       WorkerBroadcaster.Delivery.SENT
     );
     verify(rabbitTemplate, times(1)).send(any(), any(), any(Message.class));
@@ -198,18 +198,16 @@ class WorkerBroadcasterTest {
    */
   @Test
   void broadcast_olderVersionThanAlreadySent_shouldBeDropped() {
-    assertThat(broadcaster.tryBroadcast(ZetaDecision.hot("k", 5L), false, Long.MAX_VALUE)).isEqualTo(
-      WorkerBroadcaster.Delivery.SENT
-    );
+    assertThat(broadcaster.send(ZetaDecision.hot("k", 5L), Long.MAX_VALUE)).isEqualTo(WorkerBroadcaster.Delivery.SENT);
 
-    assertThat(broadcaster.tryBroadcast(ZetaDecision.cool("k", 3L), false, Long.MAX_VALUE))
+    assertThat(broadcaster.send(ZetaDecision.cool("k", 3L), Long.MAX_VALUE))
       .as("superseded decision reports success so no rollback is applied")
       .isEqualTo(WorkerBroadcaster.Delivery.SUPERSEDED);
 
     verify(rabbitTemplate, times(1)).send(any(), any(), messageCaptor.capture());
     Message sent = messageCaptor.getValue();
     assertThat(sent.getMessageProperties().getHeaders().get(HEADER_VERSION)).isEqualTo(5L);
-    assertThat(sent.getMessageProperties().getHeaders().get(HEADER_TYPE)).isEqualTo(WorkerDecisionType.HOT.code());
+    assertThat(sent.getMessageProperties().getHeaders().get(HEADER_TYPE)).isEqualTo(WorkerType.HOT.code());
   }
 
   /**
@@ -219,17 +217,15 @@ class WorkerBroadcasterTest {
    */
   @Test
   void broadcast_versionAlreadyAccepted_shouldBeDroppedRegardlessOfType() {
-    assertThat(broadcaster.tryBroadcast(ZetaDecision.hot("k", 7L), false, Long.MAX_VALUE)).isEqualTo(
-      WorkerBroadcaster.Delivery.SENT
-    );
+    assertThat(broadcaster.send(ZetaDecision.hot("k", 7L), Long.MAX_VALUE)).isEqualTo(WorkerBroadcaster.Delivery.SENT);
 
-    assertThat(broadcaster.tryBroadcast(ZetaDecision.cool("k", 7L), false, Long.MAX_VALUE))
+    assertThat(broadcaster.send(ZetaDecision.cool("k", 7L), Long.MAX_VALUE))
       .as("the same version is already the state this Worker holds")
       .isEqualTo(WorkerBroadcaster.Delivery.ELIDED);
 
     verify(rabbitTemplate, times(1)).send(any(), any(), messageCaptor.capture());
     assertThat(messageCaptor.getValue().getMessageProperties().getHeaders().get(HEADER_TYPE)).isEqualTo(
-      WorkerDecisionType.HOT.code()
+      WorkerType.HOT.code()
     );
   }
 
@@ -241,34 +237,28 @@ class WorkerBroadcasterTest {
    */
   @Test
   void broadcast_coolAfterAnAcceptedCool_shouldBeElidedWithoutSending() {
-    assertThat(broadcaster.tryBroadcast(ZetaDecision.cool("k", 20L), false, Long.MAX_VALUE)).isEqualTo(
+    assertThat(broadcaster.send(ZetaDecision.cool("k", 20L), Long.MAX_VALUE)).isEqualTo(
       WorkerBroadcaster.Delivery.SENT
     );
 
-    assertThat(broadcaster.tryBroadcast(ZetaDecision.cool("k", 21L), false, Long.MAX_VALUE))
+    assertThat(broadcaster.send(ZetaDecision.cool("k", 21L), Long.MAX_VALUE))
       .as("the cluster is already cold for this key")
       .isEqualTo(WorkerBroadcaster.Delivery.ELIDED);
 
     assertThat(broadcaster.acceptedVersion("k")).as("the elided COOL is the state this Worker holds").isEqualTo(21L);
 
-    assertThat(broadcaster.tryBroadcast(ZetaDecision.hot("k", 22L), false, Long.MAX_VALUE)).isEqualTo(
-      WorkerBroadcaster.Delivery.SENT
-    );
+    assertThat(broadcaster.send(ZetaDecision.hot("k", 22L), Long.MAX_VALUE)).isEqualTo(WorkerBroadcaster.Delivery.SENT);
     verify(rabbitTemplate, times(2)).send(any(), any(), messageCaptor.capture());
     assertThat(messageCaptor.getAllValues()).hasSize(2);
     assertThat(messageCaptor.getAllValues().get(0).getMessageProperties().getHeaders().get(HEADER_TYPE)).isEqualTo(
-      WorkerDecisionType.COOL.code()
+      WorkerType.COOL.code()
     );
     assertThat(messageCaptor.getAllValues().get(1).getMessageProperties().getHeaders().get(HEADER_TYPE)).isEqualTo(
-      WorkerDecisionType.HOT.code()
+      WorkerType.HOT.code()
     );
   }
 
-  /**
-   * A HOT record outlives the queue-age bound while the key stays hot. It is the only proof the
-   * cluster was told the key is hot; expiring it would let a later COOL that displaced a pending
-   * HOT be elided as a ghost demotion.
-   */
+  /** A HOT record outlives the queue-age bound, so a long hot episode still orders its COOL. */
   @Test
   void aHotAcceptedRecordOutlivesTheQueueAgeBound() throws InterruptedException {
     broadcaster = new WorkerBroadcaster(
@@ -280,26 +270,92 @@ class WorkerBroadcasterTest {
       1L
     );
 
-    assertThat(broadcaster.tryBroadcast(ZetaDecision.hot("k", 1L), false, Long.MAX_VALUE)).isEqualTo(
-      WorkerBroadcaster.Delivery.SENT
-    );
+    assertThat(broadcaster.send(ZetaDecision.hot("k", 1L), Long.MAX_VALUE)).isEqualTo(WorkerBroadcaster.Delivery.SENT);
     Thread.sleep(20L);
-    assertThat(broadcaster.tryBroadcast(ZetaDecision.cool("k", 2L), true, Long.MAX_VALUE))
+    assertThat(broadcaster.send(ZetaDecision.cool("k", 2L), Long.MAX_VALUE))
       .as("the cluster still holds the HOT, so the demotion must travel")
       .isEqualTo(WorkerBroadcaster.Delivery.SENT);
 
-    Thread.sleep(20L);
-    assertThat(broadcaster.tryBroadcast(ZetaDecision.cool("k", 3L), true, Long.MAX_VALUE))
-      .as("the accepted COOL turned the record cold, and the cold retention then expired")
-      .isEqualTo(WorkerBroadcaster.Delivery.ELIDED);
+    verify(rabbitTemplate, times(2)).send(any(), any(), any(Message.class));
+  }
+
+  /**
+   * A failed HOT clears only the cold knowledge. The accepted COOL's version stays the watermark,
+   * so a stale HOT below it is still superseded instead of being re-sent after the record regressed
+   * to version zero.
+   */
+  @Test
+  void forgettingColdKeepsTheAcceptedVersionWatermark() {
+    assertThat(broadcaster.send(ZetaDecision.cool("k", 5L), Long.MAX_VALUE)).isEqualTo(WorkerBroadcaster.Delivery.SENT);
+
+    broadcaster.forgetCold("k", 6L);
+
+    assertThat(broadcaster.acceptedVersion("k")).as("the failed HOT did not lower the watermark").isEqualTo(5L);
+    assertThat(broadcaster.send(ZetaDecision.hot("k", 4L), Long.MAX_VALUE))
+      .as("a stale HOT below the accepted COOL stays superseded")
+      .isEqualTo(WorkerBroadcaster.Delivery.SUPERSEDED);
+    assertThat(broadcaster.send(ZetaDecision.cool("k", 7L), Long.MAX_VALUE))
+      .as("the cold knowledge was cleared, so the correction travels")
+      .isEqualTo(WorkerBroadcaster.Delivery.SENT);
 
     verify(rabbitTemplate, times(2)).send(any(), any(), any(Message.class));
+  }
+
+  /**
+   * A superseded HOT knows the cluster was not told hot, but it must not turn an UNKNOWN record
+   * cold again: a newer failed HOT still owes a corrective COOL. The version watermark stays.
+   */
+  @Test
+  void rememberColdDoesNotRestoreColdKnowledgeClearedByANewerHot() {
+    assertThat(broadcaster.send(ZetaDecision.cool("k", 5L), Long.MAX_VALUE)).isEqualTo(WorkerBroadcaster.Delivery.SENT);
+
+    broadcaster.forgetCold("k", 6L);
+    broadcaster.rememberCold("k");
+
+    assertThat(broadcaster.acceptedVersion("k")).isEqualTo(5L);
+    assertThat(broadcaster.send(ZetaDecision.cool("k", 7L), Long.MAX_VALUE))
+      .as("the failed newer HOT still needs its corrective COOL")
+      .isEqualTo(WorkerBroadcaster.Delivery.SENT);
+    assertThat(broadcaster.acceptedVersion("k")).isEqualTo(7L);
+
+    verify(rabbitTemplate, times(2)).send(any(), any(), any(Message.class));
+  }
+
+  /** An existing cold record already covers the lifecycle, so rememberCold leaves it untouched. */
+  @Test
+  void rememberColdKeepsAnExistingColdRecordAndItsVersion() {
+    assertThat(broadcaster.send(ZetaDecision.cool("k", 5L), Long.MAX_VALUE)).isEqualTo(WorkerBroadcaster.Delivery.SENT);
+
+    broadcaster.rememberCold("k");
+
+    assertThat(broadcaster.acceptedVersion("k")).isEqualTo(5L);
+    assertThat(broadcaster.send(ZetaDecision.cool("k", 7L), Long.MAX_VALUE))
+      .as("the cluster is already cold for this key")
+      .isEqualTo(WorkerBroadcaster.Delivery.ELIDED);
+    assertThat(broadcaster.acceptedVersion("k")).isEqualTo(7L);
+
+    verify(rabbitTemplate, times(1)).send(any(), any(), any(Message.class));
+  }
+
+  /** A failed or expired HOT clears the cold record so its corrective COOL is still sent. */
+  @Test
+  void forgettingAColdTombstoneLetsTheCorrectiveCoolTravel() {
+    broadcaster.rememberCold("elided");
+    assertThat(broadcaster.send(ZetaDecision.cool("elided", 3L), Long.MAX_VALUE)).isEqualTo(
+      WorkerBroadcaster.Delivery.ELIDED
+    );
+
+    broadcaster.rememberCold("corrected");
+    broadcaster.forgetCold("corrected", 3L);
+    assertThat(broadcaster.send(ZetaDecision.cool("corrected", 4L), Long.MAX_VALUE)).isEqualTo(
+      WorkerBroadcaster.Delivery.SENT
+    );
   }
 
   /** The accepted-record cache has no size cap: a maximum would evict a live ordering predecessor. */
   @Test
   void acceptedRecordsHaveNoMaximumSize() throws Exception {
-    var field = WorkerBroadcaster.class.getDeclaredField("acceptedDecisions");
+    var field = WorkerBroadcaster.class.getDeclaredField("accepted");
     field.setAccessible(true);
     @SuppressWarnings("unchecked")
     Cache<String, ?> cache = (Cache<String, ?>) field.get(broadcaster);
@@ -312,7 +368,7 @@ class WorkerBroadcasterTest {
   void acceptedVersionTracksTheFunnelWatermark() {
     assertThat(broadcaster.acceptedVersion("k")).isZero();
 
-    broadcaster.tryBroadcast(ZetaDecision.hot("k", 5L), false, Long.MAX_VALUE);
+    broadcaster.send(ZetaDecision.hot("k", 5L), Long.MAX_VALUE);
 
     assertThat(broadcaster.acceptedVersion("k")).isEqualTo(5L);
     assertThat(broadcaster.acceptedVersion("other")).isZero();
@@ -327,18 +383,18 @@ class WorkerBroadcasterTest {
    */
   @Test
   void broadcast_elidedDuplicate_shouldStillAdvanceTheVersionWatermark() {
-    assertThat(broadcaster.tryBroadcast(ZetaDecision.hot("flip", 10L), false, Long.MAX_VALUE)).isEqualTo(
+    assertThat(broadcaster.send(ZetaDecision.hot("flip", 10L), Long.MAX_VALUE)).isEqualTo(
       WorkerBroadcaster.Delivery.SENT
     );
 
     // Same type inside the debounce window: nothing is sent, but version 12 is the
     // decision this Worker now holds for the key.
-    assertThat(broadcaster.tryBroadcast(ZetaDecision.hot("flip", 12L), false, Long.MAX_VALUE)).isEqualTo(
+    assertThat(broadcaster.send(ZetaDecision.hot("flip", 12L), Long.MAX_VALUE)).isEqualTo(
       WorkerBroadcaster.Delivery.ELIDED
     );
 
     // The older COOL is obsolete and must not reach the cluster.
-    assertThat(broadcaster.tryBroadcast(ZetaDecision.cool("flip", 11L), false, Long.MAX_VALUE))
+    assertThat(broadcaster.send(ZetaDecision.cool("flip", 11L), Long.MAX_VALUE))
       .as("a COOL older than an accepted decision reports success without sending")
       .isEqualTo(WorkerBroadcaster.Delivery.SUPERSEDED);
 
@@ -347,38 +403,37 @@ class WorkerBroadcasterTest {
   }
 
   /**
-   * A COOL that displaced a still-queued HOT proves the cluster was never told the key was hot, so
-   * it is elided. The elision must still establish the cold version: otherwise a late HOT from the
-   * earlier lifecycle sees an empty record and is sent after the Worker has already cooled the key.
+   * A COOL with no accepted record is the only demotion signal a locally promoted App can receive,
+   * so it is sent; the send establishes the cold watermark that orders a late HOT.
    */
   @Test
-  void anElidedCoolWithNoPriorRecordEstablishesTheColdWatermark() {
-    assertThat(broadcaster.tryBroadcast(ZetaDecision.cool("k", 4L), true, Long.MAX_VALUE)).isEqualTo(
-      WorkerBroadcaster.Delivery.ELIDED
-    );
+  void aCoolWithoutAnAcceptedRecordIsSentAndEstablishesTheColdWatermark() {
+    assertThat(broadcaster.send(ZetaDecision.cool("k", 4L), Long.MAX_VALUE)).isEqualTo(WorkerBroadcaster.Delivery.SENT);
     assertThat(broadcaster.acceptedVersion("k")).isEqualTo(4L);
 
-    assertThat(broadcaster.tryBroadcast(ZetaDecision.hot("k", 1L), false, Long.MAX_VALUE))
-      .as("the stale HOT is below the cold state the elided COOL established")
+    assertThat(broadcaster.send(ZetaDecision.hot("k", 1L), Long.MAX_VALUE))
+      .as("the stale HOT is below the cold state the COOL established")
       .isEqualTo(WorkerBroadcaster.Delivery.SUPERSEDED);
 
-    verifyNoInteractions(rabbitTemplate);
+    verify(rabbitTemplate, times(1)).send(any(), any(), any(Message.class));
   }
 
-  /** The token-starved head's committed elision carries the same cold watermark as the send path. */
+  /** The token-starved head's committed elision advances the same cold watermark as the send path. */
   @Test
-  void committedElidedCoolWithNoPriorRecordEstablishesTheColdWatermark() {
-    ZetaDecision cool = ZetaDecision.cool("k", 4L);
-    WorkerBroadcaster.InMemory classification = broadcaster.classifyInMemory(cool, true, Long.MAX_VALUE);
-    assertThat(classification).isNotNull();
-    assertThat(classification.outcome()).isEqualTo(WorkerBroadcaster.Delivery.ELIDED);
-    assertThat(broadcaster.commitInMemory(classification, cool)).isEqualTo(WorkerBroadcaster.Delivery.ELIDED);
+  void committedColdCoolAdvancesTheWatermark() {
+    assertThat(broadcaster.send(ZetaDecision.cool("k", 4L), Long.MAX_VALUE)).isEqualTo(WorkerBroadcaster.Delivery.SENT);
 
-    assertThat(broadcaster.acceptedVersion("k")).isEqualTo(4L);
-    assertThat(broadcaster.tryBroadcast(ZetaDecision.hot("k", 1L), false, Long.MAX_VALUE)).isEqualTo(
+    ZetaDecision cool = ZetaDecision.cool("k", 5L);
+    WorkerBroadcaster.Verdict verdict = broadcaster.classify(cool, Long.MAX_VALUE);
+    assertThat(verdict).isNotNull();
+    assertThat(verdict.outcome()).isEqualTo(WorkerBroadcaster.Delivery.ELIDED);
+    assertThat(broadcaster.commit(verdict, cool)).isEqualTo(WorkerBroadcaster.Delivery.ELIDED);
+
+    assertThat(broadcaster.acceptedVersion("k")).isEqualTo(5L);
+    assertThat(broadcaster.send(ZetaDecision.hot("k", 1L), Long.MAX_VALUE)).isEqualTo(
       WorkerBroadcaster.Delivery.SUPERSEDED
     );
 
-    verifyNoInteractions(rabbitTemplate);
+    verify(rabbitTemplate, times(1)).send(any(), any(), any(Message.class));
   }
 }

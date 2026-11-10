@@ -28,17 +28,16 @@ import io.micrometer.core.instrument.Timer;
 import io.micrometer.core.instrument.composite.CompositeMeterRegistry;
 import java.util.concurrent.TimeUnit;
 import java.util.function.IntSupplier;
-import java.util.function.ToDoubleFunction;
 
 /**
  * The detection plane's meters: what the window table holds, what the HOT set holds, what the
  * decision queues are doing, and where keys leave the hot regime.
  *
- * <p>Counters are created in the constructor; gauges and the cumulative function counters are
- * bound afterwards through {@link #bindMeters}, because they read components that themselves need
- * these meters to count a rejection or a promotion. A meter-less instance is a no-op: a null
- * registry is replaced by an empty {@link CompositeMeterRegistry}, so no call site branches on
- * metrics being wired.
+ * <p>The fixed counters are created in the constructor and the per-rule counters are registered by
+ * their rule's publication. Gauges and the cumulative function counters are bound afterwards
+ * through {@link #bindMeters}, because they read components that themselves need these meters to
+ * count a rejection or a promotion. A meter-less instance is a no-op: a null registry is replaced by
+ * an empty {@link CompositeMeterRegistry}, so no call site branches on metrics being wired.
  *
  * <p>Each decision type has its own delivery ledger. A HOT decision ends in exactly one of
  * {@code decisions.hot}, {@code dropped{type=hot}}, {@code elided{type=hot}},
@@ -49,14 +48,12 @@ import java.util.function.ToDoubleFunction;
  */
 public class WorkerDetectionMetrics {
 
-  /** The three cool-down triggers; one pre-registered counter each keeps the tag off the hot path. */
+  /** The two cool-down triggers; one pre-registered counter each keeps the tag off the hot path. */
   public enum CoolReason {
     /** The LOW_QPS dwell elapsed. */
     LOW_QPS("low_qps"),
     /** The EXPIRE deadline passed. */
-    EXPIRE("expire"),
-    /** The repair sweep found an overdue entry. */
-    SWEEP("sweep");
+    EXPIRE("expire");
 
     private final String tag;
 
@@ -108,11 +105,11 @@ public class WorkerDetectionMetrics {
   public static final String METRIC_COOLING_RECHECK = "zeta.worker.cooling.recheck";
   /** Counter tagged {@code reason}: cool-downs by trigger. */
   public static final String METRIC_COOLING_REASON = "zeta.worker.cooling.reason";
-  /** FunctionCounter tagged {@code rule}: reports that cleared the rule's promotion threshold. */
+  /** Counter tagged {@code rule}: reports that cleared the rule's promotion threshold. */
   public static final String METRIC_RULE_MATCHES = "zeta.worker.rule.matches";
-  /** FunctionCounter tagged {@code rule}: promotions per rule. */
+  /** Counter tagged {@code rule}: promotions per rule. */
   public static final String METRIC_RULE_PROMOTIONS = "zeta.worker.rule.promotions";
-  /** FunctionCounter tagged {@code rule}: cool-downs per rule. */
+  /** Counter tagged {@code rule}: cool-downs per rule. */
   public static final String METRIC_RULE_COOLS = "zeta.worker.rule.cools";
   /** Timer: per-report-batch evaluation latency. */
   public static final String METRIC_REPORT_EVAL = "zeta.worker.report.eval";
@@ -148,7 +145,6 @@ public class WorkerDetectionMetrics {
   private final Timer coolingLateness;
   private final Counter lowQpsCools;
   private final Counter expireCools;
-  private final Counter sweepCools;
   private final Counter rechecks;
   private final Timer reportEval;
 
@@ -221,7 +217,6 @@ public class WorkerDetectionMetrics {
       .register(reg);
     this.lowQpsCools = coolReasonCounter(CoolReason.LOW_QPS);
     this.expireCools = coolReasonCounter(CoolReason.EXPIRE);
-    this.sweepCools = coolReasonCounter(CoolReason.SWEEP);
   }
 
   private Counter coolReasonCounter(CoolReason reason) {
@@ -267,13 +262,13 @@ public class WorkerDetectionMetrics {
     FunctionCounter.builder(METRIC_DETECTOR_CAPACITY_REJECTIONS, detector, SlidingWindowDetector::rejectedNewKeys)
       .description("New-key admissions rejected because the tracked-key cap was reached")
       .register(registry);
-    Gauge.builder(METRIC_HOT_ACTIVE, hotRegistry, HotKeyRegistry::activeCount)
+    Gauge.builder(METRIC_HOT_ACTIVE, hotRegistry, HotKeyRegistry::size)
       .description("Keys currently holding a HOT seat")
       .register(registry);
     Gauge.builder(METRIC_HOT_CAPACITY, hotRegistry, HotKeyRegistry::capacity)
       .description("HOT seat capacity (detection.limits.max-active-hot-keys)")
       .register(registry);
-    FunctionCounter.builder(METRIC_HOT_REJECTED, hotRegistry, HotKeyRegistry::rejectedCount)
+    FunctionCounter.builder(METRIC_HOT_REJECTED, hotRegistry, HotKeyRegistry::rejected)
       .description("Promotions refused because every HOT seat was taken")
       .register(registry);
     Gauge.builder(METRIC_BROADCAST_HOT_DEPTH, hotQueueDepth, IntSupplier::getAsInt)
@@ -313,8 +308,8 @@ public class WorkerDetectionMetrics {
 
   /**
    * Counts one decision elided in memory because the cluster's state would not change: a replay of
-   * the exact accepted version, a same-type decision inside the debounce window, a COOL for a key
-   * the cluster already holds cold, or a COOL whose displaced HOT never reached the funnel.
+   * the exact accepted version, a same-type decision inside the debounce window, or a COOL for a
+   * key the cluster already holds cold.
    *
    * @param type the decision type
    */
@@ -385,64 +380,38 @@ public class WorkerDetectionMetrics {
     switch (reason) {
       case LOW_QPS -> lowQpsCools.increment();
       case EXPIRE -> expireCools.increment();
-      case SWEEP -> sweepCools.increment();
     }
   }
 
   /**
-   * Registers the {@code rule} function counter for one rule id the first time that id is
-   * published; a later publication that keeps the id reuses the same {@code RuleCounters}, so the
-   * meter is bound once. The hot path then only increments the rule's counter field, and the
-   * scrape reads the same field through this binding.
+   * Registers the match counter for one rule id. The registry holds the meter strongly, so the
+   * scrape reads the live count without a state object to keep reachable.
    *
-   * <p>The state object is the counters instance itself and the extraction function is a
-   * non-capturing method reference, which the JVM holds as a singleton. Micrometer keeps the
-   * <em>state object</em> weakly and has no strong-reference option for a
-   * {@code FunctionCounter}, so the state must be the object that is retained for as long as the
-   * rule is published — never a lambda created just for the registration. A temporary lambda as
-   * the state would be collected after the first young collection and the counter would stop
-   * advancing.
-   *
-   * @param ruleId  the rule id
-   * @param state   the rule's counters, retained by the published binding
-   * @param matches reads the rule's cumulative eligible-report count from {@code state}
-   * @param <T>     the counters type
+   * @param ruleId the rule id
    * @return the match meter, retained so a retired rule can remove it
    */
-  public <T> FunctionCounter ruleMatchCounter(String ruleId, T state, ToDoubleFunction<T> matches) {
-    return ruleCounter(
-      METRIC_RULE_MATCHES,
-      ruleId,
-      "Reports that cleared the rule's promotion threshold",
-      state,
-      matches
-    );
+  public Counter ruleMatches(String ruleId) {
+    return ruleCounter(METRIC_RULE_MATCHES, ruleId, "Reports that cleared the rule's promotion threshold");
   }
 
   /**
    * Registers the promotion counter for one rule id.
    *
-   * @param ruleId     the rule id
-   * @param state      the rule's counters, retained by the published binding
-   * @param promotions reads the rule's cumulative promotion count from {@code state}
-   * @param <T>        the counters type
+   * @param ruleId the rule id
    * @return the promotion meter, retained so a retired rule can remove it
    */
-  public <T> FunctionCounter rulePromotionCounter(String ruleId, T state, ToDoubleFunction<T> promotions) {
-    return ruleCounter(METRIC_RULE_PROMOTIONS, ruleId, "Promotions per rule", state, promotions);
+  public Counter rulePromotions(String ruleId) {
+    return ruleCounter(METRIC_RULE_PROMOTIONS, ruleId, "Promotions per rule");
   }
 
   /**
    * Registers the cool-down counter for one rule id.
    *
    * @param ruleId the rule id
-   * @param state  the rule's counters, retained by the published binding
-   * @param cools  reads the rule's cumulative cool-down count from {@code state}
-   * @param <T>    the counters type
    * @return the cool-down meter, retained so a retired rule can remove it
    */
-  public <T> FunctionCounter ruleCoolCounter(String ruleId, T state, ToDoubleFunction<T> cools) {
-    return ruleCounter(METRIC_RULE_COOLS, ruleId, "Cool-downs per rule", state, cools);
+  public Counter ruleCools(String ruleId) {
+    return ruleCounter(METRIC_RULE_COOLS, ruleId, "Cool-downs per rule");
   }
 
   /**
@@ -473,8 +442,7 @@ public class WorkerDetectionMetrics {
   }
 
   /**
-   * Records how late a wheel-fired due cool-down check was processed. The repair sweep's grace is
-   * excluded.
+   * Records how late a due cool-down check was processed.
    *
    * @param latenessMs non-negative lateness
    */
@@ -483,25 +451,15 @@ public class WorkerDetectionMetrics {
   }
 
   /**
-   * Binds one tagged rule counter to the counters object that must stay strongly reachable for the
-   * meter's weak reference.
+   * Registers one rule-tagged counter.
    *
    * @param name        the meter name
    * @param ruleId      the rule tag value
    * @param description the meter description
-   * @param state       the rule's counters
-   * @param value       reads the rule's cumulative count from {@code state}
-   * @param <T>         the counters type
    * @return the registered meter
    */
-  private <T> FunctionCounter ruleCounter(
-    String name,
-    String ruleId,
-    String description,
-    T state,
-    ToDoubleFunction<T> value
-  ) {
-    return FunctionCounter.builder(name, state, value).tag("rule", ruleId).description(description).register(registry);
+  private Counter ruleCounter(String name, String ruleId, String description) {
+    return Counter.builder(name).tag("rule", ruleId).description(description).register(registry);
   }
 
   private static Counter counter(MeterRegistry registry, String name, String description) {

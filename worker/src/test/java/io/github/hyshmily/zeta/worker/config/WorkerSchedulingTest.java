@@ -19,12 +19,16 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.util.List;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Test;
 
@@ -37,12 +41,31 @@ class WorkerSchedulingTest {
     when(scheduler.scheduleWithFixedDelay(any(Runnable.class), anyLong(), anyLong(), any(TimeUnit.class)))
       .thenThrow(new RejectedExecutionException("executor closed"));
     WorkerAutoConfiguration.WorkerScheduling scheduling = new WorkerAutoConfiguration.WorkerScheduling(
-      List.of(new WorkerAutoConfiguration.WorkerScheduling.Task(scheduler, () -> {}, 1_000L, 1_000L))
+      List.of(new WorkerAutoConfiguration.WorkerScheduling.Task(scheduler, () -> {}, 1_000L, 1_000L, false))
     );
 
     assertThatThrownBy(scheduling::start)
       .isInstanceOf(IllegalStateException.class)
       .hasMessageContaining("Failed to schedule worker task");
+    assertThat(scheduling.isRunning()).isFalse();
+  }
+
+  @Test
+  void aFixedRateTaskStartsImmediatelyAndDoesNotDrift() {
+    ScheduledExecutorService scheduler = mock(ScheduledExecutorService.class);
+    ScheduledFuture<?> future = mock(ScheduledFuture.class);
+    doReturn(future)
+      .when(scheduler)
+      .scheduleAtFixedRate(any(Runnable.class), eq(0L), eq(1_000L), eq(TimeUnit.MILLISECONDS));
+    WorkerAutoConfiguration.WorkerScheduling scheduling = new WorkerAutoConfiguration.WorkerScheduling(
+      List.of(new WorkerAutoConfiguration.WorkerScheduling.Task(scheduler, () -> {}, 0L, 1_000L, true))
+    );
+
+    scheduling.start();
+
+    verify(scheduler).scheduleAtFixedRate(any(Runnable.class), eq(0L), eq(1_000L), eq(TimeUnit.MILLISECONDS));
+    assertThat(scheduling.isRunning()).isTrue();
+    scheduling.stop();
     assertThat(scheduling.isRunning()).isFalse();
   }
 }

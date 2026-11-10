@@ -41,6 +41,29 @@ public record WindowGeometry(int alignedSlices, long sliceMs, long windowMs, lon
   private static final int MAX_ALIGNED_SLICES = 1 << 16;
 
   /**
+   * Validates the mask arithmetic at the canonical-constructor boundary: {@link #of} is the only
+   * in-module caller, but the public constructor must not be able to publish a geometry the ring
+   * cannot index.
+   */
+  public WindowGeometry {
+    Assert.isTrue(alignedSlices > 0, "alignedSlices must be positive, got " + alignedSlices);
+    Assert.isTrue(
+      (alignedSlices & (alignedSlices - 1)) == 0,
+      "alignedSlices must be a power of two, got " + alignedSlices
+    );
+    Assert.isTrue(
+      alignedSlices <= MAX_ALIGNED_SLICES,
+      "alignedSlices must be <= " + MAX_ALIGNED_SLICES + ", got " + alignedSlices
+    );
+    Assert.isTrue(sliceMs > 0L, "sliceMs must be positive, got " + sliceMs);
+    Assert.isTrue(
+      sliceMs <= Long.MAX_VALUE / alignedSlices,
+      "alignedSlices * sliceMs must fit in a long, got alignedSlices=" + alignedSlices + ", sliceMs=" + sliceMs
+    );
+    Assert.isTrue(windowMs == alignedSlices * sliceMs, "windowMs must equal alignedSlices * sliceMs, got " + windowMs);
+  }
+
+  /**
    * Derives the geometry from the raw configuration.
    *
    * @param configuredMs  configured window length in milliseconds

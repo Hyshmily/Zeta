@@ -54,9 +54,9 @@ class DetectionSettingsTest {
     assertThat(settings.window().windowMs()).isEqualTo(992L);
     assertThat(settings.ruleSet().defaultRule().hotCount()).as("ceil(100 * 992 / 1000)").isEqualTo(100L);
     assertThat(settings.ruleSet().defaultRule().coolCount()).as("ceil(50 * 992 / 1000)").isEqualTo(50L);
-    assertThat(settings.ruleSet().defaultRule().regex())
-      .as("the unmatched default never runs a matcher, so it must not compile one")
-      .isNull();
+    assertThat(settings.ruleSet().defaultRule().matches("any:key"))
+      .as("the default rule is match-all even when called directly")
+      .isTrue();
   }
 
   /**
@@ -117,6 +117,30 @@ class DetectionSettingsTest {
     DetectionSettings settings = DetectionSettings.of(properties);
 
     assertThat(settings.ruleSet().defaultRule().id()).isEqualTo("defaults");
+    assertThat(settings.ruleSet().defaultRule().hotCount()).isEqualTo(1L);
+    assertThat(settings.ruleSet().defaultRule().matches("any")).isTrue();
+  }
+
+  /**
+   * The LOW_QPS re-check interval is not read by COOL_FOR_EXPIRE. A short window must not force the
+   * operator to shrink an unrelated interval just to pass startup validation.
+   */
+  @Test
+  void expireOnlyRulesIgnoreTheLowQpsCheckIntervalBounds() {
+    WorkerProperties properties = new WorkerProperties();
+    WorkerProperties.Detection detection = properties.getDetection();
+    detection.getWindow().setDuration(Duration.ofMillis(500));
+    detection.getWindow().setSlices(16);
+    detection.getWindow().setRetention(Duration.ofSeconds(1));
+    detection.getDefaults().setHotQps(100);
+    WorkerProperties.Cool cool = new WorkerProperties.Cool();
+    cool.setStrategy(CoolStrategy.COOL_FOR_EXPIRE);
+    cool.setCoolAfter(Duration.ofSeconds(1));
+    detection.getDefaults().setCool(cool);
+
+    DetectionSettings settings = DetectionSettings.of(properties);
+
+    assertThat(settings.ruleSet().defaultRule().isExpire()).isTrue();
   }
 
   @Test

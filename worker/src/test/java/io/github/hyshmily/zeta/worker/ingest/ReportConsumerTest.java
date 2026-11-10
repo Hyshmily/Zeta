@@ -15,6 +15,7 @@
  */
 package io.github.hyshmily.zeta.worker.ingest;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
@@ -30,6 +31,7 @@ import io.github.hyshmily.zeta.util.TimeSource;
 import io.github.hyshmily.zeta.worker.detection.DetectionPipeline;
 import io.github.hyshmily.zeta.worker.dispatch.ingest.ReportConsumer;
 import io.github.hyshmily.zeta.worker.metrics.WorkerDetectionMetrics;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.util.HashMap;
 import java.util.Map;
 import org.junit.jupiter.api.BeforeEach;
@@ -58,6 +60,13 @@ class ReportConsumerTest {
 
   private static ReportMessage message(long epoch, Map<String, Long> counts) {
     return new ReportMessage(1L, "app", TimeSource.currentTimeMillis(), epoch, counts);
+  }
+
+  @Test
+  void ignoresANullMessageWithoutTouchingThePipeline() {
+    consumer(0).onReport(null);
+
+    verifyNoMoreInteractions(pipeline);
   }
 
   @Test
@@ -98,6 +107,30 @@ class ReportConsumerTest {
     verify(pipeline, never()).onReport(eq("zero"), eq(0L), anyLong(), anyLong());
     verify(pipeline, never()).onReport(eq("negative"), eq(-1L), anyLong(), anyLong());
     verify(pipeline, never()).onReport(eq("null"), eq(0L), anyLong(), anyLong());
+  }
+
+  /**
+   * A batch with no well-formed entry never reaches the pipeline; it must not add a near-zero
+   * sample to the evaluation timer. One valid entry resets the sample count to one.
+   */
+  @Test
+  void anAllMalformedBatchDoesNotRecordAnEvaluationSample() {
+    SimpleMeterRegistry registry = new SimpleMeterRegistry();
+    try {
+      ReportConsumer consumer = new ReportConsumer(pipeline, EPOCH, 0L, new WorkerDetectionMetrics(registry));
+      Map<String, Long> counts = new HashMap<>();
+      counts.put("zero", 0L);
+      counts.put("negative", -1L);
+      counts.put("null", null);
+
+      consumer.onReport(message(EPOCH, counts));
+      assertThat(registry.get(WorkerDetectionMetrics.METRIC_REPORT_EVAL).timer().count()).isZero();
+
+      consumer.onReport(message(EPOCH, Map.of("ok", 1L)));
+      assertThat(registry.get(WorkerDetectionMetrics.METRIC_REPORT_EVAL).timer().count()).isEqualTo(1L);
+    } finally {
+      registry.close();
+    }
   }
 
   @Test

@@ -54,7 +54,7 @@ class RuleResolverTest {
 
     assertThat(resolver.binding("r").matches()).isEqualTo(2);
     assertThat(
-      registry.get(WorkerDetectionMetrics.METRIC_RULE_MATCHES).tag("rule", "r").functionCounter().count()
+      registry.get(WorkerDetectionMetrics.METRIC_RULE_MATCHES).tag("rule", "r").counter().count()
     ).isEqualTo(2.0d);
   }
 
@@ -65,7 +65,7 @@ class RuleResolverTest {
 
     assertThat(resolver.binding("defaults").matches()).isEqualTo(2);
     assertThat(
-      registry.get(WorkerDetectionMetrics.METRIC_RULE_MATCHES).tag("rule", "defaults").functionCounter().count()
+      registry.get(WorkerDetectionMetrics.METRIC_RULE_MATCHES).tag("rule", "defaults").counter().count()
     ).isEqualTo(2.0d);
   }
 
@@ -77,24 +77,24 @@ class RuleResolverTest {
   void publishingARuleSetRetiresTheRemovedRulesCounters() {
     assertThat(resolver.resolveIfEligible("k1", 5)).isSameAs(resolver.binding("r"));
     assertThat(
-      registry.find(WorkerDetectionMetrics.METRIC_RULE_MATCHES).tag("rule", "r").functionCounter()
+      registry.find(WorkerDetectionMetrics.METRIC_RULE_MATCHES).tag("rule", "r").counter()
     ).isNotNull();
     RuleBinding retired = resolver.binding("r");
 
     HotKeyRule replacement = new HotKeyRule("replacement", MatchType.PREFIX, "k", 0, 0, 5, 0L, 0L, 60_000L, null);
     resolver.publish(RuleSet.of(List.of(replacement), defaults));
 
-    assertThat(registry.find(WorkerDetectionMetrics.METRIC_RULE_MATCHES).tag("rule", "r").functionCounter())
+    assertThat(registry.find(WorkerDetectionMetrics.METRIC_RULE_MATCHES).tag("rule", "r").counter())
       .as("the retired rule's meter is removed from the registry")
       .isNull();
 
     retired.recordCool();
     retired.recordPromotion();
-    assertThat(registry.find(WorkerDetectionMetrics.METRIC_RULE_COOLS).tag("rule", "r").functionCounter())
+    assertThat(registry.find(WorkerDetectionMetrics.METRIC_RULE_COOLS).tag("rule", "r").counter())
       .as("a late cool-down does not resurrect the retired meter")
       .isNull();
     assertThat(
-      registry.find(WorkerDetectionMetrics.METRIC_RULE_PROMOTIONS).tag("rule", "r").functionCounter()
+      registry.find(WorkerDetectionMetrics.METRIC_RULE_PROMOTIONS).tag("rule", "r").counter()
     ).isNull();
   }
 
@@ -116,7 +116,7 @@ class RuleResolverTest {
 
     after.recordPromotion();
     assertThat(before.promotions()).as("the old entry and the new binding share the counters").isEqualTo(2);
-    assertThat(registry.find(WorkerDetectionMetrics.METRIC_RULE_PROMOTIONS).tag("rule", "r").functionCounter())
+    assertThat(registry.find(WorkerDetectionMetrics.METRIC_RULE_PROMOTIONS).tag("rule", "r").counter())
       .as("a retained rule keeps its meter")
       .isNotNull();
   }

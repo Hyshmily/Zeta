@@ -16,6 +16,7 @@
 package io.github.hyshmily.zeta.worker.detection.rule;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.util.List;
 import org.junit.jupiter.api.Test;
@@ -77,6 +78,36 @@ class RulePrecedenceTest {
       rule("first", MatchType.PREFIX, "user:", 0, 3)
     );
     assertThat(set.resolve("user:1").id()).isEqualTo("first");
+  }
+
+  @Test
+  void duplicateRuleIdsAreRejectedByTheFactory() {
+    HotKeyRule first = rule("same", MatchType.PREFIX, "user:", 0, 0);
+    HotKeyRule second = rule("same", MatchType.PREFIX, "account:", 0, 1);
+
+    assertThatThrownBy(() -> setOf(first, second))
+      .isInstanceOf(IllegalArgumentException.class)
+      .hasMessageContaining("same");
+  }
+
+  @Test
+  void aConfiguredRuleThatReusesTheDefaultIdIsRejectedByTheFactory() {
+    assertThatThrownBy(() -> setOf(rule("defaults", MatchType.PREFIX, "user:", 0, 0)))
+      .isInstanceOf(IllegalArgumentException.class)
+      .hasMessageContaining("defaults");
+  }
+
+  /**
+   * A delimiter inside an operator-supplied id or pattern must not let two different rules produce
+   * the same canonical definition: that would collide their fingerprint and equality.
+   */
+  @Test
+  void delimiterCharactersInAnIdOrPatternCannotCollideTwoDefinitions() {
+    HotKeyRule first = rule("a|PREFIX", MatchType.PREFIX, "x", 0, 0);
+    HotKeyRule second = rule("a", MatchType.PREFIX, "PREFIX|x", 0, 0);
+
+    assertThat(first.definition()).isNotEqualTo(second.definition());
+    assertThat(first).isNotEqualTo(second);
   }
 
   @Test

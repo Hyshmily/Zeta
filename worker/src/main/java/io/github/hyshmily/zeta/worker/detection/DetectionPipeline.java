@@ -70,7 +70,8 @@ public class DetectionPipeline {
    * @param registry    the authoritative HOT set
    * @param dispatcher  the single decision submission point
    * @param retentionMs idle-window reclamation threshold
-   * @param enabled     {@code false} skips evaluation and counts the reports
+   * @param enabled     the detection switch; the ingest consumer skips evaluation and counts the
+   *                    reports when it is {@code false}
    */
   public DetectionPipeline(
     SlidingWindowDetector detector,
@@ -101,6 +102,10 @@ public class DetectionPipeline {
   /**
    * Feeds one reported count with the batch's precomputed window slice.
    *
+   * <p>
+   * The caller owns the enablement gate: {@code ReportConsumer} calls this only while {@link #enabled()} is
+   * {@code true}, so the report path pays no second switch.
+   *
    * @param key      the cache key
    * @param count    the accesses reported for it; callers drop non-positive
    *                 counts before this point
@@ -126,18 +131,18 @@ public class DetectionPipeline {
     if (binding == null) {
       return;
     }
-    HE promoted = registry.promoteEntry(key, binding, nowMs);
+    HE promoted = registry.promote(key, binding, nowMs);
     if (promoted != null) {
       // From here the dispatcher owns delivery and returns the seat if the HOT is refused or dropped
-      // before it reaches the broker (design decisions: decision delivery). The entry reference *is*
-      // the promotion, so the dispatcher marks that exact object rather than a second map lookup.
-      dispatcher.submitPromotion(promoted);
+      // before it reaches the broker (design decisions: decision delivery). The entry carries the
+      // key and version, so the decision needs no second map lookup.
+      dispatcher.submit(promoted);
     }
   }
 
   /**
-   * Periodic housekeeping: reclaim idle windows, then repair overdue cool-down
-   * timers.
+   * Periodic housekeeping: reclaim idle windows, then re-link overdue cool-down
+   * checks.
    *
    * <p>
    * A rejected admission at the tracked-key cap arms the reclaimer's relief
@@ -158,7 +163,7 @@ public class DetectionPipeline {
     } else {
       detector.evictStale(retentionMs);
     }
-    return registry.repairOverdue(dispatcher::submit);
+    return registry.repair();
   }
 
   /** @return whether evaluation is enabled */

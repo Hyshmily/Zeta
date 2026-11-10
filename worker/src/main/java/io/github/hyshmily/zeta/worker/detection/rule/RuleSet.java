@@ -19,8 +19,10 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.Set;
 
 /**
  * An immutable, totally ordered rule snapshot plus its derived promotion floor and fingerprint.
@@ -68,11 +70,11 @@ public final class RuleSet {
    *
    * <p>Rule ids must be unique across {@code rules} and the default rule: the resolver keys its
    * counters and meter series by id, so a duplicate would make two rules share one counter set.
-   * The configuration gate rejects a duplicate; this factory trusts that boundary.
    *
    * @param rules       the configured rules, in any order
    * @param defaultRule the rule unmatched keys resolve to; always present
    * @return the immutable snapshot
+   * @throws IllegalArgumentException when the default is missing or two rules share an id
    */
   public static RuleSet of(List<HotKeyRule> rules, HotKeyRule defaultRule) {
     if (defaultRule == null) {
@@ -80,6 +82,13 @@ public final class RuleSet {
     }
     List<HotKeyRule> ordered = new ArrayList<>(rules);
     ordered.sort(null);
+    Set<String> ids = new HashSet<>(ordered.size() + 1);
+    ids.add(defaultRule.id());
+    for (HotKeyRule rule : ordered) {
+      if (!ids.add(rule.id())) {
+        throw new IllegalArgumentException("duplicate rule id: " + rule.id());
+      }
+    }
     return new RuleSet(ordered, defaultRule);
   }
 

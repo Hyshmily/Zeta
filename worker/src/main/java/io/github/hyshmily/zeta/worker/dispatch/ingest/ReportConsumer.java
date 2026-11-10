@@ -84,18 +84,21 @@ public class ReportConsumer {
   }
 
   /**
-   * Main entry point for batched report messages.
+   * Main entry point for batched report messages. A {@code null} message is ignored.
    *
    * @param message the deserialized message containing counts for multiple keys
    */
   @RabbitListener(queues = "#{@reportQueue.name}", containerFactory = "reportListenerContainerFactory")
   public void onReport(ReportMessage message) {
+    if (message == null) {
+      return;
+    }
     try {
       consume(message);
     } catch (Exception e) {
       log.error(
         "Uncaught exception in onReport, discarding message to prevent poison-message requeue loop: appName={}",
-        message != null ? message.appName() : "null",
+        message.appName(),
         e
       );
     }
@@ -185,7 +188,11 @@ public class ReportConsumer {
       );
     }
 
-    metrics.recordReportEval(evalStartNanos);
+    // A batch with no well-formed entry never reached the pipeline: recording its near-zero
+    // duration would dilute the evaluation sample with batches that did no evaluation.
+    if (malformed < keyCounts.size()) {
+      metrics.recordReportEval(evalStartNanos);
+    }
   }
 
   /**

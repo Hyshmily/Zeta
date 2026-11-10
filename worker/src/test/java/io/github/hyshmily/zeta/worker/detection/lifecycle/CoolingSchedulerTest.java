@@ -87,14 +87,11 @@ class CoolingSchedulerTest {
   @Test
   void aDueCheckIsEvaluatedOnceAndItsCoolIsSubmitted() {
     scheduler = new CoolingScheduler(wheels, registry, dispatcher);
-    assertThat(registry.promoteEntry("k1", binding, TimeSource.monotonicMillis())).isNotNull();
+    assertThat(registry.promote("k1", binding, TimeSource.monotonicMillis())).isNotNull();
     assertThat(scheduler.scheduled()).isEqualTo(1);
 
     verify(dispatcher, timeout(2_000)).submit(
-      argThat(
-        (HotKeyRegistry.CoolDecision cool) ->
-          cool != null && cool.decision().type() == ZetaDecision.DecisionType.COOL && cool.replacedPendingHot()
-      )
+      argThat((ZetaDecision cool) -> cool != null && cool.type() == ZetaDecision.DecisionType.COOL)
     );
     assertThat(registry.isHot("k1")).isFalse();
     assertThat(scheduler.scheduled()).isZero();

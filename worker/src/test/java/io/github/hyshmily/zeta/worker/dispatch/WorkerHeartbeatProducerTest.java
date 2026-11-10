@@ -20,12 +20,18 @@ import static io.github.hyshmily.zeta.constants.ZetaConstants.Amqp.HEADER_HEARTB
 import static io.github.hyshmily.zeta.constants.ZetaConstants.Amqp.HEADER_HEARTBEAT_READY;
 import static io.github.hyshmily.zeta.constants.ZetaConstants.Routing.KEY_HEARTBEAT;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 
+import io.github.hyshmily.zeta.util.TimeSource;
 import io.github.hyshmily.zeta.worker.detection.lifecycle.HotKeyRegistry;
 import io.github.hyshmily.zeta.worker.dispatch.connection.WorkerHeartbeatProducer;
 import io.github.hyshmily.zeta.worker.dispatch.connection.WorkerIdentity;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
@@ -67,6 +73,44 @@ class WorkerHeartbeatProducerTest {
     assertThat(message.getMessageProperties().getHeaders().get(HEADER_HEARTBEAT_READY)).isEqualTo(true);
     assertThat(message.getMessageProperties().getHeaders().get(HEADER_APP_NAME)).isEqualTo("tenant-a");
     assertThat(new String(message.getBody())).isEqualTo("worker-1");
+  }
+
+  /**
+   * A broker outage at startup must not consume the ready grace: the anchor moves only after a
+   * heartbeat actually reaches the template.
+   */
+  @Test
+  void anchorsTheGraceAtTheFirstSuccessfulSend() {
+    AtomicInteger attempts = new AtomicInteger();
+    doAnswer(invocation -> {
+      if (attempts.incrementAndGet() == 1) {
+        throw new RuntimeException("broker down");
+      }
+      return null;
+    })
+      .when(rabbitTemplate)
+      .send(anyString(), anyString(), any(Message.class));
+    WorkerHeartbeatProducer producer = new WorkerHeartbeatProducer(
+      rabbitTemplate,
+      "hb.exchange",
+      new WorkerIdentity("worker-1", 7L),
+      registry,
+      10L,
+      null
+    );
+
+    try {
+      producer.sendHeartbeat();
+      TimeSource.setTimeOffsetForTest(0, 100L);
+      producer.sendHeartbeat();
+
+      verify(rabbitTemplate, times(2)).send(eq("hb.exchange"), eq(KEY_HEARTBEAT + "worker-1"), messageCaptor.capture());
+      assertThat(messageCaptor.getAllValues().get(1).getMessageProperties().getHeaders().get(HEADER_HEARTBEAT_READY))
+        .as("the failed first send did not anchor the grace")
+        .isEqualTo(false);
+    } finally {
+      TimeSource.setTimeOffsetForTest(0, 0);
+    }
   }
 
   @Test

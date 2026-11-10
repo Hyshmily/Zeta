@@ -217,7 +217,7 @@
     {
       "name": "zeta.worker.detection.cooling.low-qps-check-interval",
       "type": "java.time.Duration",
-      "description": "LOW_QPS re-check period. Between one slice and the configured window duration.",
+      "description": "LOW_QPS re-check period. Between one slice and the configured window duration. Used only when at least one rule selects COOL_FOR_LOW_QPS.",
       "defaultValue": "1s"
     },
     {

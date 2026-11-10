@@ -25,7 +25,6 @@ import java.util.concurrent.Semaphore;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.concurrent.locks.ReentrantLock;
-import java.util.function.Consumer;
 import java.util.function.ToLongFunction;
 import org.jspecify.annotations.Nullable;
 
@@ -73,39 +72,14 @@ import org.jspecify.annotations.Nullable;
 public class HotKeyRegistry {
 
   /**
-   * A cool-down transition: the decision to deliver and whether the HOT promotion
-   * it replaced had
-   * not yet reached the dispatcher when the COOL was created.
-   *
-   * <p>
-   * The flag is necessary because a promotion and its submission are separate
-   * steps: a cool-down
-   * can remove the entry before the report thread submits the HOT. Such a COOL
-   * would demote a key
-   * the cluster was never told was hot, so the funnel may elide it when it has no
-   * accepted record
-   * for the key.
-   *
-   * @param decision           the COOL decision
-   * @param replacedPendingHot whether the replaced promotion's HOT never entered
-   *                           the dispatcher
-   */
-  public record CoolDecision(ZetaDecision decision, boolean replacedPendingHot) {
-  }
-
-  /**
-   * How far past its deadline a check may be before the repair sweep treats it as
-   * lost.
+   * How far past its deadline a check may be before the repair sweep re-links it.
    *
    * <p>
    * A check that reaches its deadline is normally taken by the owning wheel
-   * thread within the hand-off latency.
-   * Repairing inside that window would force a schedule that is merely late and
-   * report the cool-down as
-   * {@link WorkerDetectionMetrics.CoolReason#SWEEP} instead of its real cause. A
-   * genuinely lost check is late by one
-   * sweep interval either way, so the grace adds nothing beyond the delay the
-   * sweep cadence already allows.
+   * thread within the hand-off latency. Re-linking inside that window would
+   * move a node that is merely late and wake its owner for no reason. A
+   * genuinely lost check is late by one sweep interval either way, so the grace
+   * adds nothing beyond the delay the sweep cadence already allows.
    */
   private static final long REPAIR_GRACE_MS = 1_000L;
 
@@ -151,11 +125,12 @@ public class HotKeyRegistry {
    * @param wheels          the cool-down wheels the entries are scheduled on
    */
   public HotKeyRegistry(
-      int capacity,
-      WorkerDetectionMetrics metrics,
-      AtomicLong decisionVersion,
-      ToLongFunction<String> windowSum,
-      CoolingWheels wheels) {
+    int capacity,
+    WorkerDetectionMetrics metrics,
+    AtomicLong decisionVersion,
+    ToLongFunction<String> windowSum,
+    CoolingWheels wheels
+  ) {
     if (capacity < 1) {
       throw new IllegalArgumentException("max-active-hot-keys must be >= 1");
     }
@@ -211,7 +186,7 @@ public class HotKeyRegistry {
    */
   public boolean isCurrent(String key, long version) {
     HE entry = hotKeys.get(key);
-    return entry != null && entry.promotedVersion() == version;
+    return entry != null && entry.version() == version;
   }
 
   /**
@@ -238,7 +213,7 @@ public class HotKeyRegistry {
    *         no seat is available
    */
   @Nullable
-  public HE promoteEntry(String key, RuleBinding binding, long now) {
+  public HE promote(String key, RuleBinding binding, long now) {
     int hash = spread(key);
     ReentrantLock lock = stripe(hash);
     lock.lock();
@@ -295,9 +270,13 @@ public class HotKeyRegistry {
       if (entry != null) {
         hotKeys.remove(key, entry);
         entry.retire();
+      }
+      // The permit precedes the wheel unlink, like removeAndRelease: a failure during
+      // deschedule must not leak the seat.
+      permits.release();
+      if (entry != null) {
         wheels.select(hash).deschedule(entry);
       }
-      permits.release();
       throw e;
     }
   }
@@ -326,15 +305,15 @@ public class HotKeyRegistry {
    * {@code promotions == cools + aborted + active} checkable.
    *
    * @param key     the cache key
-   * @param version the {@code promotedVersion} of the promotion to undo
+   * @param version the decision version of the promotion to undo
    */
-  public void abortPromotion(String key, long version) {
+  public void abort(String key, long version) {
     int hash = spread(key);
     ReentrantLock lock = stripe(hash);
     lock.lock();
     try {
       HE entry = hotKeys.get(key);
-      if (entry != null && entry.promotedVersion() == version && removeAndRelease(entry, wheels.select(hash))) {
+      if (entry != null && entry.version() == version && removeAndRelease(entry, wheels.select(hash))) {
         entry.binding().recordAbort();
         metrics.countAbortedPromotion();
       }
@@ -347,79 +326,69 @@ public class HotKeyRegistry {
    * Evaluates one due check, applying its verdict.
    *
    * <p>
-   * The only transition point besides {@link #promoteEntry} and
-   * {@link #abortPromotion}. The fired entry is re-checked
-   * under the lock: a cool or an abort since it was scheduled retired it, and the
-   * tombstone discards the event without
-   * a second map lookup. A {@code forced} evaluation is the sweep's repair pass,
-   * but it does not skip the deadline:
-   * the sweep's outer check is only a hint, and a wheel owner or an earlier
-   * repair may have re-armed the entry before
-   * this call took the stripe. Re-checking under the lock is what keeps one due
-   * check from being evaluated twice —
-   * the second evaluation would re-read the window and move {@code nextCheckAt}
-   * again.
+   * The only transition point besides {@link #promote} and {@link #abort}. The
+   * fired entry is re-checked under the lock: a cool or an abort since it was
+   * scheduled retired it, and the tombstone discards the event without a second
+   * map lookup. The wheel's owner is the only caller; a concurrent re-arm that
+   * moved {@code nextCheckAt} forward makes this evaluation re-link the fresh
+   * deadline instead of reading the window. The owner also clears the node's
+   * {@code DETACHED} hand-off here, so a repair that lost the stripe race sees a
+   * decided entry instead of re-linking it behind this evaluation.
    *
    * <p>
    * The re-arm and the cool-down both move the entry's wheel node inside this
-   * critical section. That is what makes
-   * the wheel's deadline, the map membership and the seat permit one atomic
-   * transition; the wheel's advance path
-   * detaches under its own lock and evaluates after releasing it, so the two
-   * locks never nest in the opposite order.
+   * critical section. That is what makes the wheel's deadline, the map
+   * membership and the seat permit one atomic transition; the wheel's advance
+   * path detaches under its own lock and evaluates after releasing it, so the
+   * two locks never nest in the opposite order.
    *
    * <p>
-   * A wheel-fired check ({@code forced == false}) records its lateness against
-   * the deadline this call is about to
-   * replace. The repair sweep is excluded: its one-second grace is deliberate.
+   * The check records its lateness against the deadline this call is about to
+   * replace.
    *
-   * @param fired  the entry the wheel fired; must have come from this registry
-   * @param forced {@code true} for the sweep's repair pass
-   * @return the cool-down decision when this call released the seat, otherwise
+   * @param fired the entry the wheel fired; must have come from this registry
+   * @return the COOL decision when this call released the seat, otherwise
    *         {@code null}
    */
   @Nullable
-  public CoolDecision evaluate(HE fired, boolean forced) {
+  public ZetaDecision evaluate(HE fired) {
     int hash = spread(fired.key());
     ReentrantLock lock = stripe(hash);
     TimerWheel wheel = wheels.select(hash);
     lock.lock();
     try {
+      // The wheel handed the node over as DETACHED and left it that way: a concurrent repair must
+      // still defer to this evaluation. The stripe lock now serializes the two, so the owner can
+      // clear the state before re-linking or classifying the entry.
+      if (fired.wheelState == TimerWheel.DETACHED) {
+        fired.wheelState = TimerWheel.UNSCHEDULED;
+      }
       if (fired.retired()) {
         return null;
       }
 
       long now = TimeSource.monotonicMillis();
       if (now < fired.nextCheckAt) {
+        // A concurrent re-arm moved the deadline after the wheel detached the node. Re-link the
+        // fresh deadline; the node is UNSCHEDULED, so this is the schedule, not a move.
         wheel.reschedule(fired);
         return null;
       }
 
-      if (!forced) {
-        // The check is due and this call owns it. Sample the lateness against the
-        // deadline that is about to be
-        // replaced; a concurrent repair cannot move it under the same stripe lock. The
-        // repair sweep's grace is
-        // deliberate, so only a wheel-fired check reports lateness.
-        metrics.recordCoolingLateness(Math.max(0L, now - fired.nextCheckAt));
-      }
+      // The check is due and this call owns it. Sample the lateness against the deadline that is
+      // about to be replaced; a concurrent repair cannot move it under the same stripe lock.
+      metrics.recordCoolingLateness(Math.max(0L, now - fired.nextCheckAt));
 
       RuleBinding binding = fired.binding();
       return switch (classifyDue(fired, binding, now)) {
-        case EXPIRE -> coolLocked(
-            fired,
-            wheel,
-            forced ? WorkerDetectionMetrics.CoolReason.SWEEP : WorkerDetectionMetrics.CoolReason.EXPIRE);
+        case EXPIRE -> coolLocked(fired, wheel, WorkerDetectionMetrics.CoolReason.EXPIRE);
         case RECOVERED -> {
           fired.belowSince = HE.NOT_BELOW;
           rearm(wheel, fired, binding.rule().firstDue(now));
           metrics.countRecheck();
           yield null;
         }
-        case COOL -> coolLocked(
-            fired,
-            wheel,
-            forced ? WorkerDetectionMetrics.CoolReason.SWEEP : WorkerDetectionMetrics.CoolReason.LOW_QPS);
+        case COOL -> coolLocked(fired, wheel, WorkerDetectionMetrics.CoolReason.LOW_QPS);
         case REARM -> {
           if (fired.belowSince == HE.NOT_BELOW) {
             fired.belowSince = now;
@@ -461,49 +430,53 @@ public class HotKeyRegistry {
   }
 
   /**
-   * Re-evaluates every entry whose registered check is overdue by more than
+   * Re-links every entry whose registered check is overdue by more than
    * {@link #REPAIR_GRACE_MS}.
    *
    * <p>
-   * A stalled or failed wheel advance leaves {@code nextCheckAt} in the past;
-   * this pass is what bounds the damage to one
-   * sweep interval. Entries with a healthy long timer ({@code cool-after: 10m})
-   * are skipped by one volatile comparison.
-   * The grace keeps the pass off a check that only just reached its deadline:
-   * that one is still owned by a wheel
-   * thread, and forcing it would misreport the cool-down's cause as
-   * {@code sweep}. The scan is only a hint: {@link
-   * #evaluate} re-checks {@code nextCheckAt} under the stripe lock, so a check
-   * the wheel owner already handled between
-   * the scan and the lock is left alone.
+   * A failed evaluation or a missed link leaves {@code nextCheckAt} in the past;
+   * this pass bounds the damage to one sweep interval by re-linking the node.
+   * Entries with a healthy long timer ({@code cool-after: 10m}) are skipped by
+   * one volatile comparison. The wheel stays the only evaluator: re-linking a
+   * lost node wakes its owner, which applies the real verdict and the real cool
+   * reason. The scan is only a hint: the stripe lock re-checks
+   * {@code nextCheckAt}, so a check the wheel owner already handled between the
+   * scan and the lock is left alone. A wheel owner that dies leaves its buckets
+   * without an advancing thread; this pass cannot replace the owner, and the
+   * App's hot hard TTL bounds the keys it held.
    *
-   * @param decisions sink for the cool-down decisions this pass produces
    * @return the number of entries the scan selected as overdue; a concurrent
-   *         re-arm can still make an individual
-   *         evaluation a no-op
+   *         re-arm can still make an individual re-link a no-op
    */
-  public int repairOverdue(Consumer<CoolDecision> decisions) {
+  public int repair() {
     long now = TimeSource.monotonicMillis();
     int repaired = 0;
     for (HE candidate : hotKeys.values()) {
       // Subtract from the clock rather than adding to the deadline: a saturated
-      // far-future
-      // deadline must stay future instead of wrapping negative and looking overdue.
+      // far-future deadline must stay future instead of wrapping negative and looking overdue.
       if (candidate.nextCheckAt > now - REPAIR_GRACE_MS) {
         continue;
       }
 
-      repaired++;
-      CoolDecision decision = evaluate(candidate, true);
-      if (decision != null) {
-        decisions.accept(decision);
+      int hash = spread(candidate.key());
+      ReentrantLock lock = stripe(hash);
+      lock.lock();
+      try {
+        if (candidate.retired() || candidate.nextCheckAt > now - REPAIR_GRACE_MS) {
+          continue;
+        }
+        // The wheel is the only evaluator: re-link the lost node and wake its owner.
+        wheels.select(hash).reschedule(candidate);
+        repaired++;
+      } finally {
+        lock.unlock();
       }
     }
     return repaired;
   }
 
   /** @return the number of keys currently holding a seat */
-  public int activeCount() {
+  public int size() {
     return hotKeys.size();
   }
 
@@ -513,12 +486,12 @@ public class HotKeyRegistry {
   }
 
   /** @return cumulative promotions refused because every seat was taken */
-  public long rejectedCount() {
+  public long rejected() {
     return rejected.sum();
   }
 
   /**
-   * Free seats. With {@link #activeCount()} this must always sum to
+   * Free seats. With {@link #size()} this must always sum to
    * {@link #capacity()}.
    *
    * @return the semaphore's available permits
@@ -563,7 +536,7 @@ public class HotKeyRegistry {
    *
    * <p>
    * The two-argument remove is the whole guard: {@code false} means another
-   * thread (a sweep, a competing due check)
+   * thread (a competing due check)
    * already committed the cool-down, and this call must not release a second
    * permit. Called under the key lock.
    *
@@ -571,15 +544,13 @@ public class HotKeyRegistry {
    *         gone
    */
   @Nullable
-  private CoolDecision coolLocked(HE entry, TimerWheel wheel, WorkerDetectionMetrics.CoolReason reason) {
+  private ZetaDecision coolLocked(HE entry, TimerWheel wheel, WorkerDetectionMetrics.CoolReason reason) {
     if (!removeAndRelease(entry, wheel)) {
       return null;
     }
     entry.binding().recordCool();
     metrics.countCoolReason(reason);
-    return new CoolDecision(
-        ZetaDecision.cool(entry.key(), decisionVersion.incrementAndGet()),
-        !entry.promotionSubmitted());
+    return ZetaDecision.cool(entry.key(), decisionVersion.incrementAndGet());
   }
 
   /**

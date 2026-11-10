@@ -185,31 +185,49 @@ public record HotKeyRule(
    * it is only the final precedence tiebreak, and the snapshot's ordered rule list already reflects
    * it, so a {@link RuleBinding} does not depend on it.
    *
-   * <p>{@link RuleSet} fingerprints this text, and {@link RuleResolver} compares it to decide
-   * whether a published rule is unchanged. Comparing text rather than the record keeps a
-   * recompiled {@code Pattern} — the same expression in a new object — from rebuilding a binding
-   * that is otherwise identical.
+   * <p>{@link RuleSet} fingerprints this text. Every string field is length-prefixed, so an
+   * operator-supplied {@code id} or {@code pattern} containing a delimiter cannot make two
+   * different rules produce the same definition. {@link RuleResolver} compares fields, not this
+   * text, when it decides whether a published rule is unchanged.
    *
    * @return the canonical text, without a trailing newline
    */
   String definition() {
-    return id + "|" + type + "|" + pattern + "|" + priority + "|" + hotCount + "|" + describeCool();
+    return String.join(
+      "|",
+      id.length() + ":" + id,
+      type.name(),
+      pattern.length() + ":" + pattern,
+      Integer.toString(priority),
+      Long.toString(hotCount),
+      describeCool()
+    );
   }
 
   /**
-   * Two rules are equal when their canonical definitions and configuration order match. The
+   * Two rules are equal when every behavioural field and the configuration order match. The
    * compiled {@link #regex} is deliberately excluded: it is fully determined by {@code type} and
    * {@code pattern}, and {@link Pattern} uses identity equality, so including it would make two
-   * identically configured regex rules compare unequal.
+   * identically configured regex rules compare unequal. Comparing the fields directly keeps
+   * equality allocation-free; {@link #definition()} is only the fingerprint's canonical text.
    *
    * @param other the object to compare with
-   * @return {@code true} when both rules produce the same canonical definition and order
+   * @return {@code true} when both rules carry the same fields and order
    */
   @Override
   public boolean equals(Object other) {
     return (
       this == other ||
-      (other instanceof HotKeyRule that && order == that.order && definition().equals(that.definition()))
+      (other instanceof HotKeyRule that &&
+        priority == that.priority &&
+        order == that.order &&
+        hotCount == that.hotCount &&
+        coolCount == that.coolCount &&
+        lowQpsForMs == that.lowQpsForMs &&
+        checkIntervalMs == that.checkIntervalMs &&
+        type == that.type &&
+        id.equals(that.id) &&
+        pattern.equals(that.pattern))
     );
   }
 
@@ -218,7 +236,16 @@ public record HotKeyRule(
    */
   @Override
   public int hashCode() {
-    return 31 * definition().hashCode() + order;
+    int result = id.hashCode();
+    result = 31 * result + type.hashCode();
+    result = 31 * result + pattern.hashCode();
+    result = 31 * result + priority;
+    result = 31 * result + order;
+    result = 31 * result + Long.hashCode(hotCount);
+    result = 31 * result + Long.hashCode(coolCount);
+    result = 31 * result + Long.hashCode(lowQpsForMs);
+    result = 31 * result + Long.hashCode(checkIntervalMs);
+    return result;
   }
 
   /**

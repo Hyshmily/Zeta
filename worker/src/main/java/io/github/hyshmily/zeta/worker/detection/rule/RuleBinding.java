@@ -17,9 +17,7 @@ package io.github.hyshmily.zeta.worker.detection.rule;
 
 import io.github.hyshmily.zeta.util.Internal;
 import io.github.hyshmily.zeta.worker.metrics.WorkerDetectionMetrics;
-import io.micrometer.core.instrument.FunctionCounter;
-import java.lang.invoke.MethodHandles;
-import java.lang.invoke.VarHandle;
+import io.micrometer.core.instrument.Counter;
 import java.util.concurrent.atomic.LongAdder;
 
 /**
@@ -118,85 +116,48 @@ public final class RuleBinding {
 /**
  * The counters of one rule id.
  *
- * <p>{@code matches} is a {@link LongAdder}: every eligible report from any consumer thread
- * increments it, and a default rule concentrates all of that traffic on one counter. The other
- * three are plain {@code volatile long} fields updated through {@link VarHandle}s because their
- * writes happen under a key's stripe lock. The endpoint reads the values directly; the three
- * meters read them with this object as their Micrometer state and a non-capturing method
- * reference as their extraction function, so the meter's weak reference points at the object the
- * published binding retains.
+ * <p>{@code matches}, {@code promotions} and {@code cools} are Micrometer counters: the registry
+ * holds each meter strongly, so a scrape always finds the live value and no extra state object has
+ * to be kept reachable. {@code aborts} is endpoint-only and stays a {@link LongAdder}.
  */
 final class RuleCounters {
 
-  private static final VarHandle PROMOTIONS;
-  private static final VarHandle ABORTS;
-  private static final VarHandle COOLS;
+  private final LongAdder aborts = new LongAdder();
 
-  static {
-    // VarHandles are resolved once per class and are the only writers of the three stripe-guarded
-    // fields. A missing field is a programming error, so fail class initialization rather than
-    // leaving a counter that silently never advances.
-    try {
-      MethodHandles.Lookup lookup = MethodHandles.lookup();
-      PROMOTIONS = lookup.findVarHandle(RuleCounters.class, "promotions", long.class);
-      ABORTS = lookup.findVarHandle(RuleCounters.class, "aborts", long.class);
-      COOLS = lookup.findVarHandle(RuleCounters.class, "cools", long.class);
-    } catch (ReflectiveOperationException e) {
-      throw new ExceptionInInitializerError(e);
-    }
-  }
-
-  private final LongAdder matches = new LongAdder();
-
-  @SuppressWarnings("unused")
-  private volatile long promotions;
-
-  @SuppressWarnings("unused")
-  private volatile long aborts;
-
-  @SuppressWarnings("unused")
-  private volatile long cools;
-
-  private FunctionCounter promotionMeter;
-  private FunctionCounter matchMeter;
-  private FunctionCounter coolMeter;
+  private Counter matches;
+  private Counter promotions;
+  private Counter cools;
 
   /**
-   * Registers the three function counters that read this rule's fields. Called once, before the
-   * binding is published, so the hot path never sees an unbound counter.
-   *
-   * <p>Each meter's state object is this instance, which the published {@link RuleBinding} keeps
-   * reachable, and each extraction function is a non-capturing method reference the JVM holds as a
-   * singleton. A lambda created for the registration would be the meter's weak state object:
-   * collected after the first young collection, leaving a counter that never advances.
+   * Registers the three counters for this rule id. Called once, before the binding is published.
    *
    * @param metrics the detection meters
    * @param ruleId  the rule id that tags the series
    */
   void bind(WorkerDetectionMetrics metrics, String ruleId) {
-    this.matchMeter = metrics.ruleMatchCounter(ruleId, this, RuleCounters::matches);
-    this.promotionMeter = metrics.rulePromotionCounter(ruleId, this, RuleCounters::promotions);
-    this.coolMeter = metrics.ruleCoolCounter(ruleId, this, RuleCounters::cools);
+    this.matches = metrics.ruleMatches(ruleId);
+    this.promotions = metrics.rulePromotions(ruleId);
+    this.cools = metrics.ruleCools(ruleId);
   }
 
   /** @return the cumulative eligible-report count */
   long matches() {
-    return matches.sum();
+    return (long) matches.count();
   }
 
   /** @return the cumulative promotion count */
   long promotions() {
-    return (long) PROMOTIONS.getVolatile(this);
+    return (long) promotions.count();
   }
 
   /** @return the cumulative aborted-promotion count */
   long aborts() {
-    return (long) ABORTS.getVolatile(this);
+    return aborts.sum();
   }
 
   /** @return the cumulative cool-out count */
   long cools() {
-    return (long) COOLS.getVolatile(this);
+    return (long) cools.count();
   }
 
   /** Records one eligible report. */
@@ -206,28 +167,35 @@ final class RuleCounters {
 
   /** Records one promotion. */
   void promotion() {
-    PROMOTIONS.getAndAdd(this, 1L);
+    promotions.increment();
   }
 
   /** Records one aborted promotion. */
   void abort() {
-    ABORTS.getAndAdd(this, 1L);
+    aborts.increment();
   }
 
   /** Records one cool-out. */
   void cool() {
-    COOLS.getAndAdd(this, 1L);
+    cools.increment();
   }
 
   /**
-   * Removes this id's three meters. A late update still lands on the fields, but the removed meter
-   * is never scraped again; removal is idempotent, so a second retirement is a no-op.
+   * Removes this id's three meters. A late update still lands on the field the meter reads, but the
+   * removed meter is never scraped again; removal is idempotent, and a partially bound counter
+   * skips the handles it never received.
    *
    * @param metrics the detection meters that own the three registrations
    */
   void retire(WorkerDetectionMetrics metrics) {
-    metrics.remove(matchMeter);
-    metrics.remove(promotionMeter);
-    metrics.remove(coolMeter);
+    if (matches != null) {
+      metrics.remove(matches);
+    }
+    if (promotions != null) {
+      metrics.remove(promotions);
+    }
+    if (cools != null) {
+      metrics.remove(cools);
+    }
   }
 }

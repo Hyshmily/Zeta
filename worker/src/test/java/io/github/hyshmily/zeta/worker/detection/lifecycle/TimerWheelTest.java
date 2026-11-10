@@ -214,6 +214,58 @@ class TimerWheelTest {
   }
 
   /**
+   * Zero and negative monotonic instants are real. An earlier schedule must wake a sleeping owner
+   * whose current sleep target is negative; a zero-awake sentinel cannot see that deadline.
+   */
+  @Test
+  void anEarlierScheduleWakesTheOwnerWhenTheSleepTargetIsNegative() throws Exception {
+    long base = TimeSource.monotonicMillis();
+    try {
+      TimeSource.setTimeOffsetForTest(0, -base - 20_000L);
+      TimerWheel wheel = new TimerWheel();
+      long clock = TimeSource.monotonicMillis();
+      assertThat(clock).isNegative();
+      wheel.schedule(entry("far", clock + 5_000L));
+
+      CountDownLatch started = new CountDownLatch(1);
+      CountDownLatch finished = new CountDownLatch(1);
+      Thread waiter = new Thread(() -> {
+        started.countDown();
+        try {
+          wheel.awaitNext();
+        } catch (InterruptedException e) {
+          Thread.currentThread().interrupt();
+        } finally {
+          finished.countDown();
+        }
+      });
+      waiter.start();
+      try {
+        assertThat(started.await(3, TimeUnit.SECONDS)).isTrue();
+        long deadline = System.nanoTime() + 3_000L * 1_000_000L;
+        while (waiter.getState() != Thread.State.TIMED_WAITING && System.nanoTime() < deadline) {
+          Thread.sleep(5L);
+        }
+        assertThat(waiter.getState())
+          .as("the owner is sleeping toward the negative deadline")
+          .isEqualTo(Thread.State.TIMED_WAITING);
+
+        wheel.schedule(entry("near", clock));
+        assertThat(finished.await(1_000L, TimeUnit.MILLISECONDS))
+          .as("the earlier deadline must release the sleeping owner")
+          .isTrue();
+      } finally {
+        if (waiter.isAlive()) {
+          waiter.interrupt();
+        }
+        waiter.join(3_000L);
+      }
+    } finally {
+      TimeSource.setTimeOffsetForTest(0, 0);
+    }
+  }
+
+  /**
    * A deadline inside the current coarse span is placed in a later slot, never in the slot the
    * wheel is currently consuming: a 4095 ms deadline must not be treated as due one 64 ms tick
    * later.
@@ -302,7 +354,8 @@ class TimerWheelTest {
       assertThat(wheel.pollDetached()).isSameAs(node);
       assertThat(wheel.pollDetached()).isNull();
 
-      // The registry's re-arm after the poll links it again.
+      // The registry's hand-off after the poll clears the state, then its re-arm links it again.
+      node.wheelState = TimerWheel.UNSCHEDULED;
       node.nextCheckAt = 20L;
       wheel.reschedule(node);
       wheel.advance(20L);
@@ -331,6 +384,9 @@ class TimerWheelTest {
 
       HE detached = wheel.pollDetached();
       assertThat(detached).isSameAs(node);
+      assertThat(node.wheelState).as("the hand-off stays detached for the registry").isEqualTo(TimerWheel.DETACHED);
+      // The registry clears the hand-off under the key's stripe lock before it re-arms.
+      node.wheelState = TimerWheel.UNSCHEDULED;
       node.nextCheckAt = 50L;
       wheel.reschedule(node);
 
@@ -338,6 +394,27 @@ class TimerWheelTest {
       assertThat(wheel.pollDetached()).isNull();
       wheel.advance(50L);
       assertThat(wheel.pollDetached()).isSameAs(node);
+    } finally {
+      TimeSource.setTimeOffsetForTest(0, 0);
+    }
+  }
+
+  /**
+   * An undrained batch is already due. The next wait must return immediately instead of sleeping
+   * toward the pending list or a bucket that cannot make the batch any later.
+   */
+  @Test
+  void anUndrainedBatchWakesTheOwnerImmediately() throws Exception {
+    long base = TimeSource.monotonicMillis();
+    try {
+      TimeSource.setTimeOffsetForTest(0, -base);
+      TimerWheel wheel = new TimerWheel();
+      wheel.schedule(entry("k", 10L));
+      wheel.advance(10L);
+
+      Method nextDelay = TimerWheel.class.getDeclaredMethod("nextDelay");
+      nextDelay.setAccessible(true);
+      assertThat((long) nextDelay.invoke(wheel)).isZero();
     } finally {
       TimeSource.setTimeOffsetForTest(0, 0);
     }

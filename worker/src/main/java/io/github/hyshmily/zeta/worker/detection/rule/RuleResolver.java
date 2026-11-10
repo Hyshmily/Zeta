@@ -60,7 +60,7 @@ public class RuleResolver {
   private static final int MIN_CACHE_SIZE = 1_024;
 
   private final WorkerDetectionMetrics metrics;
-  private final int cacheSize;
+  private final long cacheSize;
 
   /** The current snapshot; replaced wholesale, and its maps and scan array are immutable. */
   private volatile Snapshot published;
@@ -74,7 +74,7 @@ public class RuleResolver {
    */
   public RuleResolver(RuleSet ruleSet, int maxActiveHotKeys, WorkerDetectionMetrics metrics) {
     this.metrics = metrics;
-    this.cacheSize = Math.max(MIN_CACHE_SIZE, 4 * Math.max(1, maxActiveHotKeys));
+    this.cacheSize = Math.max((long) MIN_CACHE_SIZE, 4L * Math.max(1, maxActiveHotKeys));
     publish(ruleSet);
   }
 
@@ -89,6 +89,8 @@ public class RuleResolver {
    * cache stay in place. Otherwise a rule whose definition is unchanged keeps its binding, so a
    * threshold edit to one rule does not rebuild the rest. Definition equality is textual, so a
    * recompiled regex — the same expression in a new {@code Pattern} — also keeps its binding.
+   * Meters for newly added ids are registered only after the snapshot is fully built, so a failed
+   * publication leaves the previous snapshot and its meter set in place.
    *
    * @param next the new snapshot
    */
@@ -97,7 +99,7 @@ public class RuleResolver {
       throw new IllegalArgumentException("rule set must not be null");
     }
     Snapshot current = published;
-    if (current != null && current.hash().equals(next.hash())) {
+    if (current != null && current.hash().equals(next.hash()) && current.ruleSet().equals(next)) {
       return;
     }
 
@@ -111,15 +113,32 @@ public class RuleResolver {
       RuleBinding binding =
         old != null && old.rule().definition().equals(rule.definition())
           ? old
-          : new RuleBinding(rule, old != null ? old.counters() : counters(rule.id()));
+          : new RuleBinding(rule, old != null ? old.counters() : new RuleCounters());
       bindingsById.put(rule.id(), binding);
       ordered.add(binding);
     }
 
-    // Build the whole snapshot before retiring anything: a failure while deriving the exact index
-    // or the scan array leaves the published snapshot and its meters untouched.
+    // Build the whole snapshot before binding or retiring anything: a failure while deriving the
+    // exact index or the scan array leaves the published snapshot and its meter set untouched.
     Snapshot snapshot = new Snapshot(next, ordered, bindingsById, cacheSize);
 
+    try {
+      for (RuleBinding binding : ordered) {
+        // A new id is bound only now, so a snapshot that never published registers no meter.
+        if (!previous.containsKey(binding.rule().id())) {
+          binding.counters().bind(metrics, binding.rule().id());
+        }
+      }
+    } catch (RuntimeException | Error e) {
+      // A registration failed after the snapshot was built: remove the meters this publication
+      // registered, so the previous snapshot's meter set stays intact.
+      for (RuleBinding binding : ordered) {
+        if (!previous.containsKey(binding.rule().id())) {
+          binding.counters().retire(metrics);
+        }
+      }
+      throw e;
+    }
     for (Map.Entry<String, RuleBinding> entry : previous.entrySet()) {
       if (!bindingsById.containsKey(entry.getKey())) {
         entry.getValue().retire(metrics);
@@ -147,7 +166,7 @@ public class RuleResolver {
    * before the match cache: a cold report for a special key must not occupy a cache slot or run the
    * scan. Every other rule is checked against its own {@code hotCount} after the cache resolves it,
    * not only against the global floor, so the caller receives a binding that is already eligible
-   * and can hand it straight to {@code HotKeyRegistry.promoteEntry}.
+   * and can hand it straight to {@code HotKeyRegistry.promote}.
    *
    * <p>An eligible report advances the governing rule's match counter, whichever kind of rule it
    * is. That is the single definition of {@code zeta.worker.rule.matches}: the cache and the exact
@@ -176,19 +195,6 @@ public class RuleResolver {
   }
 
   /**
-   * Creates and binds the counters for a rule id that was absent from the previous publication. A
-   * retained id never reaches this method: its counters (and meters) survive the rule change.
-   *
-   * @param ruleId the new rule id
-   * @return the bound counters
-   */
-  private RuleCounters counters(String ruleId) {
-    RuleCounters counters = new RuleCounters();
-    counters.bind(metrics, ruleId);
-    return counters;
-  }
-
-  /**
    * One publication unit: the rule set, its match cache, its indexes and the bindings, behind a
    * single volatile reference. The maps and the scan array are immutable; the cache is
    * thread-safe. It is also the match cache's loader, so a resolution allocates no per-call
@@ -204,7 +210,12 @@ public class RuleResolver {
     private final RuleBinding defaultBinding;
     private final RuleSet ruleSet;
 
-    private Snapshot(RuleSet ruleSet, List<RuleBinding> ordered, Map<String, RuleBinding> bindingsById, int cacheSize) {
+    private Snapshot(
+      RuleSet ruleSet,
+      List<RuleBinding> ordered,
+      Map<String, RuleBinding> bindingsById,
+      long cacheSize
+    ) {
       this.ruleSet = ruleSet;
       this.bindings = List.copyOf(ordered);
       this.bindingsById = Map.copyOf(bindingsById);
@@ -255,7 +266,7 @@ public class RuleResolver {
      * before the match cache: a cold report for a special key must not occupy a cache slot or run the
      * scan. Every other rule is checked against its own {@code hotCount} after the cache resolves it,
      * not only against the global floor, so the caller receives a binding that is already eligible
-     * and can hand it straight to {@code HotKeyRegistry.promoteEntry}.
+     * and can hand it straight to {@code HotKeyRegistry.promote}.
      *
      * <p>An eligible report advances the governing rule's match counter, whichever kind of rule it
      * is. That is the single definition of {@code zeta.worker.rule.matches}: the cache and the exact
@@ -292,6 +303,16 @@ public class RuleResolver {
     /** @return the promotion floor */
     public long minHotCount() {
       return ruleSet.minHotCount();
+    }
+
+    /**
+     * The published rule set. The fingerprint is only a cheap first filter: callers that need
+     * equality compare this snapshot's set, so a 64-bit collision cannot suppress a real change.
+     *
+     * @return the published rule set
+     */
+    RuleSet ruleSet() {
+      return ruleSet;
     }
 
     /** @return the rule-set fingerprint */

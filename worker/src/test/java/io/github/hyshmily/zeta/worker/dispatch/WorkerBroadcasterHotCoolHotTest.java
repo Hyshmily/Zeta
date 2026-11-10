@@ -46,9 +46,9 @@ class WorkerBroadcasterHotCoolHotTest {
       30_000L
     );
 
-    broadcaster.tryBroadcast(ZetaDecision.hot("k", 1L), false, Long.MAX_VALUE);
-    broadcaster.tryBroadcast(ZetaDecision.cool("k", 2L), false, Long.MAX_VALUE);
-    broadcaster.tryBroadcast(ZetaDecision.hot("k", 3L), false, Long.MAX_VALUE);
+    broadcaster.send(ZetaDecision.hot("k", 1L), Long.MAX_VALUE);
+    broadcaster.send(ZetaDecision.cool("k", 2L), Long.MAX_VALUE);
+    broadcaster.send(ZetaDecision.hot("k", 3L), Long.MAX_VALUE);
 
     verify(rabbitTemplate, times(3)).send(any(String.class), any(String.class), any(Message.class));
   }

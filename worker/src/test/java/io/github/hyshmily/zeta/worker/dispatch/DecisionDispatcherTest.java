@@ -18,6 +18,7 @@ package io.github.hyshmily.zeta.worker.dispatch;
 import static io.github.hyshmily.zeta.constants.ZetaConstants.Amqp.HEADER_TYPE;
 import static io.github.hyshmily.zeta.constants.ZetaConstants.Amqp.HEADER_VERSION;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyLong;
@@ -81,7 +82,7 @@ class DecisionDispatcherTest {
   }
 
   private DecisionDispatcher dispatcher(int hotRate, int coolRate, int hotBurst, int coolBurst, long maxAgeMs) {
-    return dispatcher(hotRate, coolRate, hotBurst, coolBurst, maxAgeMs, DecisionDispatcher.HotPromotionAbort.NOOP);
+    return dispatcher(hotRate, coolRate, hotBurst, coolBurst, maxAgeMs, DecisionDispatcher.Rollback.NOOP);
   }
 
   private DecisionDispatcher dispatcher(
@@ -90,7 +91,7 @@ class DecisionDispatcherTest {
     int hotBurst,
     int coolBurst,
     long maxAgeMs,
-    DecisionDispatcher.HotPromotionAbort abort
+    DecisionDispatcher.Rollback abort
   ) {
     return new DecisionDispatcher(
       1_000,
@@ -103,8 +104,80 @@ class DecisionDispatcherTest {
       broadcaster,
       metrics,
       abort,
-      DecisionDispatcher.HotPromotionProbe.ALWAYS
+      DecisionDispatcher.Probe.ALWAYS
     );
+  }
+
+  @Test
+  void rejectsNonPositiveLaneConfigurationBeforeStartingTheDrainThread() {
+    assertThatThrownBy(() ->
+      new DecisionDispatcher(
+        0,
+        1_000,
+        1_000,
+        1_000,
+        8,
+        32,
+        30_000,
+        broadcaster,
+        metrics,
+        DecisionDispatcher.Rollback.NOOP,
+        DecisionDispatcher.Probe.ALWAYS
+      )
+    )
+      .isInstanceOf(IllegalArgumentException.class)
+      .hasMessageContaining("capacity");
+    assertThatThrownBy(() ->
+      new DecisionDispatcher(
+        1_000,
+        1_000,
+        0,
+        1_000,
+        8,
+        32,
+        30_000,
+        broadcaster,
+        metrics,
+        DecisionDispatcher.Rollback.NOOP,
+        DecisionDispatcher.Probe.ALWAYS
+      )
+    )
+      .isInstanceOf(IllegalArgumentException.class)
+      .hasMessageContaining("rate");
+    assertThatThrownBy(() ->
+      new DecisionDispatcher(
+        1_000,
+        1_000,
+        1_000,
+        1_000,
+        0,
+        32,
+        30_000,
+        broadcaster,
+        metrics,
+        DecisionDispatcher.Rollback.NOOP,
+        DecisionDispatcher.Probe.ALWAYS
+      )
+    )
+      .isInstanceOf(IllegalArgumentException.class)
+      .hasMessageContaining("burst");
+    assertThatThrownBy(() ->
+      new DecisionDispatcher(
+        1_000,
+        1_000,
+        1_000,
+        1_000,
+        8,
+        32,
+        0L,
+        broadcaster,
+        metrics,
+        DecisionDispatcher.Rollback.NOOP,
+        DecisionDispatcher.Probe.ALWAYS
+      )
+    )
+      .isInstanceOf(IllegalArgumentException.class)
+      .hasMessageContaining("maxAgeMs");
   }
 
   @Test
@@ -131,34 +204,77 @@ class DecisionDispatcherTest {
     assertThat(counter(WorkerDetectionMetrics.METRIC_DECISIONS_DROPPED, "hot")).isEqualTo(1.0d);
   }
 
-  /** The promotion is marked accepted before the drain is woken, so a concurrent cool-down sees it. */
+  /** A promotion is delivered through the same single submission point as any other decision. */
   @Test
-  void submitPromotionMarksTheEntryAndDelivers() {
+  void submitPromotedEntryDelivers() {
     dispatcher = dispatcher(1_000, 1_000, 8, 32, 30_000);
     HE promoted = mock(HE.class);
-    when(promoted.hotDecision()).thenReturn(ZetaDecision.hot("p", 1L));
+    when(promoted.decision()).thenReturn(ZetaDecision.hot("p", 1L));
 
-    dispatcher.submitPromotion(promoted);
+    dispatcher.submit(promoted);
 
-    verify(promoted).markPromotionSubmitted();
     await(() -> untagged(WorkerDetectionMetrics.METRIC_DECISIONS_HOT) == 1.0d, 2_000);
   }
 
   /** A synchronous refusal is the dispatcher's rollback, not the caller's. */
   @Test
-  void submitPromotionReturnsTheSeatWhenTheQueueRefuses() {
+  void submitPromotedEntryReturnsTheSeatWhenTheQueueRefuses() {
     List<String> aborted = new CopyOnWriteArrayList<>();
     dispatcher = dispatcher(1_000, 1_000, 8, 32, 30_000, (key, version) -> aborted.add(key + "@" + version));
     dispatcher.shutdown();
     HE promoted = mock(HE.class);
-    when(promoted.hotDecision()).thenReturn(ZetaDecision.hot("p", 1L));
+    when(promoted.decision()).thenReturn(ZetaDecision.hot("p", 1L));
     when(promoted.key()).thenReturn("p");
-    when(promoted.promotedVersion()).thenReturn(1L);
+    when(promoted.version()).thenReturn(1L);
 
-    dispatcher.submitPromotion(promoted);
+    dispatcher.submit(promoted);
 
-    verify(promoted, never()).markPromotionSubmitted();
     assertThat(aborted).containsExactly("p@1");
+  }
+
+  /** A saturation refusal returns the promotion's seat; the queue never accepted it. */
+  @Test
+  void aSaturatedPromotionOfferReturnsTheSeat() throws InterruptedException {
+    WorkerBroadcaster funnel = mock(WorkerBroadcaster.class);
+    CountDownLatch firstSendStarted = new CountDownLatch(1);
+    CountDownLatch releaseFirstSend = new CountDownLatch(1);
+    AtomicInteger broadcasts = new AtomicInteger();
+    when(funnel.send(any(), anyLong())).thenAnswer(invocation -> {
+      if (broadcasts.incrementAndGet() == 1) {
+        firstSendStarted.countDown();
+        releaseFirstSend.await(3, TimeUnit.SECONDS);
+      }
+      return WorkerBroadcaster.Delivery.SENT;
+    });
+    List<String> aborted = new CopyOnWriteArrayList<>();
+    dispatcher = new DecisionDispatcher(
+      1,
+      8,
+      1_000_000,
+      1_000_000,
+      8,
+      8,
+      30_000,
+      funnel,
+      metrics,
+      (key, version) -> aborted.add(key + "@" + version),
+      DecisionDispatcher.Probe.ALWAYS
+    );
+    HE promoted = mock(HE.class);
+    when(promoted.decision()).thenReturn(ZetaDecision.hot("refused", 3L));
+    when(promoted.key()).thenReturn("refused");
+    when(promoted.version()).thenReturn(3L);
+    try {
+      assertThat(dispatcher.submit(ZetaDecision.hot("blocker", 1L))).isTrue();
+      assertThat(firstSendStarted.await(3, TimeUnit.SECONDS)).isTrue();
+      assertThat(dispatcher.submit(ZetaDecision.hot("queued", 2L))).isTrue();
+
+      dispatcher.submit(promoted);
+
+      assertThat(aborted).containsExactly("refused@3");
+    } finally {
+      releaseFirstSend.countDown();
+    }
   }
 
   @Test
@@ -230,6 +346,39 @@ class DecisionDispatcherTest {
 
     await(() -> counter(WorkerDetectionMetrics.METRIC_DECISIONS_EXPIRED, "hot") == 10.0d, 700);
     assertThat(counter(WorkerDetectionMetrics.METRIC_DECISIONS_EXPIRED, "hot")).isEqualTo(10.0d);
+  }
+
+  /**
+   * A round that only clears terminal decisions is progress. A backlog larger than one lane's work
+   * budget must continue immediately instead of waiting for a token those decisions never spend.
+   */
+  @Test
+  void aTerminalBacklogLargerThanTheLaneBudgetDoesNotWaitForAToken() {
+    // The first COOL establishes the cold accepted record; the rest are elided in memory. One token
+    // per second and a one-item burst leave the bucket empty while the backlog drains.
+    dispatcher = new DecisionDispatcher(
+      2_000,
+      2_000,
+      1,
+      1,
+      1,
+      1,
+      60_000,
+      broadcaster,
+      metrics,
+      DecisionDispatcher.Rollback.NOOP,
+      DecisionDispatcher.Probe.ALWAYS
+    );
+    assertThat(dispatcher.submit(ZetaDecision.cool("k", 1L))).isTrue();
+    await(() -> untagged(WorkerDetectionMetrics.METRIC_DECISIONS_COOL) == 1.0d, 2_000);
+
+    for (int version = 2; version <= 1_502; version++) {
+      assertThat(dispatcher.submit(ZetaDecision.cool("k", version))).isTrue();
+    }
+
+    await(() -> counter(WorkerDetectionMetrics.METRIC_DECISIONS_ELIDED, "cool") == 1_501.0d, 900);
+    assertThat(counter(WorkerDetectionMetrics.METRIC_DECISIONS_ELIDED, "cool")).isEqualTo(1_501.0d);
+    assertThat(dispatcher.coolDepth()).isZero();
   }
 
   /**
@@ -361,13 +510,12 @@ class DecisionDispatcherTest {
   }
 
   /**
-   * A COOL that overtakes a still-queued HOT elides itself when no accepted record exists for the
-   * key: the HOT never reached the wire, so the demotion would spend a cool token on a cluster that
-   * was never told the key was hot. The obsolete HOT then leaves its queue at the head, before the
-   * token gate.
+   * A COOL that overtakes a still-queued HOT is still sent: the queued HOT may fail, and the
+   * demotion is the conservative correction for whatever state the cluster already holds. The
+   * obsolete HOT leaves its queue at the head without reaching the wire.
    */
   @Test
-  void dropsAnOvertakenHotAndElidesItsGhostCool() throws InterruptedException {
+  void dropsAnOvertakenHotAndStillSendsTheCool() throws InterruptedException {
     CountDownLatch firstSendStarted = new CountDownLatch(1);
     CountDownLatch releaseFirstSend = new CountDownLatch(1);
     doAnswer(invocation -> {
@@ -386,13 +534,14 @@ class DecisionDispatcherTest {
     releaseFirstSend.countDown();
 
     await(() -> counter(WorkerDetectionMetrics.METRIC_DECISIONS_SUPERSEDED, "hot") == 1.0d, 2_000);
+    await(() -> untagged(WorkerDetectionMetrics.METRIC_DECISIONS_COOL) == 2.0d, 2_000);
     assertThat(dispatcher.hotDepth()).as("the obsolete head left the queue").isZero();
-    assertThat(counter(WorkerDetectionMetrics.METRIC_DECISIONS_ELIDED, "cool")).isEqualTo(1.0d);
+    assertThat(counter(WorkerDetectionMetrics.METRIC_DECISIONS_ELIDED, "cool")).isZero();
     assertThat(untagged(WorkerDetectionMetrics.METRIC_DECISIONS_HOT)).as("the HOT never reached the wire").isZero();
     assertThat(untagged(WorkerDetectionMetrics.METRIC_DECISIONS_COOL))
-      .as("only the filler COOL was sent")
-      .isEqualTo(1.0d);
-    verify(rabbitTemplate, times(1)).send(any(String.class), any(String.class), any(Message.class));
+      .as("the filler and the corrective COOL were sent")
+      .isEqualTo(2.0d);
+    verify(rabbitTemplate, times(2)).send(any(String.class), any(String.class), any(Message.class));
   }
 
   /**
@@ -462,7 +611,7 @@ class DecisionDispatcherTest {
   @Test
   void aFunnelSupersededHotReturnsItsSeat() {
     WorkerBroadcaster funnel = mock(WorkerBroadcaster.class);
-    when(funnel.tryBroadcast(any(), anyBoolean(), anyLong())).thenReturn(WorkerBroadcaster.Delivery.SUPERSEDED);
+    when(funnel.send(any(), anyLong())).thenReturn(WorkerBroadcaster.Delivery.SUPERSEDED);
     List<String> aborted = new CopyOnWriteArrayList<>();
     dispatcher = new DecisionDispatcher(
       1_000,
@@ -475,7 +624,7 @@ class DecisionDispatcherTest {
       funnel,
       metrics,
       (key, version) -> aborted.add(key + "@" + version),
-      DecisionDispatcher.HotPromotionProbe.ALWAYS
+      DecisionDispatcher.Probe.ALWAYS
     );
 
     assertThat(dispatcher.submit(ZetaDecision.hot("h", 1L))).isTrue();
@@ -493,7 +642,7 @@ class DecisionDispatcherTest {
     WorkerBroadcaster funnel = mock(WorkerBroadcaster.class);
     AtomicInteger broadcasts = new AtomicInteger();
     List<String> aborted = new CopyOnWriteArrayList<>();
-    when(funnel.tryBroadcast(any(), anyBoolean(), anyLong())).thenAnswer(invocation -> {
+    when(funnel.send(any(), anyLong())).thenAnswer(invocation -> {
       if (broadcasts.incrementAndGet() == 1) {
         throw new IllegalStateException("boom");
       }
@@ -510,7 +659,7 @@ class DecisionDispatcherTest {
       funnel,
       metrics,
       (key, version) -> aborted.add(key + "@" + version),
-      DecisionDispatcher.HotPromotionProbe.ALWAYS
+      DecisionDispatcher.Probe.ALWAYS
     );
 
     assertThat(dispatcher.submit(ZetaDecision.hot("k1", 1L))).isTrue();
@@ -557,7 +706,7 @@ class DecisionDispatcherTest {
       broadcaster,
       metrics,
       (key, version) -> aborted.add(key + "@" + version),
-      DecisionDispatcher.HotPromotionProbe.ALWAYS
+      DecisionDispatcher.Probe.ALWAYS
     );
 
     // The first decision is a COOL so the broadcaster's same-type debounce cannot elide the HOT
@@ -586,7 +735,7 @@ class DecisionDispatcherTest {
     CountDownLatch firstSendStarted = new CountDownLatch(1);
     CountDownLatch releaseFirstSend = new CountDownLatch(1);
     AtomicInteger broadcasts = new AtomicInteger();
-    when(funnel.tryBroadcast(any(), anyBoolean(), anyLong())).thenAnswer(invocation -> {
+    when(funnel.send(any(), anyLong())).thenAnswer(invocation -> {
       if (broadcasts.incrementAndGet() == 1) {
         firstSendStarted.countDown();
         releaseFirstSend.await(3, TimeUnit.SECONDS);
@@ -605,7 +754,7 @@ class DecisionDispatcherTest {
       funnel,
       metrics,
       (key, version) -> aborted.add(key + "@" + version),
-      DecisionDispatcher.HotPromotionProbe.ALWAYS
+      DecisionDispatcher.Probe.ALWAYS
     );
 
     assertThat(dispatcher.submit(ZetaDecision.cool("filler", 1L))).isTrue();
@@ -708,6 +857,39 @@ class DecisionDispatcherTest {
   }
 
   /**
+   * A HOT dropped before the wire leaves the cluster cold. The lifecycle's COOL must be elided even
+   * though the pending map no longer holds the HOT: the cold accepted record, installed when the
+   * drain dropped it, is the proof.
+   */
+  @Test
+  void aCoolThatFollowsADroppedHotWithoutAnAcceptedRecordIsElided() {
+    dispatcher = new DecisionDispatcher(
+      1_000,
+      1_000,
+      1_000_000,
+      1_000_000,
+      8,
+      32,
+      30_000,
+      broadcaster,
+      metrics,
+      DecisionDispatcher.Rollback.NOOP,
+      (key, version) -> false
+    );
+
+    assertThat(dispatcher.submit(ZetaDecision.hot("k", 1L))).isTrue();
+
+    await(() -> counter(WorkerDetectionMetrics.METRIC_DECISIONS_SUPERSEDED, "hot") == 1.0d, 2_000);
+    assertThat(dispatcher.submit(ZetaDecision.cool("k", 2L))).isTrue();
+
+    await(() -> counter(WorkerDetectionMetrics.METRIC_DECISIONS_ELIDED, "cool") == 1.0d, 2_000);
+    assertThat(untagged(WorkerDetectionMetrics.METRIC_DECISIONS_COOL))
+      .as("a COOL for a lifecycle the cluster never saw is a no-op")
+      .isZero();
+    verify(rabbitTemplate, never()).send(anyString(), anyString(), any());
+  }
+
+  /**
    * The registry probe applies at the drain, not only at submission: a HOT already queued when its
    * key cools must not reach the wire even though no newer decision is pending (its COOL was refused)
    * and no accepted record exists.
@@ -751,12 +933,12 @@ class DecisionDispatcherTest {
   }
 
   /**
-   * A stalled HOT can reach the dispatcher after the COOL that already superseded it. Dropping the
-   * late HOT proves the promotion never entered a queue, so the queued COOL carries that fact into
-   * the funnel and is elided when no accepted record exists for the key.
+   * A stalled HOT can reach the dispatcher after the COOL that already superseded it. The COOL has
+   * no accepted record, so it is sent — the only demotion signal the cluster can receive — and the
+   * late HOT is dropped as stale.
    */
   @Test
-  void aCoolThatArrivedBeforeItsSupersededHotIsElided() throws InterruptedException {
+  void aCoolThatArrivedBeforeItsSupersededHotIsSent() throws InterruptedException {
     CountDownLatch fillerStarted = new CountDownLatch(1);
     CountDownLatch releaseFiller = new CountDownLatch(1);
     List<String> sent = new CopyOnWriteArrayList<>();
@@ -780,33 +962,33 @@ class DecisionDispatcherTest {
     assertThat(dispatcher.submit(ZetaDecision.hot("k", 5L))).isTrue();
     releaseFiller.countDown();
 
-    await(() -> counter(WorkerDetectionMetrics.METRIC_DECISIONS_ELIDED, "cool") == 1.0d, 2_000);
-    assertThat(sent).containsExactly("filler");
+    await(() -> untagged(WorkerDetectionMetrics.METRIC_DECISIONS_COOL) == 2.0d, 2_000);
+    assertThat(sent).containsExactly("filler", "k");
+    assertThat(counter(WorkerDetectionMetrics.METRIC_DECISIONS_ELIDED, "cool")).isZero();
     assertThat(untagged(WorkerDetectionMetrics.METRIC_DECISIONS_HOT)).isZero();
   }
 
   /**
-   * A COOL the registry proved displaced an unsubmitted HOT is a ghost demotion even when it
-   * reaches the dispatcher before that HOT: the funnel has no accepted record for the key.
+   * A COOL with no accepted record is the only demotion signal a locally promoted App can receive,
+   * so it is sent rather than elided as a ghost.
    */
   @Test
-  void aDeclaredDisplacedCoolIsElidedWithoutWaitingForItsHot() {
+  void aCoolWithoutAnAcceptedRecordIsSent() {
     dispatcher = dispatcher(1_000, 1_000, 8, 32, 30_000);
 
-    assertThat(dispatcher.submit(new HotKeyRegistry.CoolDecision(ZetaDecision.cool("k", 2L), true))).isTrue();
+    assertThat(dispatcher.submit(ZetaDecision.cool("k", 2L))).isTrue();
 
-    await(() -> counter(WorkerDetectionMetrics.METRIC_DECISIONS_ELIDED, "cool") == 1.0d, 2_000);
-    assertThat(untagged(WorkerDetectionMetrics.METRIC_DECISIONS_COOL)).isZero();
-    verify(rabbitTemplate, never()).send(anyString(), anyString(), any());
+    await(() -> untagged(WorkerDetectionMetrics.METRIC_DECISIONS_COOL) == 1.0d, 2_000);
+    assertThat(counter(WorkerDetectionMetrics.METRIC_DECISIONS_ELIDED, "cool")).isZero();
+    verify(rabbitTemplate, times(1)).send(anyString(), anyString(), any());
   }
 
   /**
-   * A declared displaced COOL that arrives behind a newer HOT keeps the fact through the
-   * superseded-offer path. When the HOT then fails, the COOL has no accepted record and must be
-   * elided instead of demoting a key the cluster was never told was hot.
+   * A COOL behind a newer HOT yields the round, but a failed HOT must not erase it: the next round
+   * still attempts the demotion, which is the correction for whatever state the cluster holds.
    */
   @Test
-  void aDeclaredDisplacedCoolBehindAPendingHotElidesAfterTheHotFails() {
+  void aCoolBehindAFailedHotIsStillAttempted() {
     AtomicInteger sendAttempts = new AtomicInteger();
     doAnswer(invocation -> {
       sendAttempts.incrementAndGet();
@@ -817,17 +999,11 @@ class DecisionDispatcherTest {
     dispatcher = dispatcher(1_000, 1_000, 8, 32, 30_000);
 
     assertThat(dispatcher.submit(ZetaDecision.hot("k", 11L))).isTrue();
-    assertThat(dispatcher.submit(new HotKeyRegistry.CoolDecision(ZetaDecision.cool("k", 10L), true))).isTrue();
+    assertThat(dispatcher.submit(ZetaDecision.cool("k", 10L))).isTrue();
 
-    await(
-      () -> sendAttempts.get() == 1 && counter(WorkerDetectionMetrics.METRIC_DECISIONS_ELIDED, "cool") == 1.0d,
-      2_000
-    );
-    assertThat(sendAttempts).hasValue(1);
-    assertThat(counter(WorkerDetectionMetrics.METRIC_DECISIONS_ELIDED, "cool")).isEqualTo(1.0d);
-    assertThat(untagged(WorkerDetectionMetrics.METRIC_DECISIONS_COOL))
-      .as("the demotion had no accepted HOT to correct")
-      .isZero();
+    await(() -> sendAttempts.get() == 2, 2_000);
+    assertThat(sendAttempts).as("the HOT failed, so the COOL is the corrective send").hasValue(2);
+    assertThat(counter(WorkerDetectionMetrics.METRIC_DECISIONS_ELIDED, "cool")).isZero();
   }
 
   /**
@@ -906,6 +1082,120 @@ class DecisionDispatcherTest {
     assertThat(sent.indexOf("u:COOL"))
       .as("an unrelated demotion must not wait for every HOT ahead of its key")
       .isLessThan(sent.indexOf("k:HOT"));
+  }
+
+  /**
+   * A failed HOT must not inherit the cold tombstone an earlier superseded HOT installed: the
+   * conservative correction sends its COOL anyway, because the cluster may hold hot state from an
+   * earlier lifecycle whose COOL was lost.
+   */
+  @Test
+  void aFailedHotClearsTheColdTombstoneSoItsCoolIsStillSent() {
+    List<String> sent = new CopyOnWriteArrayList<>();
+    doAnswer(invocation -> {
+      Message message = invocation.getArgument(2);
+      String type = (String) message.getMessageProperties().getHeader(HEADER_TYPE);
+      String body = new String(message.getBody(), StandardCharsets.UTF_8);
+      if ("HOT".equals(type)) {
+        throw new RuntimeException("broker down");
+      }
+      sent.add(body + ":" + type);
+      return null;
+    })
+      .when(rabbitTemplate)
+      .send(any(String.class), any(String.class), any(Message.class));
+    dispatcher = new DecisionDispatcher(
+      1_000,
+      1_000,
+      1_000_000,
+      1_000_000,
+      8,
+      32,
+      30_000,
+      broadcaster,
+      metrics,
+      DecisionDispatcher.Rollback.NOOP,
+      (key, version) -> version != 1L
+    );
+
+    // v1 has no accepted record and is superseded: the funnel installs its cold tombstone.
+    assertThat(dispatcher.submit(ZetaDecision.hot("k", 1L))).isTrue();
+    await(() -> counter(WorkerDetectionMetrics.METRIC_DECISIONS_SUPERSEDED, "hot") == 1.0d, 2_000);
+
+    // v3 is a new lifecycle whose publish fails. Its COOL must still travel.
+    assertThat(dispatcher.submit(ZetaDecision.hot("k", 3L))).isTrue();
+    await(() -> counter(WorkerDetectionMetrics.METRIC_DECISIONS_DROPPED, "hot") == 1.0d, 2_000);
+    assertThat(dispatcher.submit(ZetaDecision.cool("k", 4L))).isTrue();
+
+    await(() -> sent.contains("k:COOL"), 2_000);
+    assertThat(sent).contains("k:COOL");
+    assertThat(counter(WorkerDetectionMetrics.METRIC_DECISIONS_ELIDED, "cool"))
+      .as("the tombstone from the superseded HOT must not elide the corrective COOL")
+      .isZero();
+  }
+
+  /**
+   * An older HOT never suppresses a COOL from a newer lifecycle: the COOL's version already
+   * outranks it, so the demotion travels and the HOT is dropped.
+   */
+  @Test
+  void anOlderHotDoesNotSuppressANewerCool() throws InterruptedException {
+    CountDownLatch fillerStarted = new CountDownLatch(1);
+    CountDownLatch releaseFiller = new CountDownLatch(1);
+    List<String> sent = new CopyOnWriteArrayList<>();
+    doAnswer(invocation -> {
+      Message message = invocation.getArgument(2);
+      String body = new String(message.getBody(), StandardCharsets.UTF_8);
+      sent.add(body);
+      if ("filler".equals(body)) {
+        fillerStarted.countDown();
+        releaseFiller.await(3, TimeUnit.SECONDS);
+      }
+      return null;
+    })
+      .when(rabbitTemplate)
+      .send(any(String.class), any(String.class), any(Message.class));
+    dispatcher = dispatcher(1_000_000, 1_000_000, 8, 32, 30_000);
+
+    assertThat(dispatcher.submit(ZetaDecision.cool("filler", 1L))).isTrue();
+    assertThat(fillerStarted.await(3, TimeUnit.SECONDS)).isTrue();
+    assertThat(dispatcher.submit(ZetaDecision.cool("k", 13L))).isTrue();
+    assertThat(dispatcher.submit(ZetaDecision.hot("k", 10L))).as("dropped, not refused").isTrue();
+    releaseFiller.countDown();
+
+    await(() -> sent.contains("k"), 2_000);
+    assertThat(sent).as("the COOL belongs to a newer lifecycle and must travel").contains("k");
+    assertThat(counter(WorkerDetectionMetrics.METRIC_DECISIONS_ELIDED, "cool")).isZero();
+  }
+
+  /**
+   * A HOT that becomes terminal while its lane is token-starved leaves without waiting for the next
+   * token. The probe flips on its first call, simulating the registry releasing the promotion after
+   * the drain's own peek found it current.
+   */
+  @Test
+  void aHotThatGoesStaleWhileTokenStarvedLeavesWithoutAToken() {
+    AtomicInteger probes = new AtomicInteger();
+    List<String> aborted = new CopyOnWriteArrayList<>();
+    dispatcher = new DecisionDispatcher(
+      1_000,
+      1_000,
+      1,
+      1_000_000,
+      8,
+      32,
+      30_000,
+      broadcaster,
+      metrics,
+      (key, version) -> aborted.add(key + "@" + version),
+      (key, version) -> probes.getAndIncrement() == 0
+    );
+
+    assertThat(dispatcher.submit(ZetaDecision.hot("stale", 1L))).isTrue();
+
+    await(() -> aborted.contains("stale@1"), 2_000);
+    assertThat(aborted).containsExactly("stale@1");
+    assertThat(dispatcher.hotDepth()).isZero();
   }
 
   private double counter(String name, String type) {

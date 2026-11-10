@@ -15,6 +15,7 @@
  */
 package io.github.hyshmily.zeta.worker.detection.lifecycle;
 
+import io.github.hyshmily.zeta.model.ZetaDecision;
 import io.github.hyshmily.zeta.util.TimeSource;
 import io.github.hyshmily.zeta.util.executor.ZetaThreadFactory;
 import io.github.hyshmily.zeta.worker.dispatch.DecisionDispatcher;
@@ -75,7 +76,7 @@ public class CoolingScheduler {
    * Advances one wheel and drains the entries it detached, evaluating each under the registry's
    * stripe lock and submitting any COOL decision. The inner loop checks {@code running} so a large
    * detached batch does not outlive shutdown; one poisoned check is logged and left to the repair
-   * sweep instead of killing the owner.
+   * pass, which re-links it instead of evaluating it.
    *
    * @param wheel the wheel owned by this thread
    */
@@ -85,9 +86,21 @@ public class CoolingScheduler {
         wheel.advance(TimeSource.monotonicMillis());
         HE entry;
         while (running && (entry = wheel.pollDetached()) != null) {
-          // The registry resolves the entry's own wheel from the key's hash; the evaluation must not
-          // depend on which thread handed the entry over.
-          dispatcher.submit(registry.evaluate(entry, false));
+          try {
+            // The registry resolves the entry's own wheel from the key's hash; the evaluation must not
+            // depend on which thread handed the entry over. A null decision means the check re-armed,
+            // recovered or found the entry already retired.
+            ZetaDecision decision = registry.evaluate(entry);
+            if (decision != null) {
+              dispatcher.submit(decision);
+            }
+          } catch (Exception e) {
+            // One poisoned check must never skip the rest of the detached batch or kill a cooling
+            // thread. A failed evaluation leaves the entry unscheduled and overdue for the repair
+            // pass; a failure in submit loses that COOL (the App's hard TTL bounds it) but must
+            // not stop the remaining checks.
+            log.warn("Cooling check failed; the entry stays overdue for the repair pass", e);
+          }
         }
         if (running) {
           wheel.awaitNext();
@@ -98,9 +111,7 @@ public class CoolingScheduler {
         Thread.currentThread().interrupt();
         return;
       } catch (Exception e) {
-        // One poisoned check must never kill a cooling thread: the entry is unscheduled and
-        // overdue, so the repair sweep retries it.
-        log.warn("Cooling check failed; the entry stays overdue for the repair sweep", e);
+        log.warn("Cooling wheel advance/wait failed", e);
       }
     }
   }

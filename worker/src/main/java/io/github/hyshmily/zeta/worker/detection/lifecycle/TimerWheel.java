@@ -47,8 +47,9 @@ import java.util.concurrent.locks.ReentrantLock;
  * key's stripe lock (stripe → wheel). {@link #advance} detaches due entries and appends the whole due
  * list to the owner's private batch under this lock; the owning thread evaluates them after
  * releasing it, so the wheel lock is never held while a stripe lock is taken (wheel → stripe is
- * never nested). An entry detached into the batch is {@link #DETACHED}: a concurrent cool
- * can no longer unlink it, and the owner discards it when its registry tombstone is set.
+ * never nested). An entry detached into the batch stays {@link #DETACHED}: a concurrent cool can
+ * no longer unlink it, a concurrent re-arm is deferred to the owner, and the registry clears the
+ * state under the stripe lock before it evaluates or discards the entry.
  */
 final class TimerWheel {
 
@@ -115,10 +116,11 @@ final class TimerWheel {
 
   /**
    * The deadline the owner is sleeping toward; {@code Long.MAX_VALUE} when the wheel is idle, and
-   * {@code 0} while the owner is awake or a wake signal is already pending. The zero budget is
-   * what collapses a mass-heat burst into one semaphore release: schedules that land while the
-   * owner is running see {@code 0} and leave the signal alone, instead of each paying a release
-   * that the owner's next {@code drainPermits} would throw away.
+   * {@link Long#MIN_VALUE} while the owner is awake or a wake signal is already pending. The clock
+   * may be zero or negative, so the awake sentinel must lie outside every monotonic instant. The
+   * sentinel state is what collapses a mass-heat burst into one semaphore release: schedules that
+   * land while the owner is running see it and leave the signal alone, instead of each paying a
+   * release that the owner's next {@code drainPermits} would throw away.
    */
   @GuardedBy("lock")
   private long wakeAtMs = Long.MAX_VALUE;
@@ -229,22 +231,20 @@ final class TimerWheel {
    * makes work available before the current sleep target.
    */
   private void wakeIfAsleep() {
-    if (wakeAtMs > 0L) {
+    if (wakeAtMs != Long.MIN_VALUE) {
       wakeup.release();
-      wakeAtMs = 0L;
+      wakeAtMs = Long.MIN_VALUE;
     }
   }
 
   /**
-   * Takes the next entry from the owner's batch, or {@code null} when it is drained. The entry is
-   * marked unscheduled, so its evaluation may re-arm it normally.
+   * Takes the next entry from the owner's batch, or {@code null} when it is drained. The entry stays
+   * {@link #DETACHED}; the registry clears it to {@link #UNSCHEDULED} under the key's stripe lock
+   * before evaluating it.
    *
    * <p>Called only by the advancing thread, and lock-free: {@link #advance} appended the whole due
    * list to {@link #draining}, which no other thread touches. A re-arm or cool of a detached node
-   * is a no-op under the wheel lock, so the traversal cannot race a link mutation. The state write
-   * below is the one wheel mutation outside the wheel lock: the node has already left every shared
-   * list, and {@link HE#wheelState} is volatile so the one-way
-   * {@code DETACHED -> UNSCHEDULED} transition is visible to a concurrent reader under that lock.
+   * is a no-op under the wheel lock, so the traversal cannot race a link mutation.
    *
    * @return the next due entry, or {@code null}
    */
@@ -254,7 +254,6 @@ final class TimerWheel {
       return null;
     }
     unlink(head);
-    head.wheelState = UNSCHEDULED;
     return head;
   }
 
@@ -274,7 +273,7 @@ final class TimerWheel {
     try {
       // The owner runs from here to its next wait: schedules landing in that window can be picked
       // up by nextDelay without a release.
-      wakeAtMs = 0L;
+      wakeAtMs = Long.MIN_VALUE;
       if (nowMs > clockMs) {
         long previous = clockMs;
         clockMs = nowMs;
@@ -419,7 +418,7 @@ final class TimerWheel {
         // an instant later than the actual sleep target.
         long deadline = clockMs + delay;
         sleepMs = deadline - TimeSource.monotonicMillis();
-        wakeAtMs = sleepMs > 0L ? deadline : 0L;
+        wakeAtMs = sleepMs > 0L ? deadline : Long.MIN_VALUE;
       }
     } finally {
       lock.unlock();
@@ -439,9 +438,9 @@ final class TimerWheel {
    */
   @GuardedBy("lock")
   private long nextDelay() {
-    if (pending.wheelNext != pending) {
-      // The next advance appends this list to the owner's batch, so wake immediately instead of
-      // adding a millisecond of latency to an already-due schedule or an exception's leftover batch.
+    if (pending.wheelNext != pending || draining.wheelNext != draining) {
+      // The next advance appends pending to the owner's batch, and an undrained batch is already
+      // due: wake immediately instead of adding a millisecond of latency to either list.
       return 0L;
     }
 
@@ -510,7 +509,7 @@ final class TimerWheel {
   void signal() {
     lock.lock();
     try {
-      wakeAtMs = 0L;
+      wakeAtMs = Long.MIN_VALUE;
       wakeup.release();
     } finally {
       lock.unlock();

@@ -92,7 +92,7 @@ class DetectionPipelineTest {
 
     pipeline(120_000L).onReport("k", 2L, 1_234L, 7L);
 
-    verify(dispatcher).submitPromotion(entry);
+    verify(dispatcher).submit(entry);
   }
 
   @Test
@@ -101,11 +101,11 @@ class DetectionPipelineTest {
     when(detector.addCountAtSlice("k", 2L, 7L)).thenReturn(9L);
     RuleBinding binding = mock(RuleBinding.class);
     when(rules.resolveIfEligible("k", 9L)).thenReturn(binding);
-    when(registry.promoteEntry("k", binding, 1_234L)).thenReturn(null);
+    when(registry.promote("k", binding, 1_234L)).thenReturn(null);
 
     pipeline(120_000L).onReport("k", 2L, 1_234L, 7L);
 
-    verify(dispatcher, never()).submitPromotion(any());
+    verify(dispatcher, never()).submit(any(HE.class));
   }
 
   private HE stubPromotion(ZetaDecision decision) {
@@ -114,9 +114,9 @@ class DetectionPipelineTest {
     RuleBinding binding = mock(RuleBinding.class);
     when(rules.resolveIfEligible("k", 9L)).thenReturn(binding);
     HE entry = mock(HE.class);
-    when(entry.hotDecision()).thenReturn(decision);
-    when(entry.promotedVersion()).thenReturn(decision.decisionVersion());
-    when(registry.promoteEntry("k", binding, 1_234L)).thenReturn(entry);
+    when(entry.decision()).thenReturn(decision);
+    when(entry.version()).thenReturn(decision.decisionVersion());
+    when(registry.promote("k", binding, 1_234L)).thenReturn(entry);
     return entry;
   }
 }

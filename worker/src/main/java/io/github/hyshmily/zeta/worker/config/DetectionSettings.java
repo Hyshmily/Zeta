@@ -68,15 +68,17 @@ public record DetectionSettings(
   /**
    * Placeholder default used when detection is disabled and no default rule resolved. A disabled
    * pipeline never resolves a rule, but the resolver and the endpoint still need a well-formed
-   * snapshot.
+   * snapshot: the match-all pattern makes a direct {@code matches} call true, and the threshold is
+   * a real one rather than {@link Long#MAX_VALUE}, which the endpoint would render as an absurd
+   * effective QPS.
    */
   private static final HotKeyRule DISABLED_DEFAULT_RULE = new HotKeyRule(
     DEFAULT_RULE_ID,
-    MatchType.PREFIX,
-    "*",
+    MatchType.REGEX,
+    ".*",
     Integer.MIN_VALUE,
     -1,
-    Long.MAX_VALUE,
+    1L,
     0L,
     0L,
     60_000L,
@@ -115,7 +117,12 @@ public record DetectionSettings(
     private DetectionSettings validate() {
       window = resolveGeometry(detection.getWindow());
       WorkerProperties.Cooling cooling = detection.getCooling();
-      checkIntervalMs = millis(cooling.getLowQpsCheckInterval(), "detection.cooling.low-qps-check-interval");
+      boolean lowQps = usesLowQps();
+      // The re-check period only governs LOW_QPS rules. An EXPIRE-only configuration must not be
+      // forced to shrink it to fit a short window the rule never reads.
+      checkIntervalMs = lowQps
+        ? millis(cooling.getLowQpsCheckInterval(), "detection.cooling.low-qps-check-interval")
+        : 0L;
       long sweepIntervalMs = millis(cooling.getSweepInterval(), "detection.cooling.sweep-interval");
       if (sweepIntervalMs > 0 && sweepIntervalMs < 1_000L) {
         errors.add("detection.cooling.sweep-interval (" + sweepIntervalMs + "ms) must be >= 1000ms");
@@ -124,7 +131,7 @@ public record DetectionSettings(
       long retentionMs = millis(detection.getWindow().getRetention(), "detection.window.retention");
       RuleSet ruleSet = null;
       if (window != null) {
-        validateWindowBounds(retentionMs);
+        validateWindowBounds(retentionMs, lowQps);
         ruleSet = resolveRuleSet();
       }
 
@@ -146,11 +153,11 @@ public record DetectionSettings(
         limits.getMaxHotBroadcastsPerSecond(),
         limits.getMaxCoolBroadcastsPerSecond()
       );
-      settings.warn(properties.getMaxTrackedKeys(), checkIntervalMs);
+      settings.warn(properties.getMaxTrackedKeys());
       return settings;
     }
 
-    private void validateWindowBounds(long retentionMs) {
+    private void validateWindowBounds(long retentionMs, boolean lowQps) {
       if (retentionMs > 0 && retentionMs < window.windowMs()) {
         errors.add(
           "detection.window.retention (" +
@@ -159,6 +166,9 @@ public record DetectionSettings(
             window.windowMs() +
             "ms)"
         );
+      }
+      if (!lowQps) {
+        return;
       }
       // The upper bound is the CONFIGURED duration, not the effective window: `1s` against a
       // 992ms window is a rounding artifact of the slice alignment, not a slower re-check.
@@ -180,6 +190,26 @@ public record DetectionSettings(
             "ms)"
         );
       }
+    }
+
+    /**
+     * Whether any rule would actually read the global LOW_QPS re-check interval.
+     */
+    private boolean usesLowQps() {
+      WorkerProperties.Defaults defaults = detection.getDefaults();
+      if (defaults != null && isLowQps(defaults.getCool())) {
+        return true;
+      }
+      for (WorkerProperties.Rule rule : detection.getRules()) {
+        if (isLowQps(rule.getCool())) {
+          return true;
+        }
+      }
+      return false;
+    }
+
+    private static boolean isLowQps(WorkerProperties.Cool cool) {
+      return cool != null && cool.getStrategy() == CoolStrategy.COOL_FOR_LOW_QPS;
     }
 
     @Nullable
@@ -226,8 +256,8 @@ public record DetectionSettings(
       }
       return resolveRule(
         DEFAULT_RULE_ID,
-        MatchType.PREFIX,
-        "*",
+        MatchType.REGEX,
+        ".*",
         Integer.MIN_VALUE,
         -1,
         defaults.getHotQps(),
@@ -245,7 +275,10 @@ public record DetectionSettings(
         WorkerProperties.Rule rule = configured.get(i);
         String id = rule.getId() == null || rule.getId().isBlank() ? "rule-" + (i + 1) : rule.getId();
         if (!ids.add(id)) {
+          // The first definition owns the id; keeping the duplicate would make RuleSet.of throw a
+          // bare IllegalArgumentException before the validator can report its collected errors.
           errors.add("detection.rules[" + i + "].id '" + id + "' is duplicated");
+          continue;
         }
         if (rule.getMatch() == null || rule.getMatch().getType() == null) {
           errors.add("detection.rules[" + i + "].match.type is required");
@@ -275,8 +308,9 @@ public record DetectionSettings(
      * Resolves one rule, appending every problem it has.
      *
      * <p>The callers have already proved {@code hotQps} and {@code cool} non-null; the default
-     * rule's pattern is a placeholder because the rule set returns it directly when no other rule
-     * matched, so no matcher ever consults it.
+     * rule's pattern is match-all so a direct {@code matches} call has the same meaning as the rule
+     * set's fallback. The rule set returns it directly when no other rule matched, so the report
+     * path never consults that matcher.
      */
     @Nullable
     private HotKeyRule resolveRule(
@@ -480,9 +514,8 @@ public record DetectionSettings(
    * conversions below can assume a positive check interval.
    *
    * @param maxTrackedKeys the configured window-table cap ({@code 0} disables the memory check)
-   * @param checkIntervalMs the resolved LOW_QPS re-check period
    */
-  private void warn(long maxTrackedKeys, long checkIntervalMs) {
+  private void warn(long maxTrackedKeys) {
     if (!enabled) {
       return;
     }
@@ -495,31 +528,18 @@ public record DetectionSettings(
       );
     }
     warnTrackedKeyMemory(maxTrackedKeys);
-    long checksPerSecond = (maxActiveHotKeys * 1_000L) / checkIntervalMs;
-    // A wheel thread inserts and fires in O(1) and allocates nothing; the cost per check is the
-    // registry evaluation plus the wheel link. The budget is deliberately conservative: at 200k
-    // checks/s one wheel still spends only a few percent of a core, so crossing it means the
-    // deployment is an order of magnitude beyond the design point, not that the wheel is full.
-    long checksPerWheel = 200_000L;
-    if (checksPerSecond > checksPerWheel * coolingThreads) {
-      log.warn(
-        "max-active-hot-keys / low-qps-check-interval projects ~{}/s of checks, above {} checks/s ({} per wheel, " +
-          "{} configured); add wheels (detection.cooling.threads) before the per-check evaluation dominates a " +
-          "core, and expect the sweep to repair checks that fall behind",
-        checksPerSecond,
-        checksPerWheel * coolingThreads,
-        checksPerWheel,
-        coolingThreads
-      );
-    }
-    long refreshPerSecond = 0L;
+    long checksPerSecond = 0L;
+    long refreshPerLanePerSecond = 0L;
     for (HotKeyRule rule : ruleSet.allRules()) {
       if (rule.isExpire()) {
         // max-active-hot-keys is shared by every rule, so the worst-case refresh rate is the
-        // fastest EXPIRE rule's 2-per-key rate, not the sum across rules.
-        long ruleRefreshPerSecond = (2L * maxActiveHotKeys * 1_000L) / rule.checkIntervalMs();
-        refreshPerSecond = Math.max(refreshPerSecond, ruleRefreshPerSecond);
+        // fastest EXPIRE rule's per-key rate, not the sum across rules. Each refresh emits one HOT
+        // and one COOL, which spend separate lane budgets.
+        long ruleRefreshPerLane = (maxActiveHotKeys * 1_000L) / rule.checkIntervalMs();
+        refreshPerLanePerSecond = Math.max(refreshPerLanePerSecond, ruleRefreshPerLane);
       } else {
+        long ruleChecks = (maxActiveHotKeys * 1_000L) / rule.checkIntervalMs();
+        checksPerSecond = Math.max(checksPerSecond, ruleChecks);
         long coolQps = window.toEffectiveQps(rule.coolCount());
         long hotQps = window.toEffectiveQps(rule.hotCount());
         if (coolQps * 10 > 9 * hotQps) {
@@ -532,12 +552,30 @@ public record DetectionSettings(
         }
       }
     }
-    if (refreshPerSecond > maxHotBroadcastsPerSecond + maxCoolBroadcastsPerSecond) {
+    // A wheel thread inserts and fires in O(1) and allocates nothing; the cost per check is the
+    // registry evaluation plus the wheel link. The budget is deliberately conservative: at 200k
+    // checks/s one wheel still spends only a few percent of a core, so crossing it means the
+    // deployment is an order of magnitude beyond the design point, not that the wheel is full.
+    long checksPerWheel = 200_000L;
+    if (checksPerSecond > checksPerWheel * coolingThreads) {
       log.warn(
-        "COOL_FOR_EXPIRE rules can emit ~{}/s of COOL/HOT refreshes (2 per hot key per cool-after), " +
-          "above the combined broadcast budget {}/s; still-hot keys will queue and be dropped",
-        refreshPerSecond,
-        maxHotBroadcastsPerSecond + maxCoolBroadcastsPerSecond
+        "max-active-hot-keys / low-qps-check-interval projects ~{}/s of checks, above {} checks/s ({} per wheel, " +
+          "{} configured); add wheels (detection.cooling.threads) before the per-check evaluation dominates a " +
+          "core, and expect the sweep to re-link checks that fall behind",
+        checksPerSecond,
+        checksPerWheel * coolingThreads,
+        checksPerWheel,
+        coolingThreads
+      );
+    }
+    long narrowestLaneBudget = Math.min(maxHotBroadcastsPerSecond, maxCoolBroadcastsPerSecond);
+    if (refreshPerLanePerSecond > narrowestLaneBudget) {
+      log.warn(
+        "COOL_FOR_EXPIRE rules can emit ~{}/s on each decision lane (one HOT and one COOL per refresh), " +
+          "above the narrowest lane budget ({} HOT/s, {} COOL/s); still-hot keys will queue and be dropped",
+        refreshPerLanePerSecond,
+        maxHotBroadcastsPerSecond,
+        maxCoolBroadcastsPerSecond
       );
     }
   }

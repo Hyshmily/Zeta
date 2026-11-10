@@ -97,7 +97,7 @@ class WorkerDetectionMetricsTest {
   }
 
   @Test
-  void tagsRuleFunctionCountersAndCoolReasons() {
+  void tagsRuleCountersAndCoolReasons() {
     HotKeyRule rule = new HotKeyRule("user-prefix", MatchType.PREFIX, "user:", 0, 0, 1, 0L, 0L, 60_000L, null);
     HotKeyRule defaults = new HotKeyRule(
       "defaults",
@@ -119,13 +119,13 @@ class WorkerDetectionMetricsTest {
     metrics.countCoolReason(WorkerDetectionMetrics.CoolReason.EXPIRE);
 
     assertThat(
-      registry.get(WorkerDetectionMetrics.METRIC_RULE_PROMOTIONS).tag("rule", "user-prefix").functionCounter().count()
+      registry.get(WorkerDetectionMetrics.METRIC_RULE_PROMOTIONS).tag("rule", "user-prefix").counter().count()
     ).isEqualTo(1.0d);
     assertThat(
-      registry.get(WorkerDetectionMetrics.METRIC_RULE_COOLS).tag("rule", "user-prefix").functionCounter().count()
+      registry.get(WorkerDetectionMetrics.METRIC_RULE_COOLS).tag("rule", "user-prefix").counter().count()
     ).isEqualTo(1.0d);
     assertThat(
-      registry.get(WorkerDetectionMetrics.METRIC_RULE_MATCHES).tag("rule", "user-prefix").functionCounter().count()
+      registry.get(WorkerDetectionMetrics.METRIC_RULE_MATCHES).tag("rule", "user-prefix").counter().count()
     ).isEqualTo(1.0d);
     assertThat(
       registry.get(WorkerDetectionMetrics.METRIC_COOLING_REASON).tag("reason", "expire").counter().count()

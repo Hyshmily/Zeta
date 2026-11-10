@@ -248,14 +248,15 @@ public class SlidingWindowDetector {
    *
    * @param key      the cache key; must not be {@code null}
    * @param count    the number of accesses to record (typically the batched add reported by an
-   *                 application instance); non-positive values are ignored
+   *                 application instance); non-positive values are ignored, and the returned sum is
+   *                 then taken at {@code nowSlice}
    * @param nowSlice the batch's absolute slice number, from {@link #sliceIndex(long)}
    * @return the sum of the last {@link #windowSize} slices after adding {@code count}
    * @throws NullPointerException if {@code key} is {@code null}
    */
   public long addCountAtSlice(String key, long count, long nowSlice) {
     if (count <= 0) {
-      return windowSum(key);
+      return windowSumAtSlice(key, nowSlice);
     }
     KeyWindow window = recordCount(key, count, nowSlice, false);
     if (window == null) {
@@ -309,7 +310,7 @@ public class SlidingWindowDetector {
   private KeyWindow recordCount(String key, long count, long nowSlice, boolean alreadyHot) {
     // Fast path: the window's slice is not behind this thread's sample. An older sample (a
     // concurrent adder crossed the boundary first) must not take the entry monitor only to discover
-    // it has nothing to refresh — the add is re-aligned with the window below. The comparison is on
+    // it has nothing to refresh — the add keeps its own slice below. The comparison is on
     // SLICE NUMBER, not raw elapsed time: `now - lastWrite >= sliceMs` disagrees with the bucket
     // arithmetic around boundaries (lastWrite=90 and now=180 with a 100ms slice are one bucket
     // apart, yet only 90ms elapsed).
@@ -328,12 +329,17 @@ public class SlidingWindowDetector {
       return null;
     }
 
-    // Re-align the add with the window's actual position. `nowSlice` was sampled before the
-    // monitor (and may even be older than a concurrent adder's sample), so the window can be ahead
-    // of this thread. Using the later of the two slices keeps the add inside the window and the
-    // returned sum honest.
-    long addSlice = Math.max(nowSlice, window.lastSlice);
-    addToSlot((int) (addSlice & lengthMask), (int) Math.min(count, Integer.MAX_VALUE), window.slices, addSlice);
+    // Keep the add at its own slice. `nowSlice` was sampled before the monitor and a concurrent
+    // adder may have moved the window ahead, but re-attributing this count to the newer slice
+    // would inject traffic older than the window into the current one. A batch that fell behind
+    // the whole window is dropped; one still inside the span keeps its honest slice tag.
+    long latestSlice = window.lastSlice;
+    if (latestSlice == KeyWindow.EVICTED) {
+      return null;
+    }
+    if (latestSlice - nowSlice <= windowSize) {
+      addToSlot((int) (nowSlice & lengthMask), (int) Math.min(count, Integer.MAX_VALUE), window.slices, nowSlice);
+    }
     return window;
   }
 
@@ -614,16 +620,27 @@ public class SlidingWindowDetector {
    * @return the sliding-window sum at the current time, or {@code 0}
    */
   public long windowSum(String key) {
+    // Sample the clock before reading the window's slice. A write that lands after this sample
+    // pushes lastSlice past nowSlice, so the full range ends at that newer write instead of being
+    // mistaken for a window of silence; the reverse order could pair an old slice with a new clock
+    // reading and return zero for a key that is still receiving traffic.
+    return windowSumAtSlice(key, sliceIndex(TimeSource.monotonicMillis()));
+  }
+
+  /**
+   * The shared read-only sum behind {@link #windowSum(String)} and a non-positive add: the same
+   * last-write-anchored range, taken at the caller's slice without re-sampling the clock.
+   *
+   * @param key      the cache key
+   * @param nowSlice the absolute slice the sum is taken at
+   * @return the sliding-window sum at {@code nowSlice}, or {@code 0}
+   */
+  private long windowSumAtSlice(String key, long nowSlice) {
     KeyWindow window = windows.get(key);
     if (window == null) {
       return 0L;
     }
 
-    // Sample the clock before reading the window's slice. A write that lands after this sample
-    // pushes lastSlice past nowSlice, so the full range ends at that newer write instead of being
-    // mistaken for a window of silence; the reverse order could pair an old slice with a new clock
-    // reading and return zero for a key that is still receiving traffic.
-    long nowSlice = sliceIndex(TimeSource.monotonicMillis());
     long lastSlice = window.lastSlice;
     if (lastSlice == KeyWindow.EVICTED) {
       // The evictor tombstoned the entry before removing the mapping; a reader that raced the
@@ -693,8 +710,12 @@ public class SlidingWindowDetector {
    *
    * @param staleAfterMs maximum idle time in milliseconds before a key is considered stale and
    *                     evicted; must be non-negative
+   * @throws IllegalArgumentException when {@code staleAfterMs} is negative
    */
   public void evictStale(long staleAfterMs) {
+    if (staleAfterMs < 0L) {
+      throw new IllegalArgumentException("staleAfterMs must be non-negative, got " + staleAfterMs);
+    }
     evict(staleAfterMs / timeMillisPerSlice);
   }
 

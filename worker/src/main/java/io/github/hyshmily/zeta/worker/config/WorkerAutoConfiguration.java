@@ -278,7 +278,7 @@ public class WorkerAutoConfiguration {
       broadcast.getMaxDecisionAgeMs(),
       broadcaster,
       metrics,
-      registry::abortPromotion,
+      registry::abort,
       registry::isCurrent
     );
   }
@@ -377,7 +377,7 @@ public class WorkerAutoConfiguration {
   }
 
   /**
-   * The repair task: reclaim idle windows, then re-evaluate overdue cool-downs.
+   * The repair task: reclaim idle windows, then re-link overdue cool-downs.
    *
    * @param pipeline the detection pipeline
    * @return the task
@@ -402,7 +402,7 @@ public class WorkerAutoConfiguration {
       try {
         int repaired = pipeline.sweep();
         if (repaired > 0) {
-          log.debug("Detection sweep repaired {} overdue cool-down check(s)", repaired);
+          log.debug("Detection sweep selected {} overdue cool-down check(s)", repaired);
         }
       } catch (Exception e) {
         log.error("Scheduled detection sweep failed", e);
@@ -564,13 +564,10 @@ public class WorkerAutoConfiguration {
     return new WorkerScheduling(
       List.of(
         // first sweep one full interval after startup, never during it
-        new WorkerScheduling.Task(dataPlaneScheduler, sweepTask::sweep, sweepInterval, sweepInterval),
-        new WorkerScheduling.Task(
-          controlScheduler,
-          heartbeatProducer::sendHeartbeat,
-          heartbeatInterval,
-          heartbeatInterval
-        )
+        new WorkerScheduling.Task(dataPlaneScheduler, sweepTask::sweep, sweepInterval, sweepInterval, false),
+        // First heartbeat immediately: it anchors the ready grace and joins the ring without a
+        // one-interval delay. Fixed rate keeps AMQP send time out of the heartbeat period.
+        new WorkerScheduling.Task(controlScheduler, heartbeatProducer::sendHeartbeat, 0L, heartbeatInterval, true)
       )
     );
   }
@@ -591,8 +588,16 @@ public class WorkerAutoConfiguration {
      * @param body           the work
      * @param initialDelayMs delay before the first run; {@code periodMs == 0} makes it one-shot
      * @param periodMs       period between runs, {@code 0} for a one-shot task
+     * @param fixedRate      {@code true} schedules from the previous start (no drift from the run
+     *                       time); {@code false} waits the period after the previous completion
      */
-    record Task(ScheduledExecutorService scheduler, Runnable body, long initialDelayMs, long periodMs) {}
+    record Task(
+      ScheduledExecutorService scheduler,
+      Runnable body,
+      long initialDelayMs,
+      long periodMs,
+      boolean fixedRate
+    ) {}
 
     private final List<ScheduledFuture<?>> futures = new ArrayList<>();
     private final List<Task> tasks;
@@ -630,14 +635,24 @@ public class WorkerAutoConfiguration {
       }
     }
 
-    /** Schedules one task as repeating or one-shot; {@code periodMs == 0} means one-shot. */
+    /** Schedules one task with its cadence; {@code periodMs == 0} means one-shot. */
     private static ScheduledFuture<?> schedule(Task task) {
-      if (task.periodMs() > 0) {
-        return task
-          .scheduler()
-          .scheduleWithFixedDelay(task.body(), task.initialDelayMs(), task.periodMs(), TimeUnit.MILLISECONDS);
-      }
-      return task.scheduler().schedule(task.body(), task.initialDelayMs(), TimeUnit.MILLISECONDS);
+      ScheduledExecutorService scheduler = task.scheduler();
+      return task.periodMs() <= 0
+        ? scheduler.schedule(task.body(), task.initialDelayMs(), TimeUnit.MILLISECONDS)
+        : task.fixedRate()
+          ? scheduler.scheduleAtFixedRate(
+            task.body(),
+            task.initialDelayMs(),
+            task.periodMs(),
+            TimeUnit.MILLISECONDS
+          )
+          : scheduler.scheduleWithFixedDelay(
+            task.body(),
+            task.initialDelayMs(),
+            task.periodMs(),
+            TimeUnit.MILLISECONDS
+          );
     }
 
     @Override

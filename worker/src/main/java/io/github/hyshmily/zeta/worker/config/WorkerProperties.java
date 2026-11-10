@@ -288,7 +288,8 @@ public class WorkerProperties {
     /**
      * LOW_QPS re-check period. Upper bound is the window length (a slower re-check cannot see the
      * window it is judging); lower bound is one slice — it sets the per-key check rate
-     * {@code max-active-hot-keys / interval}.
+     * {@code max-active-hot-keys / interval}. Read only when at least one rule selects
+     * {@code COOL_FOR_LOW_QPS}; an EXPIRE-only configuration ignores it.
      */
     private Duration lowQpsCheckInterval = Duration.ofSeconds(1);
 

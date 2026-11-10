@@ -20,11 +20,11 @@ import io.github.hyshmily.zeta.util.Internal;
 import io.github.hyshmily.zeta.util.TimeSource;
 import io.github.hyshmily.zeta.util.executor.ZetaThreadFactory;
 import io.github.hyshmily.zeta.worker.detection.lifecycle.HE;
-import io.github.hyshmily.zeta.worker.detection.lifecycle.HotKeyRegistry;
 import io.github.hyshmily.zeta.worker.metrics.WorkerDetectionMetrics;
 import jakarta.annotation.PreDestroy;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.VarHandle;
+import java.util.Objects;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Semaphore;
@@ -52,17 +52,17 @@ import org.jspecify.annotations.Nullable;
  * stall between the promotion and the submission while the key cools (or cools and re-promotes), and
  * the demotion's own decision may be refused, expired or failed — so neither the pending map nor the
  * accepted record would ever prove the HOT stale. A queued HOT never suppresses a COOL on its own: a
- * demotion is dropped as obsolete only when the accepted record already covers it, or when the COOL
- * proves it displaced a HOT that never reached the funnel. A decision that waited longer than
- * {@code max-decision-age-ms} is dropped at the funnel only after the in-memory state machine proves
- * it would otherwise be sent. The broadcaster keeps a cold accepted record for twice this age bound
- * and a hot one until a COOL is accepted, never size-evicts it, so every decision still allowed to
- * travel can be compared against the newest accepted one and a demotion can see that the cluster
- * still holds the key hot.
+ * demotion is dropped as obsolete only when the accepted record already covers it. A COOL with no
+ * accepted record is sent, because the cluster may be hot from local promotion or from an earlier
+ * lifecycle whose COOL was lost. A decision that waited longer than {@code max-decision-age-ms} is
+ * dropped at the funnel only after the in-memory state machine proves it would otherwise be sent.
+ * The broadcaster keeps a cold accepted record for twice this age bound and a hot one until a COOL
+ * is accepted, never size-evicts it, so every decision still allowed to travel can be compared
+ * against the newest accepted one.
  *
  * <p>
  * Delivery is fire-and-forget: a decision is sent once and never retried. A HOT whose send call never
- * succeeds returns its seat through {@link HotPromotionAbort}, identity-guarded by the decision
+ * succeeds returns its seat through {@link Rollback}, identity-guarded by the decision
  * version so a later promotion of the same key is never undone; a dropped submission returns
  * {@code false} so the caller aborts its own promotion.
  *
@@ -92,7 +92,7 @@ public class DecisionDispatcher {
    * {@link #QUEUED} records the successful offer; {@link #OWNED} records that exactly one thread has
    * taken the item and owns its terminal outcome — the drain's claim and the shutdown withdraw are the
    * same operation, because both only decide who reports the outcome. Every lifecycle bit is disjoint
-   * from the flags below, so an ownership tryToOwn and a supersede mark never invalidate each other.
+   * from the flags below, so an ownership claim and a supersede mark never invalidate each other.
    */
   private static final int UNQUEUED = 0;
   private static final int QUEUED = 1;
@@ -102,24 +102,14 @@ public class DecisionDispatcher {
    * Set when a newer decision for the key is already published: on the map value it displaced, or on
    * an older COOL queued behind it. The drain skips the identity removal for such an item because the
    * map points at, or past, a different item. It is also set by
-   * {@link Pending#markDroppedSuperseded()} on an older HOT that is never offered, which is how
+   * {@link Pending#drop()} on an older HOT that is never offered, which is how
    * {@link #submit} recognises that drop without a second result channel.
    */
   private static final int SUPERSEDED_BY_PENDING = 1 << 2;
 
-  /**
-   * Set on a COOL that displaced a still-pending HOT or a promotion the registry observed before its
-   * HOT reached the dispatcher. If the funnel later finds no accepted record for the key, that HOT
-   * never reached the wire, so the COOL would demote a key the cluster was never told was hot. A COOL
-   * that displaces a HOT already in the pending map, or whose registry entry had not been submitted,
-   * carries the bit in the plain write that publishes it before the queue offer; a HOT that arrives
-   * after the COOL that superseded it sets the bit on the already-visible item with an atomic OR.
-   */
-  private static final int REPLACED_PENDING_HOT = 1 << 3;
-
   /** Hands an undelivered HOT promotion back to the registry. */
   @FunctionalInterface
-  public interface HotPromotionAbort {
+  public interface Rollback {
     /**
      * @param key             the key whose promotion is undone
      * @param decisionVersion the version of the HOT decision that never reached the broker
@@ -129,7 +119,7 @@ public class DecisionDispatcher {
     /**
      * A no-op callback for constructions that do not own a registry (tests, embedded use).
      */
-    HotPromotionAbort NOOP = (key, decisionVersion) -> {};
+    Rollback NOOP = (key, decisionVersion) -> {};
   }
 
   /**
@@ -137,7 +127,7 @@ public class DecisionDispatcher {
    * version still owns the key's seat.
    */
   @FunctionalInterface
-  public interface HotPromotionProbe {
+  public interface Probe {
     /**
      * @param key             the key the decision is about
      * @param decisionVersion the version of the HOT decision
@@ -148,7 +138,7 @@ public class DecisionDispatcher {
     /**
      * A probe that never reports a promotion stale, for constructions without a registry.
      */
-    HotPromotionProbe ALWAYS = (key, decisionVersion) -> true;
+    Probe ALWAYS = (key, decisionVersion) -> true;
   }
 
   /**
@@ -159,8 +149,8 @@ public class DecisionDispatcher {
    * The state is a plain {@code volatile int}, updated through {@link #STATE}. Keeping it primitive
    * avoids the second header an {@code AtomicInteger} would add; the item stays one small allocation
    * (header, one reference, a {@code long} and the {@code int}). All hand-off facts — not yet
-   * offered, queued, owned, displaced, displaced-a-HOT — live in this one word, so the submitter
-   * and the drain never maintain two overlapping status fields.
+   * offered, queued, owned, displaced — live in this one word, so the submitter and the drain never
+   * maintain two overlapping status fields.
    */
   private static final class Pending {
 
@@ -197,7 +187,7 @@ public class DecisionDispatcher {
      * @param initialFlags the lifecycle bits decided under the bucket lock
      * @return {@code true} when the queue accepted the item
      */
-    boolean tryEnqueue(ArrayBlockingQueue<Pending> queue, int initialFlags) {
+    boolean enqueue(ArrayBlockingQueue<Pending> queue, int initialFlags) {
       state = QUEUED | initialFlags;
       if (queue.offer(this)) {
         return true;
@@ -209,7 +199,7 @@ public class DecisionDispatcher {
     /**
      * @return whether the queue offer was refused, so this item never became visible
      */
-    boolean enqueueRefused() {
+    boolean refused() {
       return state == UNQUEUED;
     }
 
@@ -218,55 +208,41 @@ public class DecisionDispatcher {
      *
      * <p>
      * One atomic read-modify-write with no retry loop: the ownership bit is disjoint from every other
-     * lifecycle flag, so a concurrent {@link #markSuperseded()} cannot invalidate this tryToOwn and force a
+     * lifecycle flag, so a concurrent {@link #supersede()} cannot invalidate this claim and force a
      * re-read.
      */
-    boolean tryToOwn() {
+    boolean claim() {
       int previous = (int) STATE.getAndBitwiseOr(this, OWNED);
       return (previous & (QUEUED | OWNED)) == QUEUED;
     }
 
     /**
-     * Marks this item as displaced in {@link #latestPending} by a newer decision.
+     * Marks this item as displaced in {@link #queued} by a newer decision.
      */
-    void markSuperseded() {
-      // The bit is disjoint from QUEUED/OWNED, so the OR cannot disturb a concurrent tryToOwn.
+    void supersede() {
+      // The bit is disjoint from QUEUED/OWNED, so the OR cannot disturb a concurrent claim.
       STATE.getAndBitwiseOr(this, SUPERSEDED_BY_PENDING);
     }
 
     /**
-     * Marks this already-visible COOL when a HOT with an older version arrives after it: that HOT
-     * proves its promotion never entered a queue, so the funnel may elide the demotion when the key
-     * has no accepted record. The atomic-OR counterpart of the bit {@link #enqueue(int)} may carry.
-     */
-    void markReplacedPendingHot() {
-      STATE.getAndBitwiseOr(this, REPLACED_PENDING_HOT);
-    }
-
-    /**
      * Marks an older HOT dropped before its offer. The QUEUED bit stays clear, so
-     * {@link #droppedAsSuperseded()} can tell this path from an item that was actually queued.
+     * {@link #dropped()} can tell this path from an item that was actually queued.
      */
-    void markDroppedSuperseded() {
+    void drop() {
       state = SUPERSEDED_BY_PENDING;
     }
 
     /**
      * @return whether this item was dropped before the offer because a newer decision was pending
      */
-    boolean droppedAsSuperseded() {
+    boolean dropped() {
       return state == SUPERSEDED_BY_PENDING;
-    }
-
-    /** @return whether this COOL displaced a HOT still waiting for the drain */
-    boolean replacedPendingHot() {
-      return (state & REPLACED_PENDING_HOT) != 0;
     }
 
     /**
      * @return whether a newer decision for this key was published while this item was queued
      */
-    boolean isSuperseded() {
+    boolean superseded() {
       return (state & SUPERSEDED_BY_PENDING) != 0;
     }
 
@@ -341,8 +317,17 @@ public class DecisionDispatcher {
     }
   }
 
-  private final HotPromotionAbort hotPromotionAbort;
-  private final HotPromotionProbe hotPromotionProbe;
+  /**
+   * What one round settled. {@code sent} drives the token accounting; {@code processed} also counts
+   * items that ended in memory, so a round that only discarded terminal decisions still advances the
+   * loop instead of waiting for a token.
+   */
+  private record RoundResult(int sent, int processed) {
+    private static final RoundResult NONE = new RoundResult(0, 0);
+  }
+
+  private final Rollback rollback;
+  private final Probe probe;
   private final WorkerDetectionMetrics metrics;
   private final WorkerBroadcaster broadcaster;
 
@@ -354,7 +339,7 @@ public class DecisionDispatcher {
    * are one per-key step (see {@link #submit}), so a newer submission either sees the older item or the
    * older offer was refused and never suppressed anything.
    */
-  private final ConcurrentHashMap<String, Pending> latestPending = new ConcurrentHashMap<>();
+  private final ConcurrentHashMap<String, Pending> queued = new ConcurrentHashMap<>();
 
   /**
    * Released on every successful submission and on shutdown, so an idle drain blocks instead of polling.
@@ -396,8 +381,8 @@ public class DecisionDispatcher {
    * @param maxAgeMs          maximum queue residency before a decision is dropped
    * @param broadcaster       the funnel every decision is sent through
    * @param metrics           detection meters (a meter-less instance is a no-op)
-   * @param hotPromotionAbort undo sink for a HOT that never reaches the broker; never {@code null}
-   * @param hotPromotionProbe currency probe for a queued HOT; never {@code null}
+   * @param rollback undo sink for a HOT that never reaches the broker; never {@code null}
+   * @param probe currency probe for a queued HOT; never {@code null}
    */
   public DecisionDispatcher(
     int hotCapacity,
@@ -409,18 +394,42 @@ public class DecisionDispatcher {
     long maxAgeMs,
     WorkerBroadcaster broadcaster,
     WorkerDetectionMetrics metrics,
-    HotPromotionAbort hotPromotionAbort,
-    HotPromotionProbe hotPromotionProbe
+    Rollback rollback,
+    Probe probe
   ) {
-    this.metrics = metrics;
+    if (hotCapacity <= 0 || coolCapacity <= 0) {
+      throw new IllegalArgumentException("Lane capacity must be positive");
+    }
+    if (hotRate <= 0 || coolRate <= 0) {
+      throw new IllegalArgumentException("Lane rate must be positive");
+    }
+    if (hotBurst <= 0 || coolBurst <= 0) {
+      throw new IllegalArgumentException("Lane burst must be positive");
+    }
+    if (maxAgeMs <= 0L) {
+      throw new IllegalArgumentException("maxAgeMs must be positive");
+    }
+    this.broadcaster = Objects.requireNonNull(broadcaster, "broadcaster");
+    this.metrics = Objects.requireNonNull(metrics, "metrics");
+    this.rollback = Objects.requireNonNull(rollback, "rollback");
+    this.probe = Objects.requireNonNull(probe, "probe");
     this.maxAgeMs = maxAgeMs;
-    this.broadcaster = broadcaster;
     this.hotLane = new Lane(hotCapacity, hotRate, hotBurst);
     this.coolLane = new Lane(coolCapacity, coolRate, coolBurst);
     this.drainThread = new ZetaThreadFactory("zeta-worker-broadcast").newThread(this::drainLoop);
-    this.hotPromotionAbort = hotPromotionAbort;
-    this.hotPromotionProbe = hotPromotionProbe;
     this.drainThread.start();
+  }
+
+  /**
+   * Submits one HOT promotion produced by the registry. On a refused enqueue this call returns the
+   * seat and the caller owns nothing.
+   *
+   * @param promoted the promotion to deliver
+   */
+  public void submit(HE promoted) {
+    if (!submit(promoted.decision())) {
+      abort(promoted.key(), promoted.version());
+    }
   }
 
   /**
@@ -434,47 +443,6 @@ public class DecisionDispatcher {
    * @throws IllegalArgumentException when a HOT or COOL decision carries no causal version
    */
   public boolean submit(@Nullable ZetaDecision decision) {
-    return submit(decision, false, null, null);
-  }
-
-  /**
-   * Submits one cool-down decision produced by the registry, carrying the replaced-HOT fact with
-   * it. A {@code null} decision means the evaluation produced no transition and is a no-op.
-   *
-   * @param coolDecision the registry's cool-down result, or {@code null}
-   * @return the same contract as {@link #submit(ZetaDecision)}
-   */
-  public boolean submit(HotKeyRegistry.@Nullable CoolDecision coolDecision) {
-    return coolDecision == null || submit(coolDecision.decision(), coolDecision.replacedPendingHot(), null, null);
-  }
-
-  /**
-   * Submits one HOT promotion produced by the registry. The entry is marked submitted before the
-   * queue offer makes the decision visible to the drain, so a concurrent cool-down observes the
-   * promotion as travelling; a refused offer or shutdown withdrawal clears that mark again. On a
-   * refused enqueue this call returns the seat and the caller owns nothing.
-   *
-   * @param promoted the promotion to deliver
-   */
-  public void submitPromotion(HE promoted) {
-    if (
-      !submit(
-        promoted.hotDecision(),
-        false,
-        promoted::markPromotionSubmitted,
-        promoted::clearPromotionSubmitted
-      )
-    ) {
-      abort(promoted.key(), promoted.promotedVersion());
-    }
-  }
-
-  private boolean submit(
-    @Nullable ZetaDecision decision,
-    boolean replacedPendingHot,
-    @Nullable Runnable onAccepted,
-    @Nullable Runnable onRejected
-  ) {
     if (decision == null || decision.type() == ZetaDecision.DecisionType.NONE) {
       return true;
     }
@@ -494,29 +462,20 @@ public class DecisionDispatcher {
     }
 
     Pending pending = new Pending(decision, expiresAt(TimeSource.monotonicMillis()));
-    boolean replacedHot = replacedPendingHot && type == ZetaDecision.DecisionType.COOL;
     // The offer and the publication are one per-key step: the bin lock makes the newest decision visible
     // before a newer one can replace it, and a refused offer leaves the previous record untouched.
-    latestPending.compute(
-      decision.cacheKey(),
-      (key, previous) -> publish(pending, previous, queue, replacedHot, onAccepted)
-    );
-    if (pending.droppedAsSuperseded()) {
+    queued.compute(decision.cacheKey(), (key, previous) -> publish(pending, previous, queue));
+    if (pending.dropped()) {
       // A strictly newer decision proves a later transition for this key already ran: the entry this HOT
       // created is gone or replaced, so the identity-guarded abort is a no-op and needs no
-      // accepted-version read on this producer thread.
+      // accepted-version read on this producer thread. This HOT never entered a queue; the newer
+      // pending decision is what travels.
       metrics.countSupersededDecision(type);
-      rollbackHotUndelivered(pending);
-      if (onAccepted != null) {
-        onAccepted.run();
-      }
+      abort(pending);
       return true;
     }
 
-    if (pending.enqueueRefused()) {
-      if (onRejected != null) {
-        onRejected.run();
-      }
+    if (pending.refused()) {
       drop(type);
       return false;
     }
@@ -525,13 +484,10 @@ public class DecisionDispatcher {
     // present (the drain will remove it) or already replaced by a newer submission. Shutdown may have
     // flipped running between the check and the offer. Either this thread withdraws the item (and reports
     // the drop synchronously) or the drain already claimed it and owns the terminal outcome, including
-    // the HOT rollback. The tryToOwn() hand-off is what makes the return value match the owner.
-    if (!running && pending.tryToOwn()) {
+    // the HOT rollback. The claim() hand-off is what makes the return value match the owner.
+    if (!running && pending.claim()) {
       queue.remove(pending);
-      forgetQueued(pending);
-      if (onRejected != null) {
-        onRejected.run();
-      }
+      forget(pending);
       drop(type);
       return false;
     }
@@ -557,69 +513,49 @@ public class DecisionDispatcher {
    *
    * <p>
    * Three cases: a newer pending decision drops an older HOT before the offer; an older COOL is queued
-   * behind the newer item without taking ownership of the map; otherwise the new item wins, or ties
-   * with the first one and both may travel. A COOL also carries the registry's own displaced-HOT fact,
-   * because a HOT that cooled before its submission never appears as a predecessor here.
+   * behind the newer item without taking ownership of the map; otherwise the new item is offered and
+   * becomes the map value. Equal versions are duplicates and both may be enqueued, but the map tracks the
+   * copy offered last so a newer decision still finds a predecessor after the first one settles.
    *
    * @param pending  the item to publish
    * @param previous the map's current item, or {@code null}
    * @param queue    the lane queue {@code pending} belongs to
-   * @param replacedPendingHot whether a COOL replaced a promotion the registry never submitted
-   * @param onAccepted marks the promotion submitted before the offer becomes visible to the drain
    * @return the item the map should keep
    */
-  private Pending publish(
-    Pending pending,
-    @Nullable Pending previous,
-    ArrayBlockingQueue<Pending> queue,
-    boolean replacedPendingHot,
-    @Nullable Runnable onAccepted
-  ) {
+  private Pending publish(Pending pending, @Nullable Pending previous, ArrayBlockingQueue<Pending> queue) {
+    if (!running) {
+      // Shutdown began while this submission waited for the bin lock: refuse the offer without
+      // touching the predecessor. The caller reports the drop synchronously, exactly like the
+      // pre-compute check.
+      return previous;
+    }
     if (previous != null && previous.version() > pending.version()) {
       if (!pending.isHot()) {
         // A COOL is still queued: only the accepted record may drop a demotion, and the drain must skip
-        // this item's map removal because the newer item owns the entry. The registry's own displaced fact
-        // rides along even though the newer decision is no longer visible here.
-        pending.tryEnqueue(queue, SUPERSEDED_BY_PENDING | (replacedPendingHot ? REPLACED_PENDING_HOT : 0));
+        // this item's map removal because the newer item owns the entry.
+        pending.enqueue(queue, SUPERSEDED_BY_PENDING);
         return previous;
       }
       // The newer decision owns the key's delivery; this older HOT changes nothing and must not
       // consume a queue slot.
-      pending.markDroppedSuperseded();
-      if (previous.type() == ZetaDecision.DecisionType.COOL) {
-        // This HOT proves the lifecycle it promoted never entered a queue, so the demotion ahead of it
-        // displaced a promotion that never travelled: the funnel may elide the COOL when it has no
-        // accepted record for the key.
-        previous.markReplacedPendingHot();
-      }
+      pending.drop();
       return previous;
     }
 
     boolean wins = previous == null || previous.version() < pending.version();
-    int flags =
-      replacedPendingHot ||
-      (wins && previous != null && pending.type() == ZetaDecision.DecisionType.COOL && previous.isHot())
-        ? REPLACED_PENDING_HOT
-        : 0;
     // Every lifecycle bit is decided under the bin lock and published by this one plain write. The
     // item is not visible to the drain before the offer, so no atomic OR is needed: the drain either
     // polls the finished word or does not see the item at all.
-    if (onAccepted != null) {
-      // Publish the "submitted" fact before the offer makes the item visible, so a cool-down that
-      // runs while the HOT is still in flight records the promotion as travelling. A refused offer
-      // reaches submit(), which withdraws the mark.
-      onAccepted.run();
-    }
-    if (!pending.tryEnqueue(queue, flags)) {
+    if (!pending.enqueue(queue, 0)) {
       return previous;
     }
-
     if (wins && previous != null) {
-      previous.markSuperseded();
+      previous.supersede();
     }
-    // Equal versions stay as they are: the accepted record drops the duplicate after the first one
-    // settles, and if the first one fails the second is still a useful copy.
-    return wins ? pending : previous;
+    // An equal version is a duplicate offered while the first copy is still queued: both may be
+    // enqueued, but the map tracks the copy offered last, so a newer decision still finds a
+    // predecessor after the first copy settles.
+    return pending;
   }
 
   /**
@@ -636,7 +572,7 @@ public class DecisionDispatcher {
     try {
       while (running || !queuesEmpty()) {
         try {
-          int sent = drainRound();
+          RoundResult round = drainRound();
           if (sendFailed) {
             if (!running) {
               // Shutdown with a failing broker: retrying at 10ms intervals would keep the thread alive
@@ -647,9 +583,11 @@ public class DecisionDispatcher {
             Thread.sleep(FAILURE_BACKOFF_MS);
             continue;
           }
-          if (sent > 0) {
+          if (round.sent() > 0 || round.processed() > 0) {
             // Permits released while this round was busy describe decisions already handled; drop them so
-            // the next empty round blocks instead of spinning through stale signals.
+            // the next empty round blocks instead of spinning through stale signals. A round that only
+            // settled terminal decisions is also progress: the next round continues the backlog without
+            // waiting for a token those decisions do not need.
             pendingSignal.drainPermits();
             continue;
           }
@@ -661,6 +599,10 @@ public class DecisionDispatcher {
           // submissions would keep filling the queues and every HOT would be aborted on refusal. The
           // in-flight item's HOT seat was already returned before the failure propagated out of drain.
           log.error("Decision drain round failed; retrying after {}ms", FAILURE_BACKOFF_MS, e);
+          if (!running) {
+            // Shutdown does not wait for the backoff: the final drain counts the remainder.
+            break;
+          }
           Thread.sleep(FAILURE_BACKOFF_MS);
         }
       }
@@ -679,16 +621,14 @@ public class DecisionDispatcher {
    * <p>A broker failure is global: do not pull a HOT only to lose it in the same outage. The round
    * still returns the COOL count so the caller can account for the tokens it spent.
    *
-   * @return the number of decisions handed to the AMQP client this round
+   * @return the decisions sent and the items whose queue residency ended this round
    */
-  private int drainRound() {
+  private RoundResult drainRound() {
     refill();
     sendFailed = false;
-    int sent = drain(coolLane);
-    if (!sendFailed) {
-      sent += drain(hotLane);
-    }
-    return sent;
+    RoundResult cool = drain(coolLane);
+    RoundResult hot = sendFailed ? RoundResult.NONE : drain(hotLane);
+    return new RoundResult(cool.sent() + hot.sent(), cool.processed() + hot.processed());
   }
 
   /**
@@ -713,6 +653,12 @@ public class DecisionDispatcher {
       pendingSignal.drainPermits();
       if (!running) {
         return false;
+      }
+      // A submission between the first check and the permit drain can make a head terminal; its
+      // release was just discarded, so re-check before sleeping or that head waits for a token it
+      // does not need.
+      if (hasReadyWork()) {
+        return true;
       }
       // Pending work but no usable token: wait for the next refill. The wait is on the semaphore, not
       // a fixed sleep, because the other queue may be idle and needs no token — a COOL arriving
@@ -743,23 +689,32 @@ public class DecisionDispatcher {
   }
 
   /**
-   * Whether any non-empty lane can act with the tokens it holds now. A cool head that must yield
-   * to a newer HOT counts only when that HOT lane can send it, or when the head already yielded
-   * once and is therefore allowed to proceed; otherwise a ready demotion would be mistaken for a
-   * stalled lane and delay the whole round.
+   * Whether any non-empty lane can act now. A lane with a token can send; without one, a head the
+   * funnel would settle in memory (superseded, expired, elided or a redundant COOL) leaves without
+   * a send budget. A cool head with a token always counts: the next round either sends it or yields
+   * once to a newer HOT that the hot lane can send in the same round.
    *
    * @return {@code true} when the next round can make progress without a new submission
    */
   private boolean hasReadyWork() {
-    if (!hotLane.queue.isEmpty() && hotLane.tokens >= 1.0d) {
+    Pending hotHead = hotLane.queue.peek();
+    if (hotHead != null && (hotLane.tokens >= 1.0d || isTerminalHead(hotHead))) {
       return true;
     }
     Pending coolHead = coolLane.queue.peek();
-    return (
-      coolHead != null &&
-      coolLane.tokens >= 1.0d &&
-      (coolHead == yieldedCoolHead || !hasNewerHotPending(coolHead))
-    );
+    return coolHead != null && (coolLane.tokens >= 1.0d || isTerminalHead(coolHead));
+  }
+
+  /**
+   * Whether the funnel would settle this head without a send. Mirrors the checks in
+   * {@link #drain(Lane)}: a HOT with a newer pending decision or a released promotion, or any head
+   * the broadcaster's state machine classifies as terminal.
+   *
+   * @param head the lane head
+   * @return {@code true} when the head can leave without a token
+   */
+  private boolean isTerminalHead(Pending head) {
+    return supersededHot(head) || broadcaster.classify(head.decision, head.expiresAtMs) != null;
   }
 
   /**
@@ -773,8 +728,8 @@ public class DecisionDispatcher {
    * not at the next refill.
    *
    * <p>
-   * Only read when {@link #tokenStarved()} is {@code true}; the fallback covers a state change between
-   * that check and this call, not an ordinary round.
+   * Only read while a non-empty lane has no token; the fallback covers a state change between that
+   * check and this call, not an ordinary round.
    *
    * @return the wait bound for the drain's semaphore
    */
@@ -804,9 +759,9 @@ public class DecisionDispatcher {
    * the per-round burst cannot block every unrelated demotion behind that one key.
    *
    * @param lane the lane to drain
-   * @return the number of decisions handed to the AMQP client
+   * @return the decisions sent and the items whose queue residency ended
    */
-  private int drain(Lane lane) {
+  private RoundResult drain(Lane lane) {
     ArrayBlockingQueue<Pending> queue = lane.queue;
     int sent = 0;
     int processed = 0;
@@ -828,8 +783,7 @@ public class DecisionDispatcher {
         // Whenever this lane cannot send the head, settle the terminal in-memory outcomes first. A COOL
         // that yields to a newer HOT must still shed an obsolete or expired head; otherwise it blocks
         // every decision behind it even though it would never take the wire.
-        boolean yieldToHot =
-          lane == coolLane && tokens >= 1.0d && head != yieldedCoolHead && hasNewerHotPending(head);
+        boolean yieldToHot = lane == coolLane && tokens >= 1.0d && head != yieldedCoolHead && hasNewerHotPending(head);
         if (yieldToHot) {
           yieldedCoolHead = head;
         }
@@ -856,7 +810,7 @@ public class DecisionDispatcher {
           yieldedCoolHead = null;
         }
         processed++;
-        if (!pending.tryToOwn()) {
+        if (!pending.claim()) {
           continue;
         }
         WorkerBroadcaster.Delivery delivery = null;
@@ -864,8 +818,6 @@ public class DecisionDispatcher {
           // Two checks the funnel cannot make: a newer HOT may still be queued and not yet accepted, and
           // the registry may have moved past this promotion since it was submitted. Both apply to HOT
           // only; a COOL is corrected only by the accepted record, because a queued HOT may still fail.
-          // The displaced-HOT bit rides the decision into the funnel, which folds that probe into its
-          // single record read.
           delivery = deliver(pending);
           applyOutcome(pending, delivery);
           if (delivery == WorkerBroadcaster.Delivery.SENT) {
@@ -887,13 +839,13 @@ public class DecisionDispatcher {
           }
           throw e;
         } finally {
-          forgetQueued(pending);
+          forget(pending);
         }
       }
     } finally {
       lane.tokens = tokens;
     }
-    return sent;
+    return new RoundResult(sent, processed);
   }
 
   /**
@@ -908,37 +860,60 @@ public class DecisionDispatcher {
       metrics.countSupersededDecision(pending.type());
       return WorkerBroadcaster.Delivery.SUPERSEDED;
     }
-    return broadcaster.tryBroadcast(pending.decision, pending.replacedPendingHot(), pending.expiresAtMs);
+    return broadcaster.send(pending.decision, pending.expiresAtMs);
   }
 
   /**
    * Applies one delivery outcome: the meters, the delivery-loss line, the HOT rollback and the
    * global send-failure flag that stops the round. SENT and ELIDED leave the seat in place.
+   *
+   * <p>A HOT that ends {@code SUPERSEDED} before the wire leaves the lifecycle cold when the key
+   * has no accepted record. That outcome records a cold accepted state, so the lifecycle's later
+   * COOL is elided instead of demoting a key the cluster was never told was hot. A failed or
+   * expired HOT does not record one: its COOL is still sent, because the cluster may hold a state
+   * from an earlier lifecycle whose COOL was lost. Any cold record an earlier superseded HOT
+   * installed is cleared first, so it cannot elide that corrective COOL.
    */
   private void applyOutcome(Pending pending, WorkerBroadcaster.Delivery outcome) {
     switch (outcome) {
-      // ELIDED: the funnel already holds this exact version, or the COOL's displaced HOT never reached
-      // the wire. Neither outcome is an undelivered promotion, so the seat stays.
+      // ELIDED: the funnel already holds this exact version, or the COOL is already cold. Neither
+      // outcome is an undelivered promotion, so the seat stays.
       case SENT, ELIDED -> {
       }
       case FAILED -> {
         logDeliveryLoss();
         // The funnel rejected this version before the send, so it was never accepted; the identity-
-        // guarded abort is the only rollback needed.
-        rollbackHotUndelivered(pending);
+        // guarded abort is the only rollback needed. A cold record left by an older superseded HOT
+        // must not survive: it would elide the COOL this failure requires.
+        abort(pending);
+        if (pending.isHot()) {
+          broadcaster.forgetCold(pending.key(), pending.version());
+        }
         sendFailed = true;
       }
       case EXPIRED -> {
         metrics.countExpiredDecision(pending.type());
         logDeliveryLoss();
         // Classified as sendable before the age test, so no accepted record covers this version: the
-        // unguarded abort is exact.
-        rollbackHotUndelivered(pending);
+        // unguarded abort is exact. The cold record is cleared for the same reason as FAILED.
+        abort(pending);
+        if (pending.isHot()) {
+          broadcaster.forgetCold(pending.key(), pending.version());
+        }
       }
-      case SUPERSEDED ->
-        // The accepted version moved past this decision after the pop. The abort is identity-guarded,
-        // so it is a no-op when a newer promotion already owns the seat.
-        rollbackHotUndelivered(pending);
+      case SUPERSEDED -> {
+        // A newer decision moved past this one after the pop, or a pre-funnel check dropped it before
+        // the wire. The abort is identity-guarded either way. A cold record from an earlier superseded
+        // HOT must not outlive this one: if the newer decision is a COOL it would elide that corrective
+        // demotion, and if it is a HOT the newer outcome owns the record from here.
+        abort(pending);
+        if (pending.isHot()) {
+          broadcaster.forgetCold(pending.key(), pending.version());
+          if (!supersededByPendingCool(pending)) {
+            broadcaster.rememberCold(pending.key());
+          }
+        }
+      }
     }
   }
 
@@ -952,14 +927,14 @@ public class DecisionDispatcher {
    * on a later round as the correction. A head yields at most once: if the newer HOT is deeper than one
    * hot-lane burst, the demotion is sent on the following round so unrelated keys keep progressing.
    *
-   * @param head the cool lane's head, or {@code null}
+   * @param head the cool lane's head
    * @return {@code true} when the head must wait for the HOT lane
    */
-  private boolean hasNewerHotPending(@Nullable Pending head) {
-    if (head == null || !head.isSuperseded()) {
+  private boolean hasNewerHotPending(Pending head) {
+    if (!head.superseded()) {
       return false;
     }
-    Pending latest = latestPending.get(head.key());
+    Pending latest = queued.get(head.key());
     return (latest != null && latest.isHot() && latest.version() > head.version() && hotLane.tokens >= 1.0d);
   }
 
@@ -987,15 +962,15 @@ public class DecisionDispatcher {
     // the entry this HOT created, so the identity-guarded abort is a no-op. A COOL never coalesces
     // this way; only the funnel's state machine may drop a demotion before the send.
     boolean superseded = supersededHot(head);
-    WorkerBroadcaster.InMemory classification = null;
+    WorkerBroadcaster.Verdict verdict = null;
     if (!superseded) {
-      classification = broadcaster.classifyInMemory(head.decision, head.replacedPendingHot(), head.expiresAtMs);
-      if (classification == null) {
+      verdict = broadcaster.classify(head.decision, head.expiresAtMs);
+      if (verdict == null) {
         return false;
       }
     }
 
-    if (!queue.remove(head) || !head.tryToOwn()) {
+    if (!queue.remove(head) || !head.claim()) {
       // Shutdown withdrew this item between the peek and the remove; re-read the queue.
       return true;
     }
@@ -1004,12 +979,25 @@ public class DecisionDispatcher {
         metrics.countSupersededDecision(head.type());
         applyOutcome(head, WorkerBroadcaster.Delivery.SUPERSEDED);
       } else {
-        applyOutcome(head, broadcaster.commitInMemory(classification, head.decision));
+        applyOutcome(head, broadcaster.commit(verdict, head.decision));
       }
     } finally {
-      forgetQueued(head);
+      forget(head);
     }
     return true;
+  }
+
+  /**
+   * Whether the key's newest pending decision is a COOL that displaced this HOT. Such a COOL is the
+   * corrective demotion the supersession requires, so the HOT must not install the cold record that
+   * would elide it.
+   *
+   * @param hot the superseded HOT
+   * @return {@code true} when a newer COOL is still pending for the key
+   */
+  private boolean supersededByPendingCool(Pending hot) {
+    Pending latest = queued.get(hot.key());
+    return latest != null && !latest.isHot() && latest.version() > hot.version();
   }
 
   /**
@@ -1021,7 +1009,7 @@ public class DecisionDispatcher {
    * The registry probe closes the stalled-submit window: a report thread can stall between the transition
    * that allocated the version and this submission, and the key can cool — or cool and re-promote — in
    * between. The newer decision's own delivery may be refused, expired or failed, so neither
-   * {@link #latestPending} nor the accepted record is guaranteed to remember it; the registry's entry is
+   * {@link #pending} nor the accepted record is guaranteed to remember it; the registry's entry is
    * the authority on whether the promotion still stands.
    *
    * <p>
@@ -1039,7 +1027,7 @@ public class DecisionDispatcher {
     if (!pending.isHot()) {
       return false;
     }
-    return (pending.isSuperseded() || !hotPromotionProbe.isCurrent(pending.key(), pending.version()));
+    return (pending.superseded() || !probe.isCurrent(pending.key(), pending.version()));
   }
 
   /**
@@ -1047,9 +1035,9 @@ public class DecisionDispatcher {
    * displaced by a newer one, so the map does not point at it and the removal cannot succeed; skipping it
    * saves the bin lock.
    */
-  private void forgetQueued(Pending pending) {
-    if (!pending.isSuperseded()) {
-      latestPending.remove(pending.key(), pending);
+  private void forget(Pending pending) {
+    if (!pending.superseded()) {
+      queued.remove(pending.key(), pending);
     }
   }
 
@@ -1075,29 +1063,15 @@ public class DecisionDispatcher {
     abort(pending);
   }
 
-  /**
-   * Returns a HOT seat for a decision the funnel has already rejected as failed or superseded.
-   *
-   * <p>
-   * No accepted-record read is needed: the funnel only reaches a send when it proved the accepted version
-   * is below this one, so the exact version cannot be accepted. A newer accepted version means the
-   * transition that superseded this HOT owns the seat, and the identity-guarded abort is a no-op for it.
-   *
-   * @param pending the decision the funnel rejected
-   */
-  private void rollbackHotUndelivered(Pending pending) {
-    if (pending.isHot()) {
-      abort(pending);
-    }
-  }
-
   private void abort(Pending pending) {
-    abort(pending.key(), pending.version());
+    if (pending.isHot()) {
+      abort(pending.key(), pending.version());
+    }
   }
 
   private void abort(String key, long version) {
     try {
-      hotPromotionAbort.abort(key, version);
+      rollback.abort(key, version);
     } catch (RuntimeException e) {
       log.error("Failed to roll back an undelivered HOT promotion: key={}, version={}", key, version, e);
     }
@@ -1156,14 +1130,14 @@ public class DecisionDispatcher {
     while ((pending = queue.poll()) != null) {
       // A submit that lost the shutdown race withdrew the item and counted the drop itself; it also
       // aborted the promotion synchronously, so this drain must not count or roll back twice.
-      if (!pending.tryToOwn()) {
+      if (!pending.claim()) {
         continue;
       }
       try {
         drop(pending.type());
         rollbackHot(pending);
       } finally {
-        forgetQueued(pending);
+        forget(pending);
       }
     }
   }

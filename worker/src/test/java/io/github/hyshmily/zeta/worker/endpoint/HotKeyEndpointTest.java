@@ -46,7 +46,7 @@ class HotKeyEndpointTest {
     when(entry.promotedAt()).thenReturn(Long.MAX_VALUE);
     when(entry.belowSince()).thenReturn(Long.MAX_VALUE - 1L);
     when(entry.nextCheckAt()).thenReturn(Long.MAX_VALUE);
-    when(entry.promotedVersion()).thenReturn(7L);
+    when(entry.version()).thenReturn(7L);
 
     SlidingWindowDetector detector = mock(SlidingWindowDetector.class);
     when(detector.windowSum("k")).thenReturn(0L);
@@ -80,7 +80,7 @@ class HotKeyEndpointTest {
     when(entry.promotedAt()).thenReturn(1L);
     when(entry.belowSince()).thenReturn(0L);
     when(entry.nextCheckAt()).thenReturn(1L);
-    when(entry.promotedVersion()).thenReturn(1L);
+    when(entry.version()).thenReturn(1L);
 
     HotKeyEndpoint endpoint = new HotKeyEndpoint(
       mock(RuleResolver.class),
@@ -100,8 +100,8 @@ class HotKeyEndpointTest {
     HotKeyRule defaults = new HotKeyRule("default", MatchType.PREFIX, "default:", 0, 0, 100, 0L, 0L, 60_000L, null);
     RuleResolver rules = new RuleResolver(RuleSet.of(List.of(rule), defaults), 10, new WorkerDetectionMetrics(null));
     HotKeyRegistry registry = mock(HotKeyRegistry.class);
-    when(registry.activeCount()).thenReturn(1234);
-    when(registry.rejectedCount()).thenReturn(12L);
+    when(registry.size()).thenReturn(1234);
+    when(registry.rejected()).thenReturn(12L);
     CoolingScheduler cooling = mock(CoolingScheduler.class);
     when(cooling.scheduled()).thenReturn(900);
 

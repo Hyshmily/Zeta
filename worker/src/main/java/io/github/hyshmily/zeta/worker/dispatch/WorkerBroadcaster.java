@@ -22,11 +22,12 @@ import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import com.github.benmanes.caffeine.cache.Expiry;
 import io.github.hyshmily.zeta.model.ZetaDecision;
-import io.github.hyshmily.zeta.sync.worker.WorkerDecisionType;
+import io.github.hyshmily.zeta.sync.worker.WorkerType;
 import io.github.hyshmily.zeta.util.TimeSource;
 import io.github.hyshmily.zeta.worker.dispatch.connection.WorkerIdentity;
 import io.github.hyshmily.zeta.worker.metrics.WorkerDetectionMetrics;
 import java.nio.charset.StandardCharsets;
+import java.util.Objects;
 import java.util.concurrent.TimeUnit;
 import lombok.extern.slf4j.Slf4j;
 import org.jspecify.annotations.NonNull;
@@ -43,7 +44,7 @@ import org.springframework.amqp.rabbit.core.RabbitTemplate;
  * <b>decision version</b> (worker‑local counter) that is used by receivers to
  * discard stale or out‑of‑order messages. The version of a decision is
  * allocated <em>upstream</em>, under the per-key lock that performed
- * the transition — see {@link #tryBroadcast(ZetaDecision, boolean, long)} — so the order the versions
+ * the transition — see {@link #send(ZetaDecision, long)} — so the order the versions
  * express is causal, not the order in which threads happened to reach the wire.
  *
  * <p>Messages reach every instance of this application's dedicated queue through a
@@ -57,15 +58,18 @@ import org.springframework.amqp.rabbit.core.RabbitTemplate;
  * every age bound.</b> A cold accepted record is retained for twice
  * {@code broadcast.max-decision-age-ms} and the cache has no size cap, so it expires only after its
  * key's oldest queued decision has already been dropped as expired. A record whose last accepted
- * decision is HOT is retained until a COOL is accepted: it is the only proof the cluster was told
- * the key is hot, and a hot key can keep its seat for far longer than any queue bound. The cold
- * retention assumes a producer submits a decision within {@code max-decision-age-ms} of the
- * transition that allocated its version; a producer stalled longer than twice the age bound is
- * outside the report path's latency contract and is a bounded loss, like a stalled window add.
+ * decision is HOT is retained until a COOL is accepted: it keeps the version and debounce
+ * watermarks across a hot episode that can outlive any queue bound. A COOL with no record is still
+ * sent — the cluster may be hot from local promotion or from an earlier lifecycle whose COOL was
+ * lost — so the hot retention is an ordering and duplicate-suppression optimization, not the only
+ * demotion signal. The cold retention assumes a producer submits a decision within
+ * {@code max-decision-age-ms} of the transition that allocated its version; a producer stalled
+ * longer than twice the age bound is outside the report path's latency contract and is a bounded
+ * loss, like a stalled window add.
  *
  * <p>This class is the <b>single funnel</b> for decisions leaving the Worker. Only the dispatcher's
- * drain thread calls the package-private classification and send methods, so the mutable
- * {@link AcceptedDecision} fields need no cross-thread hand-off.
+ * drain thread calls the package-private classification and send methods, so a record replacement
+ * needs no cross-thread hand-off; {@link AcceptedDecision} values are immutable.
  *
  * <p><b>One send per decision.</b> The pipeline is fire-and-forget (design decisions: sync
  * messages): no repeat chain, no periodic re-emission. A lost decision is not retried; the cluster
@@ -123,8 +127,9 @@ public class WorkerBroadcaster {
   private static final long HOT_RECORD_RETENTION_NANOS = TimeUnit.DAYS.toNanos(36_500L);
 
   /**
-   * Per-key accepted-decision record. The mutable fields are written by the single drain thread;
-   * the Caffeine cache supplies time-based retention only, never size eviction.
+   * Per-key accepted-decision record. Every field is immutable so a record read through the cache
+   * is a stable fact; the single drain thread replaces the value on an elision or a state change.
+   * The Caffeine cache supplies time-based retention only, never size eviction.
    */
   private static final class AcceptedDecision {
 
@@ -134,19 +139,50 @@ public class WorkerBroadcaster {
      */
     private static final long NEVER_SENT = Long.MIN_VALUE;
 
-    /** Highest accepted decision version; {@code 0} means no decision has been accepted yet. */
-    private long version;
+    /** What the cluster is known to hold for this key. */
+    private enum State {
+      HOT,
+      COLD,
+      /**
+       * A cold record whose coldness is no longer proven: a HOT that could have corrected it ended
+       * before the wire. Keeping the version still supersedes older decisions; the state only
+       * stops a later COOL from being elided as redundant.
+       */
+      UNKNOWN,
+    }
 
-    /** Whether {@link #version} is the state the cluster holds, even if it was elided. */
-    private boolean hot;
+    /** Highest accepted decision version; {@code 0} means no decision has been accepted yet. */
+    private final long version;
+
+    /** The cluster state this version describes, or {@link State#UNKNOWN} after a failed HOT. */
+    private final State state;
 
     /** Monotonic send instant of the last real send; {@link #NEVER_SENT} until one occurs. */
     private final long lastSentAtMs;
 
     private AcceptedDecision(ZetaDecision decision, long sentAtMs) {
-      this.version = decision.decisionVersion();
-      this.hot = decision.type() == ZetaDecision.DecisionType.HOT;
-      this.lastSentAtMs = sentAtMs;
+      this(decision.decisionVersion(), stateOf(decision), sentAtMs);
+    }
+
+    private AcceptedDecision(long version, State state, long lastSentAtMs) {
+      this.version = version;
+      this.state = state;
+      this.lastSentAtMs = lastSentAtMs;
+    }
+
+    /**
+     * The cold state recorded when a HOT is dropped before the wire and no record exists. Version
+     * {@code 0} is below every causal decision version and the never-sent anchor keeps it from
+     * debouncing a real send.
+     *
+     * @return a cold accepted record with no send anchor
+     */
+    private static AcceptedDecision coldTombstone() {
+      return new AcceptedDecision(0L, State.COLD, NEVER_SENT);
+    }
+
+    private static State stateOf(ZetaDecision decision) {
+      return decision.type() == ZetaDecision.DecisionType.HOT ? State.HOT : State.COLD;
     }
 
     long version() {
@@ -154,23 +190,33 @@ public class WorkerBroadcaster {
     }
 
     boolean isHot() {
-      return hot;
+      return state == State.HOT;
+    }
+
+    /**
+     * Whether the cluster is known to be cold at {@link #version}.
+     *
+     * @return {@code true} only for a COLD record
+     */
+    boolean isKnownCold() {
+      return state == State.COLD;
     }
 
     /**
      * Whether this record is the same type and was sent inside the debounce window.
      *
      * <p>A record established by an elision has no send anchor: it can suppress a redundant COOL
-     * through {@link #isHot()} being false, but it must not suppress a same-type decision as if a
-     * send had just happened. The sentinel check keeps the arithmetic away from
-     * {@link #NEVER_SENT}, whose subtraction would overflow.
+     * through {@link #isKnownCold()}, but it must not suppress a same-type decision as if a send
+     * had just happened. The sentinel check keeps the arithmetic away from {@link #NEVER_SENT},
+     * whose subtraction would overflow.
      *
      * @param hot   the type of the decision being considered
      * @param nowMs the monotonic sample of that decision
      * @return {@code true} when the decision is a duplicate of the last sent one
      */
-    boolean sameTypeWithinDedupWindow(boolean hot, long nowMs) {
-      if (this.hot != hot || lastSentAtMs == NEVER_SENT) {
+    boolean debounced(boolean hot, long nowMs) {
+      State target = hot ? State.HOT : State.COLD;
+      if (state != target || lastSentAtMs == NEVER_SENT) {
         return false;
       }
       long elapsed = nowMs - lastSentAtMs;
@@ -178,9 +224,17 @@ public class WorkerBroadcaster {
     }
 
     /** Advances the accepted version and type without moving the debounce anchor. */
-    void elide(ZetaDecision decision) {
-      this.version = decision.decisionVersion();
-      this.hot = decision.type() == ZetaDecision.DecisionType.HOT;
+    AcceptedDecision elide(ZetaDecision decision) {
+      return new AcceptedDecision(decision.decisionVersion(), stateOf(decision), lastSentAtMs);
+    }
+
+    /**
+     * Clears only the cold knowledge, keeping the version watermark and the send anchor.
+     *
+     * @return this record when it is not cold; otherwise an {@link State#UNKNOWN} copy
+     */
+    AcceptedDecision clearColdKnowledge() {
+      return state == State.COLD ? new AcceptedDecision(version, State.UNKNOWN, lastSentAtMs) : this;
     }
   }
 
@@ -188,12 +242,11 @@ public class WorkerBroadcaster {
    * Caffeine variable expiry: a record that represents HOT is retained for the lifetime of the
    * Worker's hot state, while a cold record keeps the queue-residency bound.
    *
-   * <p>A hot record is the only proof the cluster was told the key is hot. Its age says nothing
-   * about that fact: a key can stay hot for minutes or hours without another decision. Expiring it
-   * would let a later COOL that displaced a still-pending HOT be mistaken for the demotion of a
-   * promotion the cluster never saw, and the cluster would stay hot until the App's hard TTL. The
-   * record turns cold when a COOL is accepted, and the cold retention then bounds how long an older
-   * queued decision can still be ordered against it.
+   * <p>A hot record is the ordering and duplicate-suppression watermark for a key that can stay
+   * hot for minutes or hours without another decision. Expiring it would let a stale HOT or an old
+   * COOL be re-sent after the key's queue decisions have settled; the App's version guard makes the
+   * replay harmless, but the send is wasted. The record turns cold when a COOL is accepted, and the
+   * cold retention then bounds how long an older queued decision can still be ordered against it.
    */
   private record AcceptedDecisionExpiry(long coldRetentionNanos) implements Expiry<String, AcceptedDecision> {
     @Override
@@ -228,11 +281,11 @@ public class WorkerBroadcaster {
 
   /**
    * A terminal in-memory classification together with the accepted record it was decided against.
-   * Carrying the record from {@link #classifyInMemory} to {@link #commitInMemory} keeps one cache
+   * Carrying the record from {@link #classify} to {@link #commit} keeps one cache
    * read for the whole head-drain step: a second read could observe an expiry the first did not and
    * regress the accepted version to an older decision.
    */
-  record InMemory(Delivery outcome, @Nullable AcceptedDecision prev) {}
+  record Verdict(Delivery outcome, @Nullable AcceptedDecision prev) {}
 
   /**
    * Per-key accepted decision, retention state-dependent but never size-bounded. A cold record is
@@ -240,7 +293,7 @@ public class WorkerBroadcaster {
    * could still be compared against it has already been dropped as expired; a hot record is
    * retained until a COOL is accepted.
    */
-  private final Cache<String, AcceptedDecision> acceptedDecisions;
+  private final Cache<String, AcceptedDecision> accepted;
 
   /**
    * Detection-plane meters (documented in docs/MONITOR.md). A meter-less instance is a no-op, so
@@ -292,9 +345,7 @@ public class WorkerBroadcaster {
     this.broadcastExchange = broadcastExchange;
     this.routingKey = PREFIX_DECISION + appName;
     long retentionMs = maxDecisionAgeMs > Long.MAX_VALUE / 2L ? Long.MAX_VALUE : 2L * maxDecisionAgeMs;
-    this.acceptedDecisions = Caffeine.newBuilder()
-      .expireAfter(new AcceptedDecisionExpiry(retentionNanos(retentionMs)))
-      .build();
+    this.accepted = Caffeine.newBuilder().expireAfter(new AcceptedDecisionExpiry(retentionNanos(retentionMs))).build();
   }
 
   /** Converts a millisecond retention to nanoseconds, saturating instead of wrapping. */
@@ -316,8 +367,48 @@ public class WorkerBroadcaster {
    * @return the accepted version, or {@code 0} when the key has no live record
    */
   long acceptedVersion(String cacheKey) {
-    AcceptedDecision prev = acceptedDecisions.getIfPresent(cacheKey);
+    AcceptedDecision prev = accepted.getIfPresent(cacheKey);
     return prev == null ? 0L : prev.version();
+  }
+
+  /**
+   * Records that a HOT was superseded before the wire. The cluster is cold unless a previous
+   * accepted decision already describes another state. A later COOL with no predecessor then sees
+   * a cold record and is elided, instead of demoting a key the cluster was never told was hot.
+   *
+   * <p>The record is installed only when the key has none. An existing record keeps its version,
+   * state and send anchor: a COLD record already elides the lifecycle's COOL, and an UNKNOWN record
+   * must stay unknown because a newer failed HOT still owes a corrective COOL. A hot record is
+   * never demoted: it is proof the cluster was told the key is hot. Called by the dispatcher's drain
+   * thread only, like every other funnel mutation.
+   *
+   * @param cacheKey the key whose HOT never reached the wire
+   */
+  void rememberCold(String cacheKey) {
+    accepted.asMap().putIfAbsent(cacheKey, AcceptedDecision.coldTombstone());
+  }
+
+  /**
+   * Clears the cold knowledge of an accepted record when a HOT ends before the wire. The
+   * conservative correction for that HOT is to send its COOL anyway, because the cluster may hold a
+   * state from an earlier lifecycle whose COOL was lost; a record still marked cold would otherwise
+   * elide that correction.
+   *
+   * <p>The version watermark and the send anchor stay: a stale decision below {@code hotVersion} is
+   * still superseded, and the debounce window is not restarted. Only a non-hot record below
+   * {@code hotVersion} is downgraded to unknown. Called for a failed or expired HOT, and before a
+   * superseded HOT either installs its own record or yields to a pending COOL. Called by the
+   * dispatcher's drain thread only.
+   *
+   * @param cacheKey   the key whose HOT never reached the wire
+   * @param hotVersion the failed, expired or superseded HOT's causal version
+   */
+  void forgetCold(String cacheKey, long hotVersion) {
+    accepted
+      .asMap()
+      .computeIfPresent(cacheKey, (key, prev) ->
+        !prev.isHot() && prev.version() < hotVersion ? prev.clearColdKnowledge() : prev
+      );
   }
 
   /**
@@ -328,12 +419,12 @@ public class WorkerBroadcaster {
    * {@link Delivery#ELIDED} for an equal version or {@link Delivery#SUPERSEDED} for a strictly
    * lower one, never a send failure.
    *
-   * <p>The displacement flag is a parameter because the accepted record alone cannot recover it: an
-   * empty record plus a COOL that displaced a HOT not yet accepted by the funnel — still queued, or
-   * a registry promotion never submitted — proves that HOT never left the dispatcher, so the
-   * demotion would change nothing.
+   * <p>An empty record is not proof that the cluster is cold: the App promotes locally, and a COOL
+   * whose earlier lifecycle lost its record is the only demotion signal. A COOL with no record is
+   * therefore sent; a HOT that was queued and dropped before the wire installs a cold record, so the
+   * later COOL of that same lifecycle is still elided.
    *
-   * <p>The age bound is applied by {@link #classify} only after the in-memory state machine proves a
+   * <p>The age bound is applied by {@link #decide} only after the in-memory state machine proves a
    * send is required: a decision whose age cannot change the cluster's state is elided or dropped as
    * superseded, never misreported as expired, and an expired decision proven sendable has no accepted
    * record at or above its version.
@@ -342,19 +433,17 @@ public class WorkerBroadcaster {
    * {@link DecisionDispatcher#submit} is the single boundary that rejects those, so this funnel
    * does not repeat the check.
    *
-   * @param decision           the decision to publish
-   * @param replacedPendingHot {@code true} when this COOL displaced a HOT that had not reached the
-   *                           funnel, so an empty record proves that HOT never travelled
-   * @param expiresAtMs        the first monotonic instant at which queue residency has expired, or
-   *                           a value no sample reaches for an unbounded caller
+   * @param decision    the decision to publish
+   * @param expiresAtMs the first monotonic instant at which queue residency has expired, or a value
+   *                    no sample reaches for an unbounded caller
    * @return the outcome of the funnel
    */
-  Delivery tryBroadcast(ZetaDecision decision, boolean replacedPendingHot, long expiresAtMs) {
+  Delivery send(ZetaDecision decision, long expiresAtMs) {
     String key = decision.cacheKey();
     long sentAtMs = TimeSource.monotonicMillis();
-    AcceptedDecision prev = acceptedDecisions.getIfPresent(key);
-    Delivery inMemory = classify(sentAtMs, decision, replacedPendingHot, expiresAtMs, prev);
-    return inMemory != null ? applyInMemory(inMemory, prev, decision) : send(decision, key, sentAtMs);
+    AcceptedDecision prev = accepted.getIfPresent(key);
+    Delivery terminal = decide(sentAtMs, decision, expiresAtMs, prev);
+    return terminal != null ? apply(terminal, prev, decision) : publish(decision, key, sentAtMs);
   }
 
   /**
@@ -366,14 +455,14 @@ public class WorkerBroadcaster {
    * @param sentAtMs the monotonic send instant
    * @return {@link Delivery#SENT} or {@link Delivery#FAILED}
    */
-  private Delivery send(ZetaDecision decision, String key, long sentAtMs) {
+  private Delivery publish(ZetaDecision decision, String key, long sentAtMs) {
     ZetaDecision.DecisionType type = decision.type();
     long version = decision.decisionVersion();
     String typeCode = messageType(type);
     try {
       sendBroadcast(key, typeCode, version);
       metrics.countSentDecision(type);
-      acceptedDecisions.put(key, new AcceptedDecision(decision, sentAtMs));
+      accepted.put(key, new AcceptedDecision(decision, sentAtMs));
       if (log.isDebugEnabled()) {
         log.debug("Broadcast {}: key={}, dv={}", typeCode, key, version);
       }
@@ -391,25 +480,23 @@ public class WorkerBroadcaster {
   /**
    * Classifies a token-starved queue head without sending and <b>without</b> mutating the accepted
    * record or the meters. The dispatcher calls this before it owns the item, then calls
-   * {@link #commitInMemory} only after the queue removal and ownership take succeeded, so a
-   * shutdown withdrawal cannot leave the funnel claiming a decision the submitter dropped.
+   * {@link #commit} only after the queue removal and ownership take succeeded, so a shutdown
+   * withdrawal cannot leave the funnel claiming a decision the submitter dropped.
    *
-   * <p>The age bound is applied inside {@link #classify}: only a decision that would otherwise be
+   * <p>The age bound is applied inside {@link #decide}: only a decision that would otherwise be
    * sent can be expired.
    *
-   * @param decision           the decision to classify
-   * @param replacedPendingHot {@code true} when this COOL displaced a HOT that had not reached the
-   *                           funnel, so an empty accepted record proves that HOT never travelled
-   * @param expiresAtMs        the first monotonic instant at which queue residency has expired, or
-   *                           a value no sample reaches for an unbounded caller
+   * @param decision    the decision to classify
+   * @param expiresAtMs the first monotonic instant at which queue residency has expired, or a value
+   *                    no sample reaches for an unbounded caller
    * @return the terminal classification, or {@code null} when the decision must be sent
    */
   @Nullable
-  InMemory classifyInMemory(ZetaDecision decision, boolean replacedPendingHot, long expiresAtMs) {
+  Verdict classify(ZetaDecision decision, long expiresAtMs) {
     long nowMs = TimeSource.monotonicMillis();
-    AcceptedDecision prev = acceptedDecisions.getIfPresent(decision.cacheKey());
-    Delivery outcome = classify(nowMs, decision, replacedPendingHot, expiresAtMs, prev);
-    return outcome != null ? new InMemory(outcome, prev) : null;
+    AcceptedDecision prev = accepted.getIfPresent(decision.cacheKey());
+    Delivery outcome = decide(nowMs, decision, expiresAtMs, prev);
+    return outcome != null ? new Verdict(outcome, prev) : null;
   }
 
   /**
@@ -419,12 +506,12 @@ public class WorkerBroadcaster {
    * ended the lifecycle. The write-expiry anchor is refreshed so an elided decision keeps its key's
    * record alive for the same window a send would.
    *
-   * @param classification the classification and the record it was decided against
-   * @param decision       the classified decision
+   * @param verdict  the classification and the record it was decided against
+   * @param decision the classified decision
    * @return the classification's outcome
    */
-  Delivery commitInMemory(InMemory classification, ZetaDecision decision) {
-    return applyInMemory(classification.outcome(), classification.prev(), decision);
+  Delivery commit(Verdict verdict, ZetaDecision decision) {
+    return apply(verdict.outcome(), verdict.prev(), decision);
   }
 
   /**
@@ -437,12 +524,14 @@ public class WorkerBroadcaster {
    * @param decision the classified decision
    * @return the outcome, for the caller to return
    */
-  private Delivery applyInMemory(Delivery outcome, @Nullable AcceptedDecision prev, ZetaDecision decision) {
+  private Delivery apply(Delivery outcome, @Nullable AcceptedDecision prev, ZetaDecision decision) {
     switch (outcome) {
       case EXPIRED -> {
       }
       case ELIDED -> {
-        acceptedDecisions.put(decision.cacheKey(), elided(prev, decision));
+        // decide() returns ELIDED only with a predecessor; the record advances to a new value.
+        AcceptedDecision record = Objects.requireNonNull(prev, "elision requires a predecessor");
+        accepted.put(decision.cacheKey(), record.elide(decision));
         metrics.countElidedDecision(decision.type());
         if (log.isDebugEnabled()) {
           log.debug(
@@ -477,25 +566,15 @@ public class WorkerBroadcaster {
    * cluster's state is elided or dropped as superseded, never misreported as expired, and only a
    * decision that would otherwise be sent can be expired.
    *
-   * @param nowMs              the monotonic sample
-   * @param decision           the decision being classified
-   * @param replacedPendingHot whether an empty record proves the demotion is a no-op
-   * @param expiresAtMs        the first monotonic instant at which queue residency has expired
-   * @param prev               its accepted record, or {@code null}
+   * @param nowMs       the monotonic sample
+   * @param decision    the decision being classified
+   * @param expiresAtMs the first monotonic instant at which queue residency has expired
+   * @param prev        its accepted record, or {@code null}
    * @return the terminal outcome, or {@code null} when the decision must be sent
    */
   @Nullable
-  private static Delivery classify(
-    long nowMs,
-    ZetaDecision decision,
-    boolean replacedPendingHot,
-    long expiresAtMs,
-    @Nullable AcceptedDecision prev
-  ) {
+  private static Delivery decide(long nowMs, ZetaDecision decision, long expiresAtMs, @Nullable AcceptedDecision prev) {
     if (prev == null) {
-      if (replacedPendingHot) {
-        return Delivery.ELIDED;
-      }
       return nowMs >= expiresAtMs ? Delivery.EXPIRED : null;
     }
 
@@ -510,55 +589,29 @@ public class WorkerBroadcaster {
     }
 
     boolean hot = decision.type() == ZetaDecision.DecisionType.HOT;
-    if (!hot && !prev.isHot()) {
-      // The last accepted decision for this key is already a COOL and no HOT has been accepted
-      // since, so every App is cold and this demotion would change nothing.
+    if (!hot && prev.isKnownCold()) {
+      // The last accepted decision for this key is a COOL and no HOT has been accepted since, so
+      // every App is cold and this demotion would change nothing. An UNKNOWN record still sends
+      // the corrective COOL: a HOT that could have corrected the cold state ended before the wire.
       return Delivery.ELIDED;
     }
     // Same type inside the debounce window is the identical cluster state; a type change travels.
-    if (prev.sameTypeWithinDedupWindow(hot, nowMs)) {
+    if (prev.debounced(hot, nowMs)) {
       return Delivery.ELIDED;
     }
     return nowMs >= expiresAtMs ? Delivery.EXPIRED : null;
   }
 
-  /**
-   * Advances the accepted record for one elided decision.
-   *
-   * <p>A record elided with no predecessor is itself the proof of the state the Worker
-   * holds: the displaced HOT never travelled, so the COOL that replaced it establishes the cold
-   * state even though no send occurred. Creating that record is what lets a later stale decision be
-   * classified against the version that actually ended the lifecycle. Its debounce anchor stays at
-   * {@link AcceptedDecision#NEVER_SENT}, because no send happened.
-   *
-   * <p>An existing record advances only when the elided decision carries a higher version; a replay
-   * of the accepted version leaves it unchanged. The send instant is kept, so the debounce window
-   * stays anchored at the last real send.
-   *
-   * @param prev     the accepted record, or {@code null}
-   * @param decision the elided decision
-   * @return the record to retain
-   */
-  private static AcceptedDecision elided(@Nullable AcceptedDecision prev, ZetaDecision decision) {
-    if (prev == null) {
-      return new AcceptedDecision(decision, AcceptedDecision.NEVER_SENT);
-    }
-    if (prev.version() < decision.decisionVersion()) {
-      prev.elide(decision);
-    }
-    return prev;
-  }
-
   private static String messageType(ZetaDecision.DecisionType type) {
-    return type == ZetaDecision.DecisionType.HOT ? WorkerDecisionType.HOT.code() : WorkerDecisionType.COOL.code();
+    return type == ZetaDecision.DecisionType.HOT ? WorkerType.HOT.code() : WorkerType.COOL.code();
   }
 
   /**
    * Common send helper for HOT/COOL decisions.
    *
    * @param cacheKey the key the decision is about
-   * @param type     the message type ({@link WorkerDecisionType#HOT} or
-   *                 {@link WorkerDecisionType#COOL})
+   * @param type     the message type ({@link WorkerType#HOT} or
+   *                 {@link WorkerType#COOL})
    * @param version  the monotonically increasing decision version for ordering
    */
   private void sendBroadcast(String cacheKey, String type, long version) {

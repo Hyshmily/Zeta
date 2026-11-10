@@ -65,8 +65,8 @@ class HotKeyRegistryTest {
   }
 
   private static ZetaDecision promote(HotKeyRegistry registry, String key, HotKeyRule rule) {
-    HE entry = registry.promoteEntry(key, binding(rule), TimeSource.monotonicMillis());
-    return entry == null ? null : entry.hotDecision();
+    HE entry = registry.promote(key, binding(rule), TimeSource.monotonicMillis());
+    return entry == null ? null : entry.decision();
   }
 
   private static HotKeyRule lowQps(long hotCount, long coolCount, long lowQpsForMs) {
@@ -74,7 +74,7 @@ class HotKeyRegistryTest {
   }
 
   private static void assertConserved(HotKeyRegistry registry) {
-    assertThat(registry.availableSeats() + registry.activeCount()).isEqualTo(registry.capacity());
+    assertThat(registry.availableSeats() + registry.size()).isEqualTo(registry.capacity());
   }
 
   @Test
@@ -96,7 +96,7 @@ class HotKeyRegistryTest {
     assertThat(promote(registry, "a", rule)).isNotNull();
     assertThat(promote(registry, "b", rule)).isNull();
     assertThat(registry.isHot("a")).isTrue();
-    assertThat(registry.rejectedCount()).isEqualTo(1);
+    assertThat(registry.rejected()).isEqualTo(1);
     assertConserved(registry);
   }
 
@@ -112,46 +112,13 @@ class HotKeyRegistryTest {
     assertThat(first).isNotNull();
     assertThat(registry.isCurrent("k1", first.decisionVersion())).isTrue();
 
-    registry.abortPromotion("k1", first.decisionVersion());
+    registry.abort("k1", first.decisionVersion());
     assertThat(registry.isCurrent("k1", first.decisionVersion())).isFalse();
 
     ZetaDecision second = promote(registry, "k1", rule);
     assertThat(second).isNotNull();
     assertThat(registry.isCurrent("k1", second.decisionVersion())).isTrue();
     assertThat(registry.isCurrent("k1", first.decisionVersion())).isFalse();
-  }
-
-  /**
-   * A COOL records whether its predecessor HOT had reached the dispatcher. The promotion and its
-   * submission are separate steps, so a cool-down that wins the race must be able to mark the
-   * demotion as one the cluster may never have seen.
-   */
-  @Test
-  void aCoolReportsWhetherItsPromotionReachedTheDispatcher() {
-    long base = TimeSource.monotonicMillis();
-    try {
-      TimeSource.setTimeOffsetForTest(0, -base);
-      HotKeyRule rule = lowQps(5, 2, 0);
-      HotKeyRegistry registry = registry(1, new AtomicLong(0));
-
-      assertThat(promote(registry, "k1", rule)).isNotNull();
-      HE unsentEntry = registry.entry("k1");
-      TimeSource.setTimeOffsetForTest(0, -base + 100);
-      HotKeyRegistry.CoolDecision unsent = registry.evaluate(unsentEntry, false);
-      assertThat(unsent).isNotNull();
-      assertThat(unsent.replacedPendingHot()).isTrue();
-
-      ZetaDecision submitted = promote(registry, "k1", rule);
-      assertThat(submitted).isNotNull();
-      HE submittedEntry = registry.entry("k1");
-      submittedEntry.markPromotionSubmitted();
-      TimeSource.setTimeOffsetForTest(0, -base + 200);
-      HotKeyRegistry.CoolDecision sent = registry.evaluate(submittedEntry, false);
-      assertThat(sent).isNotNull();
-      assertThat(sent.replacedPendingHot()).as("the promotion was submitted before the cool-down").isFalse();
-    } finally {
-      TimeSource.setTimeOffsetForTest(0, 0);
-    }
   }
 
   @Test
@@ -161,7 +128,7 @@ class HotKeyRegistryTest {
     ZetaDecision promotion = promote(registry, "a", rule);
     assertThat(promotion).isNotNull();
 
-    registry.abortPromotion("a", promotion.decisionVersion());
+    registry.abort("a", promotion.decisionVersion());
 
     assertThat(registry.isHot("a")).isFalse();
     assertConserved(registry);
@@ -173,7 +140,7 @@ class HotKeyRegistryTest {
     HotKeyRule rule = lowQps(5, 2, 1_000);
     HotKeyRegistry registry = registry(1, new AtomicLong(0));
     promote(registry, "a", rule);
-    registry.abortPromotion("a", 999L);
+    registry.abort("a", 999L);
     assertThat(registry.isHot("a")).isTrue();
     assertConserved(registry);
   }
@@ -189,11 +156,11 @@ class HotKeyRegistryTest {
       HE entry = registry.entry("k1");
       TimeSource.setTimeOffsetForTest(0, -base + 100);
 
-      HotKeyRegistry.CoolDecision first = registry.evaluate(entry, false);
-      HotKeyRegistry.CoolDecision second = registry.evaluate(entry, false);
+      ZetaDecision first = registry.evaluate(entry);
+      ZetaDecision second = registry.evaluate(entry);
 
       assertThat(first).isNotNull();
-      assertThat(first.decision().type()).isEqualTo(ZetaDecision.DecisionType.COOL);
+      assertThat(first.type()).isEqualTo(ZetaDecision.DecisionType.COOL);
       assertThat(second).as("the entry is gone and the seat was released once").isNull();
       assertConserved(registry);
     } finally {
@@ -202,7 +169,7 @@ class HotKeyRegistryTest {
   }
 
   @Test
-  void aSweptCheckAndAFiredCheckCannotBothReleaseTheSeat() {
+  void aCooledEntryCannotReleaseTheSeatTwice() {
     long base = TimeSource.monotonicMillis();
     try {
       TimeSource.setTimeOffsetForTest(0, -base);
@@ -212,9 +179,8 @@ class HotKeyRegistryTest {
       HE entry = registry.entry("k1");
       TimeSource.setTimeOffsetForTest(0, -base + 100);
 
-      // Forced (sweep) first, then the entry's own event: only the first one commits.
-      assertThat(registry.evaluate(entry, true)).isNotNull();
-      assertThat(registry.evaluate(entry, false)).isNull();
+      assertThat(registry.evaluate(entry)).isNotNull();
+      assertThat(registry.evaluate(entry)).isNull();
       assertConserved(registry);
     } finally {
       TimeSource.setTimeOffsetForTest(0, 0);
@@ -235,10 +201,10 @@ class HotKeyRegistryTest {
       assertThat(promote(registry, "k1", rule)).isNotNull();
       HE previous = registry.entry("k1");
       TimeSource.setTimeOffsetForTest(0, -base + 100);
-      assertThat(registry.evaluate(previous, false)).isNotNull();
+      assertThat(registry.evaluate(previous)).isNotNull();
 
       assertThat(promote(registry, "k1", rule)).isNotNull();
-      assertThat(registry.evaluate(previous, false)).as("the previous life's event is stale").isNull();
+      assertThat(registry.evaluate(previous)).as("the previous life's event is stale").isNull();
       assertThat(registry.isHot("k1")).isTrue();
       assertConserved(registry);
     } finally {
@@ -260,25 +226,25 @@ class HotKeyRegistryTest {
       // Above the band: no dwell, the check is re-armed and belowSince stays clear. The first
       // check is due one interval after promotion.
       TimeSource.setTimeOffsetForTest(0, -base + 100);
-      assertThat(registry.evaluate(entry, false)).isNull();
+      assertThat(registry.evaluate(entry)).isNull();
       assertThat(entry.belowSince()).isEqualTo(HE.NOT_BELOW);
 
       // Below the band: the dwell starts at this instant.
       windowSum.set(0);
       TimeSource.setTimeOffsetForTest(0, -base + 200);
-      assertThat(registry.evaluate(entry, false)).isNull();
+      assertThat(registry.evaluate(entry)).isNull();
       long dwellStart = entry.belowSince();
       assertThat(dwellStart).isBetween(200L, 210L);
 
       // Still inside the dwell window.
       TimeSource.setTimeOffsetForTest(0, -base + 600);
-      assertThat(registry.evaluate(entry, false)).isNull();
+      assertThat(registry.evaluate(entry)).isNull();
 
       // The dwell elapsed: the key cools.
       TimeSource.setTimeOffsetForTest(0, -base + 1_200);
-      HotKeyRegistry.CoolDecision cool = registry.evaluate(entry, false);
+      ZetaDecision cool = registry.evaluate(entry);
       assertThat(cool).isNotNull();
-      assertThat(cool.decision().type()).isEqualTo(ZetaDecision.DecisionType.COOL);
+      assertThat(cool.type()).isEqualTo(ZetaDecision.DecisionType.COOL);
       assertConserved(registry);
     } finally {
       TimeSource.setTimeOffsetForTest(0, 0);
@@ -302,13 +268,13 @@ class HotKeyRegistryTest {
       HE entry = registry.entry("k1");
 
       TimeSource.setTimeOffsetForTest(0, -base - 9_900L);
-      assertThat(registry.evaluate(entry, false)).isNull();
+      assertThat(registry.evaluate(entry)).isNull();
       assertThat(entry.belowSince()).isBetween(-9_900L, -9_890L);
 
       TimeSource.setTimeOffsetForTest(0, -base - 8_900L);
-      HotKeyRegistry.CoolDecision cool = registry.evaluate(entry, false);
+      ZetaDecision cool = registry.evaluate(entry);
       assertThat(cool).isNotNull();
-      assertThat(cool.decision().type()).isEqualTo(ZetaDecision.DecisionType.COOL);
+      assertThat(cool.type()).isEqualTo(ZetaDecision.DecisionType.COOL);
       assertConserved(registry);
     } finally {
       TimeSource.setTimeOffsetForTest(0, 0);
@@ -327,12 +293,12 @@ class HotKeyRegistryTest {
       HE entry = registry.entry("k1");
 
       TimeSource.setTimeOffsetForTest(0, -base + 100);
-      assertThat(registry.evaluate(entry, false)).isNull();
+      assertThat(registry.evaluate(entry)).isNull();
       assertThat(entry.belowSince()).isNotEqualTo(HE.NOT_BELOW);
 
       windowSum.set(3);
       TimeSource.setTimeOffsetForTest(0, -base + 200);
-      assertThat(registry.evaluate(entry, false)).isNull();
+      assertThat(registry.evaluate(entry)).isNull();
       assertThat(entry.belowSince()).as("sum == coolCount is not below the band").isEqualTo(HE.NOT_BELOW);
     } finally {
       TimeSource.setTimeOffsetForTest(0, 0);
@@ -354,7 +320,7 @@ class HotKeyRegistryTest {
       HE entry = registry.entry("k1");
       assertThat(entry.nextCheckAt()).isEqualTo(Long.MAX_VALUE);
 
-      assertThat(registry.evaluate(entry, false)).isNull();
+      assertThat(registry.evaluate(entry)).isNull();
       assertThat(registry.isHot("k1")).isTrue();
       assertConserved(registry);
     } finally {
@@ -378,7 +344,7 @@ class HotKeyRegistryTest {
       HE entry = registry.entry("k1");
 
       TimeSource.setTimeOffsetForTest(0, -base + 102);
-      assertThat(registry.evaluate(entry, false)).isNull();
+      assertThat(registry.evaluate(entry)).isNull();
       assertThat(entry.belowSince()).isNotEqualTo(HE.NOT_BELOW);
       assertThat(entry.nextCheckAt())
         .as("the huge dwell bound must not win the earlier-deadline comparison")
@@ -400,12 +366,12 @@ class HotKeyRegistryTest {
       HE entry = registry.entry("k1");
 
       TimeSource.setTimeOffsetForTest(0, -base + 500);
-      assertThat(registry.evaluate(entry, false)).isNull();
+      assertThat(registry.evaluate(entry)).isNull();
 
       TimeSource.setTimeOffsetForTest(0, -base + 1_000);
-      HotKeyRegistry.CoolDecision cool = registry.evaluate(entry, false);
+      ZetaDecision cool = registry.evaluate(entry);
       assertThat(cool).isNotNull();
-      assertThat(cool.decision().type()).isEqualTo(ZetaDecision.DecisionType.COOL);
+      assertThat(cool.type()).isEqualTo(ZetaDecision.DecisionType.COOL);
       assertConserved(registry);
     } finally {
       TimeSource.setTimeOffsetForTest(0, 0);
@@ -413,12 +379,12 @@ class HotKeyRegistryTest {
   }
 
   /**
-   * The lateness metric belongs to the check the registry actually evaluates: a wheel-fired check
-   * reports the delay against the deadline it replaces, while the repair sweep's deliberate grace
-   * is not reported as wheel lateness.
+   * The lateness metric belongs to the check the wheel's owner actually evaluates: a wheel-fired
+   * check reports the delay against the deadline it replaces, while {@code repair()} only re-links
+   * and records no sample of its own.
    */
   @Test
-  void aWheelFiredCheckRecordsItsLatenessAndTheRepairPassDoesNot() {
+  void aWheelFiredCheckRecordsItsLatenessAndRepairRecordsNone() {
     SimpleMeterRegistry meterRegistry = new SimpleMeterRegistry();
     long base = TimeSource.monotonicMillis();
     try {
@@ -428,21 +394,21 @@ class HotKeyRegistryTest {
       RuleSet set = RuleSet.of(List.of(rule), DEFAULT);
       RuleBinding binding = Objects.requireNonNull(new RuleResolver(set, 2, metrics).binding("expire"));
       HotKeyRegistry registry = new HotKeyRegistry(2, metrics, new AtomicLong(), key -> 0, new CoolingWheels(1));
-      assertThat(registry.promoteEntry("k1", binding, TimeSource.monotonicMillis())).isNotNull();
-      assertThat(registry.promoteEntry("k2", binding, TimeSource.monotonicMillis())).isNotNull();
+      assertThat(registry.promote("k1", binding, TimeSource.monotonicMillis())).isNotNull();
+      assertThat(registry.promote("k2", binding, TimeSource.monotonicMillis())).isNotNull();
       HE first = registry.entry("k1");
 
       TimeSource.setTimeOffsetForTest(0, -base + 10_050);
-      assertThat(registry.evaluate(first, false)).isNotNull();
+      assertThat(registry.evaluate(first)).isNotNull();
       assertThat(meterRegistry.get(WorkerDetectionMetrics.METRIC_COOLING_LATENESS).timer().count()).isEqualTo(1);
       assertThat(
         meterRegistry.get(WorkerDetectionMetrics.METRIC_COOLING_LATENESS).timer().max(TimeUnit.MILLISECONDS)
       ).isGreaterThanOrEqualTo(50.0d);
 
       TimeSource.setTimeOffsetForTest(0, -base + 11_050);
-      assertThat(registry.repairOverdue(decision -> {})).isEqualTo(1);
+      assertThat(registry.repair()).isEqualTo(1);
       assertThat(meterRegistry.get(WorkerDetectionMetrics.METRIC_COOLING_LATENESS).timer().count())
-        .as("the repair pass does not report its grace as lateness")
+        .as("repair re-links without evaluating, so it records no lateness")
         .isEqualTo(1);
     } finally {
       TimeSource.setTimeOffsetForTest(0, 0);
@@ -451,12 +417,48 @@ class HotKeyRegistryTest {
   }
 
   /**
-   * A check that has only just reached its deadline may still be owned by a wheel thread; the sweep
-   * leaves it alone so the cool-down keeps its real cause. Only a check that stays overdue past the
-   * grace is repaired.
+   * The registry owns the {@code DETACHED -> UNSCHEDULED} hand-off. A repair that runs after the
+   * wheel polled the node but before the evaluation takes the stripe must defer to the owner; if it
+   * re-linked the node as detached, the evaluation's re-arm would be skipped and the fresh deadline
+   * would sit in the pending list for a spurious extra wake.
    */
   @Test
-  void repairOverdueLeavesAJustDueCheckToTheWheel() {
+  void aRepairBetweenTheWheelHandoffAndTheEvaluationDefersToTheOwner() {
+    long base = TimeSource.monotonicMillis();
+    try {
+      TimeSource.setTimeOffsetForTest(0, -base);
+      HotKeyRule rule = lowQps(5, 3, 1_000);
+      CoolingWheels wheels = new CoolingWheels(1);
+      AtomicLong windowSum = new AtomicLong(1_000);
+      HotKeyRegistry registry = new HotKeyRegistry(2, METRICS, new AtomicLong(), key -> windowSum.get(), wheels);
+      assertThat(promote(registry, "k1", rule)).isNotNull();
+      HE entry = registry.entry("k1");
+      TimerWheel wheel = wheels.wheel(0);
+
+      TimeSource.setTimeOffsetForTest(0, -base + 1_200L);
+      wheel.advance(1_200L);
+      assertThat(wheel.pollDetached()).as("the wheel hands the due node over as detached").isSameAs(entry);
+      assertThat(registry.repair()).as("the overdue check is selected").isEqualTo(1);
+      assertThat(entry.wheelState).as("repair must not take over the hand-off").isEqualTo(TimerWheel.DETACHED);
+
+      assertThat(registry.evaluate(entry)).isNull();
+      assertThat(entry.nextCheckAt()).as("the recovered check re-arms at the next interval").isBetween(1_300L, 1_310L);
+      assertThat(entry.wheelState).as("the owner links the fresh deadline").isEqualTo(TimerWheel.SCHEDULED);
+      assertThat(wheel.scheduledCount()).isEqualTo(1);
+      assertThat(registry.isHot("k1")).isTrue();
+      assertConserved(registry);
+    } finally {
+      TimeSource.setTimeOffsetForTest(0, 0);
+    }
+  }
+
+  /**
+   * A check that has only just reached its deadline may still be owned by a wheel thread; the repair
+   * leaves it alone. Only a check that stays overdue past the grace is re-linked, and re-linking does
+   * not evaluate: the wheel remains the only evaluator.
+   */
+  @Test
+  void repairLeavesAJustDueCheckToTheWheel() {
     long base = TimeSource.monotonicMillis();
     try {
       TimeSource.setTimeOffsetForTest(0, -base);
@@ -464,19 +466,19 @@ class HotKeyRegistryTest {
       HotKeyRegistry registry = registry(2, new AtomicLong(1_000));
       promote(registry, "k1", rule);
       promote(registry, "k2", rule);
+      HE first = registry.entry("k1");
 
-      assertThat(registry.repairOverdue(decision -> {})).isZero();
+      assertThat(registry.repair()).isZero();
 
       TimeSource.setTimeOffsetForTest(0, -base + 10_000);
-      assertThat(registry.repairOverdue(decision -> {}))
-        .as("a check at its deadline belongs to the wheel's thread")
-        .isZero();
+      assertThat(registry.repair()).as("a check at its deadline belongs to the wheel's thread").isZero();
 
       TimeSource.setTimeOffsetForTest(0, -base + 11_001);
-      List<HotKeyRegistry.CoolDecision> cooled = new java.util.ArrayList<>();
-      int repaired = registry.repairOverdue(cooled::add);
-      assertThat(repaired).isEqualTo(2);
-      assertThat(cooled).hasSize(2);
+      assertThat(registry.repair()).isEqualTo(2);
+      assertThat(first.wheelState)
+        .as("the repair re-links; the wheel owns the evaluation")
+        .isEqualTo(TimerWheel.SCHEDULED);
+      assertThat(registry.isHot("k1")).isTrue();
       assertConserved(registry);
     } finally {
       TimeSource.setTimeOffsetForTest(0, 0);

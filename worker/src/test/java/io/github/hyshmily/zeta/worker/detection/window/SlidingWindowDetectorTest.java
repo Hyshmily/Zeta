@@ -123,6 +123,34 @@ class SlidingWindowDetectorTest {
     assertThat(sum).as("a non-positive report cannot subtract from the window").isEqualTo(50);
   }
 
+  /**
+   * A non-positive add still reports the window at the caller's batch slice. Re-sampling the clock
+   * would let a report evaluated from a slightly older batch sample read as a silent window.
+   */
+  @Test
+  void aNonPositiveAddReadsTheWindowAtTheBatchesSlice() {
+    long base = TimeSource.monotonicMillis();
+    try {
+      TimeSource.setTimeOffsetForTest(0, -base);
+      SlidingWindowDetector detector = detector(1_000, 16, 0);
+      long batchSlice = detector.sliceIndex(TimeSource.monotonicMillis());
+      assertThat(detector.addCountAtSlice("k", 10L, batchSlice)).isEqualTo(10L);
+
+      TimeSource.setTimeOffsetForTest(0, -base + 10_000L);
+      assertThat(detector.addCountAtSlice("k", 0L, batchSlice))
+        .as("the read follows the batch slice, not the wall clock")
+        .isEqualTo(10L);
+    } finally {
+      TimeSource.setTimeOffsetForTest(0, 0);
+    }
+  }
+
+  @Test
+  void aNegativeRetentionIsRejected() {
+    SlidingWindowDetector detector = detector(10_000, 10, 0);
+    assertThatThrownBy(() -> detector.evictStale(-1L)).isInstanceOf(IllegalArgumentException.class);
+  }
+
   @Test
   void shouldReturnZeroForEvictedKey() {
     SlidingWindowDetector detector = detector(10_000, 10, 0);
@@ -367,6 +395,22 @@ class SlidingWindowDetectorTest {
 
     assertThat(computes).as("a resident slice crossing uses the entry monitor").hasValue(0);
     assertThat(detector.activeWindows()).isOne();
+  }
+
+  /**
+   * A report that fell behind the whole window belongs to no readable slice. Re-attributing it to
+   * the window's newest slice would inject expired traffic into the current sum; the tag lets the
+   * add keep its own slice, and an add outside the span is dropped.
+   */
+  @Test
+  void anAddOlderThanTheWindowIsDroppedInsteadOfBeingMovedToTheNewestSlice() {
+    SlidingWindowDetector detector = detector(4, 4, 0);
+
+    assertThat(detector.addCountAtSlice("stale", 10, 100)).isEqualTo(10);
+    assertThat(detector.addCountAtSlice("stale", 5, 104)).isEqualTo(15);
+    assertThat(detector.addCountAtSlice("stale", 7, 95))
+      .as("the expired count must not be moved onto slice 104")
+      .isEqualTo(15);
   }
 
   /**
@@ -664,12 +708,11 @@ class SlidingWindowDetectorTest {
   }
 
   /**
-   * The hard headroom refuses a new key even when every resident window is idle enough for a sample
-   * to reclaim: the sample is what frees seats, and letting admissions race it is the unbounded
-   * growth the soft cap alone cannot stop. The stale sweep, not an admission, is what recovers.
+   * The hard ledger still gets one uncontended pass: when every resident window is idle enough for
+   * a sample to reclaim, the admission frees a seat instead of waiting for the periodic sweep.
    */
   @Test
-  void hardHeadroomRejectsANewKeyBeforeTheSampleCanReclaimIdleWindows() {
+  void hardHeadroomReclaimsIdleWindowsBeforeRejecting() {
     long base = TimeSource.monotonicMillis();
     try {
       TimeSource.setTimeOffsetForTest(0, -base);
@@ -679,12 +722,9 @@ class SlidingWindowDetectorTest {
       }
 
       TimeSource.setTimeOffsetForTest(0, -base + 200);
-      assertThat(addCount(detector, "new", 1)).as("over the hard headroom: no admission, no sample").isZero();
-      assertThat(detector.activeWindows()).isEqualTo(18);
-      assertThat(detector.capacityEvictions()).isEqualTo(0);
-
-      detector.evictStale(0);
-      assertThat(addCount(detector, "new", 1)).as("the sweep freed the table").isEqualTo(1);
+      assertThat(addCount(detector, "new", 1)).as("the at-cap pass reclaimed the idle windows").isEqualTo(1);
+      assertThat(detector.activeWindows()).as("the new window replaced the idle table").isEqualTo(1);
+      assertThat(detector.capacityEvictions()).isEqualTo(18);
     } finally {
       TimeSource.setTimeOffsetForTest(0, 0);
     }

@@ -41,9 +41,10 @@ import org.springframework.amqp.rabbit.core.RabbitTemplate;
 public class WorkerHeartbeatProducer {
 
   /**
-   * First heartbeat instant (monotonic axis) anchoring the ready-to-serve grace period. Anchoring
-   * at the first send, not bean construction, counts only the time the Worker has actually been
-   * heartbeating; a slow context refresh before the scheduler starts cannot consume the grace.
+   * First successful heartbeat instant (monotonic axis) anchoring the ready-to-serve grace period.
+   * Anchoring at the first accepted send, not bean construction, counts only the time the Worker
+   * has actually been heartbeating; a slow context refresh or a broker outage before the first
+   * send cannot consume the grace.
    */
   private volatile long startTime = Long.MIN_VALUE;
 
@@ -94,33 +95,38 @@ public class WorkerHeartbeatProducer {
    * <p>Ready once the grace period elapsed or as soon as the HOT set is non-empty. The grace only
    * gates the ring-admission signal; it says nothing about detection state.
    *
+   * @param now   the monotonic sample of this heartbeat
+   * @param start the first successful-send instant, or {@link Long#MIN_VALUE} before one
    * @return {@code true} when the Worker considers itself ready
    */
-  private boolean isReadyToServe() {
-    long now = TimeSource.monotonicMillis();
-    long start = startTime;
-    if (start == Long.MIN_VALUE) {
-      startTime = start = now;
-    }
-    return now - start >= readyGraceMs || hotRegistry.activeCount() > 0;
+  private boolean isReadyToServe(long now, long start) {
+    long effectiveStart = start == Long.MIN_VALUE ? now : start;
+    return now - effectiveStart >= readyGraceMs || hotRegistry.size() > 0;
   }
 
   /**
    * Builds and sends one heartbeat.
    *
    * <p>Published to the heartbeat exchange with routing key {@code heartbeat.<workerId>}. A failure
-   * is logged at WARN and otherwise ignored (fire-and-forget).
+   * is logged at WARN and otherwise ignored (fire-and-forget). The first successful send anchors
+   * the ready grace, so a broker outage at startup does not consume it before the Worker can
+   * receive reports.
    */
   public void sendHeartbeat() {
     try {
+      long now = TimeSource.monotonicMillis();
+      long start = startTime;
       WorkerHeartbeatMessage hb = new WorkerHeartbeatMessage(
         TimeSource.currentTimeMillis(),
         identity.nodeId(),
         identity.epoch(),
-        isReadyToServe(),
+        isReadyToServe(now, start),
         appName
       );
       rabbitTemplate.send(heartbeatExchange, routingKey, hb.toMessage());
+      if (start == Long.MIN_VALUE) {
+        startTime = now;
+      }
     } catch (Exception e) {
       log.warn("Scheduled sendHeartbeat failed", e);
     }

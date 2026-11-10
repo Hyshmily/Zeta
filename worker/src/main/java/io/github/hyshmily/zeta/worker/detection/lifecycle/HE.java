@@ -30,14 +30,12 @@ import io.github.hyshmily.zeta.worker.detection.rule.RuleBinding;
  * {@code nextCheckAt} deadline belong to its {@link TimerWheel} (design decisions: worker
  * cooling).
  *
- * <p>Fields are written under the key's stripe lock except {@link #promotionSubmitted}, which the
- * submitting thread sets after the dispatcher accepts the promotion; that volatile write is the
- * hand-off a cool-down reads under the stripe. {@link #belowSince} and {@link #nextCheckAt} are
- * additionally {@code volatile} so the endpoint can read them lock-free. The wheel links are
- * guarded by the owning wheel's lock; {@link #wheelState} is written under that lock too, except
- * the owner's final hand-off in {@link TimerWheel#pollDetached()}, which is {@code volatile} for
- * the reason stated there. A stale read of the volatile fields costs a misleading diagnostic, never
- * a wrong decision.
+ * <p>Fields are written under the key's stripe lock; {@link #belowSince} and {@link #nextCheckAt}
+ * are additionally {@code volatile} so the endpoint can read them lock-free. The wheel links are
+ * guarded by the owning wheel's lock. {@link #wheelState} is written under that lock except for one
+ * hand-off: the registry clears {@code DETACHED} to {@code UNSCHEDULED} under the key's stripe lock
+ * after {@link TimerWheel#pollDetached()} has removed the node from every list. A stale read of the
+ * volatile fields costs a misleading diagnostic, never a wrong decision.
  */
 public final class HE {
 
@@ -48,14 +46,7 @@ public final class HE {
   static final long RETIRED = Long.MIN_VALUE;
 
   /** The decision version carried by this promotion. */
-  private final long promotedVersion;
-
-  /**
-   * Set once the dispatcher has accepted this promotion. A cool-down reads it to record whether the
-   * COOL may demote a HOT the cluster never saw; a promotion that cools before its submission is
-   * represented by an elided COOL instead of a send.
-   */
-  private volatile boolean promotionSubmitted;
+  private final long version;
 
   /**
    * The binding captured at promotion: the rule that judged the key and the counters of its id.
@@ -91,17 +82,18 @@ public final class HE {
    * The node's wheel relation: {@link TimerWheel#UNSCHEDULED}, {@link TimerWheel#SCHEDULED} or
    * {@link TimerWheel#DETACHED}.
    *
-   * <p>Written under the wheel lock, except the owner's {@code DETACHED -> UNSCHEDULED} hand-off in
-   * {@link TimerWheel#pollDetached()} after the node has left every list. {@code volatile} publishes
-   * that single unlocked transition to a concurrent {@code reschedule}/{@code deschedule}.
+   * <p>Written under the wheel lock, except the {@code DETACHED -> UNSCHEDULED} hand-off in
+   * {@link HotKeyRegistry#evaluate(HE)} after the node has left every list; that write runs under the
+   * key's stripe lock. {@code volatile} publishes the transition to a concurrent
+   * {@code reschedule}/{@code deschedule}.
    */
   volatile int wheelState;
 
-  HE(String key, RuleBinding binding, long promotedAt, long promotedVersion) {
+  HE(String key, RuleBinding binding, long promotedAt, long version) {
     this.key = key;
     this.binding = binding;
     this.promotedAt = promotedAt;
-    this.promotedVersion = promotedVersion;
+    this.version = version;
     this.nextCheckAt = binding.rule().firstDue(promotedAt);
   }
 
@@ -110,7 +102,7 @@ public final class HE {
     this.key = null;
     this.binding = null;
     this.promotedAt = 0L;
-    this.promotedVersion = 0L;
+    this.version = 0L;
     this.wheelNext = this;
     this.wheelPrev = this;
   }
@@ -141,13 +133,8 @@ public final class HE {
   }
 
   /** @return the promotion's decision version */
-  public long promotedVersion() {
-    return promotedVersion;
-  }
-
-  /** @return whether the dispatcher has accepted this promotion */
-  boolean promotionSubmitted() {
-    return promotionSubmitted;
+  public long version() {
+    return version;
   }
 
   /**
@@ -158,27 +145,8 @@ public final class HE {
    *
    * @return the HOT decision for this entry
    */
-  public ZetaDecision hotDecision() {
-    return ZetaDecision.hot(key, promotedVersion);
-  }
-
-  /**
-   * Records that the dispatcher accepted {@link #hotDecision()}.
-   *
-   * <p>The write lands on this entry object, not on whichever entry the key holds now: a key that
-   * cooled (or cooled and re-promoted) during the submission is a different entry, so a late
-   * success can never mark a successor as submitted.
-   */
-  public void markPromotionSubmitted() {
-    promotionSubmitted = true;
-  }
-
-  /**
-   * Withdraws the submitted mark when the dispatcher accepted the promotion but could not enqueue
-   * its HOT before shutdown or a failed offer. Only the submitting thread writes this flag.
-   */
-  public void clearPromotionSubmitted() {
-    promotionSubmitted = false;
+  public ZetaDecision decision() {
+    return ZetaDecision.hot(key, version);
   }
 
   /**

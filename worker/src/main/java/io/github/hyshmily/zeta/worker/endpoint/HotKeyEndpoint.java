@@ -115,8 +115,8 @@ public class HotKeyEndpoint {
     info.put("detection", detection);
 
     Map<String, Object> hot = new LinkedHashMap<>();
-    hot.put("active", registry.activeCount());
-    hot.put("rejected", registry.rejectedCount());
+    hot.put("active", registry.size());
+    hot.put("rejected", registry.rejected());
     info.put("hot", hot);
 
     Map<String, Object> cool = new LinkedHashMap<>();
@@ -184,7 +184,7 @@ public class HotKeyEndpoint {
     view.put("promotedForMs", Math.max(0L, now - entry.promotedAt()));
     view.put("belowForMs", belowSince == HE.NOT_BELOW ? null : Math.max(0L, now - belowSince));
     view.put("nextCheckInMs", nextCheckAt - now);
-    view.put("promotedVersion", entry.promotedVersion());
+    view.put("promotedVersion", entry.version());
     return view;
   }
 }
