@@ -283,9 +283,9 @@ User b = zeta.get("user:1", loader, GetPolicy.defaults());
 
 | Consumer                                           | Uses it to                                                 | Without it                                                                                     |
 | -------------------------------------------------- | ---------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
-| `WorkerListener` → `DefaultWorkerDecisionHandler`  | load the authoritative value before promoting a key to HOT | promotes what L1 already holds; the HOT is skipped when no entry is usable (`VALUE_NOT_FOUND`) |
-| `CacheSyncListener` → `DefaultSyncDecisionHandler` | reload after a peer `REFRESH`                              | degrades to a local invalidation — the next read goes back through your reader                 |
-| the same handler's value-carrying `PUT`            | validate the value carried on the wire with `isCacheable`  | no loader, no validation: the carried value is applied as-is                                   |
+| `WorkerListener` → `DefaultWorkerContext`  | load the authoritative value before promoting a key to HOT | promotes what L1 already holds; the HOT is skipped when no entry is usable (`VALUE_NOT_FOUND`) |
+| `CacheSyncListener` → `DefaultSyncContext` | reload after a peer `REFRESH`                              | degrades to a local invalidation — the next read goes back through your reader                 |
+| the same context's value-carrying `PUT`            | validate the value carried on the wire with `isCacheable`  | no loader, no validation: the carried value is applied as-is                                   |
 
 **Custom per-entry TTL**
 
@@ -310,13 +310,13 @@ Implement `WorkerDecisionHook` or `SyncHook` to observe how broadcasts are appli
 public WorkerDecisionHook myMonitorHook() {
   return new WorkerDecisionHook() {
     @Override
-    public void afterHotPromotion(String cacheKey, WorkerMessage wm, CacheEntry entry) {
+    public void afterHotPromotion(WorkerDecision decision, CacheEntry entry) {
       metrics.counter("hot.promotion").increment();
     }
 
     @Override
-    public void onHotSkipped(String cacheKey, WorkerMessage wm, HotSkipReason reason) {
-      log.warn("HOT skipped {}: {}", cacheKey, reason);
+    public void onHotSkipped(WorkerDecision decision, HotSkipReason reason) {
+      log.warn("HOT skipped {}: {}", decision.cacheKey(), reason);
     }
   };
 }
@@ -326,38 +326,35 @@ public WorkerDecisionHook myMonitorHook() {
 | -------------------- | -------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `WorkerDecisionHook` | `afterHotPromotion`  | a key is promoted to HOT (extended TTL)                                                                                                                           |
 | `WorkerDecisionHook` | `afterCoolDowngrade` | a key returns to the normal TTL                                                                                                                                   |
-| `WorkerDecisionHook` | `onHotSkipped`       | a HOT decision is skipped (`VERSION_STALE` stale version / `VALUE_NOT_FOUND` no usable value)                                                                     |
-| `WorkerDecisionHook` | `onCoolSkipped`      | a COOL decision is skipped (no matching entry in L1)                                                                                                              |
+| `WorkerDecisionHook` | `onHotSkipped`       | a HOT decision is skipped (`VERSION_STALE` stale version / `VALUE_NOT_FOUND` no usable value / `POLICY_REJECTED` custom refusal)                                  |
+| `WorkerDecisionHook` | `onCoolSkipped`      | a COOL decision is skipped (no matching entry in L1, stale version, or covered by a newer COOL in the same run)                                                   |
 | `SyncHook`           | `afterRefresh`       | a peer `REFRESH` read-back or a value-carrying `PUT` was applied                                                                                                  |
 | `SyncHook`           | `afterInvalidate`    | a key was removed from L1 because of a peer broadcast                                                                                                             |
 | `SyncHook`           | `onRefreshSkipped`   | a REFRESH or PUT did not take effect (stale version, missing value, rejected by the invalidation watermark, or overwritten by a higher version in the same batch) |
 
 **Replace the default broadcast handling**
 
-To take full control of HOT/COOL decisions or of cache-sync message handling, implement the strategy interface and expose it as a bean (`@ConditionalOnMissingBean`):
-
 ```java
 @Bean
-@ConditionalOnMissingBean(WorkerDecisionHandler.class)
-public WorkerDecisionHandler myHandler() {
-  return new WorkerDecisionHandler() {
+@ConditionalOnMissingBean(WorkerPolicy.class)
+public WorkerPolicy myPolicy() {
+  return new WorkerPolicy() {
     @Override
-    public void handleHot(WorkerMessage wm) {
-      // custom HOT logic — replaces loader loading, DCL, compute, etc.
+    public HotAction hot(WorkerDecision decision, HotValue value) {
+      return myPolicy(value.value())
+        ? new HotAction.Promote(value)
+        : new HotAction.Skip(HotSkipReason.POLICY_REJECTED);
     }
 
-    @Override
-    public void handleCool(WorkerMessage wm) {
-      // custom COOL logic — replaces the TTL reset, key-state transition, etc.
-    }
+    // cool keeps the default: return true
   };
 }
 ```
 
-| Interface               | Methods                                                                                                                                                              | Replaces the default behaviour                                            |
-| ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------- |
-| `WorkerDecisionHandler` | `handleHot`, `handleCool` (plus `handleCoolInline`, which delegates to `handleCool` by default)                                                                      | `WorkerListener`'s default HOT/COOL handling (loader load, version guard) |
-| `SyncDecisionHandler`   | `handleBatch(List<SyncMessage>)` — one granted batch of one key, reduced to its highest version before applying; `handle(SyncMessage)` is the single-message default | `CacheSyncListener`'s default cache-sync handling                         |
+| Interface      | Methods                                                                                                                | Framework owns                                                                                         |
+| -------------- | ---------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| `WorkerPolicy` | `hot(WorkerDecision, HotValue)`, `cool(WorkerDecision)` — both default to the standard pipeline                        | per-key dispatch, `resolveHot`/`settleHot`/`cool`/`skip`, version/tombstone guards, hooks              |
+| `SyncPolicy`   | `value(Batch.Value, SyncContext)`, `invalidate(Batch.Value, SyncContext)`, `clear(Batch.Clear, SyncContext)`           | batch reduction, `value`/`invalidate`/`clear`/`skip`, version/tombstone guards, clear watermarks, hooks |
 
 ## Annotations
 

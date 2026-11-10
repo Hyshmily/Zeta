@@ -282,9 +282,9 @@ User b = zeta.get("user:1", loader, GetPolicy.defaults());
 
 | 消费者                                             | 用它来                            | 没有它时                                                           |
 | -------------------------------------------------- | --------------------------------- | ------------------------------------------------------------------ |
-| `WorkerListener` → `DefaultWorkerDecisionHandler`  | 提升 key 为 HOT 前加载权威值      | 提升 L1 中已有的值；无可用条目时该 HOT 被跳过（`VALUE_NOT_FOUND`） |
-| `CacheSyncListener` → `DefaultSyncDecisionHandler` | 对端 `REFRESH` 后重新加载         | 退化为本地失效，下一次读取回源                                     |
-| 同一个 handler 的带值 `PUT`                        | 用 `isCacheable` 校验线上携带的值 | 无 loader 即无校验：携带的值按原样应用                             |
+| `WorkerListener` → `DefaultWorkerContext`  | 提升 key 为 HOT 前加载权威值      | 提升 L1 中已有的值；无可用条目时该 HOT 被跳过（`VALUE_NOT_FOUND`） |
+| `CacheSyncListener` → `DefaultSyncContext` | 对端 `REFRESH` 后重新加载         | 退化为本地失效，下一次读取回源                                     |
+| 同一个 context 的带值 `PUT`                        | 用 `isCacheable` 校验线上携带的值 | 无 loader 即无校验：携带的值按原样应用                             |
 
 **自定义 per-entry TTL**
 
@@ -309,54 +309,51 @@ Zeta 使用**差异化 TTL**：热点 key 和普通 key 分别有独立默认值
 public WorkerDecisionHook myMonitorHook() {
   return new WorkerDecisionHook() {
     @Override
-    public void afterHotPromotion(String cacheKey, WorkerMessage wm, CacheEntry entry) {
+    public void afterHotPromotion(WorkerDecision decision, CacheEntry entry) {
       metrics.counter("hot.promotion").increment();
     }
 
     @Override
-    public void onHotSkipped(String cacheKey, WorkerMessage wm, HotSkipReason reason) {
-      log.warn("HOT 跳过 {}：{}", cacheKey, reason);
+    public void onHotSkipped(WorkerDecision decision, HotSkipReason reason) {
+      log.warn("HOT 跳过 {}：{}", decision.cacheKey(), reason);
     }
   };
 }
 ```
 
-| Hook                 | 方法                 | 触发时机                                                                        |
-| -------------------- | -------------------- | ------------------------------------------------------------------------------- |
-| `WorkerDecisionHook` | `afterHotPromotion`  | Key 被提升为 HOT（扩展 TTL）                                                    |
-| `WorkerDecisionHook` | `afterCoolDowngrade` | Key 恢复为普通 TTL                                                              |
-| `WorkerDecisionHook` | `onHotSkipped`       | HOT 被跳过（`VERSION_STALE` 版本过旧 / `VALUE_NOT_FOUND` 无可用值）             |
-| `WorkerDecisionHook` | `onCoolSkipped`      | COOL 被跳过（L1 中无对应 entry）                                                |
-| `SyncHook`           | `afterRefresh`       | 已应用对端 REFRESH 回源或带值 PUT                                               |
-| `SyncHook`           | `afterInvalidate`    | 因对端广播而从 L1 移除 key                                                      |
-| `SyncHook`           | `onRefreshSkipped`   | REFRESH 或 PUT 未生效（版本过旧、值缺失、被失效水位拒绝，或被同批更高版本覆盖） |
+| Hook                 | 方法                 | 触发时机                                                                                           |
+| -------------------- | -------------------- | -------------------------------------------------------------------------------------------------- |
+| `WorkerDecisionHook` | `afterHotPromotion`  | Key 被提升为 HOT（扩展 TTL）                                                                       |
+| `WorkerDecisionHook` | `afterCoolDowngrade` | Key 恢复为普通 TTL                                                                                 |
+| `WorkerDecisionHook` | `onHotSkipped`       | HOT 被跳过（`VERSION_STALE` 版本过旧 / `VALUE_NOT_FOUND` 无可用值 / `POLICY_REJECTED` 自定义拒绝） |
+| `WorkerDecisionHook` | `onCoolSkipped`      | COOL 被跳过（L1 中无对应 entry、版本过旧，或被同一批中更高版本的 COOL 覆盖）                       |
+| `SyncHook`           | `afterRefresh`       | 已应用对端 REFRESH 回源或带值 PUT                                                                  |
+| `SyncHook`           | `afterInvalidate`    | 因对端广播而从 L1 移除 key                                                                         |
+| `SyncHook`           | `onRefreshSkipped`   | REFRESH 或 PUT 未生效（版本过旧、值缺失、被失效水位拒绝，或被同批更高版本覆盖）                    |
 
 **替换默认的广播处理逻辑**
 
-如果需要完全控制 HOT/COOL 决策或缓存同步消息的处理方式，实现策略接口并暴露为 Bean（`@ConditionalOnMissingBean`）：
-
 ```java
 @Bean
-@ConditionalOnMissingBean(WorkerDecisionHandler.class)
-public WorkerDecisionHandler myHandler() {
-  return new WorkerDecisionHandler() {
+@ConditionalOnMissingBean(WorkerPolicy.class)
+public WorkerPolicy myPolicy() {
+  return new WorkerPolicy() {
     @Override
-    public void handleHot(WorkerMessage wm) {
-      // 自定义 HOT 逻辑——替代 loader 加载、DCL、compute 等
+    public HotAction hot(WorkerDecision decision, HotValue value) {
+      return myPolicy(value.value())
+        ? new HotAction.Promote(value)
+        : new HotAction.Skip(HotSkipReason.POLICY_REJECTED);
     }
 
-    @Override
-    public void handleCool(WorkerMessage wm) {
-      // 自定义 COOL 逻辑——替代 TTL 重置、key 状态变更等
-    }
+    // cool 继承默认：返回 true
   };
 }
 ```
 
-| 接口                    | 方法                                                                                                                          | 替换的默认行为                                                 |
-| ----------------------- | ----------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------- |
-| `WorkerDecisionHandler` | `handleHot`, `handleCool`（另有 `handleCoolInline`，default 委托 `handleCool`）                                               | `WorkerListener` 的默认 HOT/COOL 处理（loader 加载、版本守卫） |
-| `SyncDecisionHandler`   | `handleBatch(List<SyncMessage>)`：同一 Key 的一次授权批次，执行前先归约为最高版本；`handle(SyncMessage)` 为单条消息的默认实现 | `CacheSyncListener` 的默认缓存同步处理                         |
+| 接口           | 方法                                                                                                        | 框架负责                                                                                       |
+| -------------- | ----------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| `WorkerPolicy` | `hot(WorkerDecision, HotValue)`, `cool(WorkerDecision)`，默认都走标准流水线                                | per-key 调度、`resolveHot`/`settleHot`/`cool`/`skip`、版本/墓碑守卫、Hook                   |
+| `SyncPolicy`   | `value(Batch.Value, SyncContext)`, `invalidate(Batch.Value, SyncContext)`, `clear(Batch.Clear, SyncContext)` | 批次归约、`value`/`invalidate`/`clear`/`skip`、版本/墓碑守卫、clear watermark、Hook          |
 
 ## 注解
 

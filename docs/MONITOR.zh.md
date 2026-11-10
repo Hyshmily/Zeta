@@ -294,7 +294,7 @@ curl -s "$WORKER/actuator/hotkey-worker?key=user:42" | jq
 
 `promotedForMs` 在两种策略下都表示"已 HOT 多久"；`belowForMs` 只有 `COOL_FOR_LOW_QPS` 且当前低于冷却带时非空，
 `COOL_FOR_EXPIRE` 恒为 `null`。两个时间字段分开是刻意的——单一 `sinceMs` 会随策略悄悄变义。
-`nextCheckInMs` 是距已登记冷却检查的剩余时间；检查过期时为负数（已到 deadline 但尚未被 wheel 取走，或正在等待修复扫描），
+`nextCheckInMs` 是距已登记冷却检查的剩余时间；检查过期时为负数（已到 deadline 但尚未被 wheel 取走，或正在等待修复重挂），
 这是有用的"已逾期多久"读数，而不是错误。
 
 端点返回真实 key 名和流量，生产环境按 App 侧 `hotkey` 端点的同等口径做安全防护。
@@ -361,6 +361,7 @@ Zeta 的 L1 始终启用 `recordStats()`；自定义缓存 Bean 若未开启，�
 | `zeta.reporter.feedloop.score`             | Gauge           | feed-loop 得分（bp）——平滑到达率投影到测量窗口所用的间隔后相对目标（`10000` 表示正中目标）                       |
 | `zeta.reporter.feedloop.batch`             | Gauge           | 按产生该得分的间隔投影的每批 key 数                                                                              |
 | `zeta.stall.broadcast_storm.stopped.total` | FunctionCounter | 因 Broker 错误或发送线程池饱和而丢失的 PUT/刷新广播数                                                            |
+| `zeta.sync.invalidate.dropped.total`       | FunctionCounter | 因发送线程池拒绝而丢弃的 INVALIDATE 族消息数；按消息计数，不按携带的 key 数                                      |
 
 ### 5.5 刷新、版本与同步
 
@@ -370,36 +371,36 @@ Zeta 的 L1 始终启用 `recordStats()`；自定义缓存 Bean 若未开启，�
 | `zeta.expire.refresh.failure.leased.total` | FunctionCounter | 获准续租的刷新失败累计数（陈旧值仍可服务）                                                   |
 | `zeta.expire.refresh.lease.debt.keys`      | Gauge           | 当前被租约持有的 key 数（`staleDebt` 大小）                                                  |
 | `zeta.version.clock.skew`                  | Gauge           | 最新已知版本戳（本地戳时钟或被观测到的对端戳，含被拒收的越界值）领先本地物理时间的毫秒数     |
-| `zeta.sync.send.failed.total`              | FunctionCounter | 同步面发布失败累计数；INVALIDATE 从未离开本节点的唯一信号                                    |
+| `zeta.sync.send.failed.total`              | FunctionCounter | 同步面发布失败累计数；与 `zeta.sync.invalidate.dropped.total` 配合覆盖发布前的线程池拒绝     |
 | `zeta.sync.nodeid.collision.total`         | FunctionCounter | 与本节点共享 `dataVersion` node id 的对端同步消息数；持续增长应显式配置 `zeta.local.node-id` |
 
 ### 5.6 Worker 集群与决策面
 
-| 指标                                                  | 类型                        | 含义                                                                                                                                              |
-| ----------------------------------------------------- | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `zeta.worker.alive`                                   | Gauge                       | 心跳视图通过集群闸门时为 `1`；应在应用侧读取                                                                                                      |
-| `zeta.worker.detector.keys`                           | Gauge                       | 持有活跃滑动窗口条目的 key 数                                                                                                                     |
-| `zeta.worker.detector.capacity.evictions`             | FunctionCounter             | 本次采样真正移除、用于在 `max-tracked-keys` 上接纳新 key 的空闲窗口数（Prometheus `_total`）                                                      |
-| `zeta.worker.detector.capacity.rejections`            | FunctionCounter             | 在 `max-tracked-keys` 上被拒绝的新 key 数：硬余量已满，或完成采样未找到空闲窗口后开启的 50 ms 饱和窗口仍在生效（Prometheus `_total`）             |
-| `zeta.worker.hot.active`                              | Gauge                       | 当前持有 HOT 名额的 key 数                                                                                                                        |
-| `zeta.worker.hot.capacity`                            | Gauge                       | 名额容量（`detection.limits.max-active-hot-keys`）                                                                                                |
-| `zeta.worker.hot.rejected`                            | FunctionCounter             | 满员时被拒绝的晋升（读取注册表的 LongAdder）                                                                                                      |
-| `zeta.worker.hot.aborted`                             | Counter                     | HOT 未到达 broker 而被撤销的晋升（名额已归还）                                                                                                    |
-| `zeta.worker.decisions.hot` / `.cool`                 | Counter                     | 已交给 AMQP 客户端且未抛异常的决策；未启用 publisher confirm                                                                                      |
-| `zeta.worker.decisions.dropped`                       | Counter，tag `type`         | 未到达 broker 即丢失的决策（发送失败、队列饱和、drain 异常、停机）                                                                                |
-| `zeta.worker.decisions.elided`                        | Counter，tag `type`         | 无状态变化、在内存中省略的决策：100ms 同类型去抖、已接受版本的精确重放、集群已处于 COOL 状态时再次下发的 COOL，或被取代的 HOT 从未到达漏斗的 COOL |
-| `zeta.worker.decisions.superseded`                    | Counter，tag `type`         | 已有严格更新的版本排队或已被接受，或 registry 已不再持有该 HOT 的晋升，旧决策被淘汰                                                               |
-| `zeta.worker.decisions.expired`                       | Counter，tag `type`         | 本应下发但超过 `max-decision-age-ms` 的决策；被漏斗省略或取代的决策计入对应指标，不计入此处                                                       |
-| `zeta.worker.broadcast.hot.depth` / `.cool.depth`     | Gauge                       | 两条待发队列深度                                                                                                                                  |
-| `zeta.worker.cooling.scheduled`                       | Gauge                       | 冷却轮中当前挂载的检查数                                                                                                                          |
-| `zeta.worker.cooling.lateness`                        | Timer                       | 定时轮触发的到期检查被处理的迟到程度（不含修复扫描的宽限期）                                                                                      |
-| `zeta.worker.cooling.recheck`                         | Counter                     | LOW_QPS 复核发现窗口达到或高于冷却带的次数；EXPIRE 不会重新挂载，到期即冷却，不会计入这里                                                         |
-| `zeta.worker.cooling.reason`                          | Counter，tag `reason`       | 冷却触发原因：`low_qps` / `expire` / `sweep`                                                                                                      |
-| `zeta.worker.rule.matches` / `.promotions` / `.cools` | FunctionCounter，tag `rule` | 按规则的达标上报、晋升与冷却计数，读取规则的计数器字段                                                                                            |
-| `zeta.worker.reports.epoch.dropped`                   | Counter                     | 任期围栏丢弃的报告批次                                                                                                                            |
-| `zeta.worker.reports.stale.dropped`                   | Counter                     | 可选陈旧过滤丢弃的报告批次                                                                                                                        |
-| `zeta.worker.detection.disabled.dropped`              | Counter                     | detection 关闭时跳过的报告                                                                                                                        |
-| `zeta.worker.report.eval`                             | Timer                       | 每批上报的评估耗时（单调时钟，纳秒分辨率）                                                                                                        |
+| 指标                                                  | 类型                  | 含义                                                                                                                                  |
+| ----------------------------------------------------- | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| `zeta.worker.alive`                                   | Gauge                 | 心跳视图通过集群闸门时为 `1`；应在应用侧读取                                                                                          |
+| `zeta.worker.detector.keys`                           | Gauge                 | 持有活跃滑动窗口条目的 key 数                                                                                                         |
+| `zeta.worker.detector.capacity.evictions`             | FunctionCounter       | 本次采样真正移除、用于在 `max-tracked-keys` 上接纳新 key 的空闲窗口数（Prometheus `_total`）                                          |
+| `zeta.worker.detector.capacity.rejections`            | FunctionCounter       | 在 `max-tracked-keys` 上被拒绝的新 key 数：硬余量已满，或完成采样未找到空闲窗口后开启的 50 ms 饱和窗口仍在生效（Prometheus `_total`） |
+| `zeta.worker.hot.active`                              | Gauge                 | 当前持有 HOT 名额的 key 数                                                                                                            |
+| `zeta.worker.hot.capacity`                            | Gauge                 | 名额容量（`detection.limits.max-active-hot-keys`）                                                                                    |
+| `zeta.worker.hot.rejected`                            | FunctionCounter       | 满员时被拒绝的晋升（读取注册表的 LongAdder）                                                                                          |
+| `zeta.worker.hot.aborted`                             | Counter               | HOT 未到达 broker 而被撤销的晋升（名额已归还）                                                                                        |
+| `zeta.worker.decisions.hot` / `.cool`                 | Counter               | 已交给 AMQP 客户端且未抛异常的决策；未启用 publisher confirm                                                                          |
+| `zeta.worker.decisions.dropped`                       | Counter，tag `type`   | 未到达 broker 即丢失的决策（发送失败、队列饱和、drain 异常、停机）                                                                    |
+| `zeta.worker.decisions.elided`                        | Counter，tag `type`   | 无状态变化、在内存中省略的决策：100ms 同类型去抖、已接受版本的精确重放，或集群已处于 COOL 状态时再次下发的 COOL                       |
+| `zeta.worker.decisions.superseded`                    | Counter，tag `type`   | 已有严格更新的版本排队或已被接受，或 registry 已不再持有该 HOT 的晋升，旧决策被淘汰                                                   |
+| `zeta.worker.decisions.expired`                       | Counter，tag `type`   | 本应下发但超过 `max-decision-age-ms` 的决策；被漏斗省略或取代的决策计入对应指标，不计入此处                                           |
+| `zeta.worker.broadcast.hot.depth` / `.cool.depth`     | Gauge                 | 两条待发队列深度                                                                                                                      |
+| `zeta.worker.cooling.scheduled`                       | Gauge                 | 冷却轮中当前挂载的检查数                                                                                                              |
+| `zeta.worker.cooling.lateness`                        | Timer                 | 定时轮触发的到期检查被处理的迟到程度                                                                                                  |
+| `zeta.worker.cooling.recheck`                         | Counter               | LOW_QPS 复核发现窗口达到或高于冷却带的次数；EXPIRE 不会重新挂载，到期即冷却，不会计入这里                                             |
+| `zeta.worker.cooling.reason`                          | Counter，tag `reason` | 冷却触发原因：`low_qps` / `expire`                                                                                                    |
+| `zeta.worker.rule.matches` / `.promotions` / `.cools` | Counter，tag `rule`   | 按规则的达标上报、晋升与冷却计数，读取规则的 Micrometer Counter                                                                       |
+| `zeta.worker.reports.epoch.dropped`                   | Counter               | 任期围栏丢弃的报告批次                                                                                                                |
+| `zeta.worker.reports.stale.dropped`                   | Counter               | 可选陈旧过滤丢弃的报告批次                                                                                                            |
+| `zeta.worker.detection.disabled.dropped`              | Counter               | detection 关闭时跳过的报告                                                                                                            |
+| `zeta.worker.report.eval`                             | Timer                 | 每批上报的评估耗时（单调时钟，纳秒分辨率）；全部条目畸形、未进入处理管线的批次不记录采样                                              |
 
 规则计数器和三个 `cooling.reason` 序列按当前生效配置注册，而非懒加载：每条当前规则从第一次抓取起就以 0 出现；发布移除某条规则时，它的三个序列也一并移除。被移除规则的迟到冷却只丢弃，不会重建序列。
 

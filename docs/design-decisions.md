@@ -214,14 +214,16 @@ move when NTP steps the clock. Its source clamps to `>= 1`, because `0` is the "
 a value loaded during the JVM's first second must still be eligible for the staleness cap.
 
 **One atomic mutation primitive.** `EntryMutations.apply` owns the "judge the resident, rebuild or
-remove it, report whether it applied" shape for every in-place rewrite: Decision-Validity
+remove it, report what the bin lock saw" shape for every in-place rewrite: Decision-Validity
 demotion, local promotion, the sync PUT/REFRESH apply and the versioned invalidate. The mutation
 returns the input instance for "no change", a new instance for a rewrite, or `null` for a removal;
-the call returns the pre/post images only when the store changed, so no caller carries a mutable
-`boolean[]`/`CacheEntry[]` out of the compute. The mutation runs on an absent key too, which is
-what lets an invalidate record its tombstone in the same compute as the removal. The read-path
-reconciliation consumes the reported post-image as its TOCTOU snapshot, so a demotion or promotion
-costs no follow-up table lookup.
+the call always returns the pre/post images it observed inside the compute — the pair is
+identical for a no-op — so no caller carries a mutable `boolean[]`/`CacheEntry[]` out of the
+compute and no caller has to infer "unchanged" from a null return. The mutation runs on an absent
+key too, which is what lets an invalidate record its tombstone in the same compute as the
+removal. The read-path reconciliation serves the reported `current` directly: a concurrent
+invalidate or eviction is then a miss, never the snapshot read before the lock (the previous
+"null means unchanged" return could not tell those two apart and served a removed entry).
 
 **`null` is never a cached value and never a cache hit.** No null sentinel, no negative caching,
 `put(key, null)` throws, and a loader returning `null` writes no entry. Caching absence would
@@ -413,7 +415,8 @@ Owner: `DefaultBackgroundRefresher`, `EntryLifecycleImpl`, `TtlPolicy`.
    reconcile state (Decision-Validity demotion, local promotion, soft-expiry refresh
    arming), or reload. The access is recorded only when the read actually serves (see
    _One access record per served read_ below). Reconciliation re-verifies inside its own
-   atomic compute, so a stale entry reference is safe.
+   atomic compute and removes a resident whose hard deadline passed at the same `now`, so the
+   post-image is live without a second eviction pass and a stale entry reference is safe.
 3. On a miss: `SingleFlight.load` runs the reader once per key and returns a `LoaderOutcome`.
 4. The leader stamps, admits and stores with HOT or NORMAL TTL inside its `leaderCommit`, before
    the shared future completes; every caller then records its own access and returns the value.
@@ -497,8 +500,11 @@ through one type, so a transient suppression and a real failure resolved identic
 **A failed load is never a miss; only a null result is.** `SOURCE_EMPTY` (the reader returned
 `null`) is the one outcome that resolves to a miss. `FAILED` rethrows its cause. `SUPPRESSED_TIMEOUT`
 and `SUPPRESSED_EXECUTOR` throw `ZetaSuppressedException`, because the reader never ran and the
-caller must be able to tell that from "no data". There is no per-call switch: a caller that wants
-an empty answer reads a key whose loader returns `null`, not one whose source failed.
+caller must be able to tell that from "no data". `SUPPRESSED_BREAKER` first tries the stale
+fallback and trusts the verdict that suppressed it — the breaker is not probed a second time, so a
+recovery that lands between admission and resolution cannot turn a degradable suppression into an
+exception — and only throws when nothing is servable. There is no per-call switch: a caller that
+wants an empty answer reads a key whose loader returns `null`, not one whose source failed.
 
 **A batch closes before it throws.** `getAll` processes every key first and rethrows the first
 failure with the rest attached as suppressed (an identical throwable is never attached twice).
@@ -595,7 +601,7 @@ peer PUT/REFRESH on a HOT/COOL entry updates the value, data stamp and birth sta
 the soft window, capped by the existing hard deadline. The active regime and its hard bound survive;
 so do the decision lease and its kind. A NORMAL value update re-arms both normal deadlines. This is
 one tail — `EntryLifecycle.writeValue` — used by `putLocal`, `putThrough`, `refresh`, the load path
-and `DefaultSyncDecisionHandler`; the receiver no longer re-arms a HOT/COOL hard deadline that the
+and `DefaultSyncContext`; the receiver no longer re-arms a HOT/COOL hard deadline that the
 sender preserved. A logically expired resident is treated as absent: it gets a fresh lifetime
 instead of inheriting its dead deadline. Overwriting an elevated regime would leave an entry whose
 TTLs the Worker can never repair, because the Worker only speaks again when the key changes phase.
@@ -664,7 +670,7 @@ which is why the scoped path is not a blanket `invalidateAll`. The kill happens 
 sweep, not per removed key: the watermark recorded first already refuses every pre-clear fill, so a
 per-key `invalidate` inside the sweep would only drop flights created by reads that started after
 the clear — forcing a duplicate load for every key the sweep touches. Owner: `HotKeyCache.doClear`,
-`DefaultSyncDecisionHandler.applyClearBatch`, `SingleFlightImpl`.
+`DefaultSyncContext.applyClear`, `SingleFlightImpl`.
 
 **The watermark guards every write path.** The per-key tombstones and the clear watermark live in
 `EntryLifecycle`, and peer applies, load fills, background refreshes, Worker preloads and the
@@ -697,8 +703,9 @@ was told" says nothing about the reads already in flight on this node. A guard t
 no writer fills is indistinguishable from no guard at all until the race fires.
 
 **Sends leave the caller; saturation drops and counts.** INVALIDATE publications run on the
-send executor; a saturated executor drops the message and increments `invalidateSendDrops`
-rather than blocking the caller. Peers converge via the next write or their hard TTL.
+send executor; a saturated executor drops the message and increments
+`BroadcastBuffer.invalidatesDropped` rather than blocking the caller. Peers converge via the next
+write or their hard TTL.
 
 **A local clear never broadcasts.** `clearAll(InvalidatePolicy.localOnly())` clears one JVM, not
 the cluster — peers converge at their own entry TTL; `clearAll` with the default scope is the
@@ -707,7 +714,7 @@ converging form. The former `flushLocalEmergency` verb was this exact operation
 (2026-10); `unsafe().raw()` remains the escape hatch for anything the verbs do not cover.
 
 Owner: `HotKeyCache` (`invalidate`, `dropAndBroadcastInvalidate`, `sweep`, `doClear`),
-`CentralDispatcher`, `DefaultSyncDecisionHandler`.
+`BroadcastBuffer`, `DefaultSyncContext`.
 
 ---
 
@@ -740,10 +747,11 @@ expiry inside its `compute`, because the admission event runs off the read path 
 may have crossed its hard deadline since it was queued: an expired entry is removed, never
 re-stamped with a fresh deadline. The lock-free pre-check that skips a live already-promoted
 resident still lets an expired snapshot through to that compute, so the optimization never
-bypasses the removal. The attempt reports the applied pre/post images — `null` for unchanged,
-`current == null` for removed-expired — because the read that triggered it must treat the removal
-as a miss instead of serving the value the compute just evicted. The read path uses the reported
-post-image for its TOCTOU expiry check, so a rewrite costs no second table lookup. The hot TTL is
+bypasses the removal. The attempt reports the pre/post images the compute observed — unchanged
+when the rewrite was skipped, `current == null` when the resident was removed as expired —
+because the read that triggered it must treat the removal as a miss instead of serving the value
+the compute just evicted. The read path uses the reported post-image for its TOCTOU expiry check,
+so a rewrite costs no second table lookup. The hot TTL is
 resolved from the resident's normal
 baseline and the call's override — `max(override, normalHardTtl, configured hot default)` for hard,
 `max(override, normalSoftTtl, configured hot default)` for soft — so an entry written with a
@@ -759,7 +767,11 @@ one map lookup and checks the same epoch and the shared liveness judgment. A loc
 stamp) is never incarnation-invalid, and a local override HOT carrying a COOL lease is not a
 Worker-owned HOT: its recovery is the reassertion rule above, not Decision-Validity demotion. When the judgment fails, the next read rewrites the entry
 in place — `NORMAL`, normal TTLs, decision stamp
-cleared, value preserved and still served. The rewrite caps the entry's remaining life at the
+cleared, value preserved and still served. A resident whose hard deadline has already passed is
+removed in the same compute instead of rewritten: without that removal the rewritten entry keeps
+its past deadline, and because `reconcileHit` no longer runs a second expiry pass, the read path
+would serve and access-record an entry the hard TTL had already condemned. The rewrite
+caps the entry's remaining life at the
 normal TTL rather than restarting it: the value keeps its age, so a demotion may shorten the
 deadline the dead Worker's decision granted but never extends the entry's own (a demotion is not
 a refresh). The rewrite is built **inside** the per-key `compute`, not before it: a dead Worker's
@@ -790,15 +802,24 @@ sink fires exactly once per successful demotion.
 
 **A HOT promotion never rewrites newer data.** `decisionVersion` and `dataVersion` are orthogonal,
 so the Worker plane's version guard cannot see a concurrent put / peer PUT / refresh that landed
-during the promotion's authoritative load. `DefaultWorkerDecisionHandler` therefore judges the
+during the promotion's authoritative load. `DefaultWorkerContext` therefore judges the
 data plane inside the compute: the loaded value is written only when it is provably fresh —
-resident `dataVersion` at or below the pre-read value stamp, no invalidation tombstone crossed
-since it, resident not logically expired. Otherwise the promotion applies decision metadata only
-(state, decision stamp, hot TTLs) and the resident value and version survive; a dead
-(logically expired) resident is left untouched rather than pinned hot. `editEntry` preserves the
-resident's `dataVersion`, so an unguarded overwrite would wear the newer version like fresh data
-and lock the stale value in against every later sync for the whole hot hard TTL — the one shape
-the tombstone and resident guards cannot catch, because it carries a legitimate version.
+resident `dataVersion` at or below the pre-read value stamp and no invalidation tombstone crossed
+since it. Otherwise the promotion applies decision metadata only (state, decision stamp, hot TTLs)
+and the live resident value and version survive. `editEntry` preserves the resident's
+`dataVersion`, so an unguarded overwrite would wear the newer version like fresh data and lock the
+stale value in against every later sync for the whole hot hard TTL — the one shape the tombstone
+and resident guards cannot catch, because it carries a legitimate version.
+
+**A logically expired resident is absent, not a veto.** The read path does not serve a resident
+whose hard deadline passed, so the promotion must not treat it as a live pre-image. When this call
+loaded a fresh value, `settleHot` creates a new HOT entry with `createHot` and a fresh
+`normalHardBaseline`; when it did not, the promotion is skipped. The previous shape ran the
+metadata-only branch on the dead entry: a clock-skewed dead entry carrying a higher `dataVersion`
+rejected the freshly loaded value and fired `VALUE_NOT_FOUND`, and the accepted case edited the
+dead entry in place, carrying its already-expired baseline into the next COOL downgrade. The
+version guard still runs first, because a dead entry's decision stamp must keep rejecting a
+same-node replayed older decision.
 
 The tombstone probe is part of the value-rewrite guard, not of the metadata-only path. A
 no-loader deployment (and an L1-fallback promotion) has no pre-read stamp to compare, so the probe
@@ -807,8 +828,8 @@ tombstone — even though the resident is inside the bin lock and is exactly wha
 serves. Such a promotion updates only the decision reference, state and TTLs and must not consult
 the invalidation table at all; otherwise the entry stays NORMAL forever. A refused promotion still
 fires exactly one terminal `onHotSkipped`: `VERSION_STALE` for the inner DCL guard, and
-`VALUE_NOT_FOUND` for a tombstone-refused create or an unusable resident. Owner:
-`DefaultWorkerDecisionHandler.promoteExisting`.
+`VALUE_NOT_FOUND` for a tombstone-refused create or an absent/value-less/logically expired
+resident. Owner: `DefaultWorkerContext.settleHot`, `promoteExisting`.
 
 **A loader-failure fallback keeps the resident's deadlines.** When the cluster loader fails or
 returns nothing, the HOT decision promotes the resident L1 value only in metadata; applying the
@@ -816,10 +837,10 @@ hot hard/soft TTLs would reset both deadlines to `now + hot TTL`, making stale d
 loaded and suppressing its next soft refresh for the whole hot window. The metadata-only rewrite
 therefore leaves the existing durations and expiry timestamps untouched. A deployment with no
 loader is different: the resident is the authoritative source, so its promotion does adopt the
-hot TTLs. Owner: `DefaultWorkerDecisionHandler.promoteExisting`.
+hot TTLs. Owner: `DefaultWorkerContext.promoteExisting`.
 
 **The create stamp is the value's stamp, not the decision's, and a fallback cannot create.**
-One slot carries the stamp through both phases of `handleHot`: the pre-read stamp for a fresh load,
+One slot carries the stamp through both phases of `resolveHot`/`settleHot`: the pre-read stamp for a fresh load,
 and the resident value's own `dataVersion` when the load fell back to L1. A fallback is an existing
 value, never a new one, so signing it with the pre-read stamp would let it outrank a tombstone
 recorded above its own version and resurrect a value a concurrent invalidation had already
@@ -828,7 +849,7 @@ fallback's resident disappears between the fallback read and the compute, the pr
 as `VALUE_NOT_FOUND`. Before that guard, a hard-expired resident removed by a concurrent read in
 that window was re-created from the fallback value under fresh HOT TTLs and a new `birthStampSec`,
 resurrecting data the hard TTL had already condemned for a full hot lifetime. Owner:
-`DefaultWorkerDecisionHandler.handleHot`, `createHot`.
+`DefaultWorkerContext.resolveHot`, `createHot`.
 
 **Every decision is sent once.** `WorkerBroadcaster` publishes a HOT or COOL exactly once, with no
 repeat chain and no periodic re-emission, and a failed or dropped send is not replayed (design
@@ -839,18 +860,20 @@ per-key retries were judged not worth their machinery. The receiver's version gu
 late duplicate harmless, so the send path stays idempotent even without retries.
 
 **A COOL run is reduced, a HOT run is not.** The ordered dispatcher grants same-key batches;
-`DefaultWorkerDecisionHandler.handleCoolBatch` folds a run of COOL decisions from one sender node
+`DefaultWorkerContext.reduceCool` folds a run of COOL decisions from one sender node
 to the last decision that survives the version guard, firing `onCoolSkipped` for the covered
 messages. COOL is pure in-memory (no loader, no create or remove), so only the final decision can
 affect the state. The fold is restricted to a single `decisionNodeId`: the ghost-COOL guard tests
 the resident HOT's owner, so an earlier same-owner COOL can legitimately demote the entry and
 disable the guard for a later cross-node COOL; dropping it could leave the entry HOT. Mixed-node
-runs fall back to sequential applies. HOT is never reduced: a later HOT may load a different
-value, and if its load fails the earlier HOT's created L1 entry is its only fallback. Owner:
-`DefaultWorkerDecisionHandler.handleCoolBatch`, `WorkerListener.dispatchBatch`.
+runs fall back to sequential applies. A run of one COOL goes straight to `policy.cool`: no
+`subList`, no reduction, and no second `requireType` for a batch that cannot change. `reduceCool`
+validates types and decision-node identity in one pass. HOT is never reduced: a later HOT may load
+a different value, and if its load fails the earlier HOT's created L1 entry is its only fallback.
+Owner: `DefaultWorkerContext.reduceCool`, `WorkerListener.dispatchBatch`.
 
 Owner: `LocalPromotion`, `EntryLifecycleImpl.demoteIfRemoteNodeIdInvalid`, `CacheKeysPolicy`,
-`DefaultWorkerDecisionHandler`, `ZetaSchedulingConfiguration`.
+`DefaultWorkerContext`, `ZetaSchedulingConfiguration`.
 
 ---
 
@@ -864,11 +887,11 @@ two hashes, two thread-local lookups, two capacity decisions and two independent
 that could disagree — one pipeline admitting a key the other dropped.
 
 **Tag-mode routing belongs to the counter.** `AccessCounter.record(cacheKey, TagMode)` owns the
-four-way switch (`RECORD`, `DETECT_ONLY`, `REPORT_ONLY`, `SILENT`), and `CentralDispatcher.recordAccess`
-only delegates. The previous shape decomposed the mode into two booleans in the dispatcher and
+four-way switch (`RECORD`, `DETECT_ONLY`, `REPORT_ONLY`, `SILENT`), and `HotKeyCache.recordAccess`
+calls it directly. The previous shape decomposed the mode into two booleans in the dispatcher and
 rebuilt the enum's meaning with nested `if`/`else` — a new mode could silently fall through to the
 merged read path, and the routing rule lived away from the class whose documentation describes it.
-Owner: `AccessCounter.record`, `CentralDispatcher.recordAccess`.
+Owner: `AccessCounter.record`, `HotKeyCache.recordAccess`.
 
 **The tide period and the sketch cadence are two clocks.** The tide base starts at
 `report-interval-ms` and the reporter's feed-loop tuner moves it inside
@@ -1030,7 +1053,11 @@ tripping and evicting state. Owner: `CircuitBreakerRegistry`.
 `HALF_OPEN → CLOSED` and the wedged-episode reset each swap one `Epoch` — state, episode
 generation, live probe slots, consecutive successes, the episode clock and the probe-credit
 multiplier — with a single compare-and-set, so a failure storm trips once, logs once and stamps the
-cooldown once instead of letting every failing thread re-decide. The credit belongs to the same
+cooldown once instead of letting every failing thread re-decide. Admission is one retry loop over
+that snapshot: a lost CAS means another thread advanced the machine, and the answer is re-derived
+from the new epoch. Rejecting on a lost CAS was wrong because the state it lost to may be a
+`CLOSED` that had just recovered from a successful probe — the caller then threw
+`ZetaSuppressedException` against a healthy breaker. The credit belongs to the same
 snapshot: a failed episode's penalty and a recovered episode's reward are applied by the transition
 CAS that publishes the outcome, so no reader sees a new state with the previous episode's quota. The
 packing is not a micro-optimisation. Those values used to live in separate fields, and every ordering
@@ -1371,21 +1398,22 @@ does not take the sample lock, so it can release seats during the walk, and a pa
 survivors must not report a saturation that no longer holds. That same empty pass arms the relief
 signal for the accelerated sweep: without it, a trickle of new keys slower than one per 50 ms keeps
 spending the hard headroom while the periodic scan stays at its slow cadence, until the ledger is
-exhausted. The pass's own admission still reserves
-from the hard headroom: the thread that paid for the walk is not the one admission the ledger should
-refuse while its contenders pass, and the window it just opened is what suppresses those contenders.
-A pass that removes a
-seat clears the window and admits, and its first reclaimed seat is transferred to the pass's own
-admission instead of being returned to the ledger, so a contended admission bypassing the lock
-cannot take the seat this pass just freed and leave the pass's own admission rejected. The predicate
+exhausted. Below the hard bound, the pass's own admission reserves one hard-headroom seat **before**
+the walk: the thread that paid for the walk is not the one admission the ledger should refuse while
+its contenders pass, and the window it just opened is what suppresses those contenders. A pass that
+removes a seat clears the window and admits; every reclaimed seat returns to the ledger because the
+admission already owns its reservation. A contended admission that bypasses the lock therefore
+cannot take the seat this pass reserved; the seats the pass frees are handed back to the ledger for
+the contenders. At the hard bound there is no seat to reserve, so the pass runs without one and
+admits only from what it reclaims. The predicate
 must therefore return true only when this pass tombstoned the candidate and released its seat. The
 sweep hand is weakly consistent and can still yield an entry another path already removed; treating
 that ghost as a reclaim would inflate `capacity.evictions` and spend the hard-headroom budget on a
 seat this pass did not free. The hand
 resumes where the previous pass stopped and is bounded by `min(sampleSize, map.size())`; an
 exhausted hand is rebuilt at the head, and the periodic sweep drops it because a CHM iterator pins
-the table array. A contended admission (`tryLock` fails) proceeds unless the table is past the hard
-headroom: the holder may be releasing the seat it needs, and "no pass ran" is not evidence that
+the table array. A contended admission (`tryLock` fails) proceeds unless the ledger is at the hard
+limit: the holder may be releasing the seat it needs, and "no pass ran" is not evidence that
 nothing is idle. The detector's `LongAdder` rejection counter spreads flood-time writes across
 cells, the relief/saturation flags are read before they are written because the sweep and the
 per-seat admission would otherwise bounce one cache line to store a value they already hold, and
@@ -1399,13 +1427,31 @@ newly idle window, those contended admissions add more than the pass released, a
 create. `SamplingReclaimer` therefore reserves one atomic seat per window before creation; the
 reservation is consumed by the created window or released when a race finds an existing one, and
 removal returns the seat under the entry monitor. The soft cap plus `max(8, 1%)` is the ledger's
-hard limit, so the table cannot grow past it under any interleaving. The pass's own admission is the
-exception in the other direction: its first reclaimed seat is transferred instead of returned, so a
-bypassing admission sees the ledger unchanged and cannot take it. A key that already holds a HOT
+hard limit, so the table cannot grow past it under any interleaving. The pass's own admission is
+covered by one reservation taken before the walk: a bypassing admission cannot take that seat, and
+every seat the pass reclaims is returned to the ledger. A key that already holds a HOT
 registry seat also takes a seat without the bound — a hot window's count feeds the LOW_QPS
 cool-down, and losing it would make a live hot key look quiet; the overshoot is bounded by
 `max-active-hot-keys`. The ledger initializes from a prefilled table for test/embedding callers.
 Owner: `SamplingReclaimer`, `SlidingWindowDetector`.
+
+**The failure this closes (the sampler refused after paying for the walk).** The pass used to sample
+first and call `reserve` only after releasing the lock. While it walked, contenders that lost
+`tryLock` reserved the remaining hard headroom; if the walk found nothing idle, the sampler's own
+reservation then failed at the full ledger. The one thread that had just scanned the table was the
+one admission refused, which made the cap look arbitrary under contention. Reserving the seat
+before the walk closes the window; each reclaimed seat is returned, so the reservation is the only
+seat the sampler can consume. Owner: `SamplingReclaimer.tryAdmit`.
+
+**The fast path reserves below the cap, never from the headroom.** The below-cap admission used the
+same hard-limit CAS as the sampling path. A burst that all observed the ledger one seat below the
+soft cap therefore spent the entire hard headroom without running one pass; the next arrival was
+rejected from a table that could still hold reclaimable idle windows. The fast path now CASes only
+below the cap: an arrival that loses the last below-cap seat falls through to the sampling gate, or
+to its saturation window, so headroom is spent only by an admission that reaches the sampling path —
+it walks the table, or loses the `tryLock` to the pass already walking it.
+The sampling admission still reserves its hard-headroom seat before the walk. Owner:
+`SamplingReclaimer.tryAdmit`, `SamplingReclaimer.tryReserveBelowCap`.
 
 **The tombstone is the seat state, and the seat crosses the compute as a primitive.** A
 `KeyWindow` owns its seat for exactly the interval in which `lastSlice != EVICTED`; eviction sets the
@@ -1431,16 +1477,35 @@ saturation window: above the soft cap it consumed hard headroom while reclaimabl
 stayed tracked, and a flood of such reports could push the table to the hard limit without ever
 running the pass that would have freed seats. The previous branch reasoned that a tombstone's seat
 was already returned, so the replacement was "a normal seat"; a normal seat is exactly a sampled
-admission. The hard-ledger boundary is unchanged: `tryAdmit` rejects at the hard limit before
-sampling by design, and the periodic sweep, not an admission, is the recovery path there.
+admission.
 
-**The repair sweep waits one grace period before calling a check lost.** A scheduled check is taken
-within the hand-off latency of its deadline; repairing inside that window would force a schedule
-that is merely late and report the cool-down's cause as `sweep` instead of its real reason. A check
-must therefore be overdue by a full grace period (one second) before the sweep evaluates it. A
-genuinely lost check — a wheel thread that stalled or died before re-arming — is late by one sweep
-interval either way, so the grace costs nothing the sweep cadence does not already bound. Owner:
-`HotKeyRegistry.repairOverdue`.
+**The hard bound still gets one uncontended pass.** At the hard limit the seat ledger has no
+reservation to hand out, but an idle window can still be reclaimed. `tryAdmit` therefore takes the
+sample lock with `tryLock` once before rejecting: a pass that frees a seat admits the caller, a pass
+that finds nothing opens the saturation window, and a contender that loses the lock rejects. The
+pass holds no reservation at that point, so a contender that reclaims the same seat first can still
+refuse the thread that walked the table; that is the price of the bound, and the 50 ms saturation
+window keeps the walk from repeating. Owner: `SamplingReclaimer.tryAdmit`.
+
+**The failure this closes (hard-limit lockout).** `tryAdmit` used to reject on
+`usedSeats >= hardLimit` before touching the sample lock, on the premise that the periodic sweep was
+the only recovery path there. With the default 30 s sweep cadence, a table at the hard bound but
+holding windows that had just gone idle refused every new key for up to half a minute, even though
+one bounded walk would have released a seat. The hard bound is still a true bound — the fallback
+never reserves above it, and a failed `tryLock` rejects — but an admission is no longer blind to
+reclaimable seats. Owner: `SamplingReclaimer.tryAdmit`.
+
+**The repair re-links a lost check; the wheel is the only evaluator.** A scheduled check is taken
+within the hand-off latency of its deadline, so re-linking inside that window would move a node
+that is merely late and wake its owner for no reason. A check must therefore be overdue by a full
+grace period (one second) before the sweep touches it. The sweep then calls `reschedule`, which
+links a lost node into the due list and wakes the wheel owner; the owner applies the real verdict
+and the real cool reason. A failed evaluation or a missed link is late by one sweep interval, so the
+grace costs nothing the sweep cadence does not already bound. Re-linking rather than evaluating
+keeps one answer to "who decides a cool-down": a second evaluator could move `nextCheckAt` twice and
+report the wrong cause. A wheel owner that dies leaves its buckets without an advancing thread;
+this pass cannot replace the owner, and the App's hot hard TTL bounds the keys it held. Owner:
+`HotKeyRegistry.repair`, `TimerWheel.reschedule`.
 
 **A cool-down deadline saturates instead of wrapping.** `HotKeyRule` and its published
 `RuleBinding` compute every deadline with a saturating add, so a very large `cool-after` or
@@ -1449,15 +1514,13 @@ repair scan compares the deadline against `now - REPAIR_GRACE_MS` rather than ad
 the deadline, so a saturated deadline stays future instead of looking overdue. Owner:
 `HotKeyRule`, `RuleBinding`, `HotKeyRegistry`.
 
-**A due check is evaluated once, under the stripe lock.** The sweep's outer scan and the wheel owner
-can both reach the same entry: the sweep sees an overdue `nextCheckAt`, the owner polls and
-evaluates, then the sweep takes the stripe. `evaluate` re-reads `nextCheckAt` after the identity
-check and returns when it is still in the future — a forced repair is no exception, because its
-outer scan is only a hint. Without that guard the second evaluation re-read the window, moved the
-dwell clock and re-armed the wheel for no state change. The lateness sample is taken under the same
-stripe lock, from the deadline `evaluate` is about to replace, so a concurrent repair cannot re-arm
-the entry between the check and the metric; only a wheel-fired check reports it, because the repair
-sweep's one-second grace is deliberate. Owner: `HotKeyRegistry.evaluate`.
+**A due check is evaluated once, under the stripe lock.** The wheel detaches an entry and calls
+`evaluate`; between the detach and the stripe lock, a report can re-arm the same entry. `evaluate`
+re-reads `nextCheckAt` after the identity check and re-links the fresh deadline when it is still in
+the future. The entry is `UNSCHEDULED` at that point, so the call is a schedule, not a second bucket
+move. The lateness sample is taken under the same stripe lock, from the deadline `evaluate` is about
+to replace, so a concurrent re-arm cannot move the entry between the check and the metric. Owner:
+`HotKeyRegistry.evaluate`.
 
 **The LOW_QPS dwell clock is a real timestamp; the sentinels are outside the clock.** `belowSince`
 stores the instant the key first dropped below the band verbatim, including zero and negative
@@ -1470,7 +1533,10 @@ without knowing the private sentinel; the registry's under-lock path still compa
 Owner: `HE`, `HotKeyRegistry.evaluate`.
 
 **A shutdown stops the inner batch, not only the outer loop.** A wheel advance can leave a large
-detached batch, so the owner checks `running` inside the drain as well as around the wait. The
+detached batch, so the owner checks `running` inside the drain as well as around the wait. A
+per-entry evaluation failure is caught inside the drain, so one poisoned check cannot skip the rest
+of the batch or force an extra wheel advance; the entry is unscheduled and overdue, and the repair
+pass re-links it for the wheel to retry. The
 constructor also tears down already-started owners if a later thread cannot start, because a
 constructor failure never reaches `@PreDestroy`. Owner: `CoolingScheduler`.
 
@@ -1486,11 +1552,25 @@ OS file lock as well as the in-JVM monitor: during a rolling update two Pods bri
 which each incarnation's decisions look like the other's and are silently skipped. A lock the
 platform cannot provide, or one this JVM already holds through another channel
 (`OverlappingFileLockException`, e.g. a DevTools reload or a second context), degrades to the
-in-JVM monitor with a WARN: the monitor already serializes this class's own calls. Never compare
-epochs across Workers. The file is machine-owned state: exactly one binary `long` (8 bytes), no
-text, no comments, no parser. A file whose size is not exactly 8 bytes reads as absent and is
-repaired in place on the next start, so a torn write or a text-format leftover still yields a
-strictly increasing epoch from `max(previous + 1, wall-clock floor)`. Owner: `WorkerEpochStore`.
+in-JVM monitor with a WARN: the monitor already serializes this class's own calls. The lock lives
+on a stable sidecar `.lock` file, not on the epoch file: the epoch file is replaced by rename, so a
+lock on its old inode would not serialize a process that opens the new one. Never compare epochs
+across Workers. The file is machine-owned state: exactly one binary `long` (8 bytes), no text, no
+comments, no parser. A file whose size is not exactly 8 bytes reads as absent and is replaced on
+the next start, so a text-format leftover still yields a strictly increasing epoch from
+`max(previous + 1, wall-clock floor)`. The floor is re-sampled after the OS lock, so time spent
+waiting for another incarnation cannot mint an epoch below the clock, and a corrupt
+`Long.MAX_VALUE` saturates instead of wrapping back to the floor. The write-failure fallback floors
+at the value it just tried to write (`max(previous + 1, wall clock)`), so a clock that stepped
+backwards cannot mint an epoch at or below its predecessor when the replacement file cannot be
+written. Owner: `WorkerEpochStore`.
+
+**The failure this closes (torn eight-byte overwrite).** The old write happened at offset zero of
+the existing file and truncated to eight bytes. A crash in the middle could leave the file at
+exactly eight bytes containing a mix of the old and new values, so the size check could not see the
+damage and the next start read a corrupted epoch. The replacement is now a same-directory temporary
+file, forced to disk and renamed over the target, so a crash leaves either the complete old value
+or the complete new one. Owner: `WorkerEpochStore.writeEpoch`.
 
 **The epoch file is not replaceable by a clock.** `System.nanoTime()` resets with the JVM, and
 `TimeSource.monotonicMillis()` is `BOOT_WALL_MS + uptime`, so at the instant the epoch is minted it
@@ -1517,7 +1597,12 @@ schedule for facts the App reads together. The loaded rule set's fingerprint sta
 detection endpoint: no component compares hashes across heartbeats, and the endpoint already
 answers the operator's question next to the rules it describes. The producer is a pure message
 builder; `WorkerScheduling` owns its cadence together with every other periodic task, so no
-producer starts work during bean construction. Owner: `WorkerHeartbeatProducer`,
+producer starts work during bean construction. The heartbeat task starts immediately and runs at a
+fixed rate: the first **successful** beat anchors the ready grace without losing one interval, and
+an AMQP send's duration does not accumulate into the next period. Anchoring after the send is what
+keeps a broker outage at startup from consuming the grace before the Worker can receive reports; a
+failed attempt leaves the anchor unset, so the next successful beat starts the clock. The repair
+sweep keeps a fixed delay because its run time is work the next cadence should not absorb. Owner: `WorkerHeartbeatProducer`,
 `WorkerHeartbeatMessage`, `WorkerAutoConfiguration.WorkerScheduling`.
 
 **A heartbeat is tenant-scoped at the receiver.** The topic exchange and the `heartbeat.*`
@@ -1647,12 +1732,15 @@ single volatile reference; its maps and array are immutable, so a reader cannot 
 with an old cache or an old counter. Owner: `DetectionSettings`, `RuleSet`, `RuleResolver`,
 `DetectionPipeline`.
 
-**Rule equality is the canonical definition, not object identity.** A `HotKeyRule` carries a
+**Rule equality compares fields, not object identity or allocated text.** A `HotKeyRule` carries a
 compiled `Pattern`, and `Pattern` does not override `equals`; two rule sets built from the same
 configuration therefore compared unequal once any rule was `REGEX`, and `RuleSet.equals` (which
-delegates to its rules) could never recognise an unchanged publication. `HotKeyRule` compares its
-canonical definition and order and hashes the same text, excluding the `Pattern` that `type` and
-`pattern` already determine. Owner: `HotKeyRule`, `RuleSet`.
+delegates to its rules) could never recognise an unchanged publication. `HotKeyRule.equals` now
+compares every behavioural field and the configuration order directly, excluding the `Pattern` that
+`type` and `pattern` already determine, so equality allocates no canonical string. The length-
+prefixed `definition()` remains the fingerprint's canonical text: a delimiter inside an
+operator-supplied id or pattern cannot make two different rules collide. Owner: `HotKeyRule`,
+`RuleSet`.
 
 **The tracked-key cap is priced at startup.** A tracked window is a doubled ring of
 `2 × alignedSlices` longs plus a window object, a map node and the key string — roughly 350–400 B at
@@ -1662,14 +1750,16 @@ it prevents is a 1M default on a 512 MB container entering a GC death spiral bef
 rejects a key: the cap is a bound, not proof that the deployment fits. Owner:
 `DetectionSettings`, `docs/CONFIG.md`.
 
-**The per-rule match counter is a `LongAdder`; the stripe-guarded counters are volatile longs.**
-`RuleResolver.Snapshot.eligible` records one match for every report that clears a rule's threshold, and eight
-report-consumer threads do that concurrently. When the HOT seats are full, every candidate key's
-report lands on the same default rule, so a single `volatile long` made all of them contend on one
-cache line. `RuleCounters.matches` is a `LongAdder`; promotions, aborts and cool-downs stay plain
-volatile longs updated through `VarHandle` because they run under a key's stripe lock. The previous
-shape used a volatile long for `matches` too, leaving the highest-concurrency counter on the
-lowest-concurrency update path. Owner: `RuleCounters`.
+**The per-rule match count is a counter, not a contended field.**
+`RuleResolver.Snapshot.eligible` records one match for every report that clears a rule's threshold,
+and eight report-consumer threads do that concurrently. When the HOT seats are full, every candidate
+key's report lands on the same default rule, so a single shared `volatile long` made all of them
+contend on one cache line. `RuleCounters.matches` is a Micrometer `Counter` whose underlying adder
+spreads those writes, and promotions and cool-downs use the same kind of counter; `aborts` stays a
+`LongAdder` because it is endpoint-only. The previous shape used a `volatile long` for `matches` too,
+leaving the highest-concurrency counter on the lowest-concurrency update path. The `Counter` keeps
+the adder's write spread and the endpoint on the same total the scrape reads. Owner: `RuleCounters`,
+`WorkerDetectionMetrics`.
 
 **A scrape reads one rule view, and a cache miss scans only rules that can win.**
 `RuleSet.allRules()` is the single default-first list; the fingerprint, the resolver's binding map
@@ -1691,15 +1781,23 @@ rule. No caller keeps a private `Math.round`, integer division or `instanceof` c
 pairs each published rule with a `RuleBinding`: the immutable rule and the `RuleCounters` of its
 id. The entry stores that binding, so the report path and the cooling check read the retained
 rule's thresholds by field access instead of resolving the rule through the published set, and a
-promotion, an abort and a cool-down advance the counters with field reads — no second lookup through
-the rule set, the active-id set and the metrics maps, and no per-call lambda. Counters are keyed by
+promotion, an abort and a cool-down advance the counters through the captured handles — no second
+lookup through the rule set, the active-id set and the metrics maps, and no per-call lambda. Counters
+are keyed by
 id and survive a publication that retains the id; an unchanged rule keeps its binding (definition
 equality is textual, so a recompiled regex keeps it too), so a threshold edit to one rule does not
-rebuild the rest. An identical rule-set fingerprint short-circuits the publication, keeping the
-match cache. A removed id is retired: a late cool-down still finishes against its captured rule,
-but its update lands on counters whose meters the publication already removed, so no meter series
-is recreated. The endpoint reports the current rule set, so a retired rule's counters are
-intentionally not carried forward.
+rebuild the rest. An identical fingerprint **and an equal rule set** short-circuit the publication,
+keeping the match cache; the fingerprint alone is a 64-bit filter, not an equality proof, so a
+collision cannot suppress a real configuration change. Meters for newly added ids are registered
+only after the whole snapshot is built, so a
+publication that fails while deriving the exact index or the scan array leaves the previous snapshot
+and its meter set untouched; binding while building left an orphan series for an id no published
+rule owned. A removed id is retired: a late cool-down still finishes against its
+captured rule, but its update lands on counters whose meters the publication already removed, so no
+meter series is recreated. The endpoint reports the current rule set, so a retired rule's counters
+are intentionally not carried forward. An id duplicated across the default and the precedence list is
+rejected by `RuleSet.of`; otherwise two bindings would collapse onto one counter set, so a promotion
+under one rule would advance the other's counters and the endpoint would attribute both to one id.
 Owner: `RuleResolver`, `RuleBinding`, `WorkerDetectionMetrics`.
 
 **Rule metadata is not bit-packed, and `HE` is not pooled.** A rule set is an
@@ -1789,26 +1887,37 @@ return zero for a key still receiving traffic. Owner: `SlidingWindowDetector`.
 **The window stores the absolute slice, and the report batch samples the clock once.** `KeyWindow`
 holds `volatile long lastSlice` instead of a millisecond timestamp. `ReportConsumer` samples
 `TimeSource.monotonicMillis()` once per message and derives the slice from it once;
-`DetectionPipeline` passes the instant to `promoteEntry` and the slice to
+`DetectionPipeline` passes the instant to `promote` and the slice to
 `addCountAtSlice`/`recordCountAtSlice`, so a 500-key batch pays one clock read and one `floorDiv`,
 not 500 of each. Every later comparison is integer arithmetic on the slice number:
-`lastSlice < nowSlice` is the fast-path gate, `max(nowSlice, lastSlice) & lengthMask` is the add
-index, `nowSlice - lastSlice > windowSize` is the idle test, and the sum compares each slot's tag
-with the absolute slice it expects. `evictStale(staleAfterMs)` converts the duration once per scan
+`lastSlice < nowSlice` is the fast-path gate, `nowSlice & lengthMask` is the add index, `nowSlice -
+lastSlice > windowSize` is the idle test, and the sum compares each slot's tag with the absolute
+slice it expects. `evictStale(staleAfterMs)` converts the duration once per scan
 (`staleAfterMs / sliceMs`) and the scan itself only subtracts; the retention is therefore quantized
 to whole slices, at most one slice early or late, while every real retention (minutes) is orders of
 magnitude larger. The cap-relief scan calls `evictIdle()` instead of converting a duration: it uses
 the same slice-aligned idle predicate as the read path and the capacity sampler, so a guard slice a
 reader still covers is never reclaimed. The batch sample may be older than a concurrent adder's
-sample, which `Math.max` in the add index already handles; it cannot be older than the window's own
-slice without entering the slow path. Floor division, not truncation, keeps a timestamp before zero
+sample; the add keeps its own slice tag, and an add that fell behind the whole window is dropped
+rather than moved onto the newest slice. Floor division, not truncation, keeps a timestamp before zero
 in its own slice: `-1` and `-101` are two slices apart at `sliceMs = 100`, not one. Every write
 walks the `windowSize + 1` slots; the ring is too short for a cached sum to be worth the staleness
 it would introduce. A non-positive count writes no slot and admits no key: it returns before any
-bookkeeping, and `addCountAtSlice` returns the key's current window sum (a read, not a write). Zero and
+bookkeeping, and `addCountAtSlice` returns the key's window sum at the caller's batch slice — a
+read, not a write; re-sampling the clock there would let an older batch sample read as a silent
+window. `evictStale` rejects a negative duration instead of letting a negative slice bound match
+every live window. Zero and
 negative reports are a caller contract violation; ignoring them is what makes the slot invariant
 hold — a slot starts empty, every write is positive, and an overflowing add saturates at
 `Integer.MAX_VALUE`. Owner: `SlidingWindowDetector`, `DetectionPipeline`, `ReportConsumer`.
+
+**The failure this closes (expired traffic moved to the newest slice).** `recordCount` used to take
+`max(nowSlice, window.lastSlice)` as the write slice. A thread that sampled an old slice and then
+stalled past the window had its count injected into the current newest slice, inflating the QPS the
+rules saw and keeping a dead key's window fresh. The add now writes its real slice when it is still
+inside the window and drops itself when it is not; the stored tag already handles a recycled slot,
+and `addCountAtSlice` still sums to the later of the two slices so a concurrent advance is reflected.
+Owner: `SlidingWindowDetector.recordCount`.
 
 ---
 
@@ -1832,10 +1941,9 @@ could hold an earlier deadline. Owner: `TimerWheel`.
 
 **The wheel adds no per-seat object and no deadline field.** The node is the `HE`: two
 references and one `int` link state, with `nextCheckAt` reused as the timer's variable time and the
-field that held the validation token reused as the link state. The wheel's two links and state word grew the entry by sixteen bytes; the later
-`promotionSubmitted` boolean is one more byte in the object's tail, not a reason to move the links
-back out of the node. The `int` state word fills the object header's padding, so only the two links
-add size without the boolean. Removing that `int` would not give the four bytes back — the JVM
+field that held the validation token reused as the link state. The wheel's two links and state word
+grew the entry by sixteen bytes. The `int` state word fills the object header's padding, so only
+the two links add size. Removing that `int` would not give the four bytes back — the JVM
 would insert the same alignment padding before the first `long` — while the link state would share
 a word with `belowSince` and make a stripe-lock write and the owner's unlocked hand-off contend on
 one CAS. The
@@ -1844,19 +1952,30 @@ footprint drops by roughly 30 B and a re-arm allocates nothing. One entry holds 
 it — so the queue's cap, depth counter, rejection metric and stale-check amplification all disappear
 with it. Owner: `HE`, `TimerWheel`.
 
-**The wheel state is written under the wheel lock, except the owner's hand-off.** `schedule`,
+**The wheel state is written under the wheel lock, except the registry's hand-off.** `schedule`,
 `reschedule` and `deschedule` move the node and set its state under the wheel lock; `advance`
-marks a due node `DETACHED` while it moves it to the pending list. `pollDetached` unlinks the node
-from the owner's private batch and clears it to `UNSCHEDULED` without taking that lock — the one
-wheel mutation outside it. The field is `volatile` so that one-way transition is published to a
-concurrent `reschedule`/`deschedule` that reads it under the wheel lock. Every consumer of the
-state also holds the key's stripe lock (the evaluation, cool and abort paths), and the batch is
-owned by the advancing thread, so the node's links are never read by another thread while the
-hand-off runs. That stripe ownership is also what lets `deschedule` check the volatile state before
-taking the wheel lock: the only paths that set `SCHEDULED` run under the same stripe, so an entry
-seen unscheduled cannot become scheduled before the lock is taken. A fired entry has already been
-handed off as `UNSCHEDULED`, so the common cool-down path returns without acquiring the wheel lock;
-the in-lock check remains authoritative. Owner: `HE`, `TimerWheel`.
+marks a due node `DETACHED` while it moves it to the pending list. `pollDetached` only unlinks the
+node from the owner's private batch and leaves it `DETACHED`; `HotKeyRegistry.evaluate` clears it
+to `UNSCHEDULED` under the key's stripe lock before it evaluates or re-arms the entry. The field is
+`volatile` so that one-way transition is published to a concurrent `reschedule`/`deschedule` that
+reads it under the wheel lock. Every consumer of the state also holds the key's stripe lock (the
+evaluation, cool and abort paths), and the batch is owned by the advancing thread, so the node's
+links are never read by another thread while the hand-off runs. That stripe ownership is also what
+lets `deschedule` check the volatile state before taking the wheel lock: the only paths that set
+`SCHEDULED` run under the same stripe, so an entry seen unscheduled cannot become scheduled before
+the lock is taken. A fired entry still reads as `DETACHED` after the poll, so a concurrent repair
+defers to the owner; the evaluation then clears the state and the common cool-down path returns
+without acquiring the wheel lock; the in-lock check remains authoritative. Owner: `HE`,
+`TimerWheel`, `HotKeyRegistry.evaluate`.
+
+**The failure this closes (repair stealing the hand-off).** `pollDetached` used to clear the node to
+`UNSCHEDULED` before the registry took the stripe lock. A repair that acquired the stripe in that
+window saw an unscheduled node, re-linked it into `pending`, and marked it `DETACHED` again; the
+owner's evaluation then set the fresh deadline, called `reschedule`, and the `DETACHED` check
+skipped the link. The node sat in `pending` with a future deadline, producing a spurious wake and a
+second evaluation instead of one scheduled check. Keeping the hand-off `DETACHED` until the stripe
+lock makes the two writers serial: repair either sees the detached node and defers, or runs before
+the poll. Owner: `TimerWheel.pollDetached`, `HotKeyRegistry.evaluate`, `HotKeyRegistry.repair`.
 
 **A stripe lock may take its wheel's lock; the wheel never takes a stripe lock.** Scheduling,
 re-arming and descheduling happen inside the stripe section (stripe → wheel). `advance` detaches due
@@ -1875,14 +1994,24 @@ reflected in that delay, and consuming it would only return immediately and burn
 A schedule arriving after the drain releases a fresh permit, so nothing is lost. Owner:
 `CoolingWheels`, `CoolingScheduler`.
 
-**A wake signal is a state, not a count.** `wakeAtMs` is `0` while the owner is awake (or a signal
-is already pending), the current sleep target while it sleeps, and `Long.MAX_VALUE` when the wheel
-is idle. `advance` sets it to `0` as soon as the owner takes over, and every schedule that would
-have released the semaphore first checks that word. A mass-heat burst therefore collapses to one
-release: the first schedule releases and publishes `0`, and the rest leave the permit alone instead
-of paying a CAS that the owner's next `drainPermits` would throw away. The zero also covers the
-window between `advance` and `awaitNext`, where the owner is about to recompute its target anyway.
+**A wake signal is a state, not a count.** `wakeAtMs` is `Long.MIN_VALUE` while the owner is awake
+(or a signal is already pending), the current sleep target while it sleeps, and `Long.MAX_VALUE`
+when the wheel is idle. Zero and negative monotonic instants are real — `TimeSource` is allowed to
+sit below zero, and the wheel's own tests pin that — so the awake sentinel lies outside the clock
+domain instead of colliding with a valid deadline. `advance` sets it to `Long.MIN_VALUE` as soon as
+the owner takes over, and every schedule that would have released the semaphore first checks that
+word. A mass-heat burst therefore collapses to one release: the first schedule releases and
+publishes the sentinel, and the rest leave the permit alone instead of paying a CAS that the
+owner's next `drainPermits` would throw away. The sentinel also covers the window between
+`advance` and `awaitNext`, where the owner is about to recompute its target anyway.
 Owner: `TimerWheel`.
+
+**The failure this closes (negative sleep target).** The awake sentinel was `0`, and
+`wakeIfAsleep` released only when `wakeAtMs > 0`. A wheel sleeping toward a negative deadline — a
+valid monotonic instant before the epoch — therefore ignored a schedule for an earlier entry: the
+entry was linked into the wheel, but the owner stayed parked until the old deadline. The check ran
+late by up to the previous sleep, not at its scheduled millisecond. `Long.MIN_VALUE` cannot be a
+clock instant, so the state test no longer overlaps the value domain. Owner: `TimerWheel`.
 
 **The sleep is calibrated after the batch.** `advance` samples the wheel clock before the due
 entries are evaluated, so `nextDelay` is relative to the batch start. `awaitNext` converts that
@@ -1915,12 +2044,16 @@ leaves their links alone, and only the owner traverses them. A burst of N due ch
 one lock acquisition instead of N+1. Appending rather than swapping is what keeps a batch an
 evaluation failed to finish at the head: the next advance's entries land behind it in arrival order,
 so the following poll drains the remainder and the fresh entries in one traversal instead of
-bouncing the remainder back through `pending` for an extra round. The cascade itself resets the
-drained bucket's sentinel and walks the forward chain once, re-linking each node directly: no
+bouncing the remainder back through `pending` for an extra round. `nextDelay` returns zero while
+either list is non-empty, so the owner retries an unfinished batch before sleeping toward the next
+bucket; without that check, a batch left by a failed evaluation could sleep until the next occupied
+bucket, or indefinitely with an otherwise empty wheel. The cascade itself resets the drained
+bucket's sentinel and walks
+the forward chain once, re-linking each node directly: no
 scratch list, no `transfer`, and no per-node `unlink` whose four pointer writes would be overwritten
 by the re-link immediately afterwards. Owner: `TimerWheel`, `CoolingScheduler`.
 
-**The registry resolves the wheel from the key's hash at every evaluation.** `HotKeyRegistry.evaluate(entry, forced)` computes the spread hash once and uses it for both the stripe lock and `CoolingWheels.select`, so a fired check costs one hash — the `String` caches it after the first report — and one array index. The scheduler therefore passes only the entry it drained: which thread fired a check is not part of the evaluation's contract, and the registry's shape does not depend on a caller happening to hold a wheel. `promoteEntry`, `abortPromotion` and `repairOverdue` resolve the hash the same way. Owner: `HotKeyRegistry`, `CoolingWheels`, `CoolingScheduler`.
+**The registry resolves the wheel from the key's hash at every evaluation.** `HotKeyRegistry.evaluate(entry)` computes the spread hash once and uses it for both the stripe lock and `CoolingWheels.select`, so a fired check costs one hash — the `String` caches it after the first report — and one array index. The scheduler therefore passes only the entry it drained: which thread fired a check is not part of the evaluation's contract, and the registry's shape does not depend on a caller happening to hold a wheel. `promote`, `abort` and `repair` resolve the hash the same way. Owner: `HotKeyRegistry`, `CoolingWheels`, `CoolingScheduler`.
 
 _Ruled out:_ an `evaluate(entry, wheel, forced)` overload that let the scheduler hand over the wheel it was already advancing. The evaluation still hashed the key to find the stripe, so the parameter saved exactly one array index while adding a second public overload, a private four-argument variant, and a `wheel` argument threaded through `rearm`, `coolLocked` and `removeAndRelease`; the comment that claimed it avoided a re-hash described a saving the code never made. Storing the wheel on the entry was rejected for the same reason it always was: the extra reference grows every seat by eight bytes to save one modulo. Owner: `HotKeyRegistry`.
 
@@ -1962,13 +2095,13 @@ dispatcher's rollback is identity-guarded for `SUPERSEDED` and skipped entirely 
 Accepted includes a decision elided by the 100 ms type debounce: it never travels the wire, but it
 is the state this Worker holds, and leaving it out of the accepted record let an older COOL queued
 ahead of it through — the Apps demoted a key the Worker had just re-promoted, and nothing else
-would have corrected it. An elision with no predecessor — a COOL that displaced a still-queued
-HOT — writes the record at the COOL's version and cold type even though neither decision travelled;
-without it a stale HOT from the earlier lifecycle finds an empty record and is sent after the
-Worker has cooled the key. The record's debounce anchor is a never-sent sentinel, so the cold
-record suppresses a redundant COOL but never claims a send that did not happen. A cool-down COOL
-gets its version the same way: allocated under the same per-key lock that removes the entry, so a
-re-promotion that lands afterwards outranks it.
+would have corrected it. A HOT dropped after its offer but before the wire marks the accepted record
+cold without lowering its version, so the lifecycle's later COOL is elided as a demotion of a key
+this Worker never told the cluster was hot, while a stale decision below the preserved watermark is
+still superseded. A COOL with no accepted record at all is not a ghost: it is
+the only demotion signal a locally promoted App can receive, and an earlier lifecycle's COOL may
+have been lost, so it is sent. A cool-down COOL gets its version the same way: allocated under the
+same per-key lock that removes the entry, so a re-promotion that lands afterwards outranks it.
 
 **Only a HOT is coalesced against a queued decision, and against the registry's current
 promotion.** The two queues can hold a COOL that has not been drained and a HOT from a
@@ -1980,26 +2113,26 @@ ran, so the entry this HOT created is gone or replaced. The registry is the seco
 proof, applied by the drain: a report thread can stall between the promotion and its submission
 while the key cools — or cools and re-promotes — and the demotion's own decision may be refused,
 expired or failed, so neither the pending map nor the accepted record is guaranteed to remember it.
-A HOT whose `promotedVersion` no longer owns the key's entry is therefore dropped before the send
-(and at a token-starved head), exactly like one behind a newer pending decision; without that probe
-the stale promotion would be broadcast and nothing would ever cool the App but its hard TTL.
-The registry also records when the dispatcher accepted a promotion. A cool-down that removes the
-entry before that mark creates its COOL with the displaced-HOT fact already set, so neither the
-drain's wakeup race nor a later re-promotion can hide it: the demotion is elided on the strength of
-the fact it carries, not on a HOT that may arrive too late. A late HOT that still arrives marks a
-COOL already in the pending map with the same bit; that path remains the correction when the COOL
-reached the map before its predecessor.
-The value in the per-key record is the queue item itself: a displaced item is marked
-through a bit in its own hand-off state, so the drain reads one field instead of hashing the key a
-second time, and the map does not box a `long` per submission. Every lifecycle bit — displaced, and
-the COOL-displaced-a-pending-HOT bit — is assembled under the bin lock or carried in from the
-registry, and published by the one plain write that precedes the offer. The item is invisible before
-that offer, so a bit written there cannot race the drain and needs no atomic OR; a later
-`markSuperseded` on an already-visible item uses one, and so does the displaced-a-HOT bit a late HOT
-sets on the COOL that already superseded it. The state is a plain `volatile int` updated through a `VarHandle`
+A HOT whose `version` no longer owns the key's entry is therefore dropped before the send (and at a
+token-starved head), exactly like one behind a newer pending decision; without that probe the stale
+promotion would be broadcast and nothing would ever cool the App but its hard TTL.
+The registry does not track whether the dispatcher queued a promotion. A COOL for a promotion that
+cooled before its submission is sent as a ghost; the window is the microsecond-scale gap between
+the promotion and its submission, and a ghost COOL is a no-op for an App that is already cold. The
+tracking required a per-entry flag and a late-HOT mark to cover the same window, and the flag still
+missed the App's local promotion — a locally promoted App is hot without any Worker HOT, so the
+funnel's empty record is not proof the cluster is cold. The drain keeps only the two facts the
+funnel cannot observe: a newer pending decision (`SUPERSEDED_BY_PENDING`) and the registry's
+currency probe.
+The value in the per-key record is the queue item itself: a displaced item is marked through a bit
+in its own hand-off state, so the drain reads one field instead of hashing the key a second time,
+and the map does not box a `long` per submission. The bit is assembled under the bin lock and
+published by the one plain write that precedes the offer. The item is invisible before that offer,
+so a bit written there cannot race the drain and needs no atomic OR; a later `supersede` on an
+already-visible item uses one. The state is a plain `volatile int` updated through a `VarHandle`
 rather than an `AtomicInteger` (the item stays one small allocation). The bits are orthogonal: a
-`QUEUED`/`OWNED` lifecycle pair and the `SUPERSEDED`/`REPLACED` flags, so taking ownership is one
-`getAndBitwiseOr(OWNED)` with no retry loop, and a concurrent `markSuperseded` cannot invalidate it.
+`QUEUED`/`OWNED` lifecycle pair and `SUPERSEDED_BY_PENDING`, so taking ownership is one
+`getAndBitwiseOr(OWNED)` with no retry loop, and a concurrent `supersede` cannot invalidate it.
 Claiming for the drain and withdrawing at shutdown are the same take: both only decide who reports
 the terminal outcome. The queue offer and the map publication happen inside one per-key `compute`:
 publishing after a separate offer left a window in which an older HOT was queued but not yet in the
@@ -2009,52 +2142,69 @@ older item before it can replace it; a refused offer returns the previous record
 decision that never entered a queue cannot suppress one already on its way. The entry is removed
 when the newest decision reaches a terminal outcome, so the map is bounded by the two queues. The
 drain's removal is identity-matched, so it never erases a newer item, and the superseded bit lets
-an older item skip the map removal entirely. The submitter needs no post-publication re-check: the
+an older item skip the map removal entirely. An equal-version duplicate is still allowed into the
+queue — both copies may be enqueued — but the map keeps the copy offered last, so a newer decision
+still finds a predecessor until the last copy settles; the first copy's identity-matched removal
+simply misses. The submitter needs no post-publication re-check: the
 drain's remove cannot pass the bin lock that the offering compute holds, so it either runs after
 the publication and removes the item, or the item was already displaced by a newer submission.
 
-**The failure this closes (promotion/submission split).** The registry commits a promotion under
-the stripe lock, then the report thread submits the HOT after unlocking. Two races escaped the
-late-HOT compensation. (a) A COOL submitted in that window could be drained before the delayed HOT
-ran at all: the funnel saw no predecessor and broadcast a demotion for a key it had never told the
-cluster was hot. (b) The key could cool and re-promote again, overwriting the pending map with
-HOT(v3) before the delayed HOT(v1) arrived, so the queued COOL(v2) never received the displaced
-bit and travelled as a ghost demotion too. Both symptoms were a wasted demote-then-promote pair,
-or a demotion for a key that was never hot. Before the fix the only proof was a late HOT that
-happened to arrive while its COOL was still pending — exactly the window the races close. Now
-`HE.promotionSubmitted` is set when `submit` accepts the promotion, and a cool-down reads
-it under the stripe: an unsubmitted predecessor stamps the COOL with the displaced fact at
-creation. The late-HOT mark remains as a second path, not the only one.
+**A COOL is not elided on the strength of a promotion that never reached a queue.** The registry
+commits a promotion under the stripe lock, then the report thread submits the HOT after unlocking,
+so a cool-down can remove the entry before the submission. The COOL is sent anyway: the App may have
+promoted locally, and the previous lifecycle's COOL may have been lost. Eliding it because the
+promotion never entered a queue left such a key hot until the App's hard TTL, with no later decision
+to correct it; the proof is narrower than the App's state and buys only one message. Owner:
+`HotKeyRegistry.coolLocked`, `DecisionDispatcher.submit`.
+
+**A HOT dropped after the offer records a cold lifecycle.** A key can cool immediately after the
+offer; the drain's registry probe then drops the queued HOT as superseded, and the COOL may be
+published after the pending map has forgotten it. The drain records a cold accepted record when a
+queued HOT is superseded before the wire and no accepted record exists for the key. A later COOL
+with no predecessor sees that record and is elided instead of spending a cool token and a wire round
+trip; without it, every HOT dropped before the wire was followed by a redundant demotion of a key
+this lifecycle never told the cluster was hot. `rememberCold` installs a cold record only when the
+key has none; an existing COLD record already elides the lifecycle's COOL, and an `UNKNOWN` record
+stays unknown because a newer failed HOT still owes a corrective COOL. `forgetCold` only clears the
+cold knowledge, leaving the version and send anchor in place, so older decisions stay superseded
+while a corrective COOL can still travel. The record is not marked cold when the superseding
+decision is a COOL, because that COOL is the corrective demotion itself. A failed or expired HOT
+keeps the conservative correction: its COOL is still sent, because the cluster may hold a state from
+an earlier lifecycle whose COOL was lost; the same clear runs there. A hot record is never demoted: it keeps the ordering watermark. Owner:
+`DecisionDispatcher.publish`, `DecisionDispatcher.applyOutcome`,
+`WorkerBroadcaster.rememberCold`, `WorkerBroadcaster.forgetCold`.
+
+**The failure this closes (version watermark regression).** `forgetCold` used to remove a cold
+accepted record when a newer HOT failed, and the superseded-HOT path then installed a fresh cold
+tombstone at version `0`. The key's accepted version fell from the last COOL to zero, so a delayed
+HOT below the old watermark was no longer superseded and could be re-sent; the send anchor was lost
+too, so the 100 ms debounce restarted. The record now keeps `(version, state, lastSentAtMs)` with
+the state changing independently: COLD -> UNKNOWN clears only the "cluster is known cold" fact.
+`rememberCold` never reverses that clearing, so a stale superseded HOT cannot elide the corrective
+COOL of a newer failed HOT. Owner: `WorkerBroadcaster.AcceptedDecision`.
 
 **A queued HOT never suppresses a COOL.** Suppressing the demotion on the evidence of a HOT that is
 merely queued was a split-brain bug: the HOT can still expire, fail its publish or be discarded at
 shutdown, and then the Worker has released the seat while every App keeps the key hot until its
-hard TTL, with no later decision left to correct it. The COOL may be dropped when the
-broadcaster's accepted record already covers it — proof that a newer decision actually reached
-the funnel — or when it displaced a still-queued HOT and the funnel has no accepted record for the
-key at all: that HOT never left the dispatcher, so the cluster was never told the key was hot. The
-second case rides the displaced-HOT bit into the funnel's single per-key read, so the drain never
-asks the cache a second question and the accepted-version comparison stays on the send path. The
-bit is set by the registry when the promotion cooled before its submission, and by the dispatcher
-when a late HOT finds a COOL already pending; either path proves the same fact. A hot accepted
-record never expires, so the first case cannot degrade into the second as a long hot episode ages.
-The cost is a demote-then-promote pair only when the COOL is drained before its re-promotion is
-submitted; once the HOT is pending, the drain lets it be accepted first (see the next paragraph)
-and the COOL is dropped as superseded. Version order still converges every App to the Worker's
-final state, and a pair is cheaper than a permanently split cluster. Owner: `DecisionDispatcher`,
-`WorkerBroadcaster.tryBroadcast`, `HotKeyRegistry.CoolDecision`.
+hard TTL, with no later decision left to correct it. The COOL may be dropped only when the
+broadcaster's accepted record already covers it — proof that a newer decision actually reached the
+funnel. A COOL that merely wins over a still-pending HOT is not elided: that HOT may still fail,
+and the demotion is then the conservative correction for whatever state the cluster already holds.
+The superseded HOT also skips its cold record when that COOL is still pending, so the demotion is
+sent whichever lane drains first. A hot accepted record never expires, so the first case cannot
+degrade into a redundant send as a long hot episode ages. The cost is a demote-then-promote pair
+only when the COOL is drained before its re-promotion is submitted; once the HOT is pending, the
+drain lets it be accepted first (see the next paragraph) and the COOL is dropped as superseded.
+Version order still converges every App to the Worker's final state, and a pair is cheaper than a
+permanently split cluster. Owner: `DecisionDispatcher`, `WorkerBroadcaster.send`.
 
 **The synchronous refusal's rollback belongs to the dispatcher.** `DetectionPipeline` hands the
-`HE` to `DecisionDispatcher.submitPromotion`, which marks that exact entry submitted before the
-queue offer makes the HOT visible to the drain, and calls the abort when the offer is refused.
-Marking after the offer left a window in which the drain could observe the HOT while a concurrent
-cool-down still read the entry as unsubmitted, producing a ghost demotion. The refused-offer path
-withdraws the mark before returning the seat. Previously the pipeline
-had to interpret `submit`'s boolean and call `registry.abortPromotion` itself, so the rollback
-rule lived at the caller and a caller that ignored the return value leaked a seat — eventually
-filling the seat cap and silently disabling detection. The drain's own terminal-drop rollbacks are
-unchanged; only the synchronous branch moved to the component that accepts or refuses the offer.
-Owner: `DecisionDispatcher.submitPromotion`, `DetectionPipeline.onReport`.
+`HE` to `DecisionDispatcher.submit(HE)`, which calls the abort when the queue offer is refused.
+The pipeline never interprets a boolean and never calls `registry.abort` itself: a caller that
+ignored the return value leaked a seat — eventually filling the seat cap and silently disabling
+detection. The drain's own terminal-drop rollbacks are unchanged; only the synchronous branch moved
+to the component that accepts or refuses the offer. Owner: `DecisionDispatcher.submit(HE)`,
+`DetectionPipeline.onReport`.
 
 **A superseded COOL yields one round to its newer HOT.** The drain normally sends COOL before HOT,
 because a mass-heat wave must not delay the demotions that free seats. A COOL that is already
@@ -2081,14 +2231,13 @@ COOL wave still drains first and a starved HOT lane cannot hold the demotions be
 bound.** The pending record ends when a decision reaches a terminal outcome, so a COOL drained
 before an older HOT in the other queue left nothing behind to say the HOT was obsolete. The HOT then
 sat at its head through every token-starved round — holding back every decision behind it — and was
-dropped by the funnel only once a token arrived. The drain therefore calls
-`WorkerBroadcaster.classifyInMemory` on any head the lane cannot send — an empty bucket, or a COOL
-that must yield to its newer HOT — before the token gate, and commits it with `commitInMemory` only
-after the queue removal and ownership take succeed. That
-method is the same classify-plus-elide state machine the send path uses: an exact-version replay and
-a same-type decision inside the debounce window are `ELIDED`, a strictly lower version is
-`SUPERSEDED`, a COOL for a key the cluster already holds cold is elided and advances the accepted
-record, and the displaced-HOT bit elides a demotion whose promotion never travelled. Both paths apply the
+dropped by the funnel only once a token arrived. The drain therefore calls `WorkerBroadcaster.classify` on any head the lane cannot send — an empty
+bucket, or a COOL that must yield to its newer HOT — before the token gate, and commits it with
+`commit` only after the queue removal and ownership take succeed. That method is the same
+classify-plus-elide state machine the send path uses: an exact-version replay and a same-type
+decision inside the debounce window are `ELIDED`, a strictly lower version is `SUPERSEDED`, and a
+COOL for a key the cluster already holds cold is elided and advances the accepted record. Both
+paths apply the
 queue's age bound in the same pass, _after_ the state machine: only a decision that would
 otherwise be sent can be `EXPIRED`, so an obsolete decision the funnel would elide is never reported
 as expired — the old order checked age before classification on the send path and polluted the
@@ -2100,41 +2249,55 @@ accepted-decision lookup and one clock sample classify the decision and apply th
 record at or above its version exists. The head check exists for the starved case; the send path
 pays no extra lookup to perform the same classification. `acceptedVersion` remains for a pre-funnel
 rollback with no funnel outcome of its own — the shutdown drain and an unexpected round failure.
-Owner: `DecisionDispatcher.discardHeadIfTerminal`, `WorkerBroadcaster.classifyInMemory` /
-`commitInMemory`.
+Owner: `DecisionDispatcher.discardHeadIfTerminal`, `WorkerBroadcaster.classify` / `commit`.
 
 **Shutdown spends only the budget that exists at that instant.** The drain spent a round's burst,
 then refilled and continued, so a broker send slower than one token interval kept minting
 replacement tokens and the thread drained the whole backlog until the join timeout — exactly the
 opposite of the documented shutdown contract. `refill` is now a no-op once `running` is false; the
-remaining queue is counted as dropped and HOT seats are returned synchronously. Owner:
-`DecisionDispatcher.refill`.
+remaining queue is counted as dropped and HOT seats are returned synchronously. A submission that
+passed the pre-compute check but waited for the per-key bin lock while shutdown began is refused
+inside `publish` before it can touch its predecessor; the submitter reports the drop synchronously.
+A drain-round failure after shutdown breaks to the final drain instead of sleeping through the join.
+Owner: `DecisionDispatcher.refill`, `DecisionDispatcher.publish`, `DecisionDispatcher.drainLoop`.
 
 **A lane is ready when it can act, not when no lane is starved.** The old `tokenStarved()` OR-ed
 both non-empty lanes: a hot lane starving while the cool lane held tokens made `awaitWork` wait,
 and on shutdown it returned false and dropped sendable COOLs. `hasReadyWork` asks the per-lane
-question instead — a non-empty hot lane with a token, or a cool head with a token that either no
-longer yields or has already yielded once. Owner: `DecisionDispatcher.hasReadyWork`.
+question instead — a non-empty lane with a token, or a head the funnel would settle without one.
+The terminal test mirrors the drain: a HOT with a newer pending decision or a released promotion,
+and any head `WorkerBroadcaster.classify` reports as expired, elided or superseded. A cool head with
+a token always counts; the next round sends it or yields once to a newer HOT the hot lane can send
+in the same round, so `!hasNewerHotPending` must not turn a ready demotion into a false "nothing to
+do". The check is repeated after the permit drain: a submission that makes a head terminal in that
+window releases a permit this round would discard, and without the second check the terminal head
+waited for a token it did not need. A round also reports the terminal items it processed,
+not only the sends: a lane carrying more than one work-budget of elided, superseded or expired
+items used to return `sent == 0` and park on a token those items never spend, leaving the rest of
+the backlog to wait for the next refill. Owner: `DecisionDispatcher.drain`,
+`DecisionDispatcher.awaitWork`, `DecisionDispatcher.hasReadyWork`.
 
 **A COOL is elided when the cluster is already cold.** The two queues can hold a HOT that never
 left the process (no hot token) and the COOL of the same lifecycle. The COOL is not superseded —
 nothing newer is queued — but it carries no state change: the last decision the cluster accepted
 for the key is already a COOL, so every App is cold and demoting it again spends a cool token and
 a network round trip. `WorkerBroadcaster` elides it, advancing the accepted version and keeping the
-send timestamp. The first COOL after a HOT is still sent, even when that HOT never travelled: the
-previous lifecycle's COOL may have been lost, and that send is the corrective demote. Only the
-accepted record can tell the two cases apart, which is why the decision is made there and not
-from the queue contents. An elision updates the record's fields in place.
-Owner: `WorkerBroadcaster.tryBroadcast`.
+send timestamp. A COOL after a HOT that failed or expired before the wire is still sent: the
+previous lifecycle's COOL may have been lost, and that send is the corrective demote. A queued HOT
+that was superseded before the wire is the exception: the drain records the cold state, so the
+demotion is elided by the same accepted-record rule. Only the accepted record can tell the cases
+apart, which is why the decision is made there and not from the queue contents. An elision stores an
+immutable replacement that advances the version and keeps the send timestamp. Owner:
+`WorkerBroadcaster.send`.
 
-**The funnel answers every per-key question from one accepted-decision read.** Both `tryBroadcast` and
-`classifyInMemory` take the displaced-HOT bit as a parameter, read the key's `AcceptedDecision` once,
-and decide the supersede, duplicate, redundant-COOL, debounce and send outcomes through the shared
-`classify`; `applyInMemory` is the one place an elision advances the accepted version. The
-token-starved head therefore pays one accepted-decision lookup per head, and the send path pays one
-per decision, not one per concern. The classification carries that record into `commitInMemory`, so
-the two-phase head step performs exactly one read: a second read could observe a Caffeine expiry the
-first did not and regress the accepted version to an older decision. The old shape probed the cache
+**The funnel answers every per-key question from one accepted-decision read.** Both `send` and
+`classify` read the key's `AcceptedDecision` once and decide the supersede, duplicate,
+redundant-COOL, debounce and send outcomes through the shared `decide`; `apply` is the one place an
+elision advances the accepted version. The token-starved head therefore pays one accepted-decision
+lookup per head, and the send path pays one per decision, not one per concern. The classification
+carries that record into `commit`, so the two-phase head step performs exactly one read: a second
+read could observe a Caffeine expiry the first did not and regress the accepted version to an older
+decision. The old shape probed the cache
 separately for "any accepted
 record" and "the accepted version" before and after the send, so one decision paid up to three
 Caffeine lookups and could still discard the exact fact — whether the accepted version was equal to
@@ -2143,35 +2306,32 @@ five outcomes; `NONE` is rejected at `DecisionDispatcher.submit` and never acqui
 value. Owner: `WorkerBroadcaster`, `DecisionDispatcher`.
 
 **The accepted record is time-bounded while cold, state-bounded while hot, never size-bounded.**
-The record keeps one `long` version, one `long` send instant and the type. A cold record expires
+The record keeps one `long` version, one `long` send instant and a three-state cluster fact (HOT,
+COLD, UNKNOWN); every replacement is immutable. A cold or unknown record expires
 after `2 * broadcast.max-decision-age-ms`, and the cache sets no `maximumSize`. A decision admitted
 at `t` is dropped at `t + maxAge` at the latest, so its key's cold record — created no later than
 the newest accepted decision for that key — is still present when the older decision reaches the
 funnel. A size cap would evict a live record under key churn and let an older COOL overtake a newer
 HOT; tying the cold bound to the queue age makes the guarantee explicit. A record whose last
-accepted decision is HOT has no time bound: it is the only evidence the cluster was told the key is
-hot, and a hot episode can outlive any queue age by design (`COOL_FOR_LOW_QPS` keeps a busy seat
-indefinitely, `COOL_FOR_EXPIRE` can be configured in minutes). Expiring it would let a later COOL
-that displaced a still-pending HOT be mistaken for the demotion of a promotion the cluster never
-saw, leaving every App hot until its hard TTL. The record turns cold when the COOL is accepted, and
-the cold bound resumes. The cold premise is that the producer submits a decision within
+accepted decision is HOT has no time bound: it keeps the ordering and debounce watermark across a
+hot episode that can outlive any queue age by design (`COOL_FOR_LOW_QPS` keeps a busy seat
+indefinitely, `COOL_FOR_EXPIRE` can be configured in minutes). Expiring it would let a stale HOT or
+an old COOL be re-sent; the App's version guard makes the replay harmless, but the send is wasted.
+A COOL with no record is still sent as the correction. The record turns cold when the COOL is
+accepted, and the cold bound resumes. The cold premise is that the producer submits a decision within
 `max-decision-age-ms` of the transition that allocated its version; a producer stalled longer than
 twice the bound is outside the report path's latency contract and is the same bounded loss as a
 stalled window add. Owner: `WorkerBroadcaster.AcceptedDecision`,
 `WorkerBroadcaster.AcceptedDecisionExpiry`.
 
-**The failure this closes (hot record expiry).** Before the expiry became state-dependent, every
-accepted record used `expireAfterWrite(2 * max-decision-age-ms)` (60 s at the default). A key could
-be promoted HOT(v1), stay hot for 65 s, lose the first COOL while the Worker was still cooling it,
-re-promote as HOT(v3), and cool again as COOL(v4) while HOT(v3) was still queued. COOL(v4)
-displaced a pending HOT, but the accepted record for v1 had already expired; the funnel saw
-`prev == null` plus the displaced bit, classified the COOL as a ghost demotion and elided it, while
-HOT(v3) was dropped as superseded. The cluster stayed hot forever after, until the App's hard TTL,
-despite the Worker being cold. The previous shape assumed the record only needed to outlive queue
-residency; that is true for ordering, false for the "cluster holds HOT" fact. The new expiry keeps
-a hot record until a COOL is accepted, then applies the cold bound. The cost is a record per key
-the cluster may still hold hot, bounded by the HOT population plus lost first COOLs, not by the
-queue.
+**The failure this closes (wasted replay after a long hot episode).** Before the expiry became
+state-dependent, every accepted record used `expireAfterWrite(2 * max-decision-age-ms)` (60 s at
+the default). A key could stay hot for 65 s; its record expired; a stale HOT or an old COOL then
+found an empty record and was re-sent. The App's version guard makes the replay harmless, and a
+COOL with no record is now sent as the correction, so an expired hot record costs a redundant send,
+not a stuck key. The state-dependent expiry keeps the watermark for the whole episode and avoids
+that send. The cost is a record per key the cluster may still hold hot, bounded by the HOT
+population plus lost first COOLs, not by the queue.
 
 **Bounded buffer, drop on saturation.** `DecisionDispatcher` decouples ingestion from sending:
 a mass-heat event must not stall the AMQP consumer behind synchronous publishes. One drain thread
@@ -2184,7 +2344,11 @@ round names the cause classes. Both producers — the report consumer and the co
 submit through one `DecisionDispatcher`, which owns the buffered-versus-inline choice, so neither
 carries a second send path. The detection-plane meters
 are a non-null collaborator: a meter-less construction is a no-op instance rather than a `null`
-every caller has to branch on.
+every caller has to branch on. The constructor validates capacities, rates, bursts and the age bound
+before it starts the drain thread, and requires every collaborator. A zero burst with a positive
+rate would make `hasReadyWork` report work while `drain` cannot enter its loop — a 100% CPU spin —
+and a null collaborator would otherwise leave an orphan thread behind the failed construction.
+Owner: `DecisionDispatcher`.
 
 **A failed COOL round does not spend a HOT on the same outage.** The drain sends COOL first, and a
 broker failure there is global: pulling a HOT only to lose it in the same outage is a second drop
@@ -2252,10 +2416,10 @@ queue capacity remain the real bounds. Owner: `DecisionDispatcher.Lane`.
 **A HOT that never reaches the broker returns its seat.** A decision is still sent once and never
 retried, but the Worker's seat is not a published App state. If a HOT is refused at saturation,
 expires in the queue, fails its publish, or is discarded by the shutdown drain, the promotion is
-undone through `HotKeyRegistry.abortPromotion` — the same path a synchronous enqueue refusal
+undone through `HotKeyRegistry.abort` — the same path a synchronous enqueue refusal
 already used. A HOT superseded by a newer COOL needs no hand-back: that COOL's transition already
 removed the entry and released the seat, so the identity-guarded abort is a no-op and the seat
-ledger counts the COOL, not an abort. The abort is identity-guarded by `promotedVersion`, so a later
+ledger counts the COOL, not an abort. The abort is identity-guarded by the entry's `version`, so a later
 promotion or COOL for the same key is untouched; a HOT that did reach the broker but was reported as
 failed self-corrects on the next report's newer version. A duplicate submission whose exact version
 already reached the funnel is not an undelivered promotion, so the accepted-version check leaves its
@@ -2265,20 +2429,21 @@ already-hot fast path suppresses the next promotion — a permanent seat leak. T
 retry loop; while a broker outage lasts, reports can re-promote, and the bounded hot queue is the
 bound. Owner: `DecisionDispatcher`, `HotKeyRegistry`.
 
-**Eviction goes through the same buffer.** The sweep's COOL is enqueued like every other decision,
-so the periodic task performs no AMQP I/O: a broker stall costs one failed `offer`, not a blocked
-scheduler thread. The version is allocated under the per-key lock that removed the entry, so a
-re-promotion that overtakes the queued COOL outranks it and the broadcaster drops the stale one. A
-refused enqueue or a failed send is counted, the state stays removed — nothing restores it, no retry
-is scheduled — and the entry converges through the App's hot hard TTL.
+**Eviction goes through the same buffer.** The COOL the wheel produces is enqueued like every other
+decision, so the cooling thread performs no AMQP I/O: a broker stall costs one failed `offer`, not a
+blocked scheduler thread. The repair pass only re-links overdue checks; it neither evaluates nor
+sends. The version is allocated under the per-key lock that removed the entry, so a re-promotion
+that overtakes the queued COOL outranks it and the broadcaster drops the stale one. A refused
+enqueue or a failed send is counted, the state stays removed — nothing restores it, no retry is
+scheduled — and the entry converges through the App's hot hard TTL.
 
-**A refused COOL is applied inline, never dropped.** The App-side `PerKeyOrderedDispatcher` can
+**A refused COOL is applied inline, never dropped.** The App-side `KeyDispatcher` can
 refuse a decision (per-key queue full, global budget, closed). A refused HOT stays dropped — the
 Worker never re-sends it, and inlining it would run the cluster-loader load on the AMQP consumer
 thread. A COOL has no re-send either, and dropping it would pin the entry at its HOT TTL until hard
 expiry, so the App applies it inline (`WorkerListener.onDispatchRejected`
-applies it via the `WorkerDecisionHandler.handleCoolInline` SPI — the same in-memory compute as
-`handleCool`, hooks skipped so the consumer thread never waits on user code). Rejections are counted (`zeta.worker.decision.cool.rejected.total`,
+applies it via `WorkerContext.coolNow` — the same in-memory compute as
+`policy.cool`, hooks skipped so the consumer thread never waits on user code). Rejections are counted (`zeta.worker.decision.cool.rejected.total`,
 `/actuator/hotkey` → `coolDispatchRejections`): a saturation signal, not data loss.
 
 ---
@@ -2298,7 +2463,10 @@ post-routing `epochOf`. A Worker restart therefore drops the whole batch at the 
 incarnation check instead of re-basing pre-restart counts onto the new epoch. The epoch read is
 fused with the liveness+epoch probe (`isCurrentIncarnation`): a Worker that restarted into its
 cold-start window between the alive-set snapshot and the epoch read is omitted, so pre-restart
-counts are not stamped with an incarnation that is not ready to serve. Routing then uses the
+counts are not stamped with an incarnation that is not ready to serve. When every alive Worker is
+still in that cold-start window the map is empty, and the flush is censored exactly like a
+no-alive-Worker cycle: it is dropped (and counted in the dead-Worker ledger) instead of routing each
+key through a predicate that can never match. Routing then uses the
 captured epoch map as its liveness predicate: a concurrent ring rebuild may expose a new owner
 without a captured epoch, and the key walks past it to a captured node instead of being dropped as
 unroutable. Owner: `KeyReporterImpl`.
@@ -2558,10 +2726,13 @@ NTP step rewrite entry lifetimes.
 
 **The cached wall clock is monotonic and bounded.** `TimeSource` refreshes the wall clock on a 5 ms
 daemon tick. A backward step never moves the cached value (expiry deltas stay non-negative), and a
-forward leap larger than the elapsed real time plus a 5 s tolerance is refused and slewed at
-real-time rate instead of adopted: without that bound, a transient bad leap that NTP later reverts
-pins the cached clock in the future for the length of the leap, and every absolute timestamp and
-stamp minted in the window carries the bogus future. Reads during the restart backoff keep the same
+forward leap larger than the elapsed real time plus a 5 s tolerance is refused and slewed at twice
+real-time rate until it reaches the wall clock. Without that bound, a transient bad leap that NTP
+later reverts pins the cached clock in the future for the length of the leap, and every absolute
+timestamp and stamp minted in the window carries the bogus future; without the >1× rate, a genuine
+step (VM resume, a first NTP correction) leaves the cache permanently behind the wall clock — the
+slew advances exactly as fast as the gap grows, so it never closes. The rate is capped at the wall
+clock itself, so a bogus leap still costs at most twice the seconds it lasts before NTP reverts it. Reads during the restart backoff keep the same
 monotonic floor, and the ticker is reference-counted per application context — it stops only when
 the last context in the JVM is destroyed, because the clock is JVM-global and one context teardown
 must not degrade the others to a native clock read per call.
@@ -2633,14 +2804,14 @@ first pass is not a caller read, so it must not record a hit/miss or promote the
 access-order queue. The entry-level overload is called directly, with no capturing predicate.
 REFRESH skips the pre-check when no cluster loader is configured: there is no loader I/O to avoid,
 and the fallback's compute applies the same version guard inside the bin lock. The decision
-plane's `handleHot`/`coolApply` snapshots follow the same rule: a Worker broadcast must not inflate
+plane's `resolveHot`/`coolApply` snapshots follow the same rule: a Worker broadcast must not inflate
 the caller statistics or mark a cold key as recently used in TinyLFU.
 
 Decision plane (`shouldSkipForWorker` for COOL, `shouldSkipForHot` for HOT): absent → accept;
 different `nodeId` → accept on arrival (cross-Worker versions are incomparable); same node,
 higher epoch → accept (restart); same node, lower epoch → skip (stale incarnation); same node
 and epoch → skip when `resident decisionVersion >= incoming`. A non-positive `decisionVersion` is
-unorderable and is dropped at `WorkerMessage.from`, before the body decode and the dispatcher: a
+unorderable and is dropped at `WorkerDecision.from`, before the body decode and the dispatcher: a
 malformed broadcast must never reach the "different node" acceptance path and create or overwrite a
 decision. The guard therefore assumes a positive incoming stamp and does not re-check it. The HOT
 variant accepts an equal decision when the resident is `NORMAL`: a local
@@ -2653,7 +2824,7 @@ are not comparable across Workers. Comparing them across Workers silences a surv
 after a rolling restart — the restarted Worker stamps a higher epoch, and every later decision
 from an older-epoch Worker is dropped until the entry expires. The owning Worker re-broadcasts
 its decision, so a stale out-of-order decision is corrected by the next broadcast. **The
-ghost-COOL guard is COOL-only and lives in `DefaultWorkerDecisionHandler.isStaleCrossNodeCool`**:
+ghost-COOL guard is COOL-only and lives in `DefaultWorkerContext.isStaleCrossNodeCool`**:
 it drops a cross-Worker COOL aimed at an in-force HOT whose owner is still the **current, alive
 incarnation** (`isCurrentIncarnation(owner, entryEpoch)` — the same probe the read path uses) while
 the ring still routes the key to that owner. The ring is reconciled from that health view before
@@ -2663,7 +2834,7 @@ missing signal and never touches HOT, so it cannot reintroduce the "mute the sur
 complements. A restarted owner no longer protects the previous incarnation's HOT: the COOL applies
 and the entry cools normally.
 
-Owner: `VersionGuard`, `DefaultWorkerDecisionHandler`.
+Owner: `VersionGuard`, `DefaultWorkerContext`.
 
 ---
 
@@ -2691,33 +2862,32 @@ String-vs-`toString` conversion for the app-name, origin-instance and PUT cache-
 the same conversion is not re-derived at each site. Owner: `SyncType`, `SyncMessage.from`,
 `CacheSyncListener`, `AmqpMessageReader`.
 
-**The decision plane uses the same decoded-type shape.** `WorkerMessage` carries one
-`WorkerDecisionType` (HOT/COOL, parsed once from the header) and one `DecisionStamp` that also
+**The decision plane uses the same decoded-type shape.** `WorkerDecision` carries one
+`WorkerType` (HOT/COOL, parsed once from the header) and one `DecisionStamp` that also
 stores the corresponding `DecisionKind`; no handler has to infer a lease type from the effective
 state. The listener reads the parsed flags for admission —
 `isControl()` for the global-budget exemption, `needsJitter()` for the start-jitter park — and the
 handler compares the stamp directly through `VersionGuard`, so no branch re-parses a string and no
 handler rebuilds a record per message. The wire headers are unchanged: the enum name is the
 `HEADER_TYPE` value. A blank cache-key body is rejected at the decoder, matching `SyncMessage`, so
-an unservable key never reaches the cluster loader. Owner: `WorkerDecisionType`, `WorkerMessage`,
+an unservable key never reaches the cluster loader. Owner: `WorkerType`, `WorkerDecision`,
 `WorkerListener`, `VersionGuard`.
 
 **The loader read and the hook tail have one owner per plane pair.** `DecisionPlaneSupport` holds
 the optional cluster-loader read (clean miss, declined admission and loader failure all answer
 `null`) and the hook loop that isolates a broken hook. Each `fire*` method checks its list for
 emptiness before building the capturing callback, so the default no-hook deployment allocates
-nothing on the apply path. Owner: `DecisionPlaneSupport`, `DefaultSyncDecisionHandler`,
-`DefaultWorkerDecisionHandler`.
+nothing on the apply path. Owner: `DecisionPlaneSupport`, `DefaultSyncContext`,
+`DefaultWorkerContext`.
 
-**The batch and PUT payload share one attachment reference.** `INVALIDATE_BATCH` and `PUT` are the
-only two types with a body beyond the key, and they are mutually exclusive, so `SyncMessage`
-stores one nullable `attachment` instead of a `List` field plus a `byte[]` field. The typed
-`batch()` and `payload()` accessors keep the call sites honest. The decoder materialises each
-accepted key/version pair directly as the `INVALIDATE` sub-message the listener submits, so the
-receive path does not allocate a second wrapper per key; a refused peer stamp is the only case
-that rebuilds a sub-message. The record drops from 48 to 40 bytes on a 64-bit JVM with compressed
-oops (six references/values instead of seven, no padding), which matters because a batch burst
-holds many decoded messages in the ordered dispatcher. Owner: `SyncMessage`.
+**The batch frame is decoded before the dispatcher, and the PUT payload is typed.** `SyncMessage`
+carries a nullable `byte[] payload` only for `PUT`; `INVALIDATE_BATCH` is a wire frame, not a
+message, and `SyncMessage.parseBatch` materialises each accepted key/version pair directly as the
+`INVALIDATE` sub-message the listener submits. The record therefore never holds an untyped
+`attachment`, the dispatch layer never sees the batch type, and a refused peer stamp is the only
+case that rebuilds a sub-message. The parser still consumes one entry at a time so a malformed
+element cannot shift the token stream for its neighbours. Owner: `SyncMessage`,
+`CacheSyncListener.process`.
 
 **The batch parser consumes exactly one entry at a time.** A malformed element must not shift
 the token stream for its neighbours. `skipEntry` starts from the parser's current token: an entry
@@ -2734,7 +2904,17 @@ fold must use the same rule: a later equal-version REFRESH must not cover an INV
 version, or the final state depends on message arrival order. A covered INVALIDATE is retained as
 the batch's highest one; when the winning value message falls back to an eviction, that covered
 removal still fires `afterInvalidate` (the value fallback carries out its removal), in addition to
-the winning message's `onRefreshSkipped`. Owner: `DefaultSyncDecisionHandler.handleBatch`.
+the winning message's `onRefreshSkipped`. Owner: `Batch.reduce`, `CacheSyncListener.dispatchBatch`.
+
+**A clear batch has no winner; its shape is the classification.** The clear family shares one
+dispatcher channel so all table sweeps serialize, and every clear watermark covers a different key
+set. `Batch` is sealed into `Batch.Value` (a non-clear batch reduced to one effective message) and
+`Batch.Clear` (every table-wide and prefix clear, applied in one sweep). `CacheSyncListener`
+routes on the batch type, not on a synthesized winner, so the old `outranksClear` reduction and
+the meaningless clear-batch `winner` field are gone. `Batch.Value` still takes a single-message
+fast path without allocating a covered list, and `allowSoftExpire()` is derived from the winner
+and the covered invalidate rather than stored as a second field that could drift. Owner: `Batch`,
+`CacheSyncListener.dispatchBatch`, `DefaultSyncContext.clear`.
 
 **Semantics, stated once.** At-most-once for every sync/decision message (ack before update). A
 crash between ack and update loses one message; the next write or the TTL heals it.
@@ -2777,7 +2957,7 @@ future is replayed for its whole window — and the receiver stamps whatever it 
 **message's** version. A reused load would therefore claim a version it was never read at, which
 is the unsafe direction (the read path's stamp is a pre-read lower bound by construction).
 Bounding this call needs a no-reuse load, not a shared one. Ruled out: routing the REFRESH
-receiver through `SingleFlight`; a `DefaultSyncDecisionHandlerTest` case pins the value-less
+receiver through `SingleFlight`; a `DefaultSyncContextTest` case pins the value-less
 fallback that a reused future silently broke.
 
 **Collection invalidation is batched, and a zero payload cap disables value PUTs.** An
@@ -2789,6 +2969,17 @@ so the receiver merges one clock floor and re-stamps a refused batch with one lo
 `zeta.sync.put-max-bytes=0` means no payload can fit: a synced write degrades
 to a value-less REFRESH immediately, without paying the Jackson serialization pass for a value that
 would be discarded.
+
+**The PUT payload codec is one receive/transmit component, not the publisher's parser.** The
+polymorphic mapper, the size cap and the bounded write buffer lived inside `CacheSyncPublisher`, so
+`DefaultSyncContext` had to inject the outbound publisher (and transitively `RabbitTemplate`)
+just to decode an inbound body. `PutPayloadCodec` now owns the mapper, `encode` and `decode`, and
+both sides share one bean; the publisher keeps only AMQP publishing and the dedup window. The
+bounded stream overrides `write(int)` and `write(byte[], int, int)` only: `writeBytes(byte[])`
+delegates to the latter, so the old extra override ran the cap check twice per write. Failure
+symptom of the old split: a test or deployment without a publisher could not build the receive
+context, and the whitelist had two independently constructed mappers to keep in sync. Owner:
+`PutPayloadCodec`, `CacheSyncPublisher`, `DefaultSyncContext`.
 
 **A value-less REFRESH cannot keep a known-stale value.** The peer's write already happened, so
 the local copy is stale by definition. With no cluster loader the receiver force-expires the soft
@@ -2807,7 +2998,7 @@ and told observers that a peer had explicitly invalidated a key when it had mere
 deliver a value. The one exception is a covered INVALIDATE already folded out of the same batch:
 if this fallback actually removes the entry, that invalidation's removal is now observable and
 its `afterInvalidate` fires alongside the refresh skip. Owner:
-`DefaultSyncDecisionHandler.evict`.
+`DefaultSyncContext.evict`.
 
 **A failed deduped send drops its claim instead of restoring the displaced version.** The
 claim previously rolled back to the version it displaced — but that version's own send may
@@ -2816,7 +3007,7 @@ for the whole dedup window and a retry of it was silently skipped. Dropping the 
 re-sends one idempotent broadcast (the plane's at-most-once contract); keeping a phantom claim
 can lose the mutation for the window. Owner: `CacheSyncPublisher.sendDeduped`.
 
-Owner: `CacheSyncPublisher`, `CacheSyncListener`, `DefaultSyncDecisionHandler`, `SyncMessage`,
+Owner: `CacheSyncPublisher`, `CacheSyncListener`, `DefaultSyncContext`, `SyncMessage`,
 `AmqpMessageReader.AppIsolationFilter`.
 
 ---
@@ -2874,19 +3065,21 @@ mid-batch election failure cannot strand a HALF_OPEN probe and the batch path ne
 pass.
 
 **One flight object carries the whole election.** `InFlight` extends `CompletableFuture`, and one
-volatile `long` packs the 61-bit breaker stamp, the settled bit and the kill bit. A miss allocates
-the flight (and whatever the executor's task future costs); a caller that finds an existing flight
-allocates no flight, only the small election result. Leadership is decided by identity with the candidate
-this call passed to `computeIfAbsent`: the call that inserted the flight is the leader, and every
-other call — including a same-thread re-entry that reuses the flight — is a follower. A claim bit
-set after insertion cannot make that distinction: a follower descheduled between insertion and
-claim could steal the role, which would run a `callerRunsLoader` reader on the wrong thread and lose
-the caller's transaction and MDC, and the creator's own re-entry would see the bit and run the
-reader a second time. The flight records the id of the thread running its reader; a follower that
-finds that id equal to its own throws `IllegalStateException` instead of joining a future only it
-can complete, converting the old self-join (a permanent block under caller-runs, a budget-long
-stall on the executor) into a fast failure. A follower whose leader was refused by the executor
-resolves to the same `SUPPRESSED_EXECUTOR` outcome as the leader, not to a raw rejection.
+volatile `long` packs the 61-bit breaker stamp, the settled bit, the backlog bit and the kill bit.
+The flight is created inside `computeIfAbsent` after breaker admission, so a rejected load allocates
+only the small holder that publishes the candidate back to this call, never a discarded future. A
+caller that finds an existing flight allocates no flight, only the small election result. Leadership
+is decided by identity with the candidate this call's mapping function created: the call that
+inserted the flight is the leader, and every other call — including a same-thread re-entry that
+reuses the flight — is a follower. A claim bit set after insertion cannot make that distinction: a
+follower descheduled between insertion and claim could steal the role, which would run a
+`callerRunsLoader` reader on the wrong thread and lose the caller's transaction and MDC, and the
+creator's own re-entry would see the bit and run the reader a second time. The flight records the id
+of the thread running its reader; a follower that finds that id equal to its own throws
+`IllegalStateException` instead of joining a future only it can complete, converting the old
+self-join (a permanent block under caller-runs, a budget-long stall on the executor) into a fast
+failure. A follower whose leader was refused by the executor resolves to the same
+`SUPPRESSED_EXECUTOR` outcome as the leader, not to a raw rejection.
 
 **Shutdown fails every live flight.** Spring destroys `SingleFlight` before
 `interruptibleLoadExecutor`, but the executor's `shutdownNow` drains queued tasks without completing
@@ -2915,6 +3108,16 @@ Owner: `SingleFlightImpl`, `HotKeyCache` (`dropLocal`, `dropAndBroadcastInvalida
 ---
 
 ## Buffering and ordering
+
+**The sync buffer owns the invalidation send and its causal cancellation.** All peer broadcasts leave
+through `BroadcastBuffer`: PUT/REFRESH through the deferred map, the INVALIDATE family through the
+immediate send. An INVALIDATE at version `v` cancels every buffered PUT/REFRESH for the key at or
+below `v` before the message leaves. The cancellation used to live in four `CentralDispatcher`
+methods, i.e. it was a caller obligation: a new invalidation shape that forgot the eviction shipped
+a buffered PUT after the invalidation that superseded it and re-warmed deleted data on the peers
+(or, with the invalidation dropped, pinned it until the peer's hard TTL). Folding the send into the
+buffer makes the rule impossible to skip, and the publisher and send executor also have one owner.
+Owner: `BroadcastBuffer`.
 
 **Deferred sends merge by version.** `BroadcastBuffer` defers REFRESH/PUT for a short window and
 flushes on a dedicated single-threaded bounded executor. Deferral batches a burst of writes into
@@ -2955,8 +3158,8 @@ convergence is version-guarded and order-independent.
 does not preserve an origin's send order: `zeta.sync.concurrent-consumers` defaults to three AMQP
 consumers that deserialize and submit concurrently, and the publisher uses separate channels per
 message type, so even one origin's `[REFRESH v10, PUT v5]` can reach the dispatcher with the PUT
-first. `PerKeyOrderedDispatcher` therefore hands a key's whole granted batch to
-`SyncDecisionHandler.handleBatch`, and the handler keeps only its highest-version message: the
+first. `KeyDispatcher` therefore hands a key's whole granted batch to
+`Batch.reduce`, and the handler keeps only its highest-version message: the
 final state of a key is decided by that one message, so every message it covers would be applied
 and immediately overwritten. Reducing first means a superseded PUT never pays its payload
 deserialization, a superseded REFRESH never runs the loader, and a superseded INVALIDATE never
@@ -2986,7 +3189,7 @@ correct, but the covered messages still pay their I/O and bin locks — the cost
 exists to remove. (B) A per-batch deferral slot plus an end-of-batch callback: a deferral slot only
 ever held the REFRESH (or the clear) that a later message would have covered anyway, and it needed
 a context object, a role check on every handler method and a `finally` in the listener to settle
-abandoned batches. (C) Sort inside `PerKeyOrderedDispatcher`: it is a generic ordered executor
+abandoned batches. (C) Sort inside `KeyDispatcher`: it is a generic ordered executor
 shared with `WorkerListener` and would have to learn message types and override rules. (D) Compact
 the same-key queue at enqueue time: the task a submission would replace may already be inside the
 granted batch.
@@ -3001,7 +3204,7 @@ lock, no per-key outcome array). Each rule keeps its own stamp: collapsing a sco
 into the table-wide one, or two prefixes into their maximum, would evict entries written
 legitimately after the lower-stamped clear. Ordering against per-key work is unaffected either
 way — anti-resurrection is carried by `EntryLifecycle`'s watermarks, not by the dispatcher.
-Owner: `CacheSyncListener` (`CLEAR_DISPATCH_KEY`), `DefaultSyncDecisionHandler.applyClearBatch`.
+Owner: `CacheSyncListener` (`CLEAR_DISPATCH_KEY`), `DefaultSyncContext.applyClear`.
 
 **A refusal is applied inline, on the consumer thread.** The sync plane acks before the ordered
 dispatcher runs, so a message the dispatcher refuses (per-key queue full, global budget exhausted,
@@ -3013,22 +3216,26 @@ stall. Owner: `CacheSyncListener.onDispatchRejected`.
 **A twice-refused submission retires its worker.** If the executor refuses both the immediate
 submission and the delayed re-drive, the key's `KeyWorker` is removed and its queued weight
 discharged. A later submission then creates a fresh worker instead of enqueueing behind a cycle
-that will never run. No scheduling flag is needed: the worker's `UNSCHEDULED_BIT` identifies the
-first submission, and only the creator drives the first cycle; every later cycle is re-driven by
-`runCycle` after it settles. Owner: `PerKeyOrderedDispatcher.submit`, `abandon`.
+that will never run. No scheduling flag is needed: the atomic compute reports whether this call
+created the worker, and only the creator drives the first cycle; every later cycle is re-driven by
+`run` after it settles. Owner: `KeyDispatcher.submit`, `abandon`.
 
-**One lifecycle slot per key worker.** `KeyWorker` stores its first task and positive weight
-inline, so the common single-task burst allocates neither a `PendingTask` carrier nor an
-`ArrayDeque`; only a second concurrent task creates the deque. The worker also reuses a single
-`long` for the pre-first-cycle start-jitter delay and, later, the granted batch weight: the two
-lifetimes never overlap, the high bit marks "not handed to the executor yet", and `runCycle`
-clears the grant before rescheduling, so a resubmission always reads the zero "no park" value.
-The submitter never rewrites the weight outside the bin lock (the old sign-encoded outcome could
-be observed while the worker was already published), and the same object implements `Runnable`,
-so a cycle submission allocates neither a closure nor a wrapper. Owner:
-`PerKeyOrderedDispatcher.KeyWorker`.
+**The first batch is pre-granted; a queued tail is folded into it at the first cycle.**
+`KeyWorker` is created with its first task already in a `Grant` (task list plus budget weight),
+so a lone first task pays no grant `compute` before the consumer call. If submissions arrived
+while the start-jitter park held it, the first cycle folds that queued tail into the same grant
+under the bin lock, preserving the old coalescing (one consumer call, one sweep, one loader
+read); a lone task still skips the compute. Every later batch is drained at the end of the
+previous cycle, so a sustained key costs one `compute` per cycle instead of two. The `Grant`
+reference is cleared as soon as the cycle takes it: keeping it through the consumer's synchronous
+load and the next park pinned every payload (a PUT body can be 32 KB) in the dispatcher. The
+worker also implements `Runnable`, so a cycle submission allocates neither a closure nor a
+wrapper. `close()` resets the global unit counter with the map that held the queued weight; an
+in-flight `run` therefore skips its `finally` subtraction when `closed` is set, otherwise the
+reset was immediately driven negative by the batch it had already granted. Owner:
+`KeyDispatcher.KeyWorker`, `run`, `close`.
 
-**Per-key FIFO with batched consumption.** `PerKeyOrderedDispatcher` runs up to
+**Per-key FIFO with batched consumption.** `KeyDispatcher` runs up to
 `maxTasksPerCycle` same-key tasks per submission and yields a busy key so other keys progress.
 Queue management is one atomic `compute` per operation (no orphan-queue race by construction);
 weight is `1 + bodyBytes/1024` per task, bounded per key and against one global unit budget, and
@@ -3051,7 +3258,7 @@ line under exactly the write burst the buffer exists to absorb. The pair stays t
 size reset is already one write each under the swap's write side (2026-11). Owner:
 `BroadcastBuffer`.
 
-Owner: `BroadcastBuffer`, `PerKeyOrderedDispatcher`, `DefaultSyncDecisionHandler`.
+Owner: `BroadcastBuffer`, `KeyDispatcher`, `DefaultSyncContext`.
 
 ---
 
@@ -3193,14 +3400,22 @@ decremented the submission and the internal rejection handler decremented it aga
 submission could drive the counter negative (or at least permanently under-count it). The marker
 is written by a `remove` that won while the pool is shutting down; only the JDK's recheck hands
 that same task to the rejection handler, which consumes the marker before invoking user code, so a
-`CallerRunsPolicy` task that removes another queued task still balances it. A normal submission never touches a `ThreadLocal`: the previous shape set a marker on every
-`execute` and cleared it in a `finally`, which allocated a `ThreadLocalMap.Entry` and probed the
-map on the hot path for a branch only a shutdown race can take. The JDK's `purge()` removes
+`CallerRunsPolicy` task that removes another queued task still balances it. An <em>external</em>
+`remove(task)` during shutdown writes the same marker, so every `execute` first drops any marker
+already on the thread when the pool is shut down: the JDK's own marker is written later, inside
+`super.execute`, so it cannot be mistaken for a stale one, and a re-submitted instance is still
+compensated exactly once. A normal submission never touches a `ThreadLocal`: it only pays an
+`isShutdown()` read of the pool word. The JDK's `purge()` removes
 cancelled futures through the queue iterator and never calls `remove(Runnable)`, so the previous
 code leaked one admission slot per purged future while the design document claimed the path was
 symmetric. The override removes cancelled queued futures and subtracts only the removals the purge
 actually won; a worker or a concurrent purge that won the race owns the other compensation. Owner:
 `StandardThreadExecutor.execute`, `remove`, `purge`, `InternalForceQueueHandler`.
+
+**The admission ceiling saturates.** `queueCapacity + maximumPoolSize` is computed as a `long` and
+capped at `Integer.MAX_VALUE`, and a negative capacity is rejected. A plain `int` sum overflowed to
+a negative ceiling for a large `queueCapacity`, and the over-cap pre-check then rejected every
+submission. Owner: `StandardThreadExecutor`.
 
 **Force-and-shutdown share one lifecycle lock.** `StandardExecutorQueue.force` checks
 `isShutdown()` and offers in one critical section; `shutdownNow` takes the same lock around the
@@ -3332,22 +3547,24 @@ to, and the engine's failure path (WARN plus lease-on-failure) must see a real f
 the admission filter declines looks like "no new value", which silences the failure and skips the
 lease, re-running the body on every stale read throughout the outage.
 
-**An explicit key encodes arrays by content, and a varargs tail stays on the SpEL path.**
-`namespace + value` used `Object.toString()` for an array, i.e. its identity hash; a freshly built
-`byte[]`/`String[]` produced a new key on every call, so reads never hit and invalidations removed
-nothing. `KeyPlan.appendKeyValue` routes every explicit-key value through the same canonical
-`DefaultKey` encoder when it is an array, and `KeyPlan.of` disables the single-argument fast path
-for a varargs tail so `ZetaEvaluationContext.lookupVariable` can return the whole array (or the
+**An explicit key encodes one value exactly like one default-key argument.** An absent key over a
+single-argument method encodes the canonical `DefaultKey` form (`[s5:alice]`), while `key = "#id"`
+used to concatenate the raw value (`alice`), so a query and an invalidation written against the
+same argument addressed different entries and the removal silently missed. The same split made
+`key = "#root.args"` wrap the whole argument list in an `aO[...]` part instead of using the
+multi-argument default form. `KeyPlan` now routes every explicitly selected value through
+`DefaultKey.encode(namespace, new Object[] { value })`; a whole `#root.args` is recognized from the
+parsed AST and uses the argument-list encoding, so it matches an absent key for the same call.
+Arrays are still encoded by content, not by the identity hash of `Object.toString()`; a varargs
+tail stays off the single-argument fast path so the value lookup can return the whole array (or the
 expanded arguments) intact. The lookup normalizes every shape to a component-typed array: a packed
 tail is returned as-is, an expanded tail is copied with `java.lang.reflect.Array` (so a
 `String...` always yields `String[]`, never an `Object[]`), one expanded value is wrapped rather
 than returned as a scalar, and zero expanded values yield an empty array instead of `null`. The
 same normalizer packs the arguments before a reflective background reload, because
 `Method.invoke` requires exactly `parameterCount` arguments with the final element an array.
-`#root.args`, an array `@ZetaPut`/`@ZetaInvalidate` `#result` and a `byte[]` `#p0` therefore all
-address the same entry for equal content. The previous shape was the identity hash for every array
-shape, and the expanded-one-vararg form silently keyed on the scalar. Owner:
-`ZetaCacheInterceptor.KeyPlan`, `ZetaEvaluationContext.packArguments`, `DefaultKey`.
+Owner: `ZetaCacheInterceptor.KeyPlan`, `CompiledExpression.wholeRootArgs`,
+`ZetaEvaluationContext.packArguments`, `DefaultKey`.
 
 **The plan binds to the most-specific implementation method.** A JDK proxy reports the interface
 `Method`, which may carry no parameter-name metadata and has no body, so both key discovery and a
@@ -3356,13 +3573,17 @@ candidate and is handed to plan resolution, so the same `Method` serves the anno
 the cached plan instead of being looked up again inside the mapping function; a call that reaches
 the interceptor without a prior pointcut match (a manually built proxy) resolves it on the first
 call only. Its result is stored in the plan: SpEL binds `#p0`/`#a0`/parameter names from it,
-`#root.method` is it, and a background refresh invokes it. Parameter names are discovered from that
-method first and fall back to the declared method that carried the annotation: a JDK dynamic proxy's
-generated method has no `-parameters` metadata, while the interface method usually does, so
-`key = "#id"` binds on an interface-only proxy (`@HttpExchange`, a mapper) instead of resolving to
-`null`. The plan is held in a per-user-class table, so one interface method with two implementations
-resolves two plans. When the reported method and the most-specific method differ, the same plan
-instance is stored under every view that contributed it.
+`#root.method` is it, and a background refresh invokes it.
+
+**The expression's parameter names come from the method that declares the annotation.** A key is
+written against the interface or base method that carries `@ZetaCached`/`@ZetaPut`/
+`@ZetaInvalidate`, so that method owns the names: an interface `load(String userId)` and an
+implementation `load(String id)` must not make `key = "#userId"` fail startup as an unknown
+variable. `parameterNames` therefore prefers the most-specific annotated view, then the
+implementation method when the declaring method has no metadata, then any remaining view. The
+plan is held in a per-user-class table, so one interface method with two implementations resolves
+two plans. When the reported method and the most-specific method differ, the same plan instance is
+stored under every view that contributed it.
 
 **Resolution validates the whole method, not the last view.** A method can be reached through the
 implementation, a generic bridge, a generic interface and several unrelated interfaces, and
@@ -3379,29 +3600,43 @@ different value is never seen. Direct lookups also keep the scan linear in the c
 instead of paying one hierarchy search per view. Resolving while scanning let the first view install
 a plan and every later view bind to it without re-checking the verb — a `@ZetaCached` on an
 interface silently became a `@ZetaPut` plan, or the startup conflict check disappeared entirely.
-Owner: `ZetaCacheInterceptor.computeValue`, `planFor`.
+The direct probe is gated on a declared annotation (direct or composed): `getMergedAnnotation` on
+the implementation also searches overridden declarations, so checking merely `declaredAnnotations
+.length > 0` let an unrelated annotation such as `@Deprecated` on the implementation return an
+interface verb as the "direct" one and hide the conflict. Owner:
+`ZetaCacheInterceptor.computeValue`, `planFor`, `declaresAnnotation`.
 
-**Inheritance dominance resolves views before equality is compared.** Grouping by the
+**Inheritance dominance is a partial order, so every maximal view is compared.** Grouping by the
 most-specific implementation method still leaves the superclass methods and every interface method
 that the implementation inherits. Treating them as unrelated peers made a perfectly valid
 `interface → base implementation → grandchild override` hierarchy fail startup: the base class
 declared one value, the interface declared another, and the no-annotation grandchild made both
-visible at once. The verb scan therefore reduces the annotated views by declaring-type
-assignability before comparing attributes: a class dominates its superclass and the interfaces it
-implements, a sub-interface dominates its super-interface, and only two unrelated branches with
-different values are a real conflict. Parameter-name discovery uses the same order, so a base
-class with `-parameters` metadata is not shadowed by an unrelated interface view. Owner:
-`ZetaCacheInterceptor.findVerb`, `dominates`, `parameterNames`.
+visible at once. The verb scan therefore filters the annotated views to the maximal ones under
+declaring-type assignability, then compares their attributes: a class dominates its superclass and
+the interfaces it implements, a sub-interface dominates its super-interface, and a dominated view
+is that override rather than a peer. Filtering to maximal views, not folding into one running
+winner, is load-bearing: with `SubInterface` extending `SuperInterface` and an unrelated
+`OtherInterface`, scan order could visit `SuperInterface`, then `OtherInterface` (equal to the
+current winner, so ignored), then `SubInterface` (which dominates the winner and replaces it),
+hiding the real conflict between `SubInterface` and `OtherInterface`. The view set is also
+deduplicated with `Method` equality because the class-plus-interface walk reaches one method
+through several paths. Owner: `ZetaCacheInterceptor.findVerb`, `dominates`.
 
 **The invocation's receiver is the unwrapped target object, not the proxy.** Spring's
 `MethodInvocation.getThis()` already returns the target (the proxy is on
 `ProxyMethodInvocation.getProxy()`), so the interceptor uses it directly as `#root.target` and as
-the reflective-refresh receiver. The plan key's target class is `getThis().getClass()` for an
-ordinary target and `AopProxyUtils.ultimateTargetClass` only for a `TargetClassAware` target — the
-nested-proxy case — so the per-call CGLIB-name probe is gone. A target that is itself an `Advised`
-proxy is unwrapped once in `invoke` before the verb runs; every evaluation context and the
-reflective refresh reuse that receiver, and a non-singleton `TargetSource` keeps the proxy it
-cannot unwrap.
+the reflective-refresh receiver. A target that is itself an `Advised` proxy is unwrapped once in
+`invoke` before the verb runs; every evaluation context and the reflective refresh reuse that
+receiver, and a non-singleton `TargetSource` keeps the proxy it cannot unwrap. The unwrap stops at
+the first object that still implements the reported method's declaring type: a Spring Data
+repository proxy's singleton target is `SimpleJpaRepository`, which does not implement the
+repository interface. Unwrapping through it made the plan lookup miss every repository method
+(silent cache bypass) and made a background refresh reflectively invoke a method the target class
+does not declare. The plan key follows the same rule: `planClass` returns the ultimate target class
+only when it is assignable to the method's declaring type, otherwise the declaring type itself, so
+the interface's plan table answers. When a proxy class reports a method its target class does not
+implement, `plan` also falls back to the method's declaring-type table before giving up. Owner:
+`ZetaCacheInterceptor.findUltimateTargetObject`, `planClass`, `plan`.
 
 **Resolution is the fail-fast boundary.** The advisor's pointcut calls the interceptor's plan
 resolution while Spring decides whether to proxy a bean, so a configuration error surfaces at bean
@@ -3412,32 +3647,42 @@ parsed with its role and method in the failure message, every positional `#pN`/`
 range, a method parameter that uses a reserved binding name (`root`, `this`, `result`, canonical
 `pN`/`aN`) rejected when the method compiles an expression, and every other variable name known to
 the context when parameter names are available — checked by walking the parsed AST once, which also
-collects direct variable assignments ({@code #x = ...}), so a padded expression is still checked, a
-{@code '#p1'} literal is not a reference, and the collected variable set is stored on the
-`CompiledExpression` for the later `references` checks. A direct assignment declares exactly its
-left-hand variable; property and index assignments ({@code #user.name = ...}) declare nothing, so
-the right-hand side and both sides of a property assignment are still validated, and a misspelled
-name on the right of an assignment no longer slips through startup. A declared parameter name is
-legal unless it is reserved. `#result` is admitted exactly where the
-caller declares it bound — a read key/TTL and a pre-invocation key do not. A permanent synced
-`@ZetaPut` is rejected at resolution too. The alternative —
-compile or degrade per call — turns a typo into a runtime log storm, lets a misconfigured cache
-address wrong keys until someone reads the logs, and can run a business side effect before a write
-configuration error surfaces.
+collects direct variable assignments (`#x = ...`), so a padded expression is still checked, a
+`'#p1'` literal is not a reference, and the collected variable set is stored on the
+`CompiledExpression` for the later `references` checks. An assignment declares its left-hand
+variable from the point it executes: `(#x = 1) + #x` is legal, while `#x = #x + 1` and
+`#x + (#x = 1)` are rejected as reads before assignment (the target itself is a write, not a
+read). A reserved name cannot be an assignment target: `#result = ...` would write a map the
+context answers from its bound result first, so the write could never be observed. Property and
+index assignments (`#user.name = ...`) declare nothing, so the right-hand side and both sides of a
+property assignment are still validated. A declared parameter name is legal unless it is reserved.
+`#result` is admitted exactly where the caller declares it bound — a read key/TTL, a pre-invocation
+key, and a `void`/`Void` invalidation do not bind a result. A permanent synced `@ZetaPut` is
+rejected at resolution too. The alternative — compile or degrade per call — turns a typo into a
+runtime log storm, lets a misconfigured cache address wrong keys until someone reads the logs, and
+can run a business side effect before a write configuration error surfaces.
 
-**An unresolved placeholder is a configuration error, not a namespace.** `cache = "${users.cache}"`
-resolved with no `ConfigurableBeanFactory` (or with one that leaves the token intact) used to
-become the physical namespace `"${users.cache}\0"` and silently miss every real `users` entry. The
-namespace validator now rejects any remaining `${` token; a TTL placeholder already fails SpEL
-parsing, so this makes the three placeholder-bearing attributes consistent. Owner:
-`ZetaCacheInterceptor.namespace`.
+**An unresolved placeholder is a configuration error, not a namespace or a SpEL expression.**
+`cache = "${users.cache}"` resolved with no `ConfigurableBeanFactory` (or with one that leaves the
+token intact) used to become the physical namespace `"${users.cache}\0"` and silently miss every
+real `users` entry. The namespace validator rejects any remaining `${` token. The TTL attributes
+now do the same instead of handing `${my.ttl}` to the SpEL parser, where `$` is a legal identifier
+and `{my.ttl}` an inline list, so the failure named neither the placeholder nor the missing bean
+factory and surfaced as an EL1041E syntax error. One check covers `cache`, `hardTtl` and
+`softTtl`; `key` and `unless` remain pure SpEL because `${...}` there is not an embedded value.
+Owner: `ZetaCacheInterceptor.namespace`, `resolveTtlPlaceholders`.
 
 **Numeric TTL literals follow one range rule.** Unary signs are part of the literal: `+60000L` and
 `+1e3` fold to constants exactly like `60000L`/`1e3`, rather than becoming a dynamic `OpPlus`
 evaluated on every write. A finite real literal outside the `long` range (`1e20`) fails startup
 with the same "exceeds the long range" error as its digits-only spelling; only a runtime
-expression result is clamped to `Long.MAX_VALUE`. The previous split let `1e20` silently become a
-permanent entry while `99999999999999999999` was rejected. Owner: `ZetaCacheInterceptor.Ttl`.
+expression result is clamped to `Long.MAX_VALUE`. The floating bound is `value >= 2^63`, not
+`value > Long.MAX_VALUE`: IEEE-754 rounds `Long.MAX_VALUE` up to `2^63`, so the comparison let
+exactly `9223372036854775808e0` through and the narrowing cast saturated to the permanent sentinel.
+Unary negation widens an `Integer` to `long` before negating (the old `-i` left
+`Integer.MIN_VALUE` negative and clamped it to the default TTL), and a negated `Long.MIN_VALUE`
+folds through `BigDecimal`, where the out-of-range magnitude is rejected like any other literal.
+Owner: `ZetaCacheInterceptor.Ttl`, `strictFloatingLiteral`, `constantNumber`.
 
 **The loader snapshots the argument array it may reuse.** A soft refresh keeps the `ReadLoader`
 after the foreground call returned, so the loader's `target` and `args` are the refresh's only
@@ -3454,8 +3699,9 @@ invocation asks the `ClassValue` with the invocation's target class; a CGLIB pro
 to the user class's immutable table once, so the hit path performs one class-value read and one map
 lookup with no key allocation, no `getUserClass` name probe and no reflection. Every view of an
 annotated group is stored under its own `Method`, so a method from any implemented interface answers
-with the table lookup alone; only a method reported by a proxy class the user class does not declare
-falls back to the most-specific user-class method. `AopUtils.canApply` stops at the first matching
+with the table lookup alone; a method reported by a proxy class the user class does not declare
+falls back to the declaring type's table (the nested interface-proxy case) and then to the
+most-specific user-class method. `AopUtils.canApply` stops at the first matching
 method, and a JDK proxy matches each method lazily on its first call, so the first pointcut question
 about a class — not the first match — scans every candidate method of that class once.
 `ClassValue.computeValue` builds the table in a local map and returns it only after the whole scan
@@ -3775,7 +4021,7 @@ facade-local view record per observation surface; with one shape the copy is pur
 **Admission governs the L1 store, not the read.** `CacheLoader.isCacheable` is
 consulted wherever the engine is about to store a value it obtained on the loader's behalf: the read path (`HotKeyCache`), Worker HOT
 warm-up, a peer `REFRESH` reload (both through the cluster loader's admitted load) and a peer `PUT`'s carried value
-(`DefaultSyncDecisionHandler.applyValueMessage`, whose value arrives on the wire rather than
+(`DefaultSyncContext.applyValue`, whose value arrives on the wire rather than
 through a loader). An explicit `put` is the caller's own write and is never filtered, and the
 predicate receives no key, so a per-key rule cannot be expressed there. A declined value is answered as "no authoritative value", so each plane takes its
 existing fallback — HOT keeps its current L1 entry or skips with `VALUE_NOT_FOUND`, REFRESH degrades
@@ -3824,6 +4070,22 @@ normalizes `null` to `SOFT_REFRESH` at its own boundary (`ReadContext`), so an a
 merge "caller said nothing" with its own configuration without the engine inventing a second
 default.
 
+**Policies decide; contexts are the guarded write path.** `WorkerPolicy` exposes
+`hot(WorkerDecision, HotValue)` returning a `HotAction` and `cool(WorkerDecision)` returning a
+boolean. The framework calls `WorkerContext.resolveHot`, then the policy, then
+`WorkerContext.settleHot`; a `Skip` (or a refused COOL) still fires exactly one terminal hook,
+so a policy cannot forget to settle a decision. `SyncPolicy` mirrors it with `value`,
+`invalidate` and `clear` over the sealed `Batch.Value` / `Batch.Clear`, and `SyncContext` owns
+the guards, clear watermarks and dedup kills. Per-key ordering, batch reduction and hook
+dispatch are framework-owned; a policy never implements them. The context is not a user
+extension point: the autoconfiguration wires the default one and only the policy is a
+`@ConditionalOnMissingBean`. The split is what keeps a custom policy from re-deriving the
+second version check: `resolveHot` is a lock-free optimization, while `settleHot` re-checks
+inside the entry compute. Failure it prevents: a policy that trusts a pre-check can overwrite a
+newer decision or resurrect a value removed while its load was in flight. Owner:
+`WorkerPolicy`, `SyncPolicy`, `WorkerContext`, `SyncContext`, `DefaultWorkerContext`,
+`DefaultSyncContext`.
+
 **Validation happens before any cache work, at one boundary.** A blank single key throws
 `IllegalArgumentException`, a null callback `NullPointerException`, a negative TTL
 `IllegalArgumentException`. Collection arguments are validated element by element at the same
@@ -3868,9 +4130,11 @@ process lifetime.
 
 ## Metrics
 
-**Monotonic totals are `FunctionCounter`; live or decaying values are `Gauge`.** A lifetime
-count (decisions emitted, queue drops, sync failures, rejected checks) must carry counter
-semantics so Prometheus applies `_total` and rate() works. A value that can move down — current
+**Monotonic totals are counters; live or decaying values are `Gauge`.** A lifetime count (decisions
+emitted, queue drops, sync failures, rejected checks) must carry counter semantics so Prometheus
+applies `_total` and rate() works. A `Counter` is incremented at the event; a `FunctionCounter` reads
+a total the component already keeps (the detector's eviction and rejection tallies, the HOT rejected
+tally). A value that can move down — current
 queue depth, in-flight batches, lease debt, clock skew, `zeta.topk.total` (decay-adjusted recent
 traffic, not a lifetime count) — stays a gauge. Registering a monotonic total as a gauge gives
 dashboards a flat line and breaks `rate()`. Owner: `ZetaMicrometerAutoConfiguration`,
@@ -3887,27 +4151,23 @@ A late `SmartInitializingSingleton` re-runs the same idempotent registrations af
 are ready, and skips a registry that already has a `zeta.*` meter so the normal path does not log
 duplicate-registration warnings. Owner: `ZetaMicrometerAutoConfiguration`.
 
-**A hot-path total has one source: a counter field exposed through a `FunctionCounter`.** The
-per-rule match/promotion/cool counts are four plain `volatile long` fields on `RuleCounters`,
-updated with `VarHandle.getAndAdd`; the endpoint reads the fields directly and the scrape reads the
-same fields through a `FunctionCounter` bound at publication. The writes are low-concurrency — an
-eligible report on the report path, and promotions, aborts and cool-downs under a key's stripe lock
-— so a `LongAdder`'s per-cell footprint and the extra `Cell[]` indirection buy nothing, and the
-plain field removes two hops from every rule event. The HOT rejected count stays a `LongAdder`: it
-is written by every refused promotion across all stripes, where cell striping pays. Writing a
-Micrometer `Counter` alongside the field would double every increment on the report path and give
-the endpoint a second total that could drift when a rule publication retired a meter. `RuleCounters`
-retains the three `FunctionCounter` handles so retiring a removed id removes exactly those series;
-the handles are never null because a `CompositeMeterRegistry` returns a no-op meter rather than
-null. The meter's state object is the `RuleCounters` instance itself and its extraction function is a
-non-capturing method reference, which the JVM holds as a singleton: Micrometer keeps the state object
-weakly and gives a `FunctionCounter` no strong-reference option, so the state must be the object the
-published `RuleBinding` retains — never a lambda created just for the registration, which a young
-collection would clear and leave a counter that silently stops advancing. The same rule applies to
-the queue-depth and cooling gauges: their `IntSupplier` state objects are binder-created lambdas, so
-those gauges opt into a strong reference. The captured dispatcher/wheels are application-lifetime
-beans, and the rule counters are owned by a live binding; neither keeps anything alive past the point
-the meter itself should be removed. Owner: `WorkerDetectionMetrics`, `RuleCounters`, `HotKeyRegistry`.
+**A per-rule total is the Micrometer counter, and the meter registry owns it.** `RuleCounters`
+holds three `Counter` handles registered when the rule is published and one endpoint-only `LongAdder`
+for aborts. The `Counter` is the single total: a rule event increments the meter and the endpoint
+reads `count()` from the same handle, so a delta cannot disagree, and a late cool-down after the id is
+retired increments a detached meter that is never scraped again. Micrometer's registry holds the meter
+strongly, so no state object has to be kept reachable. Registration happens only after the whole
+snapshot is built, so a publication that fails while deriving its indexes registers nothing. Owner:
+`WorkerDetectionMetrics`, `RuleResolver`, `RuleBinding`, `RuleCounters`.
+
+_Ruled out:_ the `volatile long` fields updated through `VarHandle.getAndAdd` with a
+`FunctionCounter` reading each field. That shape was correct — the published binding retained the
+counters object the meter held weakly — but it required three VarHandles, a hand-written weak-state
+contract, and a second read path for the endpoint. The `Counter` removes that contract and keeps the
+endpoint on the same value the scrape sees. The cost is that a meter-less construction (the
+`WorkerDetectionMetrics(null)` used by tests and embedded callers) reads zero for the three rule
+counters; the endpoint's aborts stays a `LongAdder` and is unaffected. Owner:
+`WorkerDetectionMetrics`, `RuleCounters`.
 
 ---
 
@@ -3934,12 +4194,13 @@ share one builder and a change to the container contract cannot drift between th
 `CacheSyncProperties` and `WorkerListenerProperties` keep their plane-specific knobs and implement
 the interface. Owner: `AmqpConsumerProperties`, `ZetaAmqpAutoConfiguration`.
 
-**Published strategy SPIs stay interfaces.** `SyncDecisionHandler` / `DefaultSyncDecisionHandler` and
-`WorkerDecisionHandler` / `DefaultWorkerDecisionHandler` are documented in the README as
-caller-replaceable: users implement the interface and register a bean under
-`@ConditionalOnMissingBean`, or wrap the `Default*` delegate. The same applies to `SingleFlight`,
-`CacheLoader`, `TopK`, `SyncHook`, `WorkerDecisionHook` and the message records — each has a real
-second implementation (test doubles, benchmark stubs or caller-supplied loaders).
+**Published strategy SPIs stay interfaces.** `SyncPolicy` and `WorkerPolicy` are
+documented in the README as caller-replaceable: the interface's default methods run the standard
+pipeline through `SyncContext` / `WorkerContext`, and a caller overrides only the
+decision kind whose policy changes. The contexts are the framework-owned write paths; the policy
+is the published seam. The same applies to `SingleFlight`, `CacheLoader`, `TopK`, `SyncHook`, `WorkerDecisionHook`
+and the message records — each has a real second implementation (test doubles, benchmark stubs or
+caller-supplied loaders).
 
 **Small helpers live with their only caller.** The TTL-jitter arithmetic lives in `TtlPolicy`; a
 helper with one call site is a method with a name, not a file.
@@ -4268,7 +4529,7 @@ entry in place, on the assumption that a HOT self-heals on the next promotion. I
 `COOL_FOR_LOW_QPS`: the entry's window stays above the cool band, every cooling check re-arms it,
 and the already-hot fast path suppresses the next promotion, so the seat leaks until the cap fills
 and detection silently stops. The replacement is not a retry — it is a synchronous hand-back of a
-promotion that never reached any App, identity-guarded by `promotedVersion`; a delivered HOT that
+promotion that never reached any App, identity-guarded by the entry's `version`; a delivered HOT that
 was reported as failed converges through the next report's newer version. Owner:
 `DecisionDispatcher`, `HotKeyRegistry`.
 
@@ -4288,10 +4549,7 @@ filling the alignment gap, four `long`s and four references — and removing the
 the same padding, not shrink the entry; `wheelState` is also guarded by the wheel lock while
 `nextCheckAt` is guarded by a registry stripe, so folding them into one word would join two lock
 domains. An `int`-millisecond offset from `promotedAt` overflows after `2^31 - 1 ms` (about
-24.85 days), which a long-lived hot key reaches routinely. The separate `promotionSubmitted`
-boolean may cost one alignment slot in the object tail; folding it into `wheelState` would join
-the report thread's write with the wheel owner's state transitions, the same forbidden lock merge.
-Owner: `HE`, `TimerWheel`.
+24.85 days), which a long-lived hot key reaches routinely. Owner: `HE`, `TimerWheel`.
 
 **A `-1` tombstone without an entry monitor.** A marker alone cannot close the fast-path lost-add
 race: a thread reads `lastAccessTime` in the gate and writes its slot after, so a retirement
@@ -4309,11 +4567,10 @@ needs no marker: its sum walk reads zeroes except for the slot just written. Own
 **Packing the broadcaster's decision type into the accepted version's sign bit.** With compressed
 class pointers the accepted record is 12-byte header + 4-byte type + two `long`s = 32 bytes; two
 `long`s alone are 12 + 4 padding + 16 = 32 as well, so the packing saves no bytes and buys a mask
-on every read. The allocation win is real and kept: an elision mutates the existing record's
-version and keeps its send timestamp, so the debounce path allocates nothing. The same object stays
-in the cache, updated in place; the write refreshes the state-dependent expiry — twice the queue
-age while cold, until a COOL is accepted while hot — so the newest version outlives every queued
-decision that could read it. Owner:
+on every read. The accepted record is an immutable snapshot, so an elision stores a replacement
+that advances the version and keeps the send timestamp; the write refreshes the state-dependent
+expiry — twice the queue age while cold, until a COOL is accepted while hot — so the newest version
+outlives every queued decision that could read it. Owner:
 `WorkerBroadcaster`.
 
 **A hand-written TTAS probe around `Semaphore.tryAcquire`.** `Semaphore`'s non-fair acquire already
@@ -4341,7 +4598,7 @@ exclusion for an existing entry; they are the lock that makes `promote`'s check-
 `cool`'s check-then-remove safe before any entry exists. Removing them would make promotion use
 `putIfAbsent` and force the decision version to be allocated _after_ publication (otherwise a
 promotion that stalls before the insert can mint a lower version than a cool of the previous
-lifecycle and lose at every App), which turns the entry's `promotedVersion` into a
+lifecycle and lose at every App), which turns the entry's `version` into a
 post-publication volatile write. The entry's own tombstone already removes the `hotKeys.get`
 identity re-check from the un-cooled evaluation path; the stripe stays for the pre-insertion
 transition. Owner: `HotKeyRegistry`.
@@ -4360,14 +4617,15 @@ whose load fails uses the earlier HOT's created entry as its only fallback; redu
 turn a source outage that still had one successful load into a `VALUE_NOT_FOUND` skip. Distinct
 versions therefore stay sequential; duplicate rebroadcasts are already deduplicated by the DCL
 pre-check after the first apply, before any loader call. Owner: `WorkerListener.dispatchBatch`,
-`DefaultWorkerDecisionHandler`.
+`DefaultWorkerContext`.
 
 **Folding `closed` and the pending budget into one `AtomicLong`.** The budget deliberately uses a
 striped `LongAdder`: every submission adds to it, and `sum()` with the two or three AMQP consumer
 threads that submit is a base-field read, not a cell walk. A single word would put every submitter
 on one cache line and make settlement vulnerable to a borrow that clears the closed bit when the
 budget is discharged after `close()`. The separate volatile `closed` read is cheaper than that
-risk. Owner: `PerKeyOrderedDispatcher`.
+risk, and it is also the guard that stops a granted batch's `finally` from subtracting after
+`close()` has reset the counter. Owner: `KeyDispatcher`.
 
 **Encoding the periodic chain's terminal states in its `current` reference.** A terminal enum
 would remove the `int state`, but `TERMINATED` (executor shutdown) is not a cancellation:
@@ -4396,3 +4654,13 @@ log at WARN/ERROR with the throwable, designed degradations and load rejections 
 saturation, queue full, ring probe exhaustion, epoch-fenced and foreign-app drops) log at DEBUG.
 The packed layout, the suppression tally, the `needsArguments` seam, the custom 60 s heartbeat
 window and the monotonic-since-boot clock are gone with the class. Owner: every former call site.
+
+**`HE.promotionSubmitted` and the displaced-HOT bit.** The flag proved that a promotion had not
+entered a queue, so a COOL that displaced it could be elided as a ghost; a late HOT also marked a
+pending COOL as its displacement. It was removed: the proof is narrower than the App's state — a
+locally promoted App is hot without any Worker HOT — so the elision suppressed the only demotion
+signal a locally promoted or previously hot key could receive. The window is now covered by sending
+the COOL, one idempotent message; the queued-HOT ghost is still suppressed by the cold record the
+drain installs when it drops a HOT before the wire. The cost is a wasted demote-then-promote pair
+in the microsecond gap between a promotion and its submission. Owner: `DecisionDispatcher`,
+`WorkerBroadcaster`.
