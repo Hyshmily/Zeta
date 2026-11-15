@@ -51,10 +51,12 @@ import org.springframework.util.Assert;
  *       chain started with {@code scheduleAtFixedRate} / {@code scheduleWithFixedDelay} by the
  *       original {@code command}, preventing all future runs. The JDK's {@code remove} cannot
  *       find the command because the executor only knows the internal chain wrapper.</li>
- *   <li><b>Terminal {@code isDone()}.</b> The returned future reports {@code isDone() == true}
- *       only when the chain has stopped for good — cancelled, or ended by executor shutdown —
- *       never merely because the current link finished, which would flicker between the links
- *       of a healthy chain. {@code get()} still reflects the most recently scheduled run.</li>
+ *   <li><b>Terminal {@code isDone()} and blocking {@code get()}.</b> The returned future reports
+ *       {@code isDone() == true} only when the chain has stopped for good — cancelled, or ended by
+ *       executor shutdown — never merely because the current link finished, which would flicker
+ *       between the links of a healthy chain. {@code get()} waits for that terminal state: a
+ *       healthy chain has no per-run result, so it blocks until cancellation or shutdown, like the
+ *       JDK's periodic future.</li>
  * </ul>
  *
  * <p>One-shot scheduling via {@link #schedule(Runnable, long, TimeUnit)} (and the callable
@@ -63,11 +65,11 @@ import org.springframework.util.Assert;
  * <p>The returned {@link ScheduledFuture} tracks the chain: {@link ScheduledFuture#cancel(boolean)} stops all
  * future runs and optionally interrupts the currently executing run — it returns {@code true}
  * once the chain is stopped, regardless of whether the link that happened to be executing at
- * that moment could be interrupted; {@code get()} reflects the most recently scheduled run,
- * while {@code isDone()} reports the chain's terminal state (cancelled or ended by shutdown).
+ * that moment could be interrupted. {@code isDone()} and {@code get()} both report the chain's
+ * terminal state (cancelled or ended by shutdown); a healthy chain blocks in {@code get()}.
  */
 @Internal
-public class SafeScheduledExecutorService extends ScheduledThreadPoolExecutor {
+public class PeriodicScheduler extends ScheduledThreadPoolExecutor {
 
   /** Chain lifecycle codes; {@link #CANCELLED_BIT} is set by both cancelled states. */
   private static final int ACTIVE = 0;
@@ -76,13 +78,13 @@ public class SafeScheduledExecutorService extends ScheduledThreadPoolExecutor {
   private static final int CANCELLED_INTERRUPT = 3;
   private static final int CANCELLED_BIT = 2;
 
-  /** CAS handle for {@link SafePeriodicTask#state}. */
+  /** CAS handle for {@link PeriodicChain#state}. */
   private static final VarHandle PERIODIC_STATE;
 
   static {
     try {
-      PERIODIC_STATE = MethodHandles.privateLookupIn(SafePeriodicTask.class, MethodHandles.lookup()).findVarHandle(
-        SafePeriodicTask.class,
+      PERIODIC_STATE = MethodHandles.privateLookupIn(PeriodicChain.class, MethodHandles.lookup()).findVarHandle(
+        PeriodicChain.class,
         "state",
         int.class
       );
@@ -97,7 +99,14 @@ public class SafeScheduledExecutorService extends ScheduledThreadPoolExecutor {
    * wrapper, so removal has to go through this registry. Entries are removed when a chain ends
    * (cancellation, shutdown, or replacement by a re-registered command).
    */
-  private final ConcurrentHashMap<Runnable, SafePeriodicTask> chains = new ConcurrentHashMap<>();
+  private final ConcurrentHashMap<Runnable, PeriodicChain> chains = new ConcurrentHashMap<>();
+
+  /**
+   * Set before the registry sweep in {@link #shutdown()} and {@link #shutdownNow()}. A
+   * registration racing shutdown checks it in {@code scheduleLink}, so a chain cannot queue a
+   * link the sweep already missed.
+   */
+  private volatile boolean closing;
 
   /**
    * Creates a safe scheduled executor with the given core pool size and thread factory.
@@ -105,7 +114,7 @@ public class SafeScheduledExecutorService extends ScheduledThreadPoolExecutor {
    * @param corePoolSize  the number of threads to keep in the pool
    * @param threadFactory the factory used when creating new threads
    */
-  public SafeScheduledExecutorService(int corePoolSize, ThreadFactory threadFactory) {
+  public PeriodicScheduler(int corePoolSize, ThreadFactory threadFactory) {
     super(corePoolSize, threadFactory);
     // Cancelled chain links must leave the delay queue immediately. Without this the JDK keeps
     // the cancelled ScheduledFutureTask — and every object the link closes over — queued for its
@@ -120,8 +129,7 @@ public class SafeScheduledExecutorService extends ScheduledThreadPoolExecutor {
    * <p>{@link ScheduledThreadPoolExecutor#schedule} calls this hook before
    * {@code delayedExecute}, so the chain's {@code current} reference is already the queued link
    * when a worker can take it. A link that runs immediately and schedules its successor therefore
-   * cannot be overwritten by the scheduling thread's post-{@code schedule} assignment, and an
-   * external {@code get()} cannot observe the first link before it is installed.
+   * cannot be overwritten by the scheduling thread's post-{@code schedule} assignment.
    *
    * @param runnable the caller's command
    * @param task     the executor's scheduled wrapper
@@ -130,7 +138,7 @@ public class SafeScheduledExecutorService extends ScheduledThreadPoolExecutor {
    */
   @Override
   protected <V> RunnableScheduledFuture<V> decorateTask(Runnable runnable, RunnableScheduledFuture<V> task) {
-    if (runnable instanceof SafePeriodicTask periodic) {
+    if (runnable instanceof PeriodicChain periodic) {
       periodic.current = task;
     }
     return task;
@@ -147,7 +155,7 @@ public class SafeScheduledExecutorService extends ScheduledThreadPoolExecutor {
     // Matches JDK validation. A non-positive period would otherwise produce a busy
     // self-rescheduling loop inside the chain.
     Assert.isTrue(period > 0, "period must be greater than zero");
-    return new SafePeriodicTask(command, unit.toNanos(period)).start(initialDelay, unit);
+    return new PeriodicChain(command, unit.toNanos(period)).start(initialDelay, unit);
   }
 
   @Override
@@ -162,7 +170,7 @@ public class SafeScheduledExecutorService extends ScheduledThreadPoolExecutor {
     // self-rescheduling loop inside the chain.
     Assert.isTrue(delay > 0, "delay must be greater than zero");
     // Negative gap = completion-relative delay; positive = phase-anchored rate.
-    return new SafePeriodicTask(command, -unit.toNanos(delay)).start(initialDelay, unit);
+    return new PeriodicChain(command, -unit.toNanos(delay)).start(initialDelay, unit);
   }
 
   /**
@@ -179,7 +187,7 @@ public class SafeScheduledExecutorService extends ScheduledThreadPoolExecutor {
   @Override
   public boolean remove(Runnable task) {
     if (task != null) {
-      SafePeriodicTask chain = chains.remove(task);
+      PeriodicChain chain = chains.remove(task);
       if (chain != null) {
         return chain.cancel(false);
       }
@@ -203,9 +211,14 @@ public class SafeScheduledExecutorService extends ScheduledThreadPoolExecutor {
    *
    * <p>A run already in progress is allowed to finish (JDK {@code shutdown}
    * semantics); only the next link is cancelled.
+   *
+   * <p>{@link #closing} is set before the registry sweep, so a chain registering
+   * concurrently either lands in the sweep or sees the flag in {@code scheduleLink};
+   * neither path can queue a link that outlives the shutdown.
    */
   @Override
   public void shutdown() {
+    closing = true;
     terminateChains();
     super.shutdown();
   }
@@ -219,6 +232,7 @@ public class SafeScheduledExecutorService extends ScheduledThreadPoolExecutor {
   @Override
   @NonNull
   public List<Runnable> shutdownNow() {
+    closing = true;
     terminateChains();
     return super.shutdownNow();
   }
@@ -229,7 +243,7 @@ public class SafeScheduledExecutorService extends ScheduledThreadPoolExecutor {
    * registry.
    */
   private void terminateChains() {
-    for (SafePeriodicTask chain : chains.values()) {
+    for (PeriodicChain chain : chains.values()) {
       chain.terminate();
     }
     chains.clear();
@@ -256,14 +270,14 @@ public class SafeScheduledExecutorService extends ScheduledThreadPoolExecutor {
   // internals), and `nextRunTimeNanos` is read/written exclusively along the chain's serialized
   // execution path where the schedule() submission establishes the happens-before edge.
   @SuppressWarnings({ "java:S3077", "java:S3078" })
-  private final class SafePeriodicTask implements ScheduledFuture<Void>, Runnable {
+  private final class PeriodicChain implements ScheduledFuture<Void>, Runnable {
 
     private final Runnable command;
     /** Positive = phase-anchored rate; negative = completion-relative delay. */
     private final long gapNanos;
 
     /**
-     * The newest link. {@link SafeScheduledExecutorService#decorateTask} installs it before the
+     * The newest link. {@link PeriodicScheduler#decorateTask} installs it before the
      * executor enqueues the wrapper, and the scheduling thread never assigns it after
      * {@code schedule()} returns; a fast run that schedules its successor therefore cannot be
      * overwritten by the previous link's scheduler.
@@ -289,7 +303,13 @@ public class SafeScheduledExecutorService extends ScheduledThreadPoolExecutor {
     @SuppressWarnings("unused")
     private int state;
 
-    private SafePeriodicTask(Runnable command, long gapNanos) {
+    /**
+     * Released once the chain reaches a terminal state. {@link #get()} waits on it, so
+     * {@code get()} and {@link #isDone()} report the same condition.
+     */
+    private final CountDownLatch terminal = new CountDownLatch(1);
+
+    private PeriodicChain(Runnable command, long gapNanos) {
       this.command = command;
       this.gapNanos = gapNanos;
       // Registration happens before start() by design (the double-registration
@@ -299,7 +319,7 @@ public class SafeScheduledExecutorService extends ScheduledThreadPoolExecutor {
       // between the scheduleLink check and the schedule submission — submits
       // a single link that observes cancelled at run() entry and stops there,
       // so no run ever escapes a cancellation that preceded it.
-      SafePeriodicTask previous = chains.put(command, this);
+      PeriodicChain previous = chains.put(command, this);
       if (previous != null) {
         // The same command was registered twice: the previous chain must stop, otherwise both
         // chains would keep rescheduling the same command indefinitely.
@@ -325,7 +345,7 @@ public class SafeScheduledExecutorService extends ScheduledThreadPoolExecutor {
     }
 
     @Override
-    @SuppressWarnings("all")
+    @SuppressWarnings("java:S1181")
     // catching Throwable is deliberate: an Error must not kill the cadence of
     // heartbeats/window-slides/flushes, and the chain link must never leak an exception into the worker loop
     public void run() {
@@ -338,19 +358,8 @@ public class SafeScheduledExecutorService extends ScheduledThreadPoolExecutor {
         // Exception tolerance: the throwable is reported through the injectable handler chain
         // (WARN log by default) and the finally block below keeps the chain alive. The JDK
         // would permanently cancel the task on the first uncaught exception.
-        ZetaExceptionHandler.handleException(
-          "SafeScheduledExecutorService task threw; the next run is still scheduled",
-          t
-        );
+        ZetaExceptionHandler.handleException("PeriodicScheduler task threw; the next run is still scheduled", t);
       } finally {
-        // A task that caught InterruptedException and restored the flag (or one
-        // interrupted by cancel(true)) leaves it on the pooled thread. The JDK
-        // clears the flag only on shutdown, so without this cleanup the next
-        // unrelated task scheduled on this thread fails on its first blocking call.
-        // Kept while shutting down: shutdownNow's interrupt must survive.
-        if (!isShutdown()) {
-          Thread.interrupted();
-        }
         scheduleNext();
       }
     }
@@ -393,7 +402,7 @@ public class SafeScheduledExecutorService extends ScheduledThreadPoolExecutor {
         unregister();
         return;
       }
-      if (isShutdown()) {
+      if (closing || isShutdown()) {
         // The executor refused the chain while it was healthy: terminal end,
         // visible through isDone().
         PERIODIC_STATE.compareAndSet(this, ACTIVE, TERMINATED);
@@ -406,9 +415,8 @@ public class SafeScheduledExecutorService extends ScheduledThreadPoolExecutor {
         schedule(this, delayNanos, TimeUnit.NANOSECONDS);
       } catch (RejectedExecutionException e) {
         // Executor is shutting down; the chain ends terminally. decorateTask has already
-        // installed a wrapper the queue never accepted: cancel it so a get() that raced the
-        // rejection observes a completed link, and leave the reference in place — clearing it
-        // would turn a terminal chain into "never scheduled".
+        // installed a wrapper the queue never accepted: cancel it, and leave the reference in
+        // place so getDelay() does not switch the chain back to "never scheduled".
         PERIODIC_STATE.compareAndSet(this, ACTIVE, TERMINATED);
         ScheduledFuture<?> rejected = current;
         if (rejected != null) {
@@ -417,13 +425,19 @@ public class SafeScheduledExecutorService extends ScheduledThreadPoolExecutor {
         unregister();
         return;
       }
-      // cancel()/terminate() may have raced the assignment above: it cancelled
-      // the OLD link while this new one was being queued. The state code is the
-      // authority — drop the freshly queued link too, or it (and every object
-      // the task closes over) lingers in the delay queue for its full period
-      // before the run() guard discards it.
+      // cancel()/terminate()/shutdown() may have raced the assignment above: they
+      // cancelled the OLD link while this new one was being queued. The state code
+      // and the closing flag are the authority — drop the freshly queued link too,
+      // or it (and every object the task closes over) lingers in the delay queue
+      // for its full period before the run() guard discards it.
       code = stateCode();
-      if (code != ACTIVE) {
+      if (code != ACTIVE || closing) {
+        if (code == ACTIVE) {
+          PERIODIC_STATE.compareAndSet(this, ACTIVE, TERMINATED);
+          // Re-read: a concurrent cancel(true) wins over the shutdown transition
+          // and must keep its interrupt request.
+          code = stateCode();
+        }
         current.cancel(code == CANCELLED_INTERRUPT);
         unregister();
       }
@@ -464,11 +478,13 @@ public class SafeScheduledExecutorService extends ScheduledThreadPoolExecutor {
     }
 
     /**
-     * Removes this chain from the registry. Safe to call multiple times — a chain that already
+     * Removes this chain from the registry. Every terminal path funnels through here, so this
+     * also releases {@link #get()}. Safe to call multiple times — a chain that already
      * deregistered is a no-op.
      */
     private void unregister() {
       chains.remove(command, this);
+      terminal.countDown();
     }
 
     @Override
@@ -501,41 +517,20 @@ public class SafeScheduledExecutorService extends ScheduledThreadPoolExecutor {
     }
 
     @Override
-    public Void get() throws InterruptedException, ExecutionException {
-      ScheduledFuture<?> link = current;
-      if (link != null) {
-        try {
-          link.get();
-        } catch (CancellationException e) {
-          // The link was cancelled because the chain stopped, not because a caller
-          // cancelled the chain: a shutdown-terminated chain is done, not cancelled.
-          if (!isCancelled()) {
-            return null;
-          }
-          throw e;
-        }
-      }
+    public Void get() throws InterruptedException {
+      terminal.await();
       return settled();
     }
 
     @Override
-    public Void get(long timeout, @NonNull TimeUnit unit)
-      throws InterruptedException, ExecutionException, TimeoutException {
-      ScheduledFuture<?> link = current;
-      if (link != null) {
-        try {
-          link.get(timeout, unit);
-        } catch (CancellationException e) {
-          if (!isCancelled()) {
-            return null;
-          }
-          throw e;
-        }
+    public Void get(long timeout, @NonNull TimeUnit unit) throws InterruptedException, TimeoutException {
+      if (!terminal.await(timeout, unit)) {
+        throw new TimeoutException("periodic task did not terminate within the timeout");
       }
       return settled();
     }
 
-    /** The chain's post-link result: {@code null}, or the cancellation the {@code Future} contract requires. */
+    /** The chain's post-terminal result: {@code null}, or the cancellation the {@code Future} contract requires. */
     private Void settled() {
       if (isCancelled()) {
         throw new CancellationException("periodic task was cancelled");

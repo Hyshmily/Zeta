@@ -23,7 +23,7 @@ import org.springframework.util.Assert;
 
 /**
  * A {@link LinkedTransferQueue} whose {@link #offer(Runnable)} method cooperates with
- * {@link StandardThreadExecutor} to implement Tomcat-style core → max → queue → reject ordering.
+ * {@link ElasticThreadPool} to implement Tomcat-style core → max → queue → reject ordering.
  *
  * <p>The key insight is that returning {@code false} from {@code offer()} causes
  * {@link java.util.concurrent.ThreadPoolExecutor} to create a new thread (up to maxPoolSize),
@@ -47,23 +47,23 @@ import org.springframework.util.Assert;
  * maximum is read from the owning executor on each decision, so a runtime
  * {@code setMaximumPoolSize} is observed without a mirror field to keep in sync.
  *
- * <p>The queue must be attached to a {@link StandardThreadExecutor} before use: {@link #offer}
+ * <p>The queue must be attached to a {@link ElasticThreadPool} before use: {@link #offer}
  * dereferences the attached executor and fails without one, and {@link #force} declines
  * ({@code false}). The queue is single-use: it attaches to exactly one executor and cannot be
  * re-attached.
  *
  * <p>Unlike a standard {@link java.util.concurrent.LinkedBlockingQueue}, this queue has no
  * capacity limit — the upper bound on in-flight tasks is enforced by
- * {@link StandardThreadExecutor#maxSubmittedTaskCount}.
+ * {@link ElasticThreadPool#maxSubmittedTaskCount}.
  */
 @Internal
-public class StandardExecutorQueue extends LinkedTransferQueue<Runnable> {
+public class ElasticTaskQueue extends LinkedTransferQueue<Runnable> {
 
   /**
    * Owning executor. Written once during construction, before the executor is published, so
    * every later {@link #offer} sees it without a volatile read.
    */
-  private StandardThreadExecutor executor;
+  private ElasticThreadPool executor;
 
   /**
    * Attaches this queue to its executor. The queue is single-use: a second attach — even
@@ -73,11 +73,11 @@ public class StandardExecutorQueue extends LinkedTransferQueue<Runnable> {
    * @throws NullPointerException  if {@code executor} is {@code null}
    * @throws IllegalStateException if the queue is already attached to an executor
    */
-  public synchronized void setStandardThreadExecutor(StandardThreadExecutor executor) {
+  public synchronized void attach(ElasticThreadPool executor) {
     Objects.requireNonNull(executor, "executor must not be null");
     Assert.state(
       this.executor == null,
-      "StandardExecutorQueue is already attached to " + this.executor + "; queues are single-use"
+      "ElasticTaskQueue is already attached to " + this.executor + "; queues are single-use"
     );
     this.executor = executor;
   }
@@ -111,7 +111,7 @@ public class StandardExecutorQueue extends LinkedTransferQueue<Runnable> {
    */
   public boolean force(@NonNull Runnable task) {
     synchronized (lifecycleLock) {
-      StandardThreadExecutor owner = executor;
+      ElasticThreadPool owner = executor;
       return owner != null && !owner.isShutdown() && super.offer(task);
     }
   }
@@ -119,12 +119,12 @@ public class StandardExecutorQueue extends LinkedTransferQueue<Runnable> {
   /**
    * Tomcat-style queue-or-force-thread decision. Requires an attached executor —
    * the executor's {@code submittedTasksCount} and pool size drive the decision (see
-   * class Javadoc); a queue used without {@link #setStandardThreadExecutor} fails with
+   * class Javadoc); a queue used without {@link #attach} fails with
    * a {@link NullPointerException} on the missing executor reference.
    */
   @Override
   public boolean offer(@NonNull Runnable task) {
-    StandardThreadExecutor owner = executor;
+    ElasticThreadPool owner = executor;
     int submitted = owner.getSubmittedTasksCount();
     // ThreadPoolExecutor.execute reaches workQueue.offer only when workerCount is already at
     // least corePoolSize, so fewer outstanding tasks than core threads means an idle core

@@ -117,7 +117,7 @@ public final class TimeSource {
    * the lifecycle and read fallback described in the class doc. Reached through
    * {@link #registerLifecycleUser()} and from the production stamp clock.
    */
-  @SuppressWarnings("all")
+  @SuppressWarnings("java:S1181")
   public static synchronized void start() {
     // clockThread != null also covers the 1s backoff: the dying ticker still owns the
     // slot and will re-arm itself, so starting a second thread here would only force
@@ -125,104 +125,116 @@ public final class TimeSource {
     if (currentMillis > 0L || clockThread != null) {
       return;
     }
-    // Refresh the cache synchronously BEFORE the running sign can be observed:
-    // between this assignment and the new thread's first update, readers take
-    // the cached branch and would otherwise see a value as old as the
-    // class-load initialiser (first start) or the dying thread's last tick
-    // plus the 1s restart backoff.
-    publishRunning();
     if (++startAttempts == 1) {
       log.info("TimeSource clock-cache thread starting");
     } else {
       log.info("TimeSource clock-cache thread restarted (attempt #{})", startAttempts);
     }
-    Thread ticker = new ZetaThreadFactory("TimeSource").newThread(() -> {
-      long lastTickNanos = System.nanoTime();
-      while (clockThread == Thread.currentThread()) {
-        long cached = currentMillis;
-        if (cached <= 0L) {
-          // stopTicker() or the test hook encoded the stopped state.
-          return;
-        }
-        // Wall clock first: elapsedMs then covers everything the wall reading could have
-        // missed, so a pause between the two reads inflates both sides equally and cannot
-        // turn a real tick into a rejected leap.
-        long wallNow = System.currentTimeMillis();
-        long nowNanos = System.nanoTime();
-        long elapsedMs = Math.max(0L, (nowNanos - lastTickNanos) / 1_000_000L);
-        // Advance by the whole milliseconds actually accounted for, keeping
-        // the sub-millisecond remainder for the next tick: resetting to
-        // nowNanos would discard up to 0.9ms per 5ms tick and under-measure
-        // elapsed time (and thus the slew step).
-        lastTickNanos += elapsedMs * 1_000_000L;
-        long offset = wallOffsetMs;
-        // Monotonic floor: a backward NTP step must never make the cached
-        // wall clock jump backwards. Consumers compute deltas like
-        // hardExpireAt - now against this source; a backwards step would
-        // render those negative (early expiry). Clamping to the last observed
-        // value keeps the cached clock monotonic; it catches up naturally once
-        // the wall clock moves past the floor.
-        long cachedWall = cached - offset;
-        if (wallNow > cachedWall) {
-          long delta = wallNow - cachedWall;
-          // Adopt a normal tick or a pause whose growth the ticker observed;
-          // slew anything that leaps beyond the elapsed real time.
-          long plausible = MAX_FORWARD_JUMP_MS + elapsedMs;
-          long next;
-          if (delta <= plausible) {
-            next = wallNow + offset;
-          } else {
-            // Catch-up slew at twice real time, capped at the wall clock. A real step
-            // (VM resume, a first NTP correction) is recovered in about the time it
-            // jumped, while a bogus leap that NTP reverts within seconds leaves only
-            // seconds of overhang. elapsedMs (not TICK_MS) keeps sub-millisecond
-            // remainders from being counted twice.
-            long slewMs = Math.max(1L, elapsedMs) * 2L;
-            next = Math.min(wallNow + offset, cached + slewMs);
-            log.debug(
-              "Rejected forward wall-clock leap of {}ms (max plausible {}ms); slewing the cached clock at twice real time",
-              delta,
-              plausible
-            );
-          }
-          // CAS, not a plain write: stopTicker() may have encoded the stopped
-          // state between the read above and this line, and a plain write would
-          // resurrect the running sign.
-          CURRENT_MILLIS.compareAndSet(cached, next);
-        }
-        try {
-          Thread.sleep(TICK_MS);
-        } catch (InterruptedException ignored) {
-          if (currentMillis <= 0L || clockThread != Thread.currentThread()) {
-            // Explicit stopTicker(), or this ticker was replaced before the interrupt arrived.
-            // Either way it no longer owns the slot and must not enter the backoff.
-            return;
-          }
-          // An unexpected interrupt must not degrade every read to a native call
-          // forever, and it must not cost an OS thread either: the ticker is still
-          // alive, so park for the backoff and re-arm it in place.
-          if (!resumeAfterBackoff()) {
-            return;
-          }
-          // The backoff is not clock progress: restart the elapsed-time anchor so the
-          // next tick does not adopt a 1s leap.
-          lastTickNanos = System.nanoTime();
-        }
-      }
-    });
-    ticker.setUncaughtExceptionHandler((thread, failure) -> {
-      log.error("TimeSource thread terminated unexpectedly, will restart after 1s.", failure);
-      restartWithBackoff();
-    });
-    clockThread = ticker;
     try {
+      Thread ticker = new ZetaThreadFactory("TimeSource").newThread(TimeSource::runTicker);
+      ticker.setUncaughtExceptionHandler((thread, failure) -> {
+        log.error("TimeSource thread terminated unexpectedly, will restart after 1s.", failure);
+        restartWithBackoff();
+      });
+      clockThread = ticker;
+      // Refresh the cache synchronously BEFORE the running sign can be observed:
+      // between this assignment and the new thread's first update, readers take
+      // the cached branch and would otherwise see a value as old as the
+      // class-load initialiser (first start) or the dying thread's last tick
+      // plus the 1s restart backoff.
+      publishRunning();
       ticker.start();
     } catch (Throwable e) {
-      // A thread that never started must not leave the running sign and a dead slot
-      // behind: start()'s guard would treat the ticker as installed forever.
+      // A ticker that was never installed must not leave the running sign and a dead
+      // slot behind: start()'s guard would treat it as installed and every read would
+      // return the frozen cached value.
       clockThread = null;
       publishStopped();
       throw e;
+    }
+  }
+
+  /**
+   * The ticker loop: one cached-clock tick every {@link #TICK_MS}, with the
+   * monotonic floor and bounded forward slewing described in {@link #start()}.
+   * An unexpected interrupt re-arms the same thread after the restart backoff
+   * instead of destroying it.
+   */
+  private static void runTicker() {
+    long lastTickNanos = System.nanoTime();
+    while (clockThread == Thread.currentThread()) {
+      long cached = currentMillis;
+      if (cached <= 0L) {
+        // stopTicker() or the test hook encoded the stopped state.
+        return;
+      }
+      // Wall clock first: elapsedMs then covers everything the wall reading could have
+      // missed, so a pause between the two reads inflates both sides equally and cannot
+      // turn a real tick into a rejected leap.
+      long wallNow = System.currentTimeMillis();
+      long nowNanos = System.nanoTime();
+      long elapsedMs = Math.max(0L, (nowNanos - lastTickNanos) / 1_000_000L);
+      // Advance by the whole milliseconds actually accounted for, keeping
+      // the sub-millisecond remainder for the next tick: resetting to
+      // nowNanos would discard up to 0.9ms per 5ms tick and under-measure
+      // elapsed time (and thus the slew step).
+      lastTickNanos += elapsedMs * 1_000_000L;
+      long offset = wallOffsetMs;
+      // Monotonic floor: a backward NTP step must never make the cached
+      // wall clock jump backwards. Consumers compute deltas like
+      // hardExpireAt - now against this source; a backwards step would
+      // render those negative (early expiry). Clamping to the last observed
+      // value keeps the cached clock monotonic; it catches up naturally once
+      // the wall clock moves past the floor.
+      long cachedWall = cached - offset;
+      if (wallNow > cachedWall) {
+        long delta = wallNow - cachedWall;
+        // Adopt a normal tick or a pause whose growth the ticker observed;
+        // slew anything that leaps beyond the elapsed real time.
+        long plausible = MAX_FORWARD_JUMP_MS + elapsedMs;
+        long next;
+        if (delta <= plausible) {
+          next = wallNow + offset;
+        } else {
+          // Catch-up slew at twice real time, capped at the wall clock. A real step
+          // (VM resume, a first NTP correction) is recovered in about the time it
+          // jumped, while a bogus leap that NTP reverts within seconds leaves only
+          // seconds of overhang. elapsedMs (not TICK_MS) keeps sub-millisecond
+          // remainders from being counted twice.
+          long slewMs = Math.max(1L, elapsedMs) * 2L;
+          next = Math.min(wallNow + offset, cached + slewMs);
+          log.debug(
+            "Rejected forward wall-clock leap of {}ms (max plausible {}ms); slewing the cached clock at twice real time",
+            delta,
+            plausible
+          );
+        }
+        // The running state must stay positive: a synthetic negative offset can otherwise
+        // publish the stopped encoding and make this ticker exit on its next iteration.
+        next = Math.max(1L, next);
+        // CAS, not a plain write: stopTicker() may have encoded the stopped
+        // state between the read above and this line, and a plain write would
+        // resurrect the running sign.
+        CURRENT_MILLIS.compareAndSet(cached, next);
+      }
+      try {
+        Thread.sleep(TICK_MS);
+      } catch (InterruptedException ignored) {
+        if (currentMillis <= 0L || clockThread != Thread.currentThread()) {
+          // Explicit stopTicker(), or this ticker was replaced before the interrupt arrived.
+          // Either way it no longer owns the slot and must not enter the backoff.
+          return;
+        }
+        // An unexpected interrupt must not degrade every read to a native call
+        // forever, and it must not cost an OS thread either: the ticker is still
+        // alive, so park for the backoff and re-arm it in place.
+        if (!resumeAfterBackoff()) {
+          return;
+        }
+        // The backoff is not clock progress: restart the elapsed-time anchor so the
+        // next tick does not adopt a 1s leap.
+        lastTickNanos = System.nanoTime();
+      }
     }
   }
 
@@ -233,7 +245,7 @@ public final class TimeSource {
    * {@code start()} sees the installed thread and leaves the re-arm to this thread, while a
    * concurrent {@link #stopTicker()} clears ownership and makes the final check a no-op.
    */
-  @SuppressWarnings("all")
+  @SuppressWarnings({ "java:S2142", "java:S899" })
   private static void restartWithBackoff() {
     if (!markStopped()) {
       // This ticker was superseded by stopTicker()/start() before it could claim the slot:
@@ -322,16 +334,16 @@ public final class TimeSource {
    * monotonic floor and the wall clock, shifted by the test offset. Callers hold
    * the class monitor, which is what orders these sign transitions.
    */
-  @SuppressWarnings("all")
   private static void publishRunning() {
-    currentMillis = Math.max(rawFloor(currentMillis), System.currentTimeMillis()) + wallOffsetMs;
+    // The positive sign is the running flag; clamp so a synthetic negative offset cannot publish
+    // the stopped encoding and leave the freshly started ticker without a running clock.
+    currentMillis = Math.max(1L, Math.max(rawFloor(currentMillis), System.currentTimeMillis()) + wallOffsetMs);
   }
 
   /**
    * Publishes the stopped state: the sign bit is set and the raw monotonic floor
    * preserved, so readers fall back to the wall clock until the ticker resumes.
    */
-  @SuppressWarnings("all")
   private static void publishStopped() {
     currentMillis = ~rawFloor(currentMillis);
   }

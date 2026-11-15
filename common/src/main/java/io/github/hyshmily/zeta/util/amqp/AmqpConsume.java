@@ -20,6 +20,7 @@ import io.github.hyshmily.zeta.util.Internal;
 import java.io.IOException;
 import org.slf4j.Logger;
 import org.springframework.amqp.core.Message;
+import org.springframework.amqp.core.MessageProperties;
 
 /**
  * The shared AMQP consume envelope of the sync and worker listeners: run the
@@ -27,12 +28,10 @@ import org.springframework.amqp.core.Message;
  * ERROR and nack with {@code requeue=false} so a poison message cannot loop —
  * the next application-level write re-sends the operation.
  *
- * <p><b>Ack outside the processing try.</b> RabbitMQ's basicAck can also fail
- * (IOException, or a RuntimeException such as AlreadyClosedException when the
- * channel is gone); keeping it inside the try meant an ack failure on an
- * already-processed message was logged as a processing failure and then
- * followed by basicNack on the same broken channel. An ack failure propagates
- * to the container, which owns channel recovery.
+ * <p>The ack runs outside the processing try: an ack failure on an
+ * already-processed delivery propagates to the container, which owns channel
+ * recovery, rather than being reported as a processing failure and followed by
+ * a nack on the same broken channel (design decisions: failure behaviour).
  */
 @Internal
 public final class AmqpConsume {
@@ -43,8 +42,10 @@ public final class AmqpConsume {
    * Run {@code body} for one delivery, then ack it. On a processing failure:
    * one ERROR with the truncated body, then nack ({@code requeue=false}) — no
    * ack for that delivery. An {@link Error} is nacked and then rethrown: an
-   * escaping error would leave the delivery unsettled, and RabbitMQ would
-   * redeliver the same poison message after the channel recovers.
+   * escaping error would otherwise leave the delivery unsettled and RabbitMQ
+   * would redeliver the same poison message after the channel recovers. A nack
+   * that fails while that Error propagates is attached as suppressed, so the
+   * channel failure never replaces the original Error.
    *
    * @param channel       the AMQP channel used for ack/nack
    * @param msg           the raw AMQP message (delivery tag + body)
@@ -53,17 +54,19 @@ public final class AmqpConsume {
    *                      "Worker message")
    * @param body          the plane's processing body; a failure is reported and
    *                      nacked, and an {@link Error} is rethrown after the nack
-   * @throws IOException when the final ack (or the failure nack) itself fails
-   *                     (propagates to the container)
+   * @throws IOException when the final ack, or the nack of a non-Error failure,
+   *                     itself fails (propagates to the container)
    */
-  public static void ackOrNack(
-    Channel channel,
-    Message msg,
-    Logger log,
-    String failurePrefix,
-    Runnable body
-  ) throws IOException {
-    long tag = msg.getMessageProperties().getDeliveryTag();
+  public static void ackOrNack(Channel channel, Message msg, Logger log, String failurePrefix, Runnable body)
+    throws IOException {
+    // Without properties there is no delivery tag to ack or nack; drop the malformed delivery
+    // at the one boundary that owns the envelope.
+    MessageProperties props = msg.getMessageProperties();
+    if (props == null) {
+      log.error("{} message has no properties; dropping it without ack", failurePrefix);
+      return;
+    }
+    long tag = props.getDeliveryTag();
     try {
       body.run();
     } catch (Throwable t) {
@@ -74,10 +77,15 @@ public final class AmqpConsume {
         AmqpMessageReader.abbreviateBody(msg.getBody(), 256),
         t
       );
-      channel.basicNack(tag, false, false);
       if (t instanceof Error error) {
+        try {
+          channel.basicNack(tag, false, false);
+        } catch (Throwable nackFailure) {
+          error.addSuppressed(nackFailure);
+        }
         throw error;
       }
+      channel.basicNack(tag, false, false);
       return;
     }
     channel.basicAck(tag, false);

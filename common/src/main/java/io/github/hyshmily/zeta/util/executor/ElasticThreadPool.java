@@ -32,7 +32,7 @@ import org.jspecify.annotations.NonNull;
  * resources (network, disk) should not prevent new threads from being created. The JDK default
  * favours CPU-bound workloads where queuing is preferred over creating more threads.
  *
- * <p>The executor uses a {@link StandardExecutorQueue} (backed by {@link java.util.concurrent.LinkedTransferQueue})
+ * <p>The executor uses a {@link ElasticTaskQueue} (backed by {@link java.util.concurrent.LinkedTransferQueue})
  * whose {@code offer()} method cooperates with this executor's thread-add tracking to implement the
  * Tomcat-style policy. A {@code submittedTasksCount} counter limits the total number of in-flight
  * tasks (queued + active) to {@code queueCapacity + maxThreads}.
@@ -40,7 +40,7 @@ import org.jspecify.annotations.NonNull;
  * <p><b>Execution order comparison:</b>
  * <pre>
  *   ThreadPoolExecutor:       coreThread → queue → maxThread → reject  (CPU-bound)
- *   StandardThreadExecutor:   coreThread → maxThread → queue → reject  (I/O-bound)
+ *   ElasticThreadPool:   coreThread → maxThread → queue → reject  (I/O-bound)
  * </pre>
  *
  * <p><b>Rejection accounting.</b> The counter is incremented per submission and decremented in
@@ -61,7 +61,7 @@ import org.jspecify.annotations.NonNull;
  * calling {@code getQueue().poll()} directly.
  */
 @Internal
-public class StandardThreadExecutor extends ThreadPoolExecutor {
+public class ElasticThreadPool extends ThreadPoolExecutor {
 
   /**
    * Records a task removed by {@link #remove(Runnable)} while the pool is shutting down.
@@ -99,7 +99,7 @@ public class StandardThreadExecutor extends ThreadPoolExecutor {
   private volatile int maxSubmittedTaskCount;
 
   /**
-   * Creates a new {@code StandardThreadExecutor}.
+   * Creates a new {@code ElasticThreadPool}.
    *
    * @param coreThreads    the number of core threads
    * @param maxThreads     the maximum number of threads
@@ -109,7 +109,7 @@ public class StandardThreadExecutor extends ThreadPoolExecutor {
    * @param threadFactory  the factory to create new threads
    * @param handler        the handler to use when execution is rejected
    */
-  public StandardThreadExecutor(
+  public ElasticThreadPool(
     int coreThreads,
     int maxThreads,
     long keepAliveTime,
@@ -118,8 +118,8 @@ public class StandardThreadExecutor extends ThreadPoolExecutor {
     ThreadFactory threadFactory,
     RejectedExecutionHandler handler
   ) {
-    super(coreThreads, maxThreads, keepAliveTime, unit, new StandardExecutorQueue(), threadFactory, handler);
-    ((StandardExecutorQueue) getQueue()).setStandardThreadExecutor(this);
+    super(coreThreads, maxThreads, keepAliveTime, unit, new ElasticTaskQueue(), threadFactory, handler);
+    ((ElasticTaskQueue) getQueue()).attach(this);
     this.userHandler = handler;
     this.queueCapacity = queueCapacity;
     this.maxSubmittedTaskCount = computeMaxSubmitted(queueCapacity, maxThreads);
@@ -238,7 +238,7 @@ public class StandardThreadExecutor extends ThreadPoolExecutor {
       // Report task failures through the injectable exception-handler chain (WARN log by
       // default). The throwable is reported, then dropped; retiring a worker thread that
       // escaped a task remains the ThreadPoolExecutor's own responsibility.
-      ZetaExceptionHandler.handleException("StandardThreadExecutor task failed", failure);
+      ZetaExceptionHandler.handleException("ElasticThreadPool task failed", failure);
     }
   }
 
@@ -257,7 +257,7 @@ public class StandardThreadExecutor extends ThreadPoolExecutor {
   @NonNull
   public List<Runnable> shutdownNow() {
     List<Runnable> drained;
-    synchronized (((StandardExecutorQueue) getQueue()).lifecycleLock()) {
+    synchronized (((ElasticTaskQueue) getQueue()).lifecycleLock()) {
       drained = super.shutdownNow();
     }
     submittedTasksCount.addAndGet(-drained.size());
@@ -323,7 +323,7 @@ public class StandardThreadExecutor extends ThreadPoolExecutor {
 
     @Override
     public void rejectedExecution(Runnable task, ThreadPoolExecutor pool) {
-      var queue = (StandardExecutorQueue) pool.getQueue();
+      var queue = (ElasticTaskQueue) pool.getQueue();
       if (queue.force(task)) {
         return;
       }

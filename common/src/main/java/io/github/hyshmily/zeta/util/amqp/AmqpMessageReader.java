@@ -149,20 +149,15 @@ public final class AmqpMessageReader {
    * Shared-broker appName isolation (design decisions: sync messages): the sync plane is a
    * fanout whose exchange name is a global constant, so on a shared broker every bound queue
    * receives every application's sync messages. The decision plane routes by
-   * {@code send.<appName>} and does not need this filter for delivery — it applies the same
-   * check as its own boundary. The predicate itself lives in {@link #isForeign}.
+   * {@code send.<appName>} and applies the same check as its own boundary.
    *
-   * <p>The filter owns the drop counter, the last-observed foreign sender, the
-   * DEBUG log line, and the drop-and-log tail
-   * ({@link #dropIfForeign}) — the two planes pass their own label, so a dropped
-   * decision and a dropped sync message stay distinguishable without forking the
-   * wording. Each listener keeps its own delegating
-   * {@code foreignAppDrops()} / {@code lastForeignApp()} accessors so the
-   * Actuator surface is unchanged.
+   * <p>The filter owns the drop counter, the last-observed foreign sender, the DEBUG line and
+   * the drop-and-log tail; the two planes pass their own label so a dropped decision and a
+   * dropped sync message stay distinguishable. Each listener keeps its delegating
+   * {@code foreignAppDrops()} / {@code lastForeignApp()} accessors for the Actuator surface.
    *
-   * <p>Thread safety: all state is an immutable field, an {@link AtomicLong} or
-   * a volatile reference — safe for concurrent AMQP consumer threads with no
-   * locking.
+   * <p>Thread-safe: the state is an immutable field, an {@link AtomicLong} and a volatile
+   * reference.
    */
   @Internal
   public static final class AppIsolationFilter {
@@ -211,7 +206,11 @@ public final class AmqpMessageReader {
      * @return {@code true} when the message was foreign and has been counted and logged
      */
     public boolean dropIfForeign(Message msg, Logger log, String planeLabel) {
-      String senderApp = readStringHeader(msg.getMessageProperties(), HEADER_APP_NAME);
+      MessageProperties props = msg.getMessageProperties();
+      if (props == null) {
+        return false;
+      }
+      String senderApp = readStringHeader(props, HEADER_APP_NAME);
       if (!isForeign(senderApp)) {
         return false;
       }

@@ -56,6 +56,29 @@ class TimeSourceTest {
     assertThat(TimeSource.currentTimeMillis()).isPositive();
   }
 
+  /**
+   * A synthetic negative offset must not publish the stopped encoding: the ticker would exit and
+   * the running state would silently become a wall-clock fallback for the rest of the JVM.
+   */
+  @Test
+  void start_withALargeNegativeOffset_keepsTheRunningStatePositive() throws Exception {
+    Field currentField = TimeSource.class.getDeclaredField("currentMillis");
+    currentField.setAccessible(true);
+    currentField.setLong(null, ~System.currentTimeMillis());
+    Field threadField = TimeSource.class.getDeclaredField("clockThread");
+    threadField.setAccessible(true);
+    threadField.set(null, null);
+
+    try {
+      TimeSource.setTimeOffsetForTest(-(System.currentTimeMillis() + 10_000L), 0L);
+      TimeSource.start();
+
+      assertThat(TimeSource.currentTimeMillis()).isPositive();
+    } finally {
+      TimeSource.setTimeOffsetForTest(0L, 0L);
+    }
+  }
+
   @Test
   void currentTimeMillis_shouldBeCloseToSystemTime() {
     TimeSource.start();

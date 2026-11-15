@@ -141,7 +141,7 @@ public final class InterruptingAsync {
     }
 
     @Override
-    @SuppressWarnings("all")
+    @SuppressWarnings({ "unchecked", "java:S1181" })
     public void run() {
       Supplier<? extends T> supplier;
       synchronized (this) {

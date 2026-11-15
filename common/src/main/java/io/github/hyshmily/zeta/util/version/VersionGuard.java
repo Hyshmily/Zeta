@@ -88,6 +88,9 @@ public final class VersionGuard {
    * <p>Decision logic:
    * <ol>
    * <li>No existing entry → accept (return false)</li>
+   *   <li><b>Missing or blank nodeId on either side → accept.</b> Two anonymous
+   *       decisions are not provably from the same Worker; their epoch and
+   *       decisionVersion counters are node-local and not comparable.</li>
    *   <li><b>Different nodeId → accept unconditionally.</b> Both the epoch
    *       (a per-Worker restart counter seeded from that Worker's own wall
    *       clock at boot) and the decisionVersion (a per-Worker counter starting
@@ -107,6 +110,7 @@ public final class VersionGuard {
    * @return true if the incoming message should be skipped, false if it should be applied
    */
   public static boolean shouldSkipForWorker(CacheEntry existing, DecisionStamp incoming) {
+    Objects.requireNonNull(incoming, "incoming must not be null");
     return shouldSkipDecision(existing == null ? null : existing.decision(), incoming, false);
   }
 
@@ -119,6 +123,7 @@ public final class VersionGuard {
    * @return true if the incoming COOL should be skipped
    */
   public static boolean shouldSkipForWorker(@Nullable DecisionStamp resident, DecisionStamp incoming) {
+    Objects.requireNonNull(incoming, "incoming must not be null");
     return shouldSkipDecision(resident, incoming, false);
   }
 
@@ -138,6 +143,7 @@ public final class VersionGuard {
    * @return true if the incoming HOT decision should be skipped
    */
   public static boolean shouldSkipForHot(CacheEntry existing, DecisionStamp incoming) {
+    Objects.requireNonNull(incoming, "incoming must not be null");
     return shouldSkipDecision(
       existing == null ? null : existing.decision(),
       incoming,
@@ -150,9 +156,21 @@ public final class VersionGuard {
     DecisionStamp incoming,
     boolean equalApplies
   ) {
-    if (resident == null || !Objects.equals(incoming.decisionNodeId(), resident.decisionNodeId())) {
-      // No resident decision, or a different Worker node: epoch and version are
-      // node-local, so arrival order is the only sound comparison.
+    if (resident == null) {
+      return false;
+    }
+    String residentNode = resident.decisionNodeId();
+    String incomingNode = incoming.decisionNodeId();
+    // A missing or blank node id is not an identity: two anonymous messages may come from
+    // different Workers, and their epoch/version counters are not comparable. Arrival order is the
+    // only sound tie-break, exactly as for two different named nodes.
+    if (
+      residentNode == null ||
+      residentNode.isBlank() ||
+      incomingNode == null ||
+      incomingNode.isBlank() ||
+      !residentNode.equals(incomingNode)
+    ) {
       return false;
     }
 

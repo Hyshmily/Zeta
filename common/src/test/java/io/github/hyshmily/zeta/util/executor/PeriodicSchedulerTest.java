@@ -25,17 +25,18 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 
 /**
- * Tests for {@link SafeScheduledExecutorService}.
+ * Tests for {@link PeriodicScheduler}.
  */
-class SafeScheduledExecutorServiceTest {
+class PeriodicSchedulerTest {
 
-  private SafeScheduledExecutorService newExecutor() {
-    var executor = new SafeScheduledExecutorService(2, r -> {
+  private PeriodicScheduler newExecutor() {
+    var executor = new PeriodicScheduler(2, r -> {
       Thread t = new Thread(r, "test-safe-scheduler");
       t.setDaemon(true);
       return t;
@@ -300,9 +301,62 @@ class SafeScheduledExecutorServiceTest {
     }
   }
 
+  /**
+   * {@code get()} and {@code isDone()} must report the same condition; a healthy
+   * chain has no per-run result, so a timed get waits until the terminal state.
+   */
+  @Test
+  void get_shouldBlockUntilTheChainTerminates() throws Exception {
+    var executor = newExecutor();
+    var future = executor.scheduleAtFixedRate(() -> {}, 0, TimeUnit.HOURS.toMillis(1), TimeUnit.MILLISECONDS);
+    try {
+      assertThatThrownBy(() -> future.get(50, TimeUnit.MILLISECONDS)).isInstanceOf(TimeoutException.class);
+      assertThat(future.isDone()).isFalse();
+
+      executor.shutdown();
+
+      assertThat(future.get(1, TimeUnit.SECONDS)).isNull();
+      assertThat(future.isDone()).isTrue();
+    } finally {
+      executor.shutdownNow();
+    }
+  }
+
+  /**
+   * A cancellation settles the chain immediately even while the command is still
+   * running, matching {@code Future.cancel} semantics.
+   */
+  @Test
+  void get_afterCancel_shouldThrowWhileTheRunIsStillExecuting() throws Exception {
+    var executor = newExecutor();
+    var started = new CountDownLatch(1);
+    var release = new CountDownLatch(1);
+    var future = executor.scheduleAtFixedRate(
+      () -> {
+        started.countDown();
+        try {
+          release.await();
+        } catch (InterruptedException e) {
+          Thread.currentThread().interrupt();
+        }
+      },
+      0,
+      TimeUnit.HOURS.toMillis(1),
+      TimeUnit.MILLISECONDS
+    );
+    try {
+      assertThat(started.await(5, TimeUnit.SECONDS)).isTrue();
+      assertThat(future.cancel(false)).isTrue();
+      assertThatThrownBy(future::get).isInstanceOf(CancellationException.class);
+    } finally {
+      release.countDown();
+      executor.shutdownNow();
+    }
+  }
+
   @Test
   void constructor_shouldBeUsable() {
-    var b = new SafeScheduledExecutorService(1, r -> new Thread(r));
+    var b = new PeriodicScheduler(1, r -> new Thread(r));
     assertThat(b.getPoolSize()).isEqualTo(0);
     b.shutdownNow();
   }

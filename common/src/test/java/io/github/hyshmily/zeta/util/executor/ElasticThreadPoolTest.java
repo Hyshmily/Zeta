@@ -28,22 +28,22 @@ import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
 
 /**
- * Tests for {@link StandardThreadExecutor}.
+ * Tests for {@link ElasticThreadPool}.
  *
  * <p>Verifies the Tomcat-style execution ordering (core → max → queue → reject),
- * the {@code submittedTasksCount} accounting, the {@link StandardExecutorQueue#force}
+ * the {@code submittedTasksCount} accounting, the {@link ElasticTaskQueue#force}
  * fallback, and the rejection path.
  */
-class StandardThreadExecutorTest {
+class ElasticThreadPoolTest {
 
-  private StandardThreadExecutor newExecutor(int core, int max, int queueCapacity) {
+  private ElasticThreadPool newExecutor(int core, int max, int queueCapacity) {
     return newExecutor(core, max, queueCapacity, (r, e) -> {
       throw new RejectedExecutionException("Test rejection");
     });
   }
 
-  private StandardThreadExecutor newExecutor(int core, int max, int queueCapacity, RejectedExecutionHandler handler) {
-    return new StandardThreadExecutor(
+  private ElasticThreadPool newExecutor(int core, int max, int queueCapacity, RejectedExecutionHandler handler) {
+    return new ElasticThreadPool(
       core,
       max,
       60L,
@@ -234,7 +234,7 @@ class StandardThreadExecutorTest {
    * @param executor the pool under test
    * @return true if the counter reached zero within the timeout
    */
-  private static boolean awaitSubmittedCountZero(StandardThreadExecutor executor) throws InterruptedException {
+  private static boolean awaitSubmittedCountZero(ElasticThreadPool executor) throws InterruptedException {
     long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
     while (System.nanoTime() < deadline) {
       if (executor.getSubmittedTasksCount() == 0) {
@@ -248,7 +248,7 @@ class StandardThreadExecutorTest {
   @Test
   void force_afterShutdown_shouldReturnFalse() throws Exception {
     var executor = newExecutor(1, 2, 10);
-    StandardExecutorQueue queue = (StandardExecutorQueue) executor.getQueue();
+    ElasticTaskQueue queue = (ElasticTaskQueue) executor.getQueue();
     executor.shutdownNow();
     assertThat(queue.force(() -> {})).isFalse();
   }
@@ -269,7 +269,7 @@ class StandardThreadExecutorTest {
         Thread.currentThread().interrupt();
       }
     };
-    StandardExecutorQueue queue = (StandardExecutorQueue) executor.getQueue();
+    ElasticTaskQueue queue = (ElasticTaskQueue) executor.getQueue();
     try {
       executor.execute(blocking);
       assertThat(firstStarted.await(5, TimeUnit.SECONDS)).isTrue();
@@ -354,7 +354,7 @@ class StandardThreadExecutorTest {
   @Test
   void purge_shouldCompensateCancelledQueuedFutures() throws Exception {
     // The JDK's purge removes cancellation through the queue iterator, not through
-    // StandardThreadExecutor.remove; without the overridden purge each removed Future leaks one
+    // ElasticThreadPool.remove; without the overridden purge each removed Future leaks one
     // admission slot.
     var executor = newExecutor(1, 1, 100);
     var firstStarted = new CountDownLatch(1);
@@ -399,7 +399,7 @@ class StandardThreadExecutorTest {
         Thread.currentThread().interrupt();
       }
     };
-    StandardExecutorQueue queue = (StandardExecutorQueue) executor.getQueue();
+    ElasticTaskQueue queue = (ElasticTaskQueue) executor.getQueue();
     try {
       executor.execute(blocking);
       assertThat(firstStarted.await(5, TimeUnit.SECONDS)).isTrue();
@@ -510,8 +510,8 @@ class StandardThreadExecutorTest {
   void queue_attachNullExecutor_shouldThrowNpe() {
     // Locks in the attach contract: a null executor is rejected eagerly instead of
     // surfacing later as an NPE from offer().
-    var queue = new StandardExecutorQueue();
-    assertThatThrownBy(() -> queue.setStandardThreadExecutor(null)).isInstanceOf(NullPointerException.class);
+    var queue = new ElasticTaskQueue();
+    assertThatThrownBy(() -> queue.attach(null)).isInstanceOf(NullPointerException.class);
   }
 
   @Test
@@ -520,10 +520,10 @@ class StandardThreadExecutorTest {
     // executor would mix two executors' state.
     var executor = newExecutor(1, 2, 10);
     try {
-      var queue = (StandardExecutorQueue) executor.getQueue();
+      var queue = (ElasticTaskQueue) executor.getQueue();
       var other = newExecutor(1, 2, 10);
       try {
-        assertThatThrownBy(() -> queue.setStandardThreadExecutor(other)).isInstanceOf(IllegalStateException.class);
+        assertThatThrownBy(() -> queue.attach(other)).isInstanceOf(IllegalStateException.class);
       } finally {
         other.shutdownNow();
       }

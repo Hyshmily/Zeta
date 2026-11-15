@@ -106,6 +106,28 @@ class MonotonicStampClockTest {
     assertThat(clock.nextStamp()).isPositive();
   }
 
+  /**
+   * A single corrupt future stamp must not pin the skew gauge for the whole
+   * lead: the gauge is a live signal, not an all-time maximum.
+   */
+  @Test
+  void skewMillis_shouldForgetARejectedOutlierAfterTheRetentionWindow() {
+    MonotonicStampClock clock = new MonotonicStampClock(1L, MonotonicStampClock.DEFAULT_MAX_FORWARD_DRIFT_MS);
+    long peerStamp = peerStampNear(TimeSource.currentTimeMillis() + TimeUnit.DAYS.toMillis(1));
+    try {
+      assertThat(clock.observe(peerStamp)).as("a one-day lead is refused").isFalse();
+      assertThat(clock.skewMillis())
+        .as("the outlier is visible while it is fresh")
+        .isGreaterThan(TimeUnit.HOURS.toMillis(1));
+
+      TimeSource.setTimeOffsetForTest(0L, 61_000L);
+
+      assertThat(clock.skewMillis()).as("the refused sample expires after the retention window").isZero();
+    } finally {
+      TimeSource.setTimeOffsetForTest(0L, 0L);
+    }
+  }
+
   private static long peerStampNear(long epochMillis) {
     // timeBase layout: (ms - EPOCH) << 22 | node << 12
     return ((epochMillis - StampClock.EPOCH) << 22) | (7L << 12);

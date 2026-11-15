@@ -85,6 +85,9 @@ public class MonotonicStampClock implements StampClock {
    */
   public static final long DEFAULT_MAX_FORWARD_DRIFT_MS = 60_000L;
 
+  /** How long a refused peer timestamp stays visible on the skew gauge. */
+  private static final long REFUSED_PEER_RETENTION_MS = 60_000L;
+
   private static final int NODE_SHIFT = SEQUENCE_BITS_FOR_RANGE;
 
   /**
@@ -103,14 +106,15 @@ public class MonotonicStampClock implements StampClock {
   private static final long MAX_TIMESTAMP = (1L << (Long.SIZE - 1 - TIMESTAMP_SHIFT)) - 1L;
 
   /**
-   * Highest peer-stamp timestamp (epoch millis) refused by the forward-drift
-   * guard. An accepted stamp raises {@link #last}, which already carries the
-   * same evidence; this watermark keeps the skew gauge visible exactly when a
-   * peer clock breaches {@code #maxForwardDriftMs} — the moment an operator
-   * most needs the signal — instead of dropping to 0 because the local floor
-   * was never moved.
+   * Newest peer-stamp timestamp (epoch millis) refused by the forward-drift
+   * guard, and the monotonic instant of that refusal. An accepted stamp raises
+   * {@link #last}, which already carries the same evidence; this sample keeps
+   * the skew gauge visible when a peer clock breaches {@code #maxForwardDriftMs}
+   * without pinning it for the whole (possibly years-long) lead of one corrupt
+   * stamp.
    */
-  private final AtomicLong maxObservedPeerEpochMs = new AtomicLong(0L);
+  private final AtomicLong refusedPeerEpochMs = new AtomicLong(0L);
+  private final AtomicLong refusedAtMonoMs = new AtomicLong(0L);
 
   /**
    * Highest stamp this node has ever issued or observed. {@code 0} means
@@ -308,8 +312,8 @@ public class MonotonicStampClock implements StampClock {
     // Entry guard: 0 is the unset floor, negative values are unorderable, and
     // Long.MAX_VALUE is the saturated sentinel. Rejecting the sentinel here
     // matters: its timestamp field decodes to 2094, so letting it reach the
-    // anti-drift probe would record that future instant in
-    // maxObservedPeerEpochMs and distort skewMillis() permanently.
+    // anti-drift probe would record that future instant in the refused-peer
+    // sample and distort skewMillis().
     if (stamp <= 0L || stamp > MAX_STAMP) {
       return false;
     }
@@ -333,11 +337,11 @@ public class MonotonicStampClock implements StampClock {
       // reject-beyond-delta rule of HLC implementations (uhlc defaults to
       // 500 ms; Zeta's LWW contract tolerates wider skew, hence a looser cap).
       //
-      // The refused stamp is the only one that needs the separate watermark:
-      // an accepted stamp raises `last`, and skewMillis() already reads
-      // timestampOf(last). Writing the watermark on the accepted path would add
-      // a read + CAS to every observation for no observable gain.
-      recordObservedPeerTime(peerEpochMs);
+      // The refused stamp is the only one that needs the separate sample: an
+      // accepted stamp raises `last`, and skewMillis() already reads
+      // timestampOf(last). Writing the sample on the accepted path would add a
+      // read + CAS to every observation for no observable gain.
+      recordRefusedPeer(peerEpochMs);
       log.debug(
         "Refusing observed stamp {}ms ahead of local time (max {}ms); local clock floor unchanged",
         leadMs,
@@ -361,26 +365,30 @@ public class MonotonicStampClock implements StampClock {
     }
   }
 
-  /** Monotonic max on the observed-peer timestamp watermark; CAS only on a new high. */
-  private void recordObservedPeerTime(long peerEpochMs) {
-    long curMax = maxObservedPeerEpochMs.get();
-    while (peerEpochMs > curMax) {
-      long witness = maxObservedPeerEpochMs.compareAndExchange(curMax, peerEpochMs);
-      if (witness == curMax) {
-        return;
-      }
-      curMax = witness;
+  /**
+   * Records the newest refused outlier for a bounded window. The pair is a
+   * diagnostics sample, not a correctness input: a concurrent writer may pair a
+   * peer timestamp with a slightly newer refusal instant, and the gauge then
+   * keeps that sample for one extra window at worst.
+   */
+  private void recordRefusedPeer(long peerEpochMs) {
+    long nowMono = TimeSource.monotonicMillis();
+    if (peerEpochMs > refusedPeerEpochMs.get() || nowMono - refusedAtMonoMs.get() > REFUSED_PEER_RETENTION_MS) {
+      refusedPeerEpochMs.set(peerEpochMs);
+      refusedAtMonoMs.set(nowMono);
     }
   }
 
   @Override
   public long skewMillis() {
-    // The refused-outlier watermark and the local floor both feed the gauge:
-    // the floor alone reports 0 exactly when a peer breaches maxForwardDriftMs
-    // (the refusal leaves it untouched), hiding the one anomaly the gauge
-    // exists for.
+    // The refused-outlier sample and the local floor both feed the gauge: the
+    // floor alone reports 0 exactly when a peer breaches maxForwardDriftMs (the
+    // refusal leaves it untouched), hiding the one anomaly the gauge exists
+    // for. The sample expires so one corrupt stamp cannot pin the gauge for its
+    // entire lead.
     long current = last.get();
-    long observedPeerMs = maxObservedPeerEpochMs.get();
+    long nowMono = TimeSource.monotonicMillis();
+    long observedPeerMs = nowMono - refusedAtMonoMs.get() <= REFUSED_PEER_RETENTION_MS ? refusedPeerEpochMs.get() : 0L;
     long highestKnownMs = Math.max(current > 0L ? StampClock.timestampOf(current) : 0L, observedPeerMs);
     if (highestKnownMs <= 0L) {
       return 0L;
