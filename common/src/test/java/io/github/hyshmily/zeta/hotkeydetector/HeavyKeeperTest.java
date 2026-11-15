@@ -21,6 +21,8 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.AddResult;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.HeavyKeeper;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.Item;
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -102,6 +104,39 @@ class HeavyKeeperTest {
     AddResult result = keeper.addDirect("newKey", 100);
     assertThat(result.isHotKey()).isTrue();
     assertThat(result.expelledKey()).isNotNull();
+  }
+
+  /**
+   * A caller that resolved a member just before its eviction must not be told the key is hot
+   * while {@code contains} says it is absent: the detached tombstone forces the locked
+   * re-admission path.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  void add_Direct_staleMemberReferenceReAdmitsInsteadOfReportingAGhostHotKey() throws Exception {
+    keeper = new HeavyKeeper(1, WIDTH, DEPTH, DECAY, MIN_COUNT, 10_000, 3, false);
+    keeper.addDirect("hot", 50);
+
+    Field membersField = HeavyKeeper.class.getDeclaredField("members");
+    membersField.setAccessible(true);
+    Map<String, Object> members = (Map<String, Object>) membersField.get(keeper);
+    Object staleMember = members.get("hot");
+
+    // The next admission evicts "hot"; the caller still holds its pre-eviction node reference.
+    keeper.addDirect("new", 100);
+    assertThat(keeper.contains("hot")).isFalse();
+
+    Class<?> nodeType = staleMember.getClass();
+    Field fingerprintField = nodeType.getDeclaredField("fp");
+    fingerprintField.setAccessible(true);
+    int fingerprint = (int) fingerprintField.get(staleMember);
+    Method admit = HeavyKeeper.class.getDeclaredMethod("admit", String.class, long.class, int.class, nodeType);
+    admit.setAccessible(true);
+
+    AddResult result = (AddResult) admit.invoke(keeper, "hot", 150L, fingerprint, staleMember);
+
+    assertThat(result.isHotKey()).isTrue();
+    assertThat(keeper.contains("hot")).as("the ghost member must be re-admitted").isTrue();
   }
 
   /**
@@ -573,7 +608,6 @@ class HeavyKeeperTest {
     assertThat(result.isHotKey()).isTrue();
   }
 
-
   @Test
   void fading_withConcurrentAddDirect_shouldNotDeadlock() throws InterruptedException {
     HeavyKeeper preloaded = new HeavyKeeper(TOP_K, WIDTH, DEPTH, DECAY, 1, 10_000, 3, false);
@@ -717,9 +751,9 @@ class HeavyKeeperTest {
 
   @Test
   void fading_withConcurrentAccumulate_shouldPreserveCount() throws InterruptedException {
-    // Regression test: decayMembership() previously used reset()+accumulate() on LongAccumulator,
-    // which lost concurrent accumulate() writes that arrived between get() and reset().
-    // The fix uses AtomicLong with a CAS retry loop that preserves concurrent accumulates.
+    // Concurrent raises that land around a decay cycle must survive it: the
+    // re-synchronisation is a CAS loop, so a raise between the read and the reset is
+    // preserved rather than overwritten.
     HeavyKeeper hk = new HeavyKeeper(10, 1000, 4, 0.9, 1, 50000, 3, false);
     hk.addDirect("hotkey", 10000);
 
@@ -769,8 +803,8 @@ class HeavyKeeperTest {
     // Key should still be tracked (concurrent accumulates kept it above zero)
     assertThat(hk.contains("hotkey")).isTrue();
 
-    // Count should be positive — in the old buggy code, concurrent accumulates
-    // were lost on every decay cycle, causing the add to drop to 0 rapidly.
+    // Count positive: concurrent raises captured during decay must not be lost, so the
+    // estimate stays above zero.
     List<Item> items = hk.listTopN(10);
     long hotkeyCount = -1;
     for (Item item : items) {
