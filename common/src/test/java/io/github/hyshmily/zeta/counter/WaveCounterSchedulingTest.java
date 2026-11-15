@@ -65,6 +65,24 @@ class WaveCounterSchedulingTest {
   }
 
   /**
+   * A scheduler may fire a one-shot before its nominal deadline. The running future is still the
+   * pending one at that instant, so the tide must clear that bookkeeping before its finally
+   * re-arms; otherwise {@code scheduleTide} sees its own future as a pending peer and coalesces
+   * into it, and the delivery chain dies after the early tide.
+   */
+  @Test
+  void earlyTide_shouldStillRearmTheChain() throws Exception {
+    counter.afterPropertiesSet();
+    int schedulesBefore = scheduler.delaysMillis.size();
+
+    Method tide = WaveCounter.class.getDeclaredMethod("tide");
+    tide.setAccessible(true);
+    tide.invoke(counter);
+
+    assertThat(scheduler.delaysMillis).as("the early tide armed the next one").hasSize(schedulesBefore + 1);
+  }
+
+  /**
    * The self-reschedule in {@code tide()}'s {@code finally} keeps the delivery
    * chain alive through every consumer failure: the +1 schedule per tide is the
    * evidence, with the failure logged once per tide.

@@ -93,13 +93,9 @@ class WaveCounterDecayPeriodTest {
   }
 
   /**
-   * design decisions: sketch headline behavior: an earn/miss/miss periodic earner stays
-   * hot-routed.  With the legacy every-tide decay it was decayed out by its
-   * second quiet tide and cold-routed on EVERY earn tide (the promotion at
-   * the earn tide's end serves the NEXT tide, which is quiet — the sandbox
-   * measured 0% hot coverage for this pattern, mem_adapt_exp.py).  The
-   * every-other-tide sweep keeps the evidence alive across the gap:
-   * 2 -> (skip) 2 -> (decay) 1 -> member on the earn tide.
+   * An earn/miss/miss periodic earner stays hot-routed. The every-other-tide sweep keeps
+   * the evidence alive across the gap: 2 -> (skip) 2 -> (decay) 1 -> member on the earn
+   * tide.
    */
   @Test
   void sawtoothEarner_earnMissMiss_staysHot_thenDriftsOut() throws Exception {

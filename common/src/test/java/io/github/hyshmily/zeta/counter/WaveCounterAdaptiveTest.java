@@ -133,9 +133,8 @@ class WaveCounterAdaptiveTest {
   }
 
   /**
-   * Maps a legacy test accessor to the renamed production field (the flat
-   * fields converged into the {@code MoonsTidalForce} position/state/rates
-   * wrappers; the alias layer keeps the old accessor names working).
+   * Maps a test accessor name to the production field: the flat fields live in the
+   * {@code MoonsTidalForce} position/state/rates wrappers.
    */
   private static String renamedField(String accessor) {
     switch (accessor) {
@@ -322,6 +321,26 @@ class WaveCounterAdaptiveTest {
   }
 
   /**
+   * The quiet bypass is a regime switch: an in-flight walk must be cancelled with the floor drop,
+   * or its stale samples/target would resume after traffic returns.
+   */
+  @Test
+  void governor_quietBypass_cancelsAnInFlightWalk() throws Exception {
+    onTide(counter, 0.2, 16, 16, 10, 2, 0.5, 100, 16, 500L); // under-earning distress: arm only
+    assertThat(walkOf(counter)).as("a raise-walk is in flight").isNotNull();
+    assertThat(floorOf(counter)).isEqualTo(10);
+
+    // Volume decays 100 -> 50 -> 25 -> 12.5; the third quiet tide reaches the 2s confirm.
+    onTide(counter, 0.0, 0, 16, 0, 0, 0.0, 0, 0, 1_000L);
+    onTide(counter, 0.0, 0, 16, 0, 0, 0.0, 0, 0, 1_000L);
+    onTide(counter, 0.0, 0, 16, 0, 0, 0.0, 0, 0, 1_000L);
+
+    assertThat(floorOf(counter)).as("the quiet floor engages").isEqualTo(1);
+    assertThat(walkOf(counter)).as("the stale walk is cancelled").isNull();
+    assertThat(booleanGovernorField(counter, "retreating")).as("no stale retreat survives").isFalse();
+  }
+
+  /**
    * Distress with an UNDER-EARNING hot set (hotColdRatio < 1 — occupied
    * hot slots earn less per slot than cold keys earn per key) arms a
    * bounded raise-walk: the floor steps up, confirms after the set holds
@@ -369,9 +388,8 @@ class WaveCounterAdaptiveTest {
    * veto anchor — the position the confirmed raise left from (veto-return),
    * priced by the anchor memory: the current renewal must be worse than
    * the anchor's reference renewal minus the noise-aware margin.  The
-   * anchor is planted at the confirmation, NOT re-frozen at the distress
-   * episode start (the former episode-start freeze re-anchored at the
-   * raised floor and made the retreat unreachable).
+   * anchor is planted at the confirmation, not re-frozen at the distress
+   * episode start.
    */
   @Test
   void governor_raiseConfirmedThenRedistress_shouldRetreatToAnchor() throws Exception {
@@ -607,10 +625,10 @@ class WaveCounterAdaptiveTest {
 
   /**
    * The release walk's crash bar is the ANCHOR memory, not the fixed goal
-   * target: a renewal of 0.6 (healthy under the old fixed 0.5 target)
-   * reads as a below-bar sample against the base reference 0.85 minus the
-   * margin, and three such tides crash the walk — the descended position
-   * must not earn measurably less than the position it left.
+   * target: a renewal of 0.6 (above the fixed 0.5 target) reads as a
+   * below-bar sample against the base reference 0.85 minus the margin, and
+   * three such tides crash the walk — the descended position must not earn
+   * measurably less than the position it left.
    */
   @Test
   void governor_releaseWalk_crashBar_anchorMemory() throws Exception {
@@ -623,8 +641,7 @@ class WaveCounterAdaptiveTest {
     onTide(counter, 0.6, 100, 1024, 0, 4, 1.5); // streak 2 — the walk keeps stepping
     // The stride law prices the descent from the EMA-smoothed renewal
     // against the crash bar: below-bar tides creep instead of plunging,
-    // so the descent over the pre-crash window is bounded (the old bold
-    // driver reached the seed here).
+    // so the descent over the pre-crash window is bounded.
     assertThat(floorOf(counter)).as("below-bar tides creep, not plunge").isBetween(11, 44);
     onTide(counter, 0.6, 100, 1024, 0, 4, 1.5); // streak 3: crash
     assertThat(ladderField(counter, "releaseLadder", "left"))
@@ -659,8 +676,7 @@ class WaveCounterAdaptiveTest {
   /**
    * The stride law self-converges in the decision zone: renewal pinned at
    * the crash bar shrinks the stride toward 1, so the walk confirms at a
-   * position above the seed (the old bold driver plunged to the seed
-   * within the budget).  The verdict samples the boundary at fine
+   * position above the seed. The verdict samples the boundary at fine
    * granularity instead of committing to a full descent.
    */
   @Test
@@ -957,12 +973,10 @@ class WaveCounterAdaptiveTest {
   }
 
   /**
-   * design decisions: sketch hard budget: the raise walk's TIDAL_WALK_BUDGET binds on BOTH
-   * verdict branches.  The legacy check lived only on the below-target
-   * branch, so an alternating walk (at/below cycles that never reach 3
-   * consecutive of either) outlived the documented budget by up to ~1.5x
-   * — holding the floor hostage in alternating regimes.  An at-target
-   * tide at the budget now ends the walk as FAILED (undo + backoff).
+   * The raise walk's TIDAL_WALK_BUDGET binds on BOTH verdict branches, so an alternating
+   * walk (runs that never reach 3 consecutive at-target or below-target tides) still
+   * ends at the budget. An at-target tide at the budget ends the walk as FAILED
+   * (undo + backoff).
    */
   @Test
   void governor_raiseWalk_atTargetAtBudget_fails() throws Exception {
@@ -978,9 +992,7 @@ class WaveCounterAdaptiveTest {
       assertThat(walkOf(counter)).as("tide %d: no verdict below the budget", 3 + i).isNotNull();
     }
     // The loop ended at samples 15 (tide 17).  The next tide (18) is an
-    // AT-TARGET tide at samples 16: the hard budget ends the walk there —
-    // the legacy at-target branch never checked the budget and the walk
-    // survived to sample 17+.
+    // AT-TARGET tide at samples 16: the hard budget ends the walk there.
     onTide(counter, 1.0, 3, 16, 0, 2, 1.5); // at-target at samples 16: hard budget FAILED
     assertThat(walkOf(counter)).as("the hard budget ends the walk on an at-target tide").isNull();
     assertThat(ladderField(counter, "raiseLadder", "left")).as("FAILED priced the backoff").isGreaterThan(0);

@@ -94,7 +94,7 @@ class WaveCounterRecyclingTest {
   /**
    * #1 approximate-size capacity guard: only NEW keys are dropped at
    * capacity; tracked keys keep counting.  Verifies the O(1) counter
-   * drives the same documented semantics as the old size() check.
+   * drives the documented capacity semantics.
    */
   @Test
   void capacityGuard_approximateSize_shouldDropNewColdKeys() throws Exception {
@@ -285,10 +285,9 @@ class WaveCounterRecyclingTest {
   }
 
   /**
-   * Histogram promotion (2026-08-07): a key carrying the bulk of a
-   * LOW-traffic cycle (80 counts vs per-key average ≈ 5) must be promoted
-   * — the legacy fixed threshold (100) silently failed below 100
-   * counts/cycle.  The promotion is distribution-scale-free.
+   * Histogram promotion: a key carrying the bulk of a LOW-traffic cycle (80 counts vs
+   * per-key average ≈ 5) must be promoted. Promotion is distribution-scale-free, so a
+   * relative hot spot qualifies at any traffic volume.
    */
   @Test
   void lowTraffic_topKey_shouldBePromoted() {
@@ -320,11 +319,9 @@ class WaveCounterRecyclingTest {
   }
 
   /**
-   * Per-field saturation guard (2026-08-08): a trace room saturated by
-   * OTHER keys' promotions (evidence 3) must not block a new hot key's
-   * add seeding — the former joint guard (c < 3 && t < 3) skipped the
-   * promotion entirely and even reported "newly active" while leaving
-   * the key cold.
+   * Per-field saturation guard: a trace room saturated by OTHER keys' promotions
+   * (evidence 3) must not block a new hot key's add seeding. Each role evidence is
+   * refreshed independently, so the key is promoted and reports a newly consumed slot.
    */
   @Test
   void promote_pollutedTraceRoom_shouldStillActivate() throws Exception {
@@ -351,10 +348,9 @@ class WaveCounterRecyclingTest {
   }
 
   /**
-   * Per-field saturation guard (2026-08-08): a stable member whose add
-   * room is saturated must still refresh its trace every tide — the
-   * former joint guard let the trace decay out within 2 tides (the
-   * ping-pong the 4-tide memory was designed to prevent).
+   * Per-field saturation guard: a stable member whose add room is saturated must still
+   * refresh its trace every tide. Otherwise the trace decays out within two tides — the
+   * ping-pong the 4-tide memory is designed to prevent.
    */
   @Test
   void promote_saturatedCountRoom_refreshesMemberTrace() throws Exception {

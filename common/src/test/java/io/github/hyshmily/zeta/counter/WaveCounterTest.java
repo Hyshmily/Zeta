@@ -16,6 +16,7 @@
 package io.github.hyshmily.zeta.counter;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
@@ -69,6 +70,32 @@ class WaveCounterTest {
       }
     }
     return merged;
+  }
+
+  @Test
+  void constructorRejectsANullConsumer() {
+    assertThatThrownBy(() -> new WaveCounter(null))
+      .isInstanceOf(IllegalArgumentException.class)
+      .hasMessageContaining("batchConsumer");
+  }
+
+  /**
+   * The soft capacity guard counts new cold-key drops separately from the reporter's other loss
+   * paths; the per-drop DEBUG line was removed so a high-cardinality flood cannot make DEBUG a
+   * hot-path cost.
+   */
+  @Test
+  void coldCapacityGuardReportsDroppedKeys() {
+    ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
+    WaveCounter capped = new WaveCounter(consumer, 1, scheduler, 500);
+    try {
+      capped.count("first", 1);
+      capped.count("second", 1);
+      assertThat(capped.coldCapacityDrops()).isEqualTo(1);
+    } finally {
+      capped.destroy();
+      scheduler.shutdownNow();
+    }
   }
 
   @Test
@@ -195,8 +222,7 @@ class WaveCounterTest {
    *
    * <p>Hot-path counts are exact (in-flight merges are waited out).  Cold
    * direct writes carry the documented approximate window (preemption
-   * &gt; 1ms during the snapshot quiescence) — asserted as ≤ 0.01% loss,
-   * far below the whole-batch drops of the old bounded-queue design.
+   * &gt; 1ms during the snapshot quiescence) — asserted as ≤ 0.01% loss.
    */
   @Test
   void concurrentDeliver_shouldNotLoseCounts() throws Exception {

@@ -97,6 +97,26 @@ class WaveCounterDrainRaceTest {
   }
 
   /**
+   * The last-key cache is a reference-equality shortcut, not a content cache. A content-equal but
+   * distinct String must miss it and take the full probe; otherwise every add pays the
+   * {@code String.equals} walk the shortcut exists to avoid.
+   */
+  @Test
+  void tryFastAdd_requiresTheSameStringInstance() throws Exception {
+    markHot(counter, "hot");
+    counter.count("hot", 1);
+    Object ceils = registry(counter).get(Thread.currentThread());
+    assertThat(ceils).as("writer registered").isNotNull();
+
+    Method fast = ceils.getClass().getDeclaredMethod("tryFastAdd", WaveCounter.class, String.class, long.class);
+    fast.setAccessible(true);
+    assertThat((boolean) fast.invoke(ceils, counter, new String("hot"), 1L))
+      .as("content-equal but a different reference must take the full probe")
+      .isFalse();
+    assertThat((boolean) fast.invoke(ceils, counter, "hot", 1L)).as("same reference hits").isTrue();
+  }
+
+  /**
    * {@code destroy()} merges every residual and then drops the registry and
    * the pool: a destroyed counter that is still referenced elsewhere must not
    * keep dead {@code Thread} keys or up to {@code CEIL_POOL_CAP} ~7KB maps
