@@ -17,7 +17,7 @@ package io.github.hyshmily.zeta.sharding;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-import io.github.hyshmily.zeta.sharding.HealthViewImpl.WorkerHealthRecord;
+import io.github.hyshmily.zeta.sharding.ClusterHealth.WorkerHealthRecord;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 

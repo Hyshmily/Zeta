@@ -45,7 +45,7 @@ class ConsistentHashRingDistributionTest {
   }
 
   private static double cv(int virtualNodeCount, Set<String> nodes, int keyCount) {
-    ConsistentHashRing ring = new ConsistentHashRingImpl(virtualNodeCount);
+    ConsistentHashRing ring = new HashRing(virtualNodeCount);
     ring.rebuild(nodes);
 
     Map<String, Integer> counts = new HashMap<>();

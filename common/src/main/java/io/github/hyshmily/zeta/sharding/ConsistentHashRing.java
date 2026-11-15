@@ -65,11 +65,12 @@ public interface ConsistentHashRing {
    * every physical node on a published ring was alive in the set the last rebuild was
    * built from.
    *
-   * <p>This is the reporter's fast path: the caller has just reconciled the ring, so
-   * re-probing every node through the alive set would only repeat a tautology. A node
-   * that dies after the rebuild still receives the batch, and the consumer discards it
-   * through the incarnation check — the same bounded staleness the alive-set predicate
-   * already has.
+   * <p>This is the reporter's first probe: the caller has just reconciled the ring, so
+   * re-probing every node through the alive set would only repeat a tautology. If the ring
+   * rebuilt between that reconcile and this call, the reporter falls back to the predicate
+   * overload to reach a node whose epoch it captured. A node that dies after the rebuild
+   * still receives the batch, and the consumer discards it through the incarnation check —
+   * the same bounded staleness the alive-set predicate already has.
    *
    * @param key the business key to route; must not be {@code null}
    * @return the physical node ID, or {@code null} when the ring is empty

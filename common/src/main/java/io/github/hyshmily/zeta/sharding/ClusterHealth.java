@@ -54,7 +54,7 @@ import lombok.extern.slf4j.Slf4j;
  */
 @Internal
 @Slf4j
-public class HealthViewImpl implements HealthView {
+public class ClusterHealth implements HealthView {
 
   private static final int HEALTH_TS_BITS = 42;
   private static final int HEALTH_GEN_SHIFT = HEALTH_TS_BITS + 1;
@@ -97,21 +97,28 @@ public class HealthViewImpl implements HealthView {
 
   private volatile int minAliveWorkers;
 
-  public HealthViewImpl(long heartbeatTimeoutMs) {
+  public ClusterHealth(long heartbeatTimeoutMs) {
     this(heartbeatTimeoutMs, DEFAULT_HEALTH_CACHE_TTL_MS, false, 0L);
   }
 
   /**
-   * Creates a HealthViewImpl with adaptive per-Worker liveness timeouts.
+   * Creates a ClusterHealth with adaptive per-Worker liveness timeouts.
    *
-   * @param heartbeatTimeoutMs heartbeat timeout window (ms); with adaptive
+   * @param heartbeatTimeoutMs heartbeat timeout window (ms, positive); with adaptive
    *                           timeouts this is the warm-up window and the ceiling
-   * @param healthCacheTtlMs   cluster-health judgment cache TTL (ms)
+   * @param healthCacheTtlMs   cluster-health judgment cache TTL (ms, non-negative)
    * @param adaptiveTimeout    whether liveness windows adapt per Worker
    * @param adaptiveFloorMs    lower clamp for the adaptive window; ignored when
    *                           {@code adaptiveTimeout} is off ({@code 0})
+   * @throws IllegalArgumentException when the timeout is non-positive or the cache TTL is negative
    */
-  public HealthViewImpl(long heartbeatTimeoutMs, long healthCacheTtlMs, boolean adaptiveTimeout, long adaptiveFloorMs) {
+  public ClusterHealth(long heartbeatTimeoutMs, long healthCacheTtlMs, boolean adaptiveTimeout, long adaptiveFloorMs) {
+    if (heartbeatTimeoutMs <= 0L) {
+      throw new IllegalArgumentException("heartbeatTimeoutMs must be > 0, but got: " + heartbeatTimeoutMs);
+    }
+    if (healthCacheTtlMs < 0L) {
+      throw new IllegalArgumentException("healthCacheTtlMs must be >= 0, but got: " + healthCacheTtlMs);
+    }
     this.healthCacheTtlMs = healthCacheTtlMs;
     this.heartbeatTimeoutMs = heartbeatTimeoutMs;
     this.adaptiveFloorMs = adaptiveTimeout ? Math.max(1L, adaptiveFloorMs) : 0L;

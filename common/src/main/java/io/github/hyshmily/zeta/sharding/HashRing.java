@@ -37,7 +37,7 @@ import org.jspecify.annotations.Nullable;
  */
 @Internal
 @Slf4j
-public class ConsistentHashRingImpl implements ConsistentHashRing {
+public class HashRing implements ConsistentHashRing {
 
   /** Published by every empty rebuild, so an empty ring never allocates. */
   private static final RingState EMPTY_STATE = new RingState(new int[0], new int[0], new String[0], Set.of());
@@ -74,7 +74,7 @@ public class ConsistentHashRingImpl implements ConsistentHashRing {
    * @param virtualNodeCount replicas per physical node (positive)
    * @throws IllegalArgumentException when {@code virtualNodeCount <= 0}
    */
-  public ConsistentHashRingImpl(int virtualNodeCount) {
+  public HashRing(int virtualNodeCount) {
     if (virtualNodeCount <= 0) {
       throw new IllegalArgumentException("virtualNodeCount (" + virtualNodeCount + ") must be > 0");
     }
@@ -85,7 +85,7 @@ public class ConsistentHashRingImpl implements ConsistentHashRing {
    * Atomically replace the ring with one built from the given live nodes.
    * Each node is replicated {@code virtualNodeCount} times on the ring.
    *
-   * <p>Synchronized like {@link #rebuildIfPossible(HealthView)}: the two entry
+   * <p>Uses the same monitor as {@link #rebuildIfPossible(HealthView)}: the two entry
    * points both publish a whole snapshot, and without a shared monitor a background
    * reconcile could overwrite a caller's explicit rebuild (or vice versa) with a set the
    * other never saw.
@@ -293,6 +293,11 @@ public class ConsistentHashRingImpl implements ConsistentHashRing {
    * Rebuild the ring from the alive-Worker set of the given health view when it
    * differs from the current node set; a no-op (and no log) when unchanged.
    *
+   * <p>The unchanged-set fast path is lock-free: the alive set is materialised and compared
+   * with the published snapshot before the monitor is taken, so a report flush or a COOL probe
+   * that finds no membership change never serialises on the rebuild lock. Only a real change
+   * enters the monitor and re-checks against the snapshot another writer may have published.
+   *
    * <p>The node-ID sample in the rebuild log is taken from the snapshot's already-sorted
    * {@code nodes} and capped at {@code REBUILD_LOG_MAX_NODE_IDS} — the Worker counts in the
    * same line already carry the cardinality.
@@ -304,16 +309,27 @@ public class ConsistentHashRingImpl implements ConsistentHashRing {
    *         {@link HealthView#getAliveWorkerIds()} materialisation
    */
   @Override
-  public synchronized Set<String> rebuildIfPossible(HealthView healthView) {
-    RingState ring = currentState.get();
+  public Set<String> rebuildIfPossible(HealthView healthView) {
     Set<String> alive = healthView.getAliveWorkerIds();
+    RingState ring = currentState.get();
     if (alive.equals(ring.live)) {
       return ring.live;
     }
 
-    RingState next = applyRebuild(alive);
-    log.info("Ring rebuilt: {} -> {} workers [{}]", ring.live.size(), alive.size(), truncateNodeIds(next.nodes));
-    return next.live;
+    synchronized (this) {
+      ring = currentState.get();
+      // Always re-read under the monitor: another caller may have published a newer alive set
+      // between the lock-free probe and this point. Publishing the pre-lock sample would
+      // overwrite that newer snapshot with an older membership, and returning it would skip a
+      // membership change the health view already observed.
+      alive = healthView.getAliveWorkerIds();
+      if (alive.equals(ring.live)) {
+        return ring.live;
+      }
+      RingState next = applyRebuild(alive);
+      log.info("Ring rebuilt: {} -> {} workers [{}]", ring.live.size(), alive.size(), truncateNodeIds(next.nodes));
+      return next.live;
+    }
   }
 
   /**
