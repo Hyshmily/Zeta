@@ -16,6 +16,7 @@
 package io.github.hyshmily.zeta.worker.ingest;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
@@ -60,6 +61,13 @@ class ReportConsumerTest {
 
   private static ReportMessage message(long epoch, Map<String, Long> counts) {
     return new ReportMessage(1L, "app", TimeSource.currentTimeMillis(), epoch, counts);
+  }
+
+  @Test
+  void rejectsANegativeStalenessThreshold() {
+    assertThatThrownBy(() -> new ReportConsumer(pipeline, EPOCH, -1L, new WorkerDetectionMetrics(null)))
+      .isInstanceOf(IllegalArgumentException.class)
+      .hasMessageContaining("stalenessThresholdMs");
   }
 
   @Test
