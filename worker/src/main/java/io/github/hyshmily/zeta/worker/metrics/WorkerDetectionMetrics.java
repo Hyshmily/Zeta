@@ -308,8 +308,7 @@ public class WorkerDetectionMetrics {
 
   /**
    * Counts one decision elided in memory because the cluster's state would not change: a replay of
-   * the exact accepted version, a same-type decision inside the debounce window, or a COOL for a
-   * key the cluster already holds cold.
+   * the exact accepted version or a same-type decision inside the debounce window.
    *
    * @param type the decision type
    */

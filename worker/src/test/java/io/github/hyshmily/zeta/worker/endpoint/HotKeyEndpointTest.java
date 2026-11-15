@@ -19,6 +19,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+import io.github.hyshmily.zeta.util.TimeSource;
 import io.github.hyshmily.zeta.worker.detection.lifecycle.CoolingScheduler;
 import io.github.hyshmily.zeta.worker.detection.lifecycle.HE;
 import io.github.hyshmily.zeta.worker.detection.lifecycle.HotKeyRegistry;
@@ -91,6 +92,39 @@ class HotKeyEndpointTest {
     );
 
     assertThat((Long) endpoint.info("k").get("nextCheckInMs")).isNegative();
+  }
+
+  /**
+   * A saturated deadline is {@link Long#MAX_VALUE}; subtracting a negative monotonic sample would
+   * wrap the remaining time negative and report a live check as long overdue.
+   */
+  @Test
+  void aSaturatedNextCheckStaysPositiveUnderANegativeClock() {
+    long base = TimeSource.monotonicMillis();
+    try {
+      TimeSource.setTimeOffsetForTest(0, -base - 1_000L);
+      HotKeyRule rule = new HotKeyRule("r", MatchType.EXACT, "k", 0, 0, 1, 0L, 0L, 60_000L, null);
+      HotKeyRegistry registry = mock(HotKeyRegistry.class);
+      HE entry = mock(HE.class);
+      when(registry.entry("k")).thenReturn(entry);
+      when(entry.rule()).thenReturn(rule);
+      when(entry.promotedAt()).thenReturn(-1_000L);
+      when(entry.belowSince()).thenReturn(HE.NOT_BELOW);
+      when(entry.nextCheckAt()).thenReturn(Long.MAX_VALUE);
+      when(entry.version()).thenReturn(1L);
+
+      HotKeyEndpoint endpoint = new HotKeyEndpoint(
+        mock(RuleResolver.class),
+        WindowGeometry.of(1_000, 16),
+        registry,
+        mock(CoolingScheduler.class),
+        mock(SlidingWindowDetector.class)
+      );
+
+      assertThat(endpoint.info("k").get("nextCheckInMs")).isEqualTo(Long.MAX_VALUE);
+    } finally {
+      TimeSource.setTimeOffsetForTest(0, 0);
+    }
   }
 
   @Test

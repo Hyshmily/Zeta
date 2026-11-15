@@ -29,9 +29,9 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import org.jspecify.annotations.Nullable;
 import org.springframework.boot.actuate.endpoint.annotation.Endpoint;
 import org.springframework.boot.actuate.endpoint.annotation.ReadOperation;
+import org.springframework.lang.Nullable;
 
 /**
  * Actuator {@code /actuator/hotkey-worker} endpoint (id {@code hotkeyworker}): the detection
@@ -181,9 +181,12 @@ public class HotKeyEndpoint {
     long belowSince = entry.belowSince();
     long nextCheckAt = entry.nextCheckAt();
     long now = TimeSource.monotonicMillis();
+    // A saturated deadline subtracted from a negative monotonic sample would wrap negative and read
+    // as "overdue"; keep the saturation instead.
+    long nextCheckInMs = nextCheckAt == Long.MAX_VALUE ? Long.MAX_VALUE : nextCheckAt - now;
     view.put("promotedForMs", Math.max(0L, now - entry.promotedAt()));
     view.put("belowForMs", belowSince == HE.NOT_BELOW ? null : Math.max(0L, now - belowSince));
-    view.put("nextCheckInMs", nextCheckAt - now);
+    view.put("nextCheckInMs", nextCheckInMs);
     view.put("promotedVersion", entry.version());
     return view;
   }
