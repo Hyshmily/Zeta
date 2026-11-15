@@ -17,8 +17,6 @@ package io.github.hyshmily.zeta.autoconfigure;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyBoolean;
-import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
@@ -34,6 +32,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Executor;
+import java.util.function.Supplier;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -50,12 +49,6 @@ class ZetaFacadeAutoConfigurationTest {
   private final ApplicationContextRunner runner = new ApplicationContextRunner().withConfiguration(
     AutoConfigurations.of(ZetaFacadeAutoConfiguration.class)
   );
-
-  @AfterEach
-  void tearDown() {
-    NodeIdentity.setInstanceOverride(null);
-    NodeIdentity.setNodeOverride(null);
-  }
 
   /**
    * Verifies that the facade auto-configuration is self-sufficient: it registers its
@@ -137,8 +130,8 @@ class ZetaFacadeAutoConfigurationTest {
         // Fan-out went through the injected executor — one task per key,
         // executed inline by the capturing pool (never the commonPool).
         assertThat(submitted).hasSize(2);
-        verify(cache).refresh(eq("k1"), any(), anyLong(), anyLong(), anyBoolean());
-        verify(cache).refresh(eq("k2"), any(), anyLong(), anyLong(), anyBoolean());
+        verify(cache).refresh(eq("k1"), any(Supplier.class), eq(false));
+        verify(cache).refresh(eq("k2"), any(Supplier.class), eq(false));
       });
   }
 
@@ -159,38 +152,34 @@ class ZetaFacadeAutoConfigurationTest {
   @Test
   void instanceIdIsSetFromPropertiesWhenConfigured() {
     String instanceId = "test-instance-456";
-    NodeIdentity.setInstanceOverride(null);
     new ApplicationContextRunner()
       .withPropertyValues("zeta.local.instance-id=" + instanceId)
       .withConfiguration(AutoConfigurations.of(ZetaFacadeAutoConfiguration.class))
-      .run(ctx -> assertThat(NodeIdentity.getInstanceId()).isEqualTo(instanceId));
+      .run(ctx -> assertThat(ctx.getBean(NodeIdentity.class).instanceId()).isEqualTo(instanceId));
   }
 
-  /**
-   * The identity overrides are JVM-global: a later context without an instance id must clear
-   * the override left by an earlier context instead of inheriting it.
-   */
+  /** Each context owns its identity; a later context does not inherit an earlier one. */
   @Test
-  void aLaterContextWithoutInstanceIdClearsThePreviousOverride() {
+  void aLaterContextWithoutInstanceIdGetsItsOwnIdentity() {
+    String[] first = new String[1];
     new ApplicationContextRunner()
       .withPropertyValues("zeta.local.instance-id=first-context")
       .withConfiguration(AutoConfigurations.of(ZetaFacadeAutoConfiguration.class))
-      .run(ctx -> assertThat(NodeIdentity.getInstanceId()).isEqualTo("first-context"));
+      .run(ctx -> first[0] = ctx.getBean(NodeIdentity.class).instanceId());
 
-    runner.run(ctx -> assertThat(NodeIdentity.getInstanceId()).isNotEqualTo("first-context"));
+    runner.run(ctx -> assertThat(ctx.getBean(NodeIdentity.class).instanceId()).isNotEqualTo(first[0]));
   }
 
   /**
-   * Verifies that the node id configured via properties is propagated to {@link NodeIdentity},
-   * overriding the instance-derived identity.
+   * Verifies that the node id configured via properties is propagated to the {@link NodeIdentity}
+   * bean, overriding the instance-derived identity.
    */
   @Test
   void nodeIdIsSetFromPropertiesWhenConfigured() {
-    NodeIdentity.setNodeOverride(null);
     new ApplicationContextRunner()
       .withPropertyValues("zeta.local.node-id=777")
       .withConfiguration(AutoConfigurations.of(ZetaFacadeAutoConfiguration.class))
-      .run(ctx -> assertThat(NodeIdentity.getNodeId()).isEqualTo(777L));
+      .run(ctx -> assertThat(ctx.getBean(NodeIdentity.class).nodeId()).isEqualTo(777L));
   }
 
   /**

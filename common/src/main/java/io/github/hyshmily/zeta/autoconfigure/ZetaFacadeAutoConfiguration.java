@@ -22,15 +22,15 @@ import io.github.hyshmily.zeta.constants.ZetaConstants;
 import io.github.hyshmily.zeta.endpoint.ZetaEndpoint;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.TopK;
 import io.github.hyshmily.zeta.reporting.KeyReporter;
+import io.github.hyshmily.zeta.sharding.ClusterHealth;
 import io.github.hyshmily.zeta.sharding.HealthView;
-import io.github.hyshmily.zeta.sharding.HealthViewImpl;
 import io.github.hyshmily.zeta.sync.local.CacheSyncProperties;
 import io.github.hyshmily.zeta.util.Internal;
 import io.github.hyshmily.zeta.util.NodeIdentity;
 import io.github.hyshmily.zeta.util.TimeSource;
 import io.github.hyshmily.zeta.util.clock.MonotonicStampClock;
 import io.github.hyshmily.zeta.util.clock.StampClock;
-import io.github.hyshmily.zeta.util.executor.SafeScheduledExecutorService;
+import io.github.hyshmily.zeta.util.executor.PeriodicScheduler;
 import io.github.hyshmily.zeta.util.executor.ZetaThreadFactory;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
@@ -59,9 +59,10 @@ import org.springframework.context.annotation.Bean;
  *   <li><b>Coexistence</b> — receives everything the context provides</li>
  * </ul>
  *
- * <p>Registered first in {@code AutoConfiguration.imports} so the
- * {@code HotKey} facade singleton is available early and the instance ID
- * override is set before any queue-creating auto-configuration runs.
+ * <p>Always active: the {@link Zeta} facade singleton and the {@link NodeIdentity} bean are
+ * context-wide, so every other Zeta auto-configuration resolves the same deployment identity.
+ * {@link ZetaActuatorAutoConfiguration} is ordered after this class, so its actuator-only
+ * identity fallback never displaces the configured one.
  */
 @Internal
 @AutoConfiguration
@@ -72,25 +73,23 @@ public class ZetaFacadeAutoConfiguration {
   private final ZetaProperties properties;
 
   /**
-   * Bind the deployment identity before any bean of this configuration (or any
-   * later auto-configuration) can create a queue or a stamp clock. Constructor
-   * injection runs before {@code @PostConstruct}, closing the window in which
-   * another component could read the auto-detected identity first.
-   *
-   * <p>Both overrides are JVM-global, so every context start sets them: a context
-   * that leaves {@code instance-id} empty clears an override left by a previously
-   * started context instead of inheriting it. {@link NodeIdentity#setInstanceOverride}
-   * owns the null/blank normalization.
-   *
    * @param properties the HotKey configuration properties
    */
   public ZetaFacadeAutoConfiguration(ZetaProperties properties) {
     this.properties = properties;
-    NodeIdentity.setInstanceOverride(properties.getInstanceId());
-    // Set after the instance override: clearing node-id re-derives from the
-    // (possibly newly configured) instance id.
-    Integer nodeId = properties.getNodeId();
-    NodeIdentity.setNodeOverride(nodeId == null ? null : nodeId.longValue());
+  }
+
+  /**
+   * The context's deployment identity. One immutable instance value per context, so two
+   * contexts in one JVM get distinct queue names and message origins.
+   *
+   * @param properties the HotKey configuration properties
+   * @return the resolved identity
+   */
+  @Bean
+  @ConditionalOnMissingBean
+  public NodeIdentity nodeIdentity(ZetaProperties properties) {
+    return NodeIdentity.resolve(properties.getInstanceId(), properties.getNodeId());
   }
 
   /**
@@ -98,13 +97,13 @@ public class ZetaFacadeAutoConfiguration {
    * broadcast buffer's deferred flush, and the TopK/expiry maintenance ticks
    * (design decisions: scheduling). Pool size configurable via
    * {@code zeta.local.scheduler-pool-size} (default 8).
-   * Wrapped in a {@link SafeScheduledExecutorService} so a throwing periodic task never
+   * Wrapped in a {@link PeriodicScheduler} so a throwing periodic task never
    * kills the cadence of the shared scheduler.
    */
   @Bean(name = "hotKeyScheduler", destroyMethod = "shutdownNow")
   @ConditionalOnMissingBean(name = "hotKeyScheduler")
   public ScheduledExecutorService hotKeyScheduler() {
-    return new SafeScheduledExecutorService(
+    return new PeriodicScheduler(
       properties.getSchedulerPoolSize(),
       new ZetaThreadFactory(ZetaConstants.Threads.PREFIX_SCHEDULER)
     );
@@ -140,12 +139,12 @@ public class ZetaFacadeAutoConfiguration {
    * inconsistent instances with independent state. Consumers inject this bean
    * directly; a locally built fallback would never receive heartbeat updates.
    *
-   * @return a new {@link HealthViewImpl} instance
+   * @return a new {@link ClusterHealth} instance
    */
   @Bean
   @ConditionalOnMissingBean
   public HealthView clusterHealthView() {
-    HealthViewImpl view = defaultHealthView(properties);
+    ClusterHealth view = defaultHealthView(properties);
     if (properties.getHeartbeat().getMinAliveWorkers() <= 0) {
       log.warn(
         "zeta.local.heartbeat.min-alive-workers is not configured; cluster health threshold defaults to one third of " +
@@ -156,18 +155,18 @@ public class ZetaFacadeAutoConfiguration {
   }
 
   /**
-   * The default {@link HealthViewImpl} from the heartbeat properties — the one
+   * The default {@link ClusterHealth} from the heartbeat properties — the one
    * assembly behind the shared bean, so a new heartbeat setting is threaded in
    * once and every consumer observes the same policy. The configured
    * {@code min-alive-workers} threshold is part of the assembly.
    *
    * @param properties the HotKey configuration properties (default source)
-   * @return a new {@link HealthViewImpl}
+   * @return a new {@link ClusterHealth}
    */
-  static HealthViewImpl defaultHealthView(ZetaProperties properties) {
-    HealthViewImpl view = new HealthViewImpl(
+  static ClusterHealth defaultHealthView(ZetaProperties properties) {
+    ClusterHealth view = new ClusterHealth(
       properties.getHeartbeat().getTimeoutMs(),
-      HealthViewImpl.DEFAULT_HEALTH_CACHE_TTL_MS,
+      ClusterHealth.DEFAULT_HEALTH_CACHE_TTL_MS,
       properties.getHeartbeat().isAdaptiveTimeout(),
       properties.getHeartbeat().getAdaptiveFloorMs()
     );
@@ -191,8 +190,8 @@ public class ZetaFacadeAutoConfiguration {
    */
   @Bean
   @ConditionalOnMissingBean
-  public StampClock stampClock() {
-    return new MonotonicStampClock(NodeIdentity.getNodeId(), properties.getClockMaxForwardDriftMs());
+  public StampClock stampClock(NodeIdentity identity) {
+    return new MonotonicStampClock(identity.nodeId(), properties.getClockMaxForwardDriftMs());
   }
 
   /**
@@ -220,11 +219,10 @@ public class ZetaFacadeAutoConfiguration {
     @Qualifier("heavyKeeper") ObjectProvider<TopK> appTopKProvider,
     @Qualifier("hotKeyExecutor") ObjectProvider<Executor> refreshExecutorProvider
   ) {
-    DefaultZeta facade = new DefaultZeta(hotKeyCacheProvider.getIfAvailable(), appTopKProvider.getIfAvailable());
-    Executor refreshExecutor = refreshExecutorProvider.getIfAvailable();
-    if (refreshExecutor != null) {
-      facade.setRefreshExecutor(refreshExecutor);
-    }
-    return facade;
+    return new DefaultZeta(
+      hotKeyCacheProvider.getIfAvailable(),
+      appTopKProvider.getIfAvailable(),
+      refreshExecutorProvider.getIfAvailable()
+    );
   }
 }

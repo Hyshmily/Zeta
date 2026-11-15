@@ -60,8 +60,8 @@ class ZetaAutoConfigurationTest {
     runner.run(ctx -> {
       assertThat(ctx).hasSingleBean(HotKeyDetector.class);
       assertThat(ctx.getBean("hotKeyDetector")).isInstanceOf(HotKeyDetector.class);
-      // Exactly one TopK bean: the sketch. A second one (the detector used to
-      // be one) makes every List<TopK> injection decay the same sketch twice.
+      // Exactly one TopK bean: the sketch. A second TopK bean (for example a
+      // detector) makes every List<TopK> injection decay the same sketch twice.
       assertThat(ctx.getBeansOfType(TopK.class)).containsOnlyKeys("heavyKeeper");
       assertThat(ctx).hasSingleBean(Cache.class);
       assertThat(ctx).hasSingleBean(SingleFlight.class);
@@ -304,9 +304,8 @@ class ZetaAutoConfigurationTest {
   }
 
   /**
-   * Verifies that a plain NORMAL entry is accepted with logical expiry
-   * (F1 L1 type closure: slots hold {@link CacheEntry} only — the former
-   * non-entry fallback is gone).
+   * Verifies that a plain NORMAL entry is accepted with logical expiry; the
+   * table holds {@link CacheEntry} values only.
    */
   @Test
   void localCache_shouldAcceptNormalEntry() {

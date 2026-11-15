@@ -30,6 +30,7 @@ import java.util.Set;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.springframework.boot.actuate.endpoint.InvalidEndpointRequestException;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.server.ResponseStatusException;
 
@@ -90,13 +91,22 @@ class RingEndpointTest {
   }
 
   @Test
-  void keyMapping_shouldThrowWhenKeyIsEmpty() {
-    assertThatThrownBy(() -> endpoint.keyMapping(new String[] { "" })).isInstanceOf(IllegalArgumentException.class);
+  void keyMapping_shouldRejectAnEmptyKeyAsAClientError() {
+    assertThatThrownBy(() -> endpoint.keyMapping(new String[] { "" })).isInstanceOf(
+      InvalidEndpointRequestException.class
+    );
   }
 
   @Test
-  void keyMapping_shouldThrowWhenKeyIsBlank() {
-    assertThatThrownBy(() -> endpoint.keyMapping(new String[] { "   " })).isInstanceOf(IllegalArgumentException.class);
+  void keyMapping_shouldRejectABlankKeyAsAClientError() {
+    assertThatThrownBy(() -> endpoint.keyMapping(new String[] { "   " })).isInstanceOf(
+      InvalidEndpointRequestException.class
+    );
+  }
+
+  @Test
+  void keyMapping_shouldRejectAnAbsentKeyAsAClientError() {
+    assertThatThrownBy(() -> endpoint.keyMapping(null)).isInstanceOf(InvalidEndpointRequestException.class);
   }
 
   @Test
@@ -125,6 +135,8 @@ class RingEndpointTest {
   void keyMapping_shouldRejectBlankKeyBeforeCheckingTheRing() {
     RingEndpoint unwired = new RingEndpoint(null, healthView);
 
-    assertThatThrownBy(() -> unwired.keyMapping(new String[] { " " })).isInstanceOf(IllegalArgumentException.class);
+    assertThatThrownBy(() -> unwired.keyMapping(new String[] { " " })).isInstanceOf(
+      InvalidEndpointRequestException.class
+    );
   }
 }

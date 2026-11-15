@@ -231,13 +231,17 @@ public class ZetaMicrometerAutoConfiguration {
           (double) VersionGuard.epochRegressSkips()
         ).register(registry);
       });
-      // dataVersion node-id collisions: two instances sharing a node id can
-      // mint equal stamps and skip each other's writes until the next ms/TTL.
-      syncListenerProvider.ifAvailable(sl ->
+      // Sync-plane saturation and identity diagnostics: a dispatcher refusal is applied by
+      // the no-hook fallback (never silently lost), and a shared node id means two instances
+      // can mint equal stamps and skip each other's writes until the next ms/TTL.
+      syncListenerProvider.ifAvailable(sl -> {
+        FunctionCounter.builder("zeta.sync.dispatch.rejected.total", sl, s ->
+          (double) s.syncDispatchRejections()
+        ).register(registry);
         FunctionCounter.builder("zeta.sync.nodeid.collision.total", sl, s -> (double) s.nodeIdCollisions()).register(
           registry
-        )
-      );
+        );
+      });
     };
   }
 

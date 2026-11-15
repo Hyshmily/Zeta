@@ -35,6 +35,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import lombok.Builder;
+import org.springframework.boot.actuate.endpoint.InvalidEndpointRequestException;
 import org.springframework.boot.actuate.endpoint.annotation.Endpoint;
 import org.springframework.boot.actuate.endpoint.annotation.ReadOperation;
 import org.springframework.lang.Nullable;
@@ -60,19 +61,33 @@ import org.springframework.lang.Nullable;
 @Endpoint(id = "hotkey")
 public class ZetaEndpoint {
 
+  private static final int DEFAULT_LIMIT = 100;
+
+  private static final int MAX_TOP_K_LIMIT = 1_000;
+
+  /** The stale-debt view stays a short diagnostic list regardless of the requested TopK size. */
+  private static final int MAX_STALE_DEBT_LIMIT = 100;
+
   /** L1 Caffeine cache instance. */
+  @Nullable
   private final Cache<String, CacheEntry> caffeineCache;
+
   /** Background soft-expire refresh executor (limiter observability). */
+  @Nullable
   private final BackgroundRefresher backgroundRefresher;
+
   /**
    * Sync-plane listener supplying appName-isolation counters for the "sync" section;
    * {@code null} when the sync plane is absent.
    */
+  @Nullable
   private final CacheSyncListener syncListener;
+
   /**
    * Decision-plane listener supplying appName-isolation counters for the "worker" section;
    * {@code null} when Worker mode is off.
    */
+  @Nullable
   private final WorkerListener workerListener;
 
   /**
@@ -80,22 +95,33 @@ public class ZetaEndpoint {
    * Its pending-key figure is reported as {@code reportPendingKeys}; without it the reporter's
    * own count is the fallback.
    */
+  @Nullable
   @SuppressWarnings("SpringJavaInjectionPointsAutowiringInspection")
   private final AccessCounter accessCounter;
 
   /** App-to-Worker report router and publisher. */
+  @Nullable
   private final KeyReporter hotKeyReporter;
+
   /** SingleFlight deduplication guard for concurrent source loads. */
+  @Nullable
   private final SingleFlight singleFlight;
 
   /** Node-local data-version stamp clock (skew observability). */
+  @Nullable
   @SuppressWarnings("SpringJavaInjectionPointsAutowiringInspection")
   private final StampClock stampClock;
 
   /** Cluster health view (may be {@code null} in Worker-only mode). */
+  @Nullable
   private final HealthView healthView;
+
   /** App-side TopK detector (HeavyKeeper) for local hot-key frequency tracking. */
+  @Nullable
   private final TopK hotKeyDetector;
+
+  /** This context's deployment identity. */
+  private final NodeIdentity identity;
 
   /**
    * Collect all diagnostic metrics into a three-section response map:
@@ -106,15 +132,22 @@ public class ZetaEndpoint {
    * </ul>
    *
    * @param limit maximum TopK entries per section; {@code null} (absent query
-   *              parameter) means the default of 100
+   *              parameter) means the default of 100, values above 1000 are capped
    * @return a {@link LinkedHashMap} with identity fields and sectioned metrics
+   * @throws InvalidEndpointRequestException when {@code limit} is below 1
    */
   @ReadOperation
   public Map<String, Object> hotKeyInfo(@Nullable Integer limit) {
-    int topLimit = limit != null ? limit : 100;
+    if (limit != null && limit < 1) {
+      throw new InvalidEndpointRequestException(
+        "limit must be >= 1",
+        "The 'limit' parameter must be a positive integer"
+      );
+    }
+    int topLimit = limit == null ? DEFAULT_LIMIT : Math.min(limit, MAX_TOP_K_LIMIT);
     Map<String, Object> info = new LinkedHashMap<>();
 
-    info.put("instanceId", NodeIdentity.getInstanceId());
+    info.put("instanceId", identity.instanceId());
     info.put("jvmId", NodeIdentity.getJvmId());
 
     Map<String, Object> local = buildLocalSection(topLimit);
@@ -142,7 +175,7 @@ public class ZetaEndpoint {
    * @param drops          cumulative messages dropped for a foreign application name
    * @param lastForeignApp the most recently seen foreign app name, or {@code null}
    */
-  private static void putForeignAppStats(Map<String, Object> section, long drops, String lastForeignApp) {
+  private static void putForeignAppStats(Map<String, Object> section, long drops, @Nullable String lastForeignApp) {
     section.put("foreignAppDrops", drops);
     if (lastForeignApp != null) {
       section.put("lastForeignApp", lastForeignApp);
@@ -166,7 +199,7 @@ public class ZetaEndpoint {
     if (hotKeyDetector != null) {
       // The detector already owns the bounded, sorted snapshot; doing list()
       // plus a manual subList would sort the whole membership and copy it twice.
-      local.put("topK", toTopKEntries(hotKeyDetector.listTopN(Math.max(1, limit))));
+      local.put("topK", toTopKEntries(hotKeyDetector.listTopN(limit)));
       local.put("totalRequests", hotKeyDetector.total());
     }
 
@@ -204,7 +237,7 @@ public class ZetaEndpoint {
       // Lease-on-failure observability (design decisions: expiry and refresh): the keys a
       // failed refresh is still holding servable, oldest first. One map replaces three
       // aggregate counters — it answers "which keys, how stale" rather than "how many events".
-      local.put("staleDebt", backgroundRefresher.leasedStaleness(Math.max(1, Math.min(limit, 100))));
+      local.put("staleDebt", backgroundRefresher.leasedStaleness(Math.min(limit, MAX_STALE_DEBT_LIMIT)));
     }
 
     if (stampClock != null) {
@@ -227,6 +260,7 @@ public class ZetaEndpoint {
     }
     Map<String, Object> sync = new LinkedHashMap<>();
     putForeignAppStats(sync, syncListener.foreignAppDrops(), syncListener.lastForeignApp());
+    sync.put("dispatchRejections", syncListener.syncDispatchRejections());
     sync.put("nodeIdCollisions", syncListener.nodeIdCollisions());
     return sync;
   }

@@ -20,14 +20,15 @@ import java.io.Serial;
 import lombok.Getter;
 
 /**
- * A read-path load was suppressed by protection machinery (per-load timeout, executor
- * saturation).
+ * A read-path load was suppressed by protection machinery (breaker, per-load timeout,
+ * executor saturation).
  *
  * <p>Unlike "source returned null" (an empty read that is never cached), a suppression means the
  * data source was never consulted or never answered — mapping it to {@code null} would let 500s
- * masquerade as 404s. A timeout or executor rejection throws this exception; a breaker-open load
- * does not, because the caller serves the stale fallback instead. Keeps its stack trace (a
- * diagnostic, not hot-path control flow).
+ * masquerade as 404s. A suppression first serves a hard-valid stale entry when one exists;
+ * otherwise it throws this exception. A <em>failed</em> load under an open breaker is a different
+ * outcome: it degrades to the stale entry or a miss. Keeps its stack trace (a diagnostic, not
+ * hot-path control flow).
  */
 @Getter
 public class ZetaSuppressedException extends IllegalStateException {

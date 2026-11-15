@@ -29,14 +29,14 @@ import io.github.hyshmily.zeta.reporting.KeyReporter;
 import io.github.hyshmily.zeta.reporting.ReportPublisher;
 import io.github.hyshmily.zeta.reporting.impl.KeyReporterImpl;
 import io.github.hyshmily.zeta.sharding.ConsistentHashRing;
-import io.github.hyshmily.zeta.sharding.ConsistentHashRingImpl;
+import io.github.hyshmily.zeta.sharding.HashRing;
 import io.github.hyshmily.zeta.sharding.HealthView;
-import io.github.hyshmily.zeta.sharding.HealthViewImpl;
+import io.github.hyshmily.zeta.sharding.ClusterHealth;
 import io.github.hyshmily.zeta.sync.local.CacheSyncListener;
 import io.github.hyshmily.zeta.sync.local.CacheSyncProperties;
 import io.github.hyshmily.zeta.sync.local.CacheSyncPublisher;
 import io.github.hyshmily.zeta.sync.local.PutPayloadCodec;
-import io.github.hyshmily.zeta.sync.local.SyncContext;
+import io.github.hyshmily.zeta.sync.local.DefaultSyncContext;
 import io.github.hyshmily.zeta.sync.local.SyncPolicy;
 import io.github.hyshmily.zeta.sync.worker.DefaultWorkerContext;
 import io.github.hyshmily.zeta.sync.worker.WorkerPolicy;
@@ -143,8 +143,8 @@ class ZetaAmqpAutoConfigurationTest {
       reportPublisher,
       properties,
       new ZetaAppProperties(),
-      new ConsistentHashRingImpl(150),
-      new HealthViewImpl(5_000)
+      new HashRing(150),
+      new ClusterHealth(5_000)
     );
 
     assertThat(reporter).isNotNull();
@@ -274,10 +274,13 @@ class ZetaAmqpAutoConfigurationTest {
     props.setQueuePrefix("test.sync");
 
     ZetaAmqpAutoConfiguration.SyncConfiguration config = new ZetaAmqpAutoConfiguration.SyncConfiguration();
-    Queue queue = config.hotkeySyncQueue(props);
+    Queue queue = config.hotkeySyncQueue(
+      props,
+      new io.github.hyshmily.zeta.util.NodeIdentity("test-instance", 1L)
+    );
 
     assertThat(queue).isNotNull();
-    assertThat(queue.getName()).isEqualTo("test.sync:" + io.github.hyshmily.zeta.util.NodeIdentity.getInstanceId());
+    assertThat(queue.getName()).isEqualTo("test.sync:test-instance");
     assertThat(queue.isDurable()).isTrue();
   }
 
@@ -323,9 +326,10 @@ class ZetaAmqpAutoConfigurationTest {
       props,
       scheduler,
       mock(SyncPolicy.class),
-      mock(SyncContext.class),
+      mock(DefaultSyncContext.class),
       new ZetaAppProperties(),
-      clocks
+      clocks,
+      new io.github.hyshmily.zeta.util.NodeIdentity("test", 1L)
     );
 
     assertThat(listener).isNotNull();
@@ -388,10 +392,13 @@ class ZetaAmqpAutoConfigurationTest {
 
     ZetaAmqpAutoConfiguration.WorkerListenerConfiguration config =
       new ZetaAmqpAutoConfiguration.WorkerListenerConfiguration();
-    Queue queue = config.hotkeyWorkerQueue(props);
+    Queue queue = config.hotkeyWorkerQueue(
+      props,
+      new io.github.hyshmily.zeta.util.NodeIdentity("test-instance", 1L)
+    );
 
     assertThat(queue).isNotNull();
-    assertThat(queue.getName()).startsWith("test.worker:");
+    assertThat(queue.getName()).isEqualTo("test.worker:test-instance");
     assertThat(queue.isDurable()).isTrue();
   }
 
@@ -490,7 +497,8 @@ class ZetaAmqpAutoConfigurationTest {
       rabbitTemplate,
       props,
       new PutPayloadCodec(props),
-      new ZetaAppProperties()
+      new ZetaAppProperties(),
+      new io.github.hyshmily.zeta.util.NodeIdentity("test", 1L)
     );
 
     assertThat(publisher).isNotNull();
@@ -506,15 +514,16 @@ class ZetaAmqpAutoConfigurationTest {
     beanFactory.registerSingleton("rabbitConnectionFactory", connectionFactory);
 
     ZetaAmqpAutoConfiguration.SyncConfiguration config = new ZetaAmqpAutoConfiguration.SyncConfiguration();
+    String queueName = "zeta.sync:test-instance";
     SimpleMessageListenerContainer container = config.syncListenerContainer(
       beanFactory,
-      new Queue(props.getQueueName()),
+      new Queue(queueName),
       cacheSyncListener,
       props
     );
 
     assertThat(container).isNotNull();
-    assertThat(container.getQueueNames()).containsExactly(props.getQueueName());
+    assertThat(container.getQueueNames()).containsExactly(queueName);
   }
 
   // ── WorkerListenerConfiguration remaining beans ──
@@ -538,10 +547,12 @@ class ZetaAmqpAutoConfigurationTest {
   void hotkeyHeartbeatQueueIsCreated() {
     ZetaAmqpAutoConfiguration.WorkerListenerConfiguration config =
       new ZetaAmqpAutoConfiguration.WorkerListenerConfiguration();
-    Queue queue = config.hotkeyHeartbeatQueue();
+    Queue queue = config.hotkeyHeartbeatQueue(
+      new io.github.hyshmily.zeta.util.NodeIdentity("test-instance", 1L)
+    );
 
     assertThat(queue).isNotNull();
-    assertThat(queue.getName()).startsWith("zeta.heartbeat:");
+    assertThat(queue.getName()).isEqualTo("zeta.heartbeat:test-instance");
     assertThat(queue.isDurable()).isFalse();
     assertThat(queue.isAutoDelete()).isTrue();
   }
@@ -573,7 +584,8 @@ class ZetaAmqpAutoConfigurationTest {
       connectionFactory,
       healthView,
       heartbeatQueue,
-      new ZetaAppProperties()
+      new ZetaAppProperties(),
+      mock(ObjectProvider.class)
     );
 
     assertThat(container).isNotNull();
@@ -591,7 +603,7 @@ class ZetaAmqpAutoConfigurationTest {
     ZetaAmqpAutoConfiguration.WorkerListenerConfiguration config =
       new ZetaAmqpAutoConfiguration.WorkerListenerConfiguration();
     MessageListener listener = config
-      .heartbeatContainer(connectionFactory, healthView, heartbeatQueue, appProperties)
+      .heartbeatContainer(connectionFactory, healthView, heartbeatQueue, appProperties, mock(ObjectProvider.class))
       .getMessageListener();
 
     listener.onMessage(new WorkerHeartbeatMessage(1L, "foreign-worker", 1L, true, "tenant-b").toMessage());

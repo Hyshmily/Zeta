@@ -32,6 +32,7 @@ import io.github.hyshmily.zeta.sharding.ConsistentHashRing;
 import io.github.hyshmily.zeta.sharding.HealthView;
 import io.github.hyshmily.zeta.sync.local.CacheSyncListener;
 import io.github.hyshmily.zeta.sync.worker.WorkerListener;
+import io.github.hyshmily.zeta.util.NodeIdentity;
 import io.github.hyshmily.zeta.util.clock.StampClock;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicLong;
@@ -107,7 +108,8 @@ class ZetaActuatorAutoConfigurationTest {
       stampClockProvider,
       healthViewProvider,
       syncListenerProvider,
-      workerListenerProvider
+      workerListenerProvider,
+      new NodeIdentity("test", 1L)
     );
 
     assertThat(endpoint).isNotNull();
@@ -146,7 +148,8 @@ class ZetaActuatorAutoConfigurationTest {
       stampClockProvider,
       healthViewProvider,
       syncListenerProvider,
-      workerListenerProvider
+      workerListenerProvider,
+      new NodeIdentity("test", 1L)
     );
 
     assertThat(endpoint).isNotNull();
@@ -212,10 +215,24 @@ class ZetaActuatorAutoConfigurationTest {
       stampClockProvider,
       healthViewProvider,
       syncListenerProvider,
-      workerListenerProvider
+      workerListenerProvider,
+      new NodeIdentity("test", 1L)
     );
 
     assertThat(endpoint).isNotNull();
+  }
+
+  @Test
+  void configuredIdentityWinsOverTheActuatorFallback() {
+    new ApplicationContextRunner()
+      .withPropertyValues("zeta.local.instance-id=configured-instance", "zeta.local.node-id=321")
+      .withConfiguration(AutoConfigurations.of(ZetaActuatorAutoConfiguration.class, ZetaFacadeAutoConfiguration.class))
+      .run(ctx -> {
+        assertThat(ctx).hasSingleBean(NodeIdentity.class);
+        NodeIdentity identity = ctx.getBean(NodeIdentity.class);
+        assertThat(identity.instanceId()).isEqualTo("configured-instance");
+        assertThat(identity.nodeId()).isEqualTo(321L);
+      });
   }
 
   /**

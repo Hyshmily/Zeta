@@ -290,7 +290,7 @@
     {
       "name": "zeta.sync.put-allowed-packages",
       "type": "java.util.List",
-      "description": "Extra package prefixes admitted by the PUT deserialization whitelist. The built-in whitelist keeps JDK value types and io.github.hyshmily.zeta.*; a business DTO outside both fails closed and degrades to a versioned INVALIDATE.",
+      "description": "Extra package prefixes admitted by the PUT deserialization whitelist. A trailing '.' is added when absent, so com.example.dto does not admit com.example.dtoOther. The built-in whitelist keeps JDK value types (Collection/Map implementations only from java.util) and io.github.hyshmily.zeta.model.*; a business DTO outside both fails closed and degrades to a versioned INVALIDATE.",
       "defaultValue": []
     },
     {

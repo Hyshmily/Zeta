@@ -15,18 +15,19 @@
  */
 package io.github.hyshmily.zeta.endpoint;
 
+import io.github.hyshmily.zeta.sharding.ClusterHealth;
 import io.github.hyshmily.zeta.sharding.ConsistentHashRing;
 import io.github.hyshmily.zeta.sharding.HealthView;
-import io.github.hyshmily.zeta.sharding.HealthViewImpl;
 import io.github.hyshmily.zeta.util.Internal;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import org.jspecify.annotations.Nullable;
+import org.springframework.boot.actuate.endpoint.InvalidEndpointRequestException;
 import org.springframework.boot.actuate.endpoint.annotation.Endpoint;
 import org.springframework.boot.actuate.endpoint.annotation.ReadOperation;
 import org.springframework.boot.actuate.endpoint.annotation.Selector;
 import org.springframework.http.HttpStatus;
-import org.springframework.util.Assert;
+import org.springframework.util.StringUtils;
 import org.springframework.web.server.ResponseStatusException;
 
 /**
@@ -56,7 +57,10 @@ public class RingEndpoint {
   @Nullable
   private final ConsistentHashRing ring;
 
-  /** The live view, or a zero-timeout view so an unwired endpoint never allocates per request. */
+  /** A view with no records: every Worker is dead and the cluster is never healthy. */
+  private static final HealthView NO_HEALTH = new ClusterHealth(1L);
+
+  /** The live view, or {@link #NO_HEALTH} so an unwired endpoint never allocates per request. */
   private final HealthView healthView;
 
   /**
@@ -69,7 +73,7 @@ public class RingEndpoint {
    */
   public RingEndpoint(@Nullable ConsistentHashRing ring, @Nullable HealthView healthView) {
     this.ring = ring;
-    this.healthView = healthView != null ? healthView : new HealthViewImpl(0);
+    this.healthView = healthView != null ? healthView : NO_HEALTH;
   }
 
   /**
@@ -88,14 +92,19 @@ public class RingEndpoint {
    * mapping reports {@code null} for {@code nodeId}.
    *
    * @param keySegments the path segments of the key; a key containing {@code /} arrives as
-   *                    several segments and is re-joined verbatim
+   *                    several segments and is re-joined verbatim, or {@code null} when the
+   *                    request carries no path segment
    * @return a map containing the key and its assigned node ID
-   * @throws IllegalArgumentException if the joined key is blank
+   * @throws InvalidEndpointRequestException if the joined key is blank
    */
   @ReadOperation
-  public Map<String, Object> keyMapping(@Selector(match = Selector.Match.ALL_REMAINING) String[] keySegments) {
-    String key = String.join("/", keySegments);
-    Assert.hasText(key, "key must not be empty");
+  public Map<String, Object> keyMapping(
+    @Selector(match = Selector.Match.ALL_REMAINING) String@Nullable [] keySegments
+  ) {
+    String key = keySegments == null ? "" : String.join("/", keySegments);
+    if (!StringUtils.hasText(key)) {
+      throw new InvalidEndpointRequestException("key must not be empty", "The 'key' path selector must not be blank");
+    }
     ConsistentHashRing activeRing = reconciledRing();
     Map<String, Object> result = new LinkedHashMap<>(2);
     result.put("key", key);

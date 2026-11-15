@@ -28,6 +28,7 @@ import io.github.hyshmily.zeta.sharding.HealthView;
 import io.github.hyshmily.zeta.sync.local.CacheSyncListener;
 import io.github.hyshmily.zeta.sync.worker.WorkerListener;
 import io.github.hyshmily.zeta.util.Internal;
+import io.github.hyshmily.zeta.util.NodeIdentity;
 import io.github.hyshmily.zeta.util.clock.StampClock;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -62,9 +63,22 @@ import org.springframework.context.annotation.Bean;
  * inside each endpoint.
  */
 @Internal
-@AutoConfiguration
+@AutoConfiguration(after = ZetaFacadeAutoConfiguration.class)
 @ConditionalOnClass(name = "org.springframework.boot.actuate.endpoint.annotation.Endpoint")
 public class ZetaActuatorAutoConfiguration {
+
+  /**
+   * Fallback deployment identity for an actuator-only slice that does not load the facade
+   * configuration. The facade is ordered before this class, so a context that loads both keeps
+   * the configured bean; this method only covers a slice with no facade.
+   *
+   * @return the auto-detected identity
+   */
+  @Bean
+  @ConditionalOnMissingBean
+  public NodeIdentity nodeIdentity() {
+    return NodeIdentity.resolve(null, null);
+  }
 
   /**
    * Create the {@link ZetaEndpoint} Actuator endpoint for comprehensive diagnostics.
@@ -85,6 +99,7 @@ public class ZetaActuatorAutoConfiguration {
    *                                    dispatcher gate is reported (may be absent)
    * @param workerListenerProvider      provider for the decision-plane listener whose ordered
    *                                    dispatcher gate is reported (may be absent)
+   * @param identity                    this context's deployment identity; never {@code null}
    * @return a new {@link ZetaEndpoint} instance
    */
   @Bean
@@ -100,9 +115,11 @@ public class ZetaActuatorAutoConfiguration {
     ObjectProvider<StampClock> stampClockProvider,
     ObjectProvider<HealthView> healthViewProvider,
     ObjectProvider<CacheSyncListener> syncListenerProvider,
-    ObjectProvider<WorkerListener> workerListenerProvider
+    ObjectProvider<WorkerListener> workerListenerProvider,
+    NodeIdentity identity
   ) {
     return ZetaEndpoint.builder()
+      .identity(identity)
       .hotKeyDetector(hotKeyDetectorProvider.getIfAvailable())
       .caffeineCache(hotLocalCacheProvider.getIfAvailable())
       .singleFlight(singleFlightProvider.getIfAvailable())

@@ -26,8 +26,8 @@ import io.github.hyshmily.zeta.cache.HotKeyCache;
 import io.github.hyshmily.zeta.cache.cachesupport.circuitbreaker.CircuitBreakerRegistry;
 import io.github.hyshmily.zeta.cache.cachesupport.lifecycle.EntryLifecycle;
 import io.github.hyshmily.zeta.cache.cachesupport.lifecycle.EntryLifecycleImpl;
+import io.github.hyshmily.zeta.cache.cachesupport.loader.singleflight.LoadFlights;
 import io.github.hyshmily.zeta.cache.cachesupport.loader.singleflight.SingleFlight;
-import io.github.hyshmily.zeta.cache.cachesupport.loader.singleflight.SingleFlightImpl;
 import io.github.hyshmily.zeta.cache.cachesupport.raw.CacheEntry;
 import io.github.hyshmily.zeta.constants.ZetaConstants;
 import io.github.hyshmily.zeta.hotkeydetector.HotKeyDetector;
@@ -42,7 +42,7 @@ import io.github.hyshmily.zeta.sync.local.CacheSyncProperties;
 import io.github.hyshmily.zeta.sync.local.CacheSyncPublisher;
 import io.github.hyshmily.zeta.util.Internal;
 import io.github.hyshmily.zeta.util.clock.StampClock;
-import io.github.hyshmily.zeta.util.executor.StandardThreadExecutor;
+import io.github.hyshmily.zeta.util.executor.ElasticThreadPool;
 import io.github.hyshmily.zeta.util.executor.ZetaThreadFactory;
 import jakarta.annotation.PostConstruct;
 import java.util.concurrent.*;
@@ -271,7 +271,7 @@ public class ZetaAutoConfiguration {
     @Qualifier("interruptibleLoadExecutor") Executor loadExecutor,
     CircuitBreakerRegistry breakerRegistry
   ) {
-    return new SingleFlightImpl(
+    return new LoadFlights(
       properties.getInFlightMaxSize(),
       properties.getInFlightTtlSeconds(),
       properties.getInFlightTimeoutSeconds(),
@@ -349,7 +349,7 @@ public class ZetaAutoConfiguration {
    * right degradation.
    *
    * @param properties the HotKey configuration properties (never {@code null})
-   * @return a configured {@link StandardThreadExecutor}
+   * @return a configured {@link ElasticThreadPool}
    */
   @Bean(name = "hotKeyExecutor", destroyMethod = "shutdownNow")
   @ConditionalOnMissingBean(name = "hotKeyExecutor")
@@ -372,7 +372,7 @@ public class ZetaAutoConfiguration {
    * the only two components that run interruptible loads.
    *
    * @param properties the HotKey configuration properties (never {@code null})
-   * @return a configured {@link StandardThreadExecutor} reserved for interruptible loads
+   * @return a configured {@link ElasticThreadPool} reserved for interruptible loads
    */
   @Bean(name = "interruptibleLoadExecutor", destroyMethod = "shutdownNow")
   @ConditionalOnMissingBean(name = "interruptibleLoadExecutor")
@@ -391,7 +391,7 @@ public class ZetaAutoConfiguration {
    * and must not share a pool with cache writes or loads.
    *
    * @param properties the HotKey configuration properties (never {@code null})
-   * @return a configured {@link StandardThreadExecutor} reserved for broadcast sends
+   * @return a configured {@link ElasticThreadPool} reserved for broadcast sends
    */
   @Bean(name = "zetaSendExecutor", destroyMethod = "shutdownNow")
   @ConditionalOnMissingBean(name = "zetaSendExecutor")
@@ -440,9 +440,9 @@ public class ZetaAutoConfiguration {
    * @param properties   the HotKey configuration properties (never {@code null})
    * @param threadPrefix the thread-name prefix identifying the pool's domain
    * @param saturation   whether this pool may honor {@code CALLER_RUNS}
-   * @return a configured {@link StandardThreadExecutor}
+   * @return a configured {@link ElasticThreadPool}
    */
-  private StandardThreadExecutor newPool(ZetaProperties properties, String threadPrefix, Saturation saturation) {
+  private ElasticThreadPool newPool(ZetaProperties properties, String threadPrefix, Saturation saturation) {
     boolean callerRuns =
       saturation == Saturation.CALLER_RUNS_OK &&
       properties.getExecutorRejection() == ZetaProperties.ExecutorRejection.CALLER_RUNS;
@@ -462,7 +462,7 @@ public class ZetaAutoConfiguration {
           );
           throw new RejectedExecutionException("HotKey executor queue full: " + threadPrefix);
         };
-    var executor = new StandardThreadExecutor(
+    var executor = new ElasticThreadPool(
       properties.getExecutorCorePoolSize(),
       properties.getExecutorMaxPoolSize(),
       60L,
@@ -594,8 +594,8 @@ public class ZetaAutoConfiguration {
     // Stats recording enables hit/miss/eviction counters for Zeta#stats() and the cache.*
     // Micrometer metrics; overhead is a few LongAdder increments per cache operation.
     builder.recordStats();
-    // Narrowing call: captures the String/CacheEntry-typed reference for the
-    // removalListener/customizer/build calls below (same mutated instance).
+    // Caffeine.newBuilder() starts as <Object, Object>; expireAfter(...) narrows the same
+    // builder instance in place, so this typed reference carries every setting written above.
     Caffeine<String, CacheEntry> typed = builder.expireAfter(
       new Expiry<>() {
         /**
@@ -656,12 +656,9 @@ public class ZetaAutoConfiguration {
         }
       }
     );
-    // Typing note: Caffeine's narrowing setters (expireAfter) mutate
-    // this same builder instance in place and only narrow the static type, so
-    // the captured `typed` reference above carries every setting.
-    // Application customizers run last, in order, immediately before build() —
-    // they may add orthogonal listeners/executors/schedulers but cannot replace
-    // the capacity or expiry knobs set above (Caffeine setters are single-use).
+    // Application customizers run last, in order, immediately before build() — they may add
+    // orthogonal listeners/executors/schedulers but cannot replace the capacity or expiry knobs
+    // set above (Caffeine setters are single-use).
     customizerProvider.orderedStream().forEach(customizer -> customizer.customize(typed));
     return typed.build();
   }
