@@ -24,19 +24,17 @@ import io.github.hyshmily.zeta.sharding.HealthView;
 import io.github.hyshmily.zeta.util.Internal;
 import io.github.hyshmily.zeta.util.TimeSource;
 import io.github.hyshmily.zeta.util.executor.ZetaThreadFactory;
-import java.util.HashMap;
-import java.util.Iterator;
-import java.util.Map;
-import java.util.Set;
+import lombok.Setter;
+import lombok.extern.slf4j.Slf4j;
+import org.jspecify.annotations.Nullable;
+
+import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 import java.util.function.Predicate;
-import lombok.Setter;
-import lombok.extern.slf4j.Slf4j;
-import org.jspecify.annotations.Nullable;
 
 /**
  * Publishes per-key access-add batches to the Worker via {@link ReportPublisher}.
@@ -73,7 +71,7 @@ public class KeyReporterImpl implements KeyReporter {
   @Setter
   private volatile Consumer<Long> cadenceAdjuster;
 
-  /** Keys dropped because {@code locateNode} returned null or the target had no epoch. */
+  /** Keys dropped because no target with a captured epoch remained after the routing fallback. */
   private final AtomicLong unroutableDropCounter = new AtomicLong();
   /** Keys dropped because no Worker was alive. */
   private final AtomicLong workerDeadDropCounter = new AtomicLong();
@@ -98,10 +96,13 @@ public class KeyReporterImpl implements KeyReporter {
    * @param reportPublisher     publisher used to send report messages
    * @param appName             this application instance's name, stamped on every message
    * @param queueCapacity       dispatcher work-queue capacity
-   * @param queueOfferTimeoutMs how long a routed batch waits for queue space
+   * @param queueOfferTimeoutMs shared whole-flush budget for routing offers, not a per-batch wait
    * @param consumerCount       threads draining the queue
    * @param ring                consistent-hash ring for Worker routing
    * @param healthView          cluster health view (liveness and epoch)
+   * @throws IllegalArgumentException when the queue capacity or consumer count is non-positive, or
+   *                                  the offer timeout is negative
+   * @throws NullPointerException     when a required collaborator is null
    */
   public KeyReporterImpl(
     ReportPublisher reportPublisher,
@@ -112,12 +113,21 @@ public class KeyReporterImpl implements KeyReporter {
     ConsistentHashRing ring,
     HealthView healthView
   ) {
-    this.ring = ring;
-    this.appName = appName;
-    this.healthView = healthView;
+    this.reportPublisher = Objects.requireNonNull(reportPublisher, "reportPublisher must not be null");
+    this.appName = Objects.requireNonNull(appName, "appName must not be null");
+    this.ring = Objects.requireNonNull(ring, "ring must not be null");
+    this.healthView = Objects.requireNonNull(healthView, "healthView must not be null");
+    if (queueCapacity <= 0) {
+      throw new IllegalArgumentException("queueCapacity must be > 0, but got: " + queueCapacity);
+    }
+    if (queueOfferTimeoutMs < 0) {
+      throw new IllegalArgumentException("queueOfferTimeoutMs must be >= 0, but got: " + queueOfferTimeoutMs);
+    }
+    if (consumerCount <= 0) {
+      throw new IllegalArgumentException("consumerCount must be > 0, but got: " + consumerCount);
+    }
     this.queueCapacity = queueCapacity;
     this.consumerCount = consumerCount;
-    this.reportPublisher = reportPublisher;
     this.queueOfferTimeoutMs = queueOfferTimeoutMs;
   }
 
@@ -273,14 +283,16 @@ public class KeyReporterImpl implements KeyReporter {
   }
 
   /**
-   * Drops a flush that cannot be routed and counts every key as a dead-Worker drop.
+   * Drops a flush that cannot be routed and counts every key as a dead-Worker drop. A designed
+   * degradation, so it logs at DEBUG: the cumulative {@link RoutingStats} counter is the
+   * operational signal and a per-tide WARN under a systemic outage is a log flood.
    *
    * @param counts the flush counts
    * @param reason the operator-facing cause, without a trailing separator
    */
   private void dropUnroutable(Map<String, Long> counts, String reason) {
     long total = workerDeadDropCounter.addAndGet(counts.size());
-    log.warn("{}; dropping {} keys in this flush (cumulative: {})", reason, counts.size(), total);
+    log.debug("{}; dropping {} keys in this flush (cumulative: {})", reason, counts.size(), total);
   }
 
   /**
@@ -322,10 +334,10 @@ public class KeyReporterImpl implements KeyReporter {
 
     long timestamp = admission.timestamp();
     long enqueuedAt = TimeSource.monotonicMillis();
-    // Route only to nodes whose epoch this admission captured. The ring can be rebuilt by a
-    // concurrent heartbeat between the reconcile and this pass; the current snapshot's new owner
-    // has no captured epoch, and walking past it to a captured node keeps the counts instead of
-    // dropping the key as unroutable.
+    // Route only to nodes whose epoch this admission captured. The snapshot-only fast path is
+    // enough while the ring still matches the admission; if a concurrent heartbeat rebuild
+    // moved the key to a node with no captured epoch, the admitted-target walk skips that node
+    // and keeps the counts instead of dropping the key as unroutable.
     Predicate<String> admittedTarget = admission.epochs()::containsKey;
     Map<String, Map<String, Long>> sharded = new HashMap<>();
     for (Map.Entry<String, Long> entry : counts.entrySet()) {
@@ -337,7 +349,10 @@ public class KeyReporterImpl implements KeyReporter {
 
       String target;
       try {
-        target = ring.locateNode(entry.getKey(), admittedTarget);
+        target = ring.locateNode(entry.getKey());
+        if (target == null || !admission.epochs().containsKey(target)) {
+          target = ring.locateNode(entry.getKey(), admittedTarget);
+        }
         if (target == null) {
           noteUnroutable(entry.getKey(), 1, "locateNode returned null");
           continue;
@@ -365,6 +380,9 @@ public class KeyReporterImpl implements KeyReporter {
       // one after a restart.
       Long targetEpoch = admission.epochs().get(target);
       if (targetEpoch == null) {
+        // The admitted-target walk guarantees a captured node for the built-in ring; a custom
+        // ring that ignores the predicate can still answer outside the captured set, and such
+        // a batch must not be stamped with an unknown incarnation.
         noteUnroutable(target, countsForTarget.size(), "no epoch for routed target");
         continue;
       }
@@ -390,10 +408,9 @@ public class KeyReporterImpl implements KeyReporter {
         break;
       }
 
-      long offerTimeoutMs = Math.max(1L, TimeUnit.NANOSECONDS.toMillis(remainingNanos));
       boolean accepted = current.enqueue(
         new ShardBatch(target, targetEpoch, timestamp, countsForTarget, enqueuedAt),
-        offerTimeoutMs
+        remainingNanos
       );
       if (!accepted) {
         long dropped = droppedCounter.addAndGet(countsForTarget.size());
@@ -524,19 +541,21 @@ public class KeyReporterImpl implements KeyReporter {
     }
 
     /**
-     * Offer a batch to the bounded queue, waiting up to {@code timeoutMs} for space.
+     * Offer a batch to the bounded queue, waiting up to {@code timeoutNanos} for space.
      * An interrupt discards the batch and restores the flag.
      *
-     * @param batch     the batch to enqueue
-     * @param timeoutMs the remaining shared flush budget
+     * @param batch        the batch to enqueue
+     * @param timeoutNanos the remaining shared flush budget in nanoseconds
      * @return {@code true} when the batch was accepted
      */
-    boolean enqueue(ShardBatch batch, long timeoutMs) {
+    boolean enqueue(ShardBatch batch, long timeoutNanos) {
       if (!running) {
+        droppedCount.incrementAndGet();
         return false;
       }
       try {
-        boolean accepted = queue.offer(batch, timeoutMs, TimeUnit.MILLISECONDS);
+        boolean accepted =
+          timeoutNanos > 0L ? queue.offer(batch, timeoutNanos, TimeUnit.NANOSECONDS) : queue.offer(batch);
         // shutdown() flips running and then drains the queue. A batch offered after that
         // drain would sit forever with no consumer, so withdraw it and report the same
         // rejection the caller would have seen before the offer.
@@ -600,8 +619,8 @@ public class KeyReporterImpl implements KeyReporter {
 
     /**
      * Records batches the routing layer refused before an offer: a shared offer budget that
-     * expired between targets, or a queue offer that lost to shutdown. The queue's own
-     * {@link #enqueue} path counts its internal withdrawal separately.
+     * expired between targets. The queue's own {@link #enqueue} path counts a closed
+     * dispatcher and a post-offer shutdown withdrawal separately.
      *
      * @param batches the number of batches not offered
      */
@@ -669,7 +688,16 @@ public class KeyReporterImpl implements KeyReporter {
           break;
         }
 
-        boolean deadTarget = !healthView.isCurrentIncarnation(batch.target(), batch.targetEpoch());
+        boolean deadTarget;
+        try {
+          deadTarget = !healthView.isCurrentIncarnation(batch.target(), batch.targetEpoch());
+        } catch (RuntimeException e) {
+          // A broken health probe must not kill a permanent consumer: submit() swallows the
+          // exception into an unobserved Future and the fixed pool never replaces the thread.
+          droppedCount.incrementAndGet();
+          log.warn("Health check failed for target={}, dropping report batch", batch.target(), e);
+          continue;
+        }
         boolean stale = TimeSource.monotonicMillis() - batch.enqueuedAt() > STALE_BATCH_MS;
         if (deadTarget || stale) {
           (deadTarget ? expiredDeadTargetCount : expiredStaleCount).incrementAndGet();

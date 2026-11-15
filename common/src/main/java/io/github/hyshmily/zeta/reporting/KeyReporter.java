@@ -80,7 +80,9 @@ public interface KeyReporter {
   /**
    * A point-in-time read of the routing-drop counters.
    *
-   * @param unroutableKeys keys whose target could not be resolved, or whose target had no epoch
+   * @param unroutableKeys keys for which no captured target was resolved; the built-in ring
+   *                       retries an uncaptured owner on the admitted-target walk, so only a
+   *                       custom ring outside that set still lands here
    * @param workerDeadKeys keys dropped because no Worker was alive
    * @param refusedKeys    keys in batches the queue or shared offer budget refused
    */
@@ -108,10 +110,13 @@ public interface KeyReporter {
    * A point-in-time read of the dispatcher's counters.
    *
    * @param depth             batches waiting in the work queue
-   * @param expiredDeadTarget batches discarded because their target Worker was no longer alive
+   * @param expiredDeadTarget batches discarded because their target Worker failed the incarnation
+   *                          check
    * @param expiredStale      batches discarded because they waited past the staleness bound
-   * @param dropped           batches refused after the offer: the queue stayed full past the
-   *                          offer timeout, or the batch was withdrawn during shutdown
+   * @param dropped           batches not accepted by the dispatcher: the shared offer budget
+   *                          expired, the queue stayed full past it, the dispatcher was already
+   *                          closed, the batch was withdrawn after the offer during shutdown, or
+   *                          the consumer's health probe failed
    */
   record DispatcherStats(int depth, long expiredDeadTarget, long expiredStale, long dropped) {}
 }

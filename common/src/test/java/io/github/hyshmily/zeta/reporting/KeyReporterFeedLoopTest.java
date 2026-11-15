@@ -22,9 +22,9 @@ import io.github.hyshmily.zeta.cache.AccessCounter;
 import io.github.hyshmily.zeta.reporting.impl.KeyReporterImpl;
 import io.github.hyshmily.zeta.reporting.impl.ReportFeedLoop;
 import io.github.hyshmily.zeta.sharding.ConsistentHashRing;
-import io.github.hyshmily.zeta.sharding.ConsistentHashRingImpl;
+import io.github.hyshmily.zeta.sharding.HashRing;
 import io.github.hyshmily.zeta.sharding.HealthView;
-import io.github.hyshmily.zeta.sharding.HealthViewImpl;
+import io.github.hyshmily.zeta.sharding.ClusterHealth;
 import io.github.hyshmily.zeta.sync.worker.WorkerHeartbeatMessage;
 import java.lang.reflect.Field;
 import java.util.concurrent.Executors;
@@ -58,8 +58,8 @@ class KeyReporterFeedLoopTest {
   void setUp() {
     scheduler = Executors.newSingleThreadScheduledExecutor();
     testPublisher = new KeyReporterTest.TestReportPublisher();
-    ring = new ConsistentHashRingImpl(150);
-    healthView = new HealthViewImpl(30000);
+    ring = new HashRing(150);
+    healthView = new ClusterHealth(30000);
     reporter = newReporter();
     // design decisions: access counting: the tide lives on the shared access counter; the feed-loop
     // tuner's apply mode moves it through the cadence-adjuster seam.

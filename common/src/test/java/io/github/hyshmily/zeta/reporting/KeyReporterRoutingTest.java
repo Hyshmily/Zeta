@@ -21,9 +21,9 @@ import static org.mockito.Mockito.mock;
 import io.github.hyshmily.zeta.cache.AccessCounter;
 import io.github.hyshmily.zeta.reporting.impl.KeyReporterImpl;
 import io.github.hyshmily.zeta.sharding.ConsistentHashRing;
-import io.github.hyshmily.zeta.sharding.ConsistentHashRingImpl;
+import io.github.hyshmily.zeta.sharding.HashRing;
 import io.github.hyshmily.zeta.sharding.HealthView;
-import io.github.hyshmily.zeta.sharding.HealthViewImpl;
+import io.github.hyshmily.zeta.sharding.ClusterHealth;
 import io.github.hyshmily.zeta.sync.worker.WorkerHeartbeatMessage;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -75,8 +75,8 @@ class KeyReporterRoutingTest {
   void setUp() {
     scheduler = Executors.newSingleThreadScheduledExecutor();
     testPublisher = new TestReportPublisher();
-    ring = new ConsistentHashRingImpl(150);
-    healthView = new HealthViewImpl(30000);
+    ring = new HashRing(150);
+    healthView = new ClusterHealth(30000);
     reporter = new KeyReporterImpl(testPublisher, "testApp", QUEUE_CAPACITY, 100, 1, ring, healthView);
     reporterCounter = new AccessCounter(
       mock(io.github.hyshmily.zeta.hotkeydetector.HotKeyDetector.class),

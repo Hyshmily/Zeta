@@ -32,11 +32,8 @@ import org.springframework.amqp.rabbit.core.RabbitTemplate;
 @Internal
 public class ReportPublisher {
 
-  /** RabbitMQ template for message publishing. */
   private final RabbitTemplate rabbitTemplate;
-  /** Name of the RabbitMQ exchange to which reports are sent. */
   private final String reportExchange;
-  /** Application name; prefixes the per-Worker routing key. */
   private final String appName;
 
   /**
