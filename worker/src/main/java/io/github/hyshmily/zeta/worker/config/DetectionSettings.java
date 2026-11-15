@@ -379,16 +379,15 @@ public record DetectionSettings(
     }
 
     /**
-     * Resolves and validates one rule's cool-down block into the three primitive parameters the
-     * runtime rule stores.
+     * Resolves one rule's cool-down block into the three primitive parameters the runtime rule
+     * stores.
      *
-     * <p>Each strategy is checked against the fields it actually uses: EXPIRE rejects
-     * {@code cool-qps}/{@code low-qps-for}, LOW_QPS rejects {@code cool-after}, and LOW_QPS also
-     * requires a non-empty hysteresis band ({@code coolCount < hotCount}) and a positive global
-     * re-check interval. The returned encoding is the runtime contract: {@code coolCount == 0} means
-     * EXPIRE and stores the lifetime in {@code checkIntervalMs}; a positive {@code coolCount} means
-     * LOW_QPS and stores the dwell in {@code lowQpsForMs}. Returning {@code null} means at least one
-     * error was appended; the caller must not build a rule.
+     * <p>Each strategy is checked against the fields it uses: EXPIRE rejects
+     * {@code cool-qps}/{@code low-qps-for}, LOW_QPS rejects {@code cool-after} and requires a
+     * non-empty hysteresis band plus a positive global re-check interval. The encoding is the
+     * runtime contract: {@code coolCount == 0} means EXPIRE and stores the lifetime in
+     * {@code checkIntervalMs}; a positive {@code coolCount} means LOW_QPS and stores the dwell in
+     * {@code lowQpsForMs}. Returning {@code null} means at least one error was appended.
      *
      * @param id       the rule id, for error messages
      * @param cool     the configured cool block (never {@code null})
@@ -481,13 +480,14 @@ public record DetectionSettings(
     }
 
     /**
-     * Converts a configured duration to milliseconds, recording a missing or non-positive value in
-     * {@link #errors}. The raw conversion is returned even when it is invalid (0 for a missing
-     * value), so a caller must treat any appended error as fatal before using the result.
+     * Converts a configured duration to milliseconds, recording a missing, non-positive or
+     * unrepresentably large value in {@link #errors}. The raw conversion is returned even when it is
+     * invalid (0 for a missing or overflowing value), so a caller must treat any appended error as
+     * fatal.
      *
      * @param value the configured duration, possibly {@code null}
      * @param name  the property path used in the error message
-     * @return the duration in milliseconds, or 0 when the value is missing
+     * @return the duration in milliseconds, or 0 when the value is missing or overflows
      */
     private long millis(@Nullable Duration value, String name) {
       if (value == null) {
@@ -495,11 +495,19 @@ public record DetectionSettings(
         return 0L;
       }
 
-      long ms = value.toMillis();
-      if (ms <= 0) {
-        errors.add(name + " must be positive");
+      try {
+        long ms = value.toMillis();
+        if (ms <= 0) {
+          errors.add(name + " must be positive");
+        }
+        return ms;
+      } catch (ArithmeticException e) {
+        // A Duration near Long.MAX_VALUE seconds cannot be represented in milliseconds. Catch it
+        // here so the validator still reports every violation in one startup error instead of
+        // letting the arithmetic exception escape the aggregation.
+        errors.add(name + " exceeds the maximum supported millisecond value");
+        return 0L;
       }
-      return ms;
     }
 
     /**
@@ -552,10 +560,9 @@ public record DetectionSettings(
         }
       }
     }
-    // A wheel thread inserts and fires in O(1) and allocates nothing; the cost per check is the
-    // registry evaluation plus the wheel link. The budget is deliberately conservative: at 200k
-    // checks/s one wheel still spends only a few percent of a core, so crossing it means the
-    // deployment is an order of magnitude beyond the design point, not that the wheel is full.
+    // A wheel thread inserts and fires in O(1) and allocates nothing; per-check cost is the registry
+    // evaluation plus the wheel link. 200k checks/s on one wheel still spends only a few percent of
+    // a core, so crossing the budget means the deployment is far beyond the design point.
     long checksPerWheel = 200_000L;
     if (checksPerSecond > checksPerWheel * coolingThreads) {
       log.warn(
@@ -584,9 +591,8 @@ public record DetectionSettings(
    * Warns when the configured key cap projects a window table larger than half the heap.
    *
    * <p>Each tracked key holds a doubled ring of two {@code long} slots per slice plus one window
-   * object, a concurrent-map node and the key string. The estimate is deliberately coarse — it is
-   * a startup capacity check, not an allocation model — and it catches the common failure of
-   * keeping the 1M default on a sub-gigabyte container.
+   * object, a concurrent-map node and the key string. The estimate is deliberately coarse; it
+   * catches the common failure of keeping the 1M default on a sub-gigabyte container.
    *
    * @param maxTrackedKeys the configured cap ({@code 0} disables the check)
    */

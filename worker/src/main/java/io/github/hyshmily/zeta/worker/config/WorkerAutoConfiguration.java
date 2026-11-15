@@ -21,7 +21,7 @@ import io.github.hyshmily.zeta.autoconfigure.ZetaAmqpAutoConfiguration;
 import io.github.hyshmily.zeta.autoconfigure.ZetaAppProperties;
 import io.github.hyshmily.zeta.constants.ZetaConstants;
 import io.github.hyshmily.zeta.util.NodeIdentity;
-import io.github.hyshmily.zeta.util.executor.SafeScheduledExecutorService;
+import io.github.hyshmily.zeta.util.executor.PeriodicScheduler;
 import io.github.hyshmily.zeta.util.executor.ZetaThreadFactory;
 import io.github.hyshmily.zeta.worker.detection.DetectionPipeline;
 import io.github.hyshmily.zeta.worker.detection.lifecycle.CoolingScheduler;
@@ -68,29 +68,12 @@ import org.springframework.context.SmartLifecycle;
 import org.springframework.context.annotation.Bean;
 
 /**
- * Auto‑configuration for the <b>hot‑key Worker</b>.
+ * Auto-configuration for the standalone hot-key Worker.
  *
  * <p>Activates when {@code zeta.worker.enabled=true} and RabbitMQ is on the classpath. The Worker
- * consumes per‑key access counts reported by application instances, evaluates them against one
+ * consumes per-key access counts reported by application instances, evaluates them against one
  * sliding window and an ordered rule set, and broadcasts HOT / COOL decisions back to every
- * instance.
- *
- * <h2>Provisioned beans</h2>
- * <ul>
- *   <li>{@link DetectionSettings} – the validated detection block, with thresholds converted to
- *       window counts.</li>
- *   <li>{@link SlidingWindowDetector} – the shared per-key window table.</li>
- *   <li>{@link RuleResolver} – the published rule snapshot and its bounded match cache.</li>
- *   <li>{@link HotKeyRegistry} – the authoritative HOT set and its seat permits.</li>
- *   <li>{@link CoolingWheels} / {@link CoolingScheduler} – the striped cool-down wheels and their
- *       advancing threads.</li>
- *   <li>{@link DetectionPipeline} – the report entry point that ties them together.</li>
- *   <li>{@link ReportConsumer} – the AMQP listener.</li>
- *   <li>{@link DecisionDispatcher} / {@link WorkerBroadcaster} – two-queue delivery.</li>
- *   <li>{@link WorkerIdentity} – this process's node id and restart epoch, stamped on every send.</li>
- *   <li>{@link WorkerDetectionMetrics} – detection-plane meters (meter-less without a registry).</li>
- *   <li>RabbitMQ topology, the heartbeat, and the repair sweep's schedule.</li>
- * </ul>
+ * instance (design decisions: worker pipeline).
  */
 @AutoConfiguration(after = ZetaAmqpAutoConfiguration.class)
 @ConditionalOnClass(name = "org.springframework.amqp.rabbit.core.RabbitTemplate")
@@ -105,17 +88,16 @@ public class WorkerAutoConfiguration {
   /**
    * Dedicated single-thread scheduler for the Worker <b>control plane</b>: heartbeat emission.
    *
-   * <p>The heartbeat has its own connection factory so data-plane congestion cannot block it; the
-   * thread pool is the other half of that isolation. The repair sweep walks the window table and
-   * the HOT set and runs on the data-plane scheduler, so a long sweep cannot delay a heartbeat —
-   * and an App that sees a late heartbeat drops a perfectly healthy Worker from the ring.
+   * <p>The heartbeat has its own connection factory so data-plane congestion cannot block it. The
+   * repair sweep walks the window table and the HOT set on the data-plane scheduler, so a long sweep
+   * cannot delay a heartbeat — and a late heartbeat makes an App drop a healthy Worker from the ring.
    *
    * @return the control-plane scheduler
    */
   @Bean(name = "workerControlScheduler", destroyMethod = "shutdownNow")
   @ConditionalOnMissingBean(name = "workerControlScheduler")
   public ScheduledExecutorService workerControlScheduler() {
-    return new SafeScheduledExecutorService(1, new ZetaThreadFactory("zeta-worker-control"));
+    return new PeriodicScheduler(1, new ZetaThreadFactory("zeta-worker-control"));
   }
 
   /**
@@ -183,11 +165,8 @@ public class WorkerAutoConfiguration {
   }
 
   /**
-   * Detection-plane meters.
-   *
-   * <p>Only the counters are created here. The gauges and the cumulative function counters are
-   * bound by {@link #workerDetectionMeterBinder} once every singleton exists, because they read
-   * components that themselves need these meters to count a rejection.
+   * Detection-plane meters. The gauges and cumulative function counters bind later, in
+   * {@link #workerDetectionMeterBinder}, because they read components that need these meters.
    *
    * @param meterRegistry provider for the registry; absent when the context holds none
    * @return the meters (meter-less without a registry)
@@ -199,11 +178,8 @@ public class WorkerAutoConfiguration {
   }
 
   /**
-   * Worker-wide causal decision-version allocator.
-   *
-   * <p>One counter for the whole Worker, not one per component: the numbers must be comparable
-   * across promotions and cool-downs, otherwise the broadcaster cannot tell "queued behind a slow
-   * chunk" from "already superseded".
+   * Worker-wide causal decision-version allocator: one counter for the whole Worker, so promotion
+   * and cool-down versions are comparable for every key.
    *
    * @return a fresh counter
    */
@@ -237,8 +213,7 @@ public class WorkerAutoConfiguration {
 
   /**
    * The striped cool-down wheels: one independent timer wheel and one advancing thread per
-   * configured cooling thread. A key is assigned to a wheel by its hash, so the key space — not a
-   * shared queue — partitions the work.
+   * configured cooling thread, partitioned by key hash.
    *
    * @param settings the resolved detection settings (wheel count)
    * @return the wheel set
@@ -302,21 +277,20 @@ public class WorkerAutoConfiguration {
   }
 
   /**
-   * Binds the gauges and cumulative function counters after every singleton exists. This is a
-   * separate bean, not a side effect of {@link #coolingScheduler}, so a caller-supplied
-   * {@code CoolingScheduler} does not silently lose the meters that read the detector, registry
-   * and queues.
+   * Binds the gauges and cumulative function counters after every singleton exists, so a
+   * caller-supplied {@code CoolingScheduler} cannot silently lose the meters that read the detector,
+   * registry and queues.
    *
-   * <p>The queue-depth and wheel-count suppliers are method references created here, not fields.
+   * <p>The queue-depth and wheel-count suppliers are method references created here.
    * {@link WorkerDetectionMetrics#bindMeters} therefore registers those three gauges with a strong
-   * reference: Micrometer's default weak reference would otherwise let a young collection clear the
-   * supplier and leave the gauge reading {@code NaN}.
+   * reference: Micrometer's default weak reference would let a young collection clear the supplier
+   * and leave the gauge reading {@code NaN}.
    *
-   * @param metrics   detection meters
-   * @param detector  the window table
-   * @param registry  the HOT set
+   * @param metrics    detection meters
+   * @param detector   the window table
+   * @param registry   the HOT set
    * @param dispatcher the decision queues
-   * @param wheels    the cool-down wheels
+   * @param wheels     the cool-down wheels
    * @return a callback invoked once after singleton instantiation
    */
   @Bean
@@ -397,12 +371,12 @@ public class WorkerAutoConfiguration {
       this.pipeline = pipeline;
     }
 
-    /** Runs one sweep and logs the number of overdue checks it selected. */
+    /** Runs one sweep and logs the number of overdue checks it re-linked. */
     public void sweep() {
       try {
         int repaired = pipeline.sweep();
         if (repaired > 0) {
-          log.debug("Detection sweep selected {} overdue cool-down check(s)", repaired);
+          log.debug("Detection sweep re-linked {} overdue cool-down check(s)", repaired);
         }
       } catch (Exception e) {
         log.error("Scheduled detection sweep failed", e);
@@ -413,10 +387,9 @@ public class WorkerAutoConfiguration {
   /**
    * Dedicated {@link RabbitTemplate} for HOT/COOL decision broadcasts.
    *
-   * <p>The decision plane is data-plane traffic: it uses the same connection factory as report
-   * consumption and worker-listener containers, never the dedicated heartbeat factory. A shared
-   * template would let broker flow control on a broadcast burst block the heartbeat channel and
-   * make the App drop a healthy Worker from the ring.
+   * <p>The decision plane is data-plane traffic: it uses the report connection factory, never the
+   * dedicated heartbeat factory, so broker flow control on a broadcast burst cannot block the
+   * heartbeat channel and make the App drop a healthy Worker from the ring.
    *
    * @param beanFactory the bean factory used to resolve the data-plane connection factory
    * @return a new {@link RabbitTemplate} for decision broadcasts
@@ -641,18 +614,13 @@ public class WorkerAutoConfiguration {
       return task.periodMs() <= 0
         ? scheduler.schedule(task.body(), task.initialDelayMs(), TimeUnit.MILLISECONDS)
         : task.fixedRate()
-          ? scheduler.scheduleAtFixedRate(
-            task.body(),
-            task.initialDelayMs(),
-            task.periodMs(),
-            TimeUnit.MILLISECONDS
-          )
+          ? scheduler.scheduleAtFixedRate(task.body(), task.initialDelayMs(), task.periodMs(), TimeUnit.MILLISECONDS)
           : scheduler.scheduleWithFixedDelay(
-            task.body(),
-            task.initialDelayMs(),
-            task.periodMs(),
-            TimeUnit.MILLISECONDS
-          );
+              task.body(),
+              task.initialDelayMs(),
+              task.periodMs(),
+              TimeUnit.MILLISECONDS
+            );
     }
 
     @Override
@@ -685,37 +653,30 @@ public class WorkerAutoConfiguration {
    * This process's immutable identity: the node id plus the restart-detection epoch, incremented on
    * every start and persisted in {@code zeta.worker.epoch-file}.
    *
-   * <p>The epoch is read once at startup and never changes, so one record carries it together with
-   * the node id. That record is the single source of the node identity in the context: the report
-   * queue, its binding and every sender read it instead of a separate {@code String} bean.
-   *
    * <p>{@code INSTANCE_ID} is the deployment-supplied identity (Kubernetes downward API, Nomad
-   * meta, ...). It is applied before the node id is read, so the override and the read are one step.
+   * meta, ...); when absent, the shared auto-detected instance id is used.
    *
    * @return the identity every sender stamps
    */
   @Bean
   @ConditionalOnMissingBean
   public WorkerIdentity workerIdentity() {
-    String envId = System.getenv("INSTANCE_ID");
-    if (envId != null && !envId.isBlank()) {
-      NodeIdentity.setInstanceOverride(envId);
-    }
-    String nodeId = NodeIdentity.getInstanceId();
+    NodeIdentity nodeIdentity = NodeIdentity.resolve(System.getenv("INSTANCE_ID"), null);
+    // The heartbeat identity and the decision stamp must be the same text; a padded
+    // INSTANCE_ID would otherwise enter the health view differently from the decision node.
+    String workerId = nodeIdentity.instanceId().trim();
     String configured = properties.getEpochFile();
     Path epochFile = configured == null || configured.isBlank() ? null : Path.of(configured);
-    return new WorkerIdentity(nodeId, WorkerEpochStore.initEpoch(nodeId, epochFile));
+    return new WorkerIdentity(workerId, WorkerEpochStore.initEpoch(workerId, epochFile));
   }
 
   /**
-   * Façade endpoint for the detection plane.
+   * Actuator endpoint for the detection plane.
    *
-   * <p>Declared explicitly (not component-scanned): {@code @Endpoint} is not a stereotype, so
-   * without this bean the endpoint would silently vanish. The explicit bean name keeps it
-   * distinct from the App-side {@code ZetaEndpoint} bean, which both auto-configurations would
-   * otherwise register as {@code hotKeyEndpoint}. The shipped {@code application.yml} exposes
-   * only {@code health}; an operator opts in by adding {@code hotkeyworker} to the web exposure
-   * include and mapping its path.
+   * <p>Declared explicitly because {@code @Endpoint} is not a stereotype. The explicit bean name
+   * keeps it distinct from the App-side {@code ZetaEndpoint} bean. The shipped
+   * {@code application.yml} exposes only {@code health}; an operator opts in by adding
+   * {@code hotkeyworker} to the web exposure include and mapping its path.
    *
    * @param rules    the rule resolver
    * @param window   the effective window geometry

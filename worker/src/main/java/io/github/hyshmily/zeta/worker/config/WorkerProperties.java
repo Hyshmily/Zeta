@@ -123,9 +123,9 @@ public class WorkerProperties {
 
     /**
      * Maximum time a decision may wait in its queue before the drain drops it as expired. The
-     * broadcaster retains a cold accepted record for twice this value and a hot record until a COOL
-     * is accepted, so the decision age is the only ordering bound an operator has to reason about
-     * for cold keys.
+     * broadcaster retains a COOL-state accepted record for twice this value and a hot record until a
+     * COOL is accepted, so the decision age is the only ordering bound an operator has to reason
+     * about for COOL-state keys.
      */
     @Min(1)
     @Max(3_600_000L)

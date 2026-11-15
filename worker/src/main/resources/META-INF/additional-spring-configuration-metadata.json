@@ -111,7 +111,7 @@
     {
       "name": "zeta.worker.broadcast.max-decision-age-ms",
       "type": "java.lang.Long",
-      "description": "Maximum time a decision may wait in its queue before the drain drops it as expired (1ms-1h). An expired HOT returns its seat. This is a latency bound; a cold accepted record is retained for twice this value and a hot record until a COOL is accepted, never size-evicted.",
+      "description": "Maximum time a decision may wait in its queue before the drain drops it as expired (1ms-1h). An expired HOT returns its seat. This is a latency bound; a COOL-state accepted record is retained for twice this value and a hot record until a COOL is accepted, never size-evicted.",
       "defaultValue": 30000
     },
     {

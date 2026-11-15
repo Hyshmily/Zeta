@@ -168,6 +168,22 @@ class DetectionSettingsTest {
       .hasMessageContaining("detection.cooling.low-qps-check-interval");
   }
 
+  /**
+   * A duration near {@link Long#MAX_VALUE} seconds overflows {@link Duration#toMillis()}. The
+   * validator must record it with the other violations instead of letting the arithmetic exception
+   * escape the startup report.
+   */
+  @Test
+  void rejectsADurationTooLargeToConvertToMilliseconds() {
+    WorkerProperties properties = base(100, 50);
+    properties.getDetection().getCooling().setLowQpsCheckInterval(Duration.ofSeconds(Long.MAX_VALUE));
+
+    assertThatThrownBy(() -> DetectionSettings.of(properties))
+      .isInstanceOf(IllegalStateException.class)
+      .hasMessageContaining("detection.cooling.low-qps-check-interval")
+      .hasMessageContaining("maximum supported millisecond value");
+  }
+
   @Test
   void rejectsAnExpireRuleThatAlsoSetsLowQpsFields() {
     WorkerProperties properties = base(100, 50);
