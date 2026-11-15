@@ -20,6 +20,8 @@ import static io.github.hyshmily.zeta.constants.ZetaConstants.Routing.KEY_HEARTB
 import io.github.hyshmily.zeta.sync.worker.WorkerHeartbeatMessage;
 import io.github.hyshmily.zeta.util.TimeSource;
 import io.github.hyshmily.zeta.worker.detection.lifecycle.HotKeyRegistry;
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.VarHandle;
 import lombok.extern.slf4j.Slf4j;
 import org.jspecify.annotations.Nullable;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
@@ -39,6 +41,17 @@ import org.springframework.amqp.rabbit.core.RabbitTemplate;
  */
 @Slf4j
 public class WorkerHeartbeatProducer {
+
+  /** Writes the first successful-send anchor exactly once, even under concurrent callers. */
+  private static final VarHandle START_TIME;
+
+  static {
+    try {
+      START_TIME = MethodHandles.lookup().findVarHandle(WorkerHeartbeatProducer.class, "startTime", long.class);
+    } catch (ReflectiveOperationException e) {
+      throw new ExceptionInInitializerError(e);
+    }
+  }
 
   /**
    * First successful heartbeat instant (monotonic axis) anchoring the ready-to-serve grace period.
@@ -125,7 +138,7 @@ public class WorkerHeartbeatProducer {
       );
       rabbitTemplate.send(heartbeatExchange, routingKey, hb.toMessage());
       if (start == Long.MIN_VALUE) {
-        startTime = now;
+        START_TIME.compareAndSet(this, Long.MIN_VALUE, now);
       }
     } catch (Exception e) {
       log.warn("Scheduled sendHeartbeat failed", e);

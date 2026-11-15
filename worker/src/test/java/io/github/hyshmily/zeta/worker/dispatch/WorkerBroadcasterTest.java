@@ -30,6 +30,7 @@ import io.github.hyshmily.zeta.sync.worker.WorkerType;
 import io.github.hyshmily.zeta.worker.dispatch.connection.WorkerIdentity;
 import io.github.hyshmily.zeta.worker.metrics.WorkerDetectionMetrics;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -211,9 +212,9 @@ class WorkerBroadcasterTest {
   }
 
   /**
-   * A decision whose version is already the accepted one for the key describes a state the cluster
-   * has, so it must not reach the wire — whatever its type, and even outside the 100 ms debounce
-   * window (the accepted record, not the debounce, is what makes a replay a no-op).
+   * A decision whose version is already the watermark is a replay and never reaches the wire,
+   * whatever its type. An ELIDED decision does not change the recorded wire state: the later COOL
+   * at a newer version is a type change and must be sent.
    */
   @Test
   void broadcast_versionAlreadyAccepted_shouldBeDroppedRegardlessOfType() {
@@ -223,29 +224,34 @@ class WorkerBroadcasterTest {
       .as("the same version is already the state this Worker holds")
       .isEqualTo(WorkerBroadcaster.Delivery.ELIDED);
 
-    verify(rabbitTemplate, times(1)).send(any(), any(), messageCaptor.capture());
-    assertThat(messageCaptor.getValue().getMessageProperties().getHeaders().get(HEADER_TYPE)).isEqualTo(
+    assertThat(broadcaster.send(ZetaDecision.cool("k", 8L), Long.MAX_VALUE))
+      .as("the elided COOL did not turn the recorded wire state COOL")
+      .isEqualTo(WorkerBroadcaster.Delivery.SENT);
+
+    verify(rabbitTemplate, times(2)).send(any(), any(), messageCaptor.capture());
+    assertThat(messageCaptor.getAllValues().get(0).getMessageProperties().getHeaders().get(HEADER_TYPE)).isEqualTo(
       WorkerType.HOT.code()
+    );
+    assertThat(messageCaptor.getAllValues().get(1).getMessageProperties().getHeaders().get(HEADER_TYPE)).isEqualTo(
+      WorkerType.COOL.code()
     );
   }
 
   /**
-   * A COOL whose lifecycle never reached the cluster carries no state change: the last accepted
-   * decision for the key is already a COOL, so the cluster is cold. It is elided, and its version
-   * still becomes the accepted record — keeping the never-sent HOT from being accepted afterwards — so
-   * not a token and not a network round trip are spent on the demotion.
+   * A second COOL inside the 100 ms same-type window is a duplicate of the send that just happened;
+   * its version advances the watermark and it does not reach the wire.
    */
   @Test
-  void broadcast_coolAfterAnAcceptedCool_shouldBeElidedWithoutSending() {
+  void broadcast_coolInsideTheDebounceWindowIsElided() {
     assertThat(broadcaster.send(ZetaDecision.cool("k", 20L), Long.MAX_VALUE)).isEqualTo(
       WorkerBroadcaster.Delivery.SENT
     );
 
     assertThat(broadcaster.send(ZetaDecision.cool("k", 21L), Long.MAX_VALUE))
-      .as("the cluster is already cold for this key")
+      .as("the same type was sent inside the 100 ms window")
       .isEqualTo(WorkerBroadcaster.Delivery.ELIDED);
 
-    assertThat(broadcaster.acceptedVersion("k")).as("the elided COOL is the state this Worker holds").isEqualTo(21L);
+    assertThat(broadcaster.acceptedVersion("k")).as("the elided COOL advances only the version").isEqualTo(21L);
 
     assertThat(broadcaster.send(ZetaDecision.hot("k", 22L), Long.MAX_VALUE)).isEqualTo(WorkerBroadcaster.Delivery.SENT);
     verify(rabbitTemplate, times(2)).send(any(), any(), messageCaptor.capture());
@@ -256,6 +262,101 @@ class WorkerBroadcasterTest {
     assertThat(messageCaptor.getAllValues().get(1).getMessageProperties().getHeaders().get(HEADER_TYPE)).isEqualTo(
       WorkerType.HOT.code()
     );
+  }
+
+  /**
+   * The state machine classifies before the age bound: a decision already past its expiry instant
+   * but inside the same-type debounce is elided, not expired. That order keeps the expired meter
+   * free of no-op decisions.
+   */
+  @Test
+  void aDebouncedDecisionPastItsAgeBoundIsElidedNotExpired() {
+    assertThat(broadcaster.send(ZetaDecision.cool("k", 40L), Long.MAX_VALUE)).isEqualTo(
+      WorkerBroadcaster.Delivery.SENT
+    );
+
+    assertThat(broadcaster.send(ZetaDecision.cool("k", 41L), 0L))
+      .as("the same-type debounce wins over the already-passed age bound")
+      .isEqualTo(WorkerBroadcaster.Delivery.ELIDED);
+  }
+
+  /** A COOL after a COOL outside the debounce window is a new lifecycle and must travel. */
+  @Test
+  void aCoolAfterACoolOutsideTheDebounceWindowIsSent() throws InterruptedException {
+    assertThat(broadcaster.send(ZetaDecision.cool("k", 30L), Long.MAX_VALUE)).isEqualTo(
+      WorkerBroadcaster.Delivery.SENT
+    );
+    Thread.sleep(150L);
+    assertThat(broadcaster.send(ZetaDecision.cool("k", 31L), Long.MAX_VALUE))
+      .as("the App may have promoted locally after the previous COOL")
+      .isEqualTo(WorkerBroadcaster.Delivery.SENT);
+
+    verify(rabbitTemplate, times(2)).send(any(), any(), any(Message.class));
+  }
+
+  /**
+   * A failed send keeps the last confirmed version as the ordering watermark, but clears the
+   * debounce anchor: a stale replay stays suppressed, while a newer same-type decision travels
+   * immediately instead of inheriting a send the broker may never have received.
+   */
+  @Test
+  void aFailedHotKeepsTheConfirmedWatermarkAndClearsTheDebounceAnchor() throws InterruptedException {
+    AtomicInteger sends = new AtomicInteger();
+    doAnswer(invocation -> {
+      if (sends.incrementAndGet() == 2) {
+        throw new RuntimeException("broker down");
+      }
+      return null;
+    })
+      .when(rabbitTemplate)
+      .send(any(String.class), any(String.class), any(Message.class));
+
+    assertThat(broadcaster.send(ZetaDecision.hot("k", 1L), Long.MAX_VALUE)).isEqualTo(WorkerBroadcaster.Delivery.SENT);
+    Thread.sleep(150L);
+    assertThat(broadcaster.send(ZetaDecision.hot("k", 2L), Long.MAX_VALUE)).isEqualTo(
+      WorkerBroadcaster.Delivery.FAILED
+    );
+    assertThat(broadcaster.acceptedVersion("k")).as("the last confirmed version survives the failure").isEqualTo(1L);
+
+    assertThat(broadcaster.send(ZetaDecision.hot("k", 1L), Long.MAX_VALUE))
+      .as("a replay at the confirmed watermark is still elided")
+      .isEqualTo(WorkerBroadcaster.Delivery.ELIDED);
+
+    assertThat(broadcaster.send(ZetaDecision.hot("k", 3L), Long.MAX_VALUE))
+      .as("the failed send must not anchor the same-type debounce")
+      .isEqualTo(WorkerBroadcaster.Delivery.SENT);
+
+    assertThat(broadcaster.send(ZetaDecision.cool("k", 4L), Long.MAX_VALUE)).isEqualTo(WorkerBroadcaster.Delivery.SENT);
+    verify(rabbitTemplate, times(4)).send(any(), any(), any(Message.class));
+  }
+
+  /**
+   * A failed COOL after a confirmed HOT must not erase the HOT watermark: an older queued COOL
+   * below it would otherwise travel after the newer transition and regress the cluster.
+   */
+  @Test
+  void aFailedCoolKeepsTheHotWatermarkAndSuppressesAStaleCool() {
+    AtomicInteger sends = new AtomicInteger();
+    doAnswer(invocation -> {
+      if (sends.incrementAndGet() == 2) {
+        throw new RuntimeException("broker down");
+      }
+      return null;
+    })
+      .when(rabbitTemplate)
+      .send(any(String.class), any(String.class), any(Message.class));
+
+    assertThat(broadcaster.send(ZetaDecision.hot("k", 10L), Long.MAX_VALUE)).isEqualTo(WorkerBroadcaster.Delivery.SENT);
+    assertThat(broadcaster.send(ZetaDecision.cool("k", 11L), Long.MAX_VALUE)).isEqualTo(
+      WorkerBroadcaster.Delivery.FAILED
+    );
+
+    assertThat(broadcaster.acceptedVersion("k")).as("the failed COOL does not erase version 10").isEqualTo(10L);
+    assertThat(broadcaster.send(ZetaDecision.cool("k", 9L), Long.MAX_VALUE))
+      .as("the older COOL is below the surviving watermark")
+      .isEqualTo(WorkerBroadcaster.Delivery.SUPERSEDED);
+
+    verify(rabbitTemplate, times(2)).send(any(), any(), any(Message.class));
   }
 
   /** A HOT record outlives the queue-age bound, so a long hot episode still orders its COOL. */
@@ -277,79 +378,6 @@ class WorkerBroadcasterTest {
       .isEqualTo(WorkerBroadcaster.Delivery.SENT);
 
     verify(rabbitTemplate, times(2)).send(any(), any(), any(Message.class));
-  }
-
-  /**
-   * A failed HOT clears only the cold knowledge. The accepted COOL's version stays the watermark,
-   * so a stale HOT below it is still superseded instead of being re-sent after the record regressed
-   * to version zero.
-   */
-  @Test
-  void forgettingColdKeepsTheAcceptedVersionWatermark() {
-    assertThat(broadcaster.send(ZetaDecision.cool("k", 5L), Long.MAX_VALUE)).isEqualTo(WorkerBroadcaster.Delivery.SENT);
-
-    broadcaster.forgetCold("k", 6L);
-
-    assertThat(broadcaster.acceptedVersion("k")).as("the failed HOT did not lower the watermark").isEqualTo(5L);
-    assertThat(broadcaster.send(ZetaDecision.hot("k", 4L), Long.MAX_VALUE))
-      .as("a stale HOT below the accepted COOL stays superseded")
-      .isEqualTo(WorkerBroadcaster.Delivery.SUPERSEDED);
-    assertThat(broadcaster.send(ZetaDecision.cool("k", 7L), Long.MAX_VALUE))
-      .as("the cold knowledge was cleared, so the correction travels")
-      .isEqualTo(WorkerBroadcaster.Delivery.SENT);
-
-    verify(rabbitTemplate, times(2)).send(any(), any(), any(Message.class));
-  }
-
-  /**
-   * A superseded HOT knows the cluster was not told hot, but it must not turn an UNKNOWN record
-   * cold again: a newer failed HOT still owes a corrective COOL. The version watermark stays.
-   */
-  @Test
-  void rememberColdDoesNotRestoreColdKnowledgeClearedByANewerHot() {
-    assertThat(broadcaster.send(ZetaDecision.cool("k", 5L), Long.MAX_VALUE)).isEqualTo(WorkerBroadcaster.Delivery.SENT);
-
-    broadcaster.forgetCold("k", 6L);
-    broadcaster.rememberCold("k");
-
-    assertThat(broadcaster.acceptedVersion("k")).isEqualTo(5L);
-    assertThat(broadcaster.send(ZetaDecision.cool("k", 7L), Long.MAX_VALUE))
-      .as("the failed newer HOT still needs its corrective COOL")
-      .isEqualTo(WorkerBroadcaster.Delivery.SENT);
-    assertThat(broadcaster.acceptedVersion("k")).isEqualTo(7L);
-
-    verify(rabbitTemplate, times(2)).send(any(), any(), any(Message.class));
-  }
-
-  /** An existing cold record already covers the lifecycle, so rememberCold leaves it untouched. */
-  @Test
-  void rememberColdKeepsAnExistingColdRecordAndItsVersion() {
-    assertThat(broadcaster.send(ZetaDecision.cool("k", 5L), Long.MAX_VALUE)).isEqualTo(WorkerBroadcaster.Delivery.SENT);
-
-    broadcaster.rememberCold("k");
-
-    assertThat(broadcaster.acceptedVersion("k")).isEqualTo(5L);
-    assertThat(broadcaster.send(ZetaDecision.cool("k", 7L), Long.MAX_VALUE))
-      .as("the cluster is already cold for this key")
-      .isEqualTo(WorkerBroadcaster.Delivery.ELIDED);
-    assertThat(broadcaster.acceptedVersion("k")).isEqualTo(7L);
-
-    verify(rabbitTemplate, times(1)).send(any(), any(), any(Message.class));
-  }
-
-  /** A failed or expired HOT clears the cold record so its corrective COOL is still sent. */
-  @Test
-  void forgettingAColdTombstoneLetsTheCorrectiveCoolTravel() {
-    broadcaster.rememberCold("elided");
-    assertThat(broadcaster.send(ZetaDecision.cool("elided", 3L), Long.MAX_VALUE)).isEqualTo(
-      WorkerBroadcaster.Delivery.ELIDED
-    );
-
-    broadcaster.rememberCold("corrected");
-    broadcaster.forgetCold("corrected", 3L);
-    assertThat(broadcaster.send(ZetaDecision.cool("corrected", 4L), Long.MAX_VALUE)).isEqualTo(
-      WorkerBroadcaster.Delivery.SENT
-    );
   }
 
   /** The accepted-record cache has no size cap: a maximum would evict a live ordering predecessor. */
@@ -404,23 +432,23 @@ class WorkerBroadcasterTest {
 
   /**
    * A COOL with no accepted record is the only demotion signal a locally promoted App can receive,
-   * so it is sent; the send establishes the cold watermark that orders a late HOT.
+   * so it is sent; the send establishes the version watermark that orders a late HOT.
    */
   @Test
-  void aCoolWithoutAnAcceptedRecordIsSentAndEstablishesTheColdWatermark() {
+  void aCoolWithoutAnAcceptedRecordIsSentAndEstablishesTheVersionWatermark() {
     assertThat(broadcaster.send(ZetaDecision.cool("k", 4L), Long.MAX_VALUE)).isEqualTo(WorkerBroadcaster.Delivery.SENT);
     assertThat(broadcaster.acceptedVersion("k")).isEqualTo(4L);
 
     assertThat(broadcaster.send(ZetaDecision.hot("k", 1L), Long.MAX_VALUE))
-      .as("the stale HOT is below the cold state the COOL established")
+      .as("the stale HOT is below the COOL state the COOL established")
       .isEqualTo(WorkerBroadcaster.Delivery.SUPERSEDED);
 
     verify(rabbitTemplate, times(1)).send(any(), any(), any(Message.class));
   }
 
-  /** The token-starved head's committed elision advances the same cold watermark as the send path. */
+  /** The token-starved head's committed elision advances the same version watermark as the send path. */
   @Test
-  void committedColdCoolAdvancesTheWatermark() {
+  void committedElidedCoolAdvancesTheWatermark() {
     assertThat(broadcaster.send(ZetaDecision.cool("k", 4L), Long.MAX_VALUE)).isEqualTo(WorkerBroadcaster.Delivery.SENT);
 
     ZetaDecision cool = ZetaDecision.cool("k", 5L);

@@ -29,17 +29,15 @@ import org.springframework.amqp.rabbit.annotation.RabbitListener;
  * Consumes batched per-key access counts reported by application instances.
  *
  * <p>The consumer owns transport concerns only: the incarnation fence, the optional staleness
- * filter, malformed-entry rejection, per-batch timing, and one error line per failed entry. Every well-formed {@code (key, count)} pair is handed to {@link DetectionPipeline},
- * which owns the window, the rules and the HOT set.
+ * filter, malformed-entry rejection, per-batch timing, and one error line per failed entry. Every
+ * well-formed {@code (key, count)} pair is handed to {@link DetectionPipeline}, which owns the
+ * window, the rules and the HOT set.
  *
  * <p>Malformed entries — a null key, a null count, a non-positive count — are dropped before the
  * pipeline: a negative count would push negative mass into the sliding window and corrupt every
- * threshold downstream.
- *
- * <p>Every report is fenced by incarnation: {@link ReportMessage#targetEpoch()} must equal this
- * Worker's epoch. The durable report queue and the App's bounded dispatcher can both outlive a
- * restart, so without the fence a restarted Worker would replay pre-restart windows as current
- * traffic.
+ * threshold downstream. Every report is fenced by incarnation: a durable queue or a bound App
+ * dispatcher can outlive a Worker restart, and replaying pre-restart windows as current traffic
+ * would resurrect dead hot keys.
  */
 @Slf4j
 public class ReportConsumer {
@@ -70,6 +68,7 @@ public class ReportConsumer {
    * @param workerEpoch          this Worker incarnation's epoch
    * @param stalenessThresholdMs the optional report staleness threshold ({@code 0} disables it)
    * @param metrics              the detection-plane meters (a meter-less instance is a no-op)
+   * @throws IllegalArgumentException when {@code stalenessThresholdMs} is negative
    */
   public ReportConsumer(
     DetectionPipeline pipeline,
@@ -77,6 +76,9 @@ public class ReportConsumer {
     long stalenessThresholdMs,
     WorkerDetectionMetrics metrics
   ) {
+    if (stalenessThresholdMs < 0L) {
+      throw new IllegalArgumentException("stalenessThresholdMs must be non-negative, got " + stalenessThresholdMs);
+    }
     this.metrics = metrics;
     this.pipeline = pipeline;
     this.workerEpoch = workerEpoch;
@@ -113,8 +115,6 @@ public class ReportConsumer {
    */
   private void consume(ReportMessage message) {
     if (!pipeline.enabled()) {
-      // Nothing downstream reads these counts: drop the batch without iterating it, and without
-      // recording an evaluation sample that would dilute zeta.worker.report.eval.
       Map<String, Long> skipped = message.counts();
       metrics.countDisabledReport(skipped == null ? 0L : skipped.size());
       return;
@@ -141,26 +141,18 @@ public class ReportConsumer {
     }
 
     Map<String, Long> keyCounts = message.counts();
-    // A malformed body can deserialize to a null counts map; an empty one carries nothing.
     if (keyCounts == null || keyCounts.isEmpty()) {
       return;
     }
 
     long evalStartNanos = metrics.startReportEval();
-    // One monotonic sample for the whole batch: the entries share a message and therefore an
-    // arrival instant, so the detector and the registry must not re-read the clock per key. The
-    // window slice is derived from that sample once, for the same reason.
     long nowMs = TimeSource.monotonicMillis();
     long nowSlice = pipeline.sliceIndex(nowMs);
 
-    // Sequential on the consumer thread: the listener container already runs several consumers,
-    // and intra-batch parallelism would only amplify stripe-lock contention for no gain.
     int malformed = 0;
     for (Map.Entry<String, Long> entry : keyCounts.entrySet()) {
       try {
         String key = entry.getKey();
-        // Deserialize-safe unboxing: a malformed body such as {"key": null} yields a null
-        // value, and a non-positive count would push negative mass into the window.
         Long count = entry.getValue();
         if (key == null || count == null || count <= 0) {
           malformed++;
@@ -188,8 +180,6 @@ public class ReportConsumer {
       );
     }
 
-    // A batch with no well-formed entry never reached the pipeline: recording its near-zero
-    // duration would dilute the evaluation sample with batches that did no evaluation.
     if (malformed < keyCounts.size()) {
       metrics.recordReportEval(evalStartNanos);
     }
