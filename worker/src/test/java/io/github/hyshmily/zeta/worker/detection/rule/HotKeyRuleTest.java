@@ -53,6 +53,15 @@ class HotKeyRuleTest {
   }
 
   @Test
+  void aNullRuleListIsRejectedAtTheSnapshotBoundary() {
+    HotKeyRule defaultRule = new HotKeyRule("default", MatchType.PREFIX, "d", 0, 1, 5L, 1L, 500L, 100L, null);
+
+    assertThatThrownBy(() -> RuleSet.of(null, defaultRule))
+      .isInstanceOf(NullPointerException.class)
+      .hasMessageContaining("rules");
+  }
+
+  @Test
   void anExpireRuleRejectsALowQpsDuration() {
     assertThatThrownBy(() -> new HotKeyRule("bad", MatchType.PREFIX, "k", 0, 0, 5, 0L, 1_000L, 60_000L, null))
       .isInstanceOf(IllegalArgumentException.class)

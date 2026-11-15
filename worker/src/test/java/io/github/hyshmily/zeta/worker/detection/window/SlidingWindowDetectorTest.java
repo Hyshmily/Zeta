@@ -82,8 +82,8 @@ class SlidingWindowDetectorTest {
       TimeSource.setTimeOffsetForTest(0, -base);
       addCount(detector, "staleKey", 1);
       assertThat(detector.activeWindows()).isEqualTo(1);
-      // Retention is quantized to slices, so cross one boundary instead of sleeping 1 ms.
-      TimeSource.setTimeOffsetForTest(0, -base + 1_000);
+      // Retention is quantized to at least one slice, so cross two boundaries instead of sleeping.
+      TimeSource.setTimeOffsetForTest(0, -base + 2_000);
       detector.evictStale(1);
       assertThat(detector.activeWindows()).isZero();
     } finally {
@@ -159,7 +159,7 @@ class SlidingWindowDetectorTest {
       TimeSource.setTimeOffsetForTest(0, -base);
       long before = addCount(detector, "ephemeral", 42);
       assertThat(before).isPositive();
-      TimeSource.setTimeOffsetForTest(0, -base + 1_000);
+      TimeSource.setTimeOffsetForTest(0, -base + 2_000);
       detector.evictStale(1);
       long after = addCount(detector, "ephemeral", 0);
       assertThat(after).isZero();
@@ -178,14 +178,18 @@ class SlidingWindowDetectorTest {
   }
 
   @Test
-  void shouldEvictAllWithZeroStaleTimeout() {
+  void shouldTreatAZeroStaleTimeoutAsOneSlice() {
     SlidingWindowDetector detector = detector(10_000, 10, 0);
     long base = TimeSource.monotonicMillis();
     try {
       TimeSource.setTimeOffsetForTest(0, -base);
       addCount(detector, "key", 1);
-      // A zero threshold evicts on the next slice boundary; the current slice is still live.
+      // The slice a fast-path writer may still be adding to is never reclaimed as idle.
       TimeSource.setTimeOffsetForTest(0, -base + 1_000);
+      detector.evictStale(0);
+      assertThat(detector.activeWindows()).isOne();
+
+      TimeSource.setTimeOffsetForTest(0, -base + 2_000);
       detector.evictStale(0);
       assertThat(detector.activeWindows()).isZero();
     } finally {
@@ -261,14 +265,13 @@ class SlidingWindowDetectorTest {
    * key, so the timestamp is refreshed before the removal compute runs. The window must survive
    * with its counts intact.
    *
-   * <p>The sleep crosses at least one full slice (625 ms) so the hooked add takes the slow
-   * path: under the slice-gated fast path, only a touch at least one slice old refreshes the
-   * timestamp. An evictor can only target a window whose timestamp is already far older than a
-   * slice (staleAfterMs is configured in minutes).
+   * <p>The sleep crosses two full slices (100 ms each) so the hooked add takes the slow path and
+   * the evictor can target the stale window: under the slice-gated fast path, only a touch at
+   * least one slice old refreshes the timestamp.
    */
   @Test
   void evictStale_shouldKeepWindowWhenTimestampRefreshedBetweenScanAndRemove() throws Exception {
-    SlidingWindowDetector detector = detector(10_000, 10, 0);
+    SlidingWindowDetector detector = detector(1_000, 10, 0);
     addCount(detector, "race", 100);
 
     Field windowsField = SlidingWindowDetector.class.getDeclaredField("windows");
@@ -297,9 +300,9 @@ class SlidingWindowDetectorTest {
 
     windowsField.set(detector, hooked);
     try {
-      // ≥ 1 slice (625 ms): "race" is stale relative to staleAfterMs = 10 AND
+      // ≥ 2 slices (100 ms each): "race" is stale relative to staleAfterMs = 10 AND
       // old enough that the hooked add crosses a slice into the slow path.
-      Thread.sleep(640);
+      Thread.sleep(250);
       detector.evictStale(10);
     } finally {
       windowsField.set(detector, realWindows);
@@ -323,7 +326,7 @@ class SlidingWindowDetectorTest {
     try {
       TimeSource.setTimeOffsetForTest(0, -base);
       addCount(detector, "stale-key", 100);
-      TimeSource.setTimeOffsetForTest(0, -base + 1_000);
+      TimeSource.setTimeOffsetForTest(0, -base + 2_000);
 
       detector.evictStale(10);
       assertThat(detector.activeWindows()).isZero();
@@ -813,8 +816,8 @@ class SlidingWindowDetectorTest {
         assertThat(addCount(detector, "a", 1)).as("round %d admits a", round).isEqualTo(1);
         assertThat(addCount(detector, "b", 1)).as("round %d admits b", round).isEqualTo(1);
 
-        // Cross one slice so evictStale(0) reclaims both windows and their seats.
-        TimeSource.setTimeOffsetForTest(0, -base + (round + 1) * sliceMs);
+        // Cross two slices so evictStale(0), clamped to one slice, reclaims both windows and seats.
+        TimeSource.setTimeOffsetForTest(0, -base + (round + 2) * sliceMs);
         detector.evictStale(0);
         assertThat(detector.activeWindows()).as("round %d reclaimed", round).isZero();
       }

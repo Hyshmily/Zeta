@@ -22,6 +22,7 @@ import io.github.hyshmily.zeta.worker.dispatch.DecisionDispatcher;
 import jakarta.annotation.PreDestroy;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.TimeUnit;
 import lombok.extern.slf4j.Slf4j;
 
 /**
@@ -75,8 +76,11 @@ public class CoolingScheduler {
   /**
    * Advances one wheel and drains the entries it detached, evaluating each under the registry's
    * stripe lock and submitting any COOL decision. The inner loop checks {@code running} so a large
-   * detached batch does not outlive shutdown; one poisoned check is logged and left to the repair
-   * pass, which re-links it instead of evaluating it.
+   * detached batch does not outlive shutdown; one poisoned check is caught at the entry boundary, so
+   * it cannot skip the rest of the batch or kill the wheel owner. A failure before the verdict
+   * commits leaves the entry unscheduled for the repair pass; a failure after a cool or re-arm has
+   * committed loses only that COOL or sample, which the App's hard TTL or the next check bounds. A
+   * failed submission loses only that COOL.
    *
    * @param wheel the wheel owned by this thread
    */
@@ -85,38 +89,65 @@ public class CoolingScheduler {
       try {
         wheel.advance(TimeSource.monotonicMillis());
         HE entry;
-        while (running && (entry = wheel.pollDetached()) != null) {
-          try {
-            // The registry resolves the entry's own wheel from the key's hash; the evaluation must not
-            // depend on which thread handed the entry over. A null decision means the check re-armed,
-            // recovered or found the entry already retired.
-            ZetaDecision decision = registry.evaluate(entry);
-            if (decision != null) {
-              dispatcher.submit(decision);
-            }
-          } catch (Exception e) {
-            // One poisoned check must never skip the rest of the detached batch or kill a cooling
-            // thread. A failed evaluation leaves the entry unscheduled and overdue for the repair
-            // pass; a failure in submit loses that COOL (the App's hard TTL bounds it) but must
-            // not stop the remaining checks.
-            log.warn("Cooling check failed; the entry stays overdue for the repair pass", e);
-          }
+        while (running && (entry = wheel.pollAndDetached()) != null) {
+          evaluate(entry);
         }
-        if (running) {
-          wheel.awaitNext();
-        } else {
+        if (!running) {
           return;
         }
+        wheel.awaitNext();
       } catch (InterruptedException e) {
-        Thread.currentThread().interrupt();
-        return;
+        if (!running) {
+          Thread.currentThread().interrupt();
+          return;
+        }
+        log.warn("Cooling thread {} was interrupted while running; continuing", Thread.currentThread().getName());
       } catch (Exception e) {
         log.warn("Cooling wheel advance/wait failed", e);
       }
     }
   }
 
-  /** Stops the threads at context shutdown. Never throws. */
+  /**
+   * Evaluates one due check and submits its COOL. The two steps fail independently: an evaluation
+   * that fails before its verdict commits leaves the entry for the repair pass, while a failure
+   * after a cool or re-arm has committed loses only that COOL or sample. A failed submission loses
+   * only this COOL. Both catch {@link Throwable} at this boundary because a dead wheel owner leaves
+   * every key on its wheel unscheduled until the App's hard TTL, and the repair pass cannot replace
+   * the owner.
+   *
+   * @param entry the due entry the wheel handed over
+   */
+  @SuppressWarnings("java:S1181")
+  private void evaluate(HE entry) {
+    // The registry resolves the entry's own wheel from the key's hash; the evaluation must not
+    // depend on which thread handed the entry over. A null decision means the check re-armed,
+    // recovered or found the entry already retired.
+    ZetaDecision decision;
+    try {
+      decision = registry.evaluate(entry);
+    } catch (Throwable t) {
+      log.warn("Cooling evaluation failed for key={}", entry.key(), t);
+      return;
+    }
+    if (decision == null) {
+      return;
+    }
+    try {
+      dispatcher.submit(decision);
+    } catch (Throwable t) {
+      log.warn("Cooling decision submission failed for key={}", decision.cacheKey(), t);
+    }
+  }
+
+  /**
+   * Stops the threads at context shutdown. Never throws.
+   *
+   * <p>
+   * The joins share one deadline, so the teardown wait is bounded by one second regardless of the
+   * wheel count. An interrupt during shutdown is recorded and the remaining threads are still
+   * joined; returning early would leave later wheels advancing during context teardown.
+   */
   @PreDestroy
   public void shutdown() {
     running = false;
@@ -124,13 +155,15 @@ public class CoolingScheduler {
     for (Thread thread : threads) {
       thread.interrupt();
     }
-    // An interrupt during shutdown must not skip the remaining threads: record it, finish the
-    // bounded joins, then restore the flag. Returning early leaves later wheels advancing during
-    // context teardown.
+    long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(1L);
     boolean interrupted = false;
     for (Thread thread : threads) {
+      long remaining = deadline - System.nanoTime();
+      if (remaining <= 0L) {
+        break;
+      }
       try {
-        thread.join(1_000L);
+        TimeUnit.NANOSECONDS.timedJoin(thread, remaining);
       } catch (InterruptedException e) {
         interrupted = true;
       }

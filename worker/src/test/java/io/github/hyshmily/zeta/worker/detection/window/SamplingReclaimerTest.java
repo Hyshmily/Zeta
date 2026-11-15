@@ -16,6 +16,7 @@
 package io.github.hyshmily.zeta.worker.detection.window;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import io.github.hyshmily.zeta.util.TimeSource;
 import java.lang.reflect.Field;
@@ -163,9 +164,8 @@ class SamplingReclaimerTest {
   }
 
   /**
-   * A table at the hard bound can still hold idle windows. Refusing before the walk left them
-   * unreclaimed until the periodic scan, so one uncontended pass must run and admit from the seat
-   * it frees.
+   * A table at the hard bound can still hold idle windows. One uncontended pass walks them and
+   * admits from the seat it frees, instead of leaving them for the periodic scan.
    */
   @Test
   void hardHeadroomReclaimsAnIdleSeatInsteadOfRejecting() {
@@ -384,6 +384,95 @@ class SamplingReclaimerTest {
   }
 
   /**
+   * At the hard bound the pass transfers its first reclaimed seat to its own admission. A contender
+   * that reaches the ledger after that reclaim cannot reserve the seat and leave the walker rejected.
+   */
+  @Test
+  void aHardLimitPassKeepsTheFirstReclaimedSeatAgainstContenders() throws Exception {
+    ConcurrentHashMap<String, Long> map = new ConcurrentHashMap<>();
+    for (int i = 0; i < 18; i++) {
+      map.put("k" + i, 1L);
+    }
+    SamplingReclaimer<Long> reclaimer = new SamplingReclaimer<>("test", map, 2, 10);
+    CountDownLatch secondStarted = new CountDownLatch(1);
+    CountDownLatch release = new CountDownLatch(1);
+    AtomicBoolean first = new AtomicBoolean(true);
+    AtomicBoolean admitted = new AtomicBoolean();
+    Thread holder = new Thread(() ->
+      admitted.set(
+        reclaimer.tryAdmit("holder", 0L, (entry, slice) -> {
+          if (first.compareAndSet(true, false)) {
+            map.remove(entry.getKey());
+            return true;
+          }
+          secondStarted.countDown();
+          await(release);
+          return false;
+        })
+      )
+    );
+    holder.start();
+    try {
+      assertThat(secondStarted.await(3, TimeUnit.SECONDS)).isTrue();
+      assertThat(reclaimer.tryAdmit("contender", 0L, (entry, slice) -> false))
+        .as("the first reclaimed seat belongs to the pass that walked the table")
+        .isFalse();
+      assertThat(reclaimer.rejectedNewKeys()).isEqualTo(1);
+    } finally {
+      release.countDown();
+      holder.join(3_000L);
+    }
+
+    assertThat(admitted).isTrue();
+    assertThat(reclaimer.capacityEvictions()).isEqualTo(1);
+    assertThat(reclaimer.usedSeats()).as("the walker consumes the transferred seat").isEqualTo(18);
+  }
+
+  /** A failure after the transfer returns that seat; the caller does not own it. */
+  @Test
+  void aHardLimitPassReturnsTheTransferredSeatWhenTheWalkFails() {
+    ConcurrentHashMap<String, Long> map = new ConcurrentHashMap<>();
+    for (int i = 0; i < 18; i++) {
+      map.put("k" + i, 1L);
+    }
+    SamplingReclaimer<Long> reclaimer = new SamplingReclaimer<>("test", map, 2, 10);
+    AtomicBoolean first = new AtomicBoolean(true);
+
+    assertThatThrownBy(() ->
+      reclaimer.tryAdmit("holder", 0L, (entry, slice) -> {
+        if (first.compareAndSet(true, false)) {
+          map.remove(entry.getKey());
+          return true;
+        }
+        throw new IllegalStateException("walk failed");
+      })
+    )
+      .isInstanceOf(IllegalStateException.class)
+      .hasMessage("walk failed");
+
+    assertThat(reclaimer.usedSeats()).as("the reclaimed entry's seat stays free").isEqualTo(17);
+  }
+
+  /** A failure below the hard bound returns the reservation the pass took before the walk. */
+  @Test
+  void aReservedSeatIsReturnedWhenTheWalkFailsBelowTheHardBound() {
+    ConcurrentHashMap<String, Long> map = new ConcurrentHashMap<>();
+    map.put("a", 1L);
+    map.put("b", 1L);
+    SamplingReclaimer<Long> reclaimer = new SamplingReclaimer<>("test", map, 32, 2);
+
+    assertThatThrownBy(() ->
+      reclaimer.tryAdmit("holder", 0L, (entry, slice) -> {
+        throw new IllegalStateException("walk failed");
+      })
+    )
+      .isInstanceOf(IllegalStateException.class)
+      .hasMessage("walk failed");
+
+    assertThat(reclaimer.usedSeats()).as("the pre-walk reservation returned to the ledger").isEqualTo(2);
+  }
+
+  /**
    * The hard bound is a seat ledger, not a size pre-check: many threads racing the same soft-cap
    * observation must still stop at the configured hard limit.
    */
@@ -451,6 +540,35 @@ class SamplingReclaimerTest {
     assertThat(reclaimer.usedSeats()).isLessThanOrEqualTo(16);
     assertThat(reclaimer.rejectedNewKeys()).isPositive();
     assertThat(samples.get()).as("a rejection at the hard bound was preceded by a sampling pass").isPositive();
+  }
+
+  /**
+   * The periodic sweep clears the hand while a pass holds the sample lock; the pass keeps walking
+   * its local iterator instead of restarting at the head and skipping the tail.
+   */
+  @Test
+  void releaseHandDoesNotRestartAnInProgressWalk() {
+    ConcurrentHashMap<String, Long> map = new ConcurrentHashMap<>();
+    map.put("a", 1L);
+    map.put("b", 1L);
+    map.put("c", 1L);
+    map.put("d", 1L);
+    SamplingReclaimer<Long> reclaimer = new SamplingReclaimer<>("test", map, 32, 2);
+    List<String> walked = new ArrayList<>();
+    AtomicBoolean first = new AtomicBoolean(true);
+    assertThat(
+      reclaimer.tryAdmit("new", 0L, (entry, slice) -> {
+        walked.add(entry.getKey());
+        if (first.compareAndSet(true, false)) {
+          reclaimer.releaseHand();
+        }
+        return false;
+      })
+    ).isTrue();
+
+    assertThat(walked)
+      .as("the walk keeps its local hand after the sweep clears the field")
+      .containsExactlyInAnyOrder("a", "b", "c", "d");
   }
 
   /**

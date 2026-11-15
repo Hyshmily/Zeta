@@ -16,6 +16,7 @@
 package io.github.hyshmily.zeta.worker.detection.lifecycle;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import io.github.hyshmily.zeta.model.ZetaDecision;
 import io.github.hyshmily.zeta.util.TimeSource;
@@ -29,6 +30,7 @@ import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import org.junit.jupiter.api.Test;
 
@@ -418,9 +420,10 @@ class HotKeyRegistryTest {
 
   /**
    * The registry owns the {@code DETACHED -> UNSCHEDULED} hand-off. A repair that runs after the
-   * wheel polled the node but before the evaluation takes the stripe must defer to the owner; if it
-   * re-linked the node as detached, the evaluation's re-arm would be skipped and the fresh deadline
-   * would sit in the pending list for a spurious extra wake.
+   * wheel polled the node but before the evaluation takes the stripe must defer to the owner and
+   * must not count the node as repaired; if it re-linked the node as detached, the evaluation's
+   * re-arm would be skipped and the fresh deadline would sit in the pending list for a spurious
+   * extra wake.
    */
   @Test
   void aRepairBetweenTheWheelHandoffAndTheEvaluationDefersToTheOwner() {
@@ -437,14 +440,68 @@ class HotKeyRegistryTest {
 
       TimeSource.setTimeOffsetForTest(0, -base + 1_200L);
       wheel.advance(1_200L);
-      assertThat(wheel.pollDetached()).as("the wheel hands the due node over as detached").isSameAs(entry);
-      assertThat(registry.repair()).as("the overdue check is selected").isEqualTo(1);
+      assertThat(wheel.pollAndDetached()).as("the wheel hands the due node over as detached").isSameAs(entry);
+      assertThat(registry.repair()).as("a detached check belongs to its owner").isZero();
       assertThat(entry.wheelState).as("repair must not take over the hand-off").isEqualTo(TimerWheel.DETACHED);
 
       assertThat(registry.evaluate(entry)).isNull();
       assertThat(entry.nextCheckAt()).as("the recovered check re-arms at the next interval").isBetween(1_300L, 1_310L);
       assertThat(entry.wheelState).as("the owner links the fresh deadline").isEqualTo(TimerWheel.SCHEDULED);
       assertThat(wheel.scheduledCount()).isEqualTo(1);
+      assertThat(registry.isHot("k1")).isTrue();
+      assertConserved(registry);
+    } finally {
+      TimeSource.setTimeOffsetForTest(0, 0);
+    }
+  }
+
+  /**
+   * A failed evaluation leaves the node unscheduled with its overdue deadline. No wheel owner can
+   * re-link it, so the repair pass must do so on the next sweep instead of waiting out the grace
+   * that protects a node still linked in a wheel.
+   */
+  @Test
+  void repairRelinksAFailedEvaluationImmediately() {
+    long base = TimeSource.monotonicMillis();
+    try {
+      TimeSource.setTimeOffsetForTest(0, -base);
+      HotKeyRule rule = lowQps(5, 3, 1_000);
+      CoolingWheels wheels = new CoolingWheels(1);
+      AtomicBoolean first = new AtomicBoolean(true);
+      HotKeyRegistry registry = new HotKeyRegistry(
+        2,
+        METRICS,
+        new AtomicLong(),
+        key -> {
+          if (first.compareAndSet(true, false)) {
+            throw new IllegalStateException("window read failed");
+          }
+          return 0L;
+        },
+        wheels
+      );
+      assertThat(promote(registry, "k1", rule)).isNotNull();
+      HE entry = registry.entry("k1");
+      long due = entry.nextCheckAt();
+      long now = due + 500L;
+      TimerWheel wheel = wheels.wheel(0);
+
+      TimeSource.setTimeOffsetForTest(0, -base + now);
+      wheel.advance(now);
+      assertThat(wheel.pollAndDetached()).isSameAs(entry);
+      assertThatThrownBy(() -> registry.evaluate(entry)).isInstanceOf(IllegalStateException.class);
+      assertThat(entry.wheelState)
+        .as("the failed evaluation left the node unscheduled")
+        .isEqualTo(TimerWheel.UNSCHEDULED);
+      assertThat(entry.nextCheckAt()).as("the failed evaluation did not move the deadline").isEqualTo(due);
+
+      assertThat(registry.repair()).as("the failed check is re-linked without the grace").isEqualTo(1);
+      assertThat(entry.wheelState)
+        .as("the repair linked the overdue node into the due list")
+        .isEqualTo(TimerWheel.DETACHED);
+      assertThat(wheel.pollAndDetached()).isNull();
+      wheel.advance(now);
+      assertThat(wheel.pollAndDetached()).as("the wheel owner can evaluate the repaired node").isSameAs(entry);
       assertThat(registry.isHot("k1")).isTrue();
       assertConserved(registry);
     } finally {

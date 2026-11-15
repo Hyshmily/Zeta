@@ -163,19 +163,22 @@ final class TimerWheel {
    * evaluate it and will link the fresh deadline on the way out.
    *
    * @param entry the entry; {@link HE#nextCheckAt} is already updated
+   * @return {@code true} when this call linked the entry; {@code false} when the owner had already
+   *         detached it
    */
-  void reschedule(HE entry) {
+  boolean reschedule(HE entry) {
     lock.lock();
     try {
       if (entry.wheelState == DETACHED) {
         // The owner is about to evaluate it and will link the fresh deadline.
-        return;
+        return false;
       }
       if (entry.wheelState == SCHEDULED) {
         unlink(entry);
         scheduledCount--;
       }
       linkScheduled(entry);
+      return true;
     } finally {
       lock.unlock();
     }
@@ -248,7 +251,7 @@ final class TimerWheel {
    *
    * @return the next due entry, or {@code null}
    */
-  HE pollDetached() {
+  HE pollAndDetached() {
     HE head = draining.wheelNext;
     if (head == draining) {
       return null;
@@ -259,7 +262,7 @@ final class TimerWheel {
 
   /**
    * Advances the wheel to {@code nowMs}, detaches every entry whose deadline has passed, and appends
-   * the whole due list to the owner's batch for {@link #pollDetached}.
+   * the whole due list to the owner's batch for {@link #pollAndDetached}.
    *
    * <p>The append happens even when the clock did not move: a schedule of an already-due entry links
    * it into {@link #pending}, and the owner must be able to drain it without waiting for the next
@@ -297,7 +300,7 @@ final class TimerWheel {
   /**
    * Moves the due list to the tail of the owner's batch and resets its sentinel. A batch left
    * undrained by a failed evaluation therefore stays ahead of the entries this advance detached, and
-   * the next {@link #pollDetached()} reaches both in one traversal. The {@code pending} list is
+   * the next {@link #pollAndDetached()} reaches both in one traversal. The {@code pending} list is
    * locked; the owner's batch is only ever touched by the advancing thread.
    */
   private void splicePending() {

@@ -41,6 +41,20 @@ class SlidingWindowDetectorTaggedSlotTest {
     assertThat(sum).as("the stale slice-1 count is not attributed to slice 9").isEqualTo(1L);
   }
 
+  /** The forward walk must add both contiguous runs when the range crosses the ring's end. */
+  @Test
+  void sumRangeWalksBothRunsAcrossTheRingEnd() {
+    long[] slots = new long[2 * WINDOW];
+    long endSlice = 9L;
+    for (long slice = endSlice - WINDOW; slice <= endSlice; slice++) {
+      slots[(int) (slice & MASK)] = SlidingWindowDetector.pack(slice, (int) (slice - 4L));
+    }
+
+    assertThat(SlidingWindowDetector.sumRange(slots, endSlice, WINDOW + 1, MASK))
+      .as("counts 1..5 from slices 5..9")
+      .isEqualTo(15L);
+  }
+
   @Test
   void aNewWriterToAReusedSlotStartsAtZeroAndKeepsItsOwnCount() {
     // 1 ms slices: absolute slice 9 reuses the ring slot written by slice 1.

@@ -16,8 +16,10 @@
 package io.github.hyshmily.zeta.worker.detection.rule;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import io.github.hyshmily.zeta.worker.metrics.WorkerDetectionMetrics;
+import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.util.List;
 import org.junit.jupiter.api.AfterEach;
@@ -53,9 +55,9 @@ class RuleResolverTest {
     assertThat(resolver.resolveIfEligible("k1", 5)).isSameAs(resolver.binding("r"));
 
     assertThat(resolver.binding("r").matches()).isEqualTo(2);
-    assertThat(
-      registry.get(WorkerDetectionMetrics.METRIC_RULE_MATCHES).tag("rule", "r").counter().count()
-    ).isEqualTo(2.0d);
+    assertThat(registry.get(WorkerDetectionMetrics.METRIC_RULE_MATCHES).tag("rule", "r").counter().count()).isEqualTo(
+      2.0d
+    );
   }
 
   @Test
@@ -76,9 +78,7 @@ class RuleResolverTest {
   @Test
   void publishingARuleSetRetiresTheRemovedRulesCounters() {
     assertThat(resolver.resolveIfEligible("k1", 5)).isSameAs(resolver.binding("r"));
-    assertThat(
-      registry.find(WorkerDetectionMetrics.METRIC_RULE_MATCHES).tag("rule", "r").counter()
-    ).isNotNull();
+    assertThat(registry.find(WorkerDetectionMetrics.METRIC_RULE_MATCHES).tag("rule", "r").counter()).isNotNull();
     RuleBinding retired = resolver.binding("r");
 
     HotKeyRule replacement = new HotKeyRule("replacement", MatchType.PREFIX, "k", 0, 0, 5, 0L, 0L, 60_000L, null);
@@ -93,9 +93,7 @@ class RuleResolverTest {
     assertThat(registry.find(WorkerDetectionMetrics.METRIC_RULE_COOLS).tag("rule", "r").counter())
       .as("a late cool-down does not resurrect the retired meter")
       .isNull();
-    assertThat(
-      registry.find(WorkerDetectionMetrics.METRIC_RULE_PROMOTIONS).tag("rule", "r").counter()
-    ).isNull();
+    assertThat(registry.find(WorkerDetectionMetrics.METRIC_RULE_PROMOTIONS).tag("rule", "r").counter()).isNull();
   }
 
   /**
@@ -122,6 +120,37 @@ class RuleResolverTest {
   }
 
   /**
+   * A meter-registration failure while building a publication leaves the previous snapshot, its
+   * bindings and its meters in place; the new id is not published and its partially bound series is
+   * removed.
+   */
+  @Test
+  void aMeterRegistrationFailureLeavesThePreviousSnapshotPublished() {
+    WorkerDetectionMetrics failing = new WorkerDetectionMetrics(registry) {
+      @Override
+      public Counter ruleMatches(String ruleId) {
+        if ("added".equals(ruleId)) {
+          throw new IllegalStateException("bind failed");
+        }
+        return super.ruleMatches(ruleId);
+      }
+    };
+    RuleResolver failingResolver = new RuleResolver(RuleSet.of(List.of(rule), defaults), 4, failing);
+    RuleBinding before = failingResolver.binding("r");
+    HotKeyRule added = new HotKeyRule("added", MatchType.PREFIX, "x", 0, 0, 5, 0L, 0L, 60_000L, null);
+
+    assertThatThrownBy(() -> failingResolver.publish(RuleSet.of(List.of(rule, added), defaults)))
+      .isInstanceOf(IllegalStateException.class)
+      .hasMessage("bind failed");
+
+    assertThat(failingResolver.binding("r")).isSameAs(before);
+    assertThat(failingResolver.binding("added")).isNull();
+    assertThat(registry.find(WorkerDetectionMetrics.METRIC_RULE_MATCHES).tag("rule", "added").counter())
+      .as("the failed publication removes its partially bound series")
+      .isNull();
+  }
+
+  /**
    * An identical fingerprint is a no-op: the snapshot, its bindings and its match cache stay in
    * place, so a configuration refresh that changes nothing does not churn the cache.
    */
@@ -137,37 +166,44 @@ class RuleResolverTest {
   }
 
   /**
-   * A publication that changes one rule keeps the binding of every unchanged rule, so a threshold
-   * edit does not rebuild the rest of the set.
+   * A publication rebuilds every binding, even for an unchanged rule, so the binding always holds
+   * the rule instance in the published snapshot; the id's cumulative counters survive.
    */
   @Test
-  void anUnchangedRuleKeepsItsBindingAcrossAPublication() {
+  void anUnchangedRuleKeepsItsCountersAcrossAPublication() {
     RuleBinding before = resolver.binding("r");
+    before.recordPromotion();
     HotKeyRule added = new HotKeyRule("added", MatchType.PREFIX, "x", 0, 0, 5, 0L, 0L, 60_000L, null);
 
     resolver.publish(RuleSet.of(List.of(rule, added), defaults));
 
-    assertThat(resolver.binding("r")).isSameAs(before);
+    RuleBinding after = resolver.binding("r");
+    assertThat(after).isNotSameAs(before);
+    assertThat(after.rule()).isSameAs(rule);
+    assertThat(after.promotions()).isEqualTo(1);
     assertThat(resolver.binding("added")).isNotNull();
   }
 
   /**
-   * A regex rule is unchanged when its expression text is unchanged, even though the configuration
-   * gate compiles a new {@code Pattern} on every refresh. Record equality would rebuild the binding
-   * for a recompiled pattern; the definition text keeps it.
+   * A recompiled regex is a new rule instance with the same behaviour. The publication binds it
+   * fresh, so the binding carries the new {@link java.util.regex.Pattern}; the counters survive.
    */
   @Test
-  void anUnchangedRegexRuleKeepsItsBindingAcrossAPublication() {
+  void anUnchangedRegexRuleKeepsItsCountersAcrossAPublication() {
     defaults = new HotKeyRule("rx-defaults", MatchType.REGEX, ".*", Integer.MIN_VALUE, -1, 100, 0L, 0L, 60_000L, null);
     HotKeyRule regex = new HotKeyRule("rx", MatchType.REGEX, "user:.*", 0, 0, 5, 0L, 0L, 60_000L, null);
     RuleResolver regexResolver = new RuleResolver(RuleSet.of(List.of(regex), defaults), 4, metrics);
     RuleBinding before = regexResolver.binding("rx");
+    before.recordPromotion();
 
     HotKeyRule recompiled = new HotKeyRule("rx", MatchType.REGEX, "user:.*", 0, 0, 5, 0L, 0L, 60_000L, null);
     HotKeyRule added = new HotKeyRule("added", MatchType.PREFIX, "x", 0, 0, 5, 0L, 0L, 60_000L, null);
     regexResolver.publish(RuleSet.of(List.of(recompiled, added), defaults));
 
-    assertThat(regexResolver.binding("rx")).isSameAs(before);
+    RuleBinding after = regexResolver.binding("rx");
+    assertThat(after).isNotSameAs(before);
+    assertThat(after.rule()).isSameAs(recompiled);
+    assertThat(after.promotions()).isEqualTo(1);
     assertThat(regexResolver.binding("added")).isNotNull();
   }
 
@@ -201,10 +237,9 @@ class RuleResolverTest {
   }
 
   /**
-   * A publication that retains an unchanged rule keeps its binding, and that binding still holds the
-   * previous {@link HotKeyRule} instance. The exact index is therefore rebuilt from the published
-   * set's own rules, not by identity against the retained bindings: an unchanged exact rule must not
-   * disappear from the index just because another rule changed.
+   * A publication rebuilds the exact rule's binding over the new rule instance and keeps its
+   * counters. The exact index is rebuilt from the published set's own rules, so an unchanged exact
+   * rule stays indexed after another rule changes.
    */
   @Test
   void anUnchangedExactRuleStaysIndexedAcrossAPublication() {
@@ -212,15 +247,19 @@ class RuleResolverTest {
     RuleResolver exactAware = new RuleResolver(RuleSet.of(List.of(exact), defaults), 4, metrics);
     RuleBinding before = exactAware.binding("solo");
     assertThat(exactAware.resolveIfEligible("solo", 5)).isSameAs(before);
+    assertThat(before.matches()).isEqualTo(1);
 
     HotKeyRule added = new HotKeyRule("added", MatchType.PREFIX, "x", 0, 0, 5, 0L, 0L, 60_000L, null);
     HotKeyRule republished = new HotKeyRule("solo", MatchType.EXACT, "solo", 0, 0, 5, 0L, 0L, 60_000L, null);
     exactAware.publish(RuleSet.of(List.of(republished, added), defaults));
 
-    assertThat(exactAware.binding("solo")).as("the unchanged rule keeps its binding").isSameAs(before);
+    RuleBinding after = exactAware.binding("solo");
+    assertThat(after).as("the publication rebuilds the binding").isNotSameAs(before);
+    assertThat(after.rule()).as("the binding holds the published rule").isSameAs(republished);
+    assertThat(after.matches()).as("the exact rule keeps its counters").isEqualTo(1);
     assertThat(exactAware.resolveIfEligible("solo", 5))
-      .as("the retained exact rule is still served from the index at its own threshold")
-      .isSameAs(before);
+      .as("the published exact rule is still served from the index at its own threshold")
+      .isSameAs(after);
   }
 
   /**

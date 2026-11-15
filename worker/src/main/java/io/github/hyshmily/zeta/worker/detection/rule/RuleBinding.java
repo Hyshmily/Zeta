@@ -23,19 +23,32 @@ import java.util.concurrent.atomic.LongAdder;
 /**
  * A published rule paired with the counters that belong to its id.
  *
- * <p>The binding pairs the immutable rule with the counters of its id, so the report path and the
- * cooling check read one object instead of chasing a second lookup through the published rule set
- * and the metrics maps. The binding is never refreshed after publication: an entry keeps the
- * binding that judged it, so a later publication cannot change the bar an already-hot key is
+ * <p>
+ * The binding pairs the immutable rule with the counters of its id, so the
+ * report path and the
+ * cooling check read one object instead of chasing a second lookup through the
+ * published rule set
+ * and the metrics maps. The binding is never refreshed after publication: an
+ * entry keeps the
+ * binding that judged it, so a later publication cannot change the bar an
+ * already-hot key is
  * measured against.
  *
- * <p>A promotion captures the binding, not the id: the entry keeps the rule that judged it and can
- * advance that rule's counters with field reads, instead of a second lookup through the published
- * rule set and the metrics maps. The counters are shared by every binding of an id, so a
- * publication that replaces a rule with the same id keeps its cumulative statistics.
+ * <p>
+ * A promotion captures the binding, not the id: the entry keeps the rule that
+ * judged it and can
+ * advance that rule's counters with field reads, instead of a second lookup
+ * through the published
+ * rule set and the metrics maps. The counters are shared by every binding of an
+ * id, so a
+ * publication that replaces a rule with the same id keeps its cumulative
+ * statistics.
  *
- * <p>A binding whose id has been removed is retired: a hot entry that cools afterwards finishes
- * against its captured rule, but its late update lands on counters whose meters the publication
+ * <p>
+ * A binding whose id has been removed is retired: a hot entry that cools
+ * afterwards finishes
+ * against its captured rule, but its late update lands on counters whose meters
+ * the publication
  * already removed, so no meter series is recreated.
  */
 @Internal
@@ -45,8 +58,10 @@ public final class RuleBinding {
   private final RuleCounters counters;
 
   /**
-   * Creates a binding over one published rule. The rule is immutable, so every threshold read is
-   * a direct final-field access; the counters are supplied by the resolver and may be shared with
+   * Creates a binding over one published rule. The rule is immutable, so every
+   * threshold read is
+   * a direct final-field access; the counters are supplied by the resolver and
+   * may be shared with
    * an older binding of the same rule id.
    *
    * @param rule     the published rule; never {@code null}
@@ -116,9 +131,13 @@ public final class RuleBinding {
 /**
  * The counters of one rule id.
  *
- * <p>{@code matches}, {@code promotions} and {@code cools} are Micrometer counters: the registry
- * holds each meter strongly, so a scrape always finds the live value and no extra state object has
- * to be kept reachable. {@code aborts} is endpoint-only and stays a {@link LongAdder}.
+ * <p>
+ * {@code matches}, {@code promotions} and {@code cools} are Micrometer
+ * counters: the registry
+ * holds each meter strongly, so a scrape always finds the live value and no
+ * extra state object has
+ * to be kept reachable. {@code aborts} is endpoint-only and stays a
+ * {@link LongAdder}.
  */
 final class RuleCounters {
 
@@ -129,7 +148,8 @@ final class RuleCounters {
   private Counter cools;
 
   /**
-   * Registers the three counters for this rule id. Called once, before the binding is published.
+   * Registers the three counters for this rule id. Called once, before the
+   * binding is published.
    *
    * @param metrics the detection meters
    * @param ruleId  the rule id that tags the series
@@ -181,8 +201,10 @@ final class RuleCounters {
   }
 
   /**
-   * Removes this id's three meters. A late update still lands on the field the meter reads, but the
-   * removed meter is never scraped again; removal is idempotent, and a partially bound counter
+   * Removes this id's three meters. A late update still lands on the field the
+   * meter reads, but the
+   * removed meter is never scraped again; removal is idempotent, and a partially
+   * bound counter
    * skips the handles it never received.
    *
    * @param metrics the detection meters that own the three registrations

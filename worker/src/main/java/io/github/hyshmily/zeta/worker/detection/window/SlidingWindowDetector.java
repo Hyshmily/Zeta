@@ -23,100 +23,51 @@ import java.util.concurrent.ConcurrentHashMap;
 import org.jspecify.annotations.Nullable;
 
 /**
- * A high‑performance sliding‑window detector for real‑time hot‑key
- * identification.
+ * A sliding-window detector for real-time hot-key identification.
  *
- * <h2>Why a sliding window?</h2>
- * A fixed‑window counter (e.g. reset every second) suffers from boundary
- * problems: a burst that straddles two windows can be split and go undetected.
- * The sliding window continuously aggregates the last {@code windowSize} time
- * slices, giving a smooth, instantaneous view of traffic for every key.
+ * <p>
+ * Each key owns one {@link KeyWindow}: a doubled {@code long[]} of {@code 2 * windowSize} slots plus
+ * the absolute slice of its last write. A slot packs its absolute slice tag in the high 32 bits and
+ * its saturating count in the low 32 bits, so a late write from a previous rotation is skipped
+ * instead of being summed as current traffic. Every slot is accessed through one static
+ * {@link VarHandle}; reads and the sum use opaque mode, and the add is a CAS loop because the tag
+ * and the count must change together.
  *
- * <h2>Data structure</h2>
- * Each key owns a single {@link KeyWindow} entry — a doubled {@code long[]} of length
- * {@code 2 * windowSize} plus the key's last written <b>absolute slice number</b>, stored together
- * in one map entry. Every slot packs its absolute slice tag in the high 32 bits and its saturating
- * count in the low 32 bits, so a late write from a previous rotation can never be read as traffic
- * in the current window: the sum skips a slot whose tag is not the slice it expects. Element access
- * goes through one static {@link VarHandle}; the packed word makes the tag and count one atomic
- * fact (design decisions: worker detection).
+ * <p>
+ * The slice number is written under the {@link KeyWindow} monitor. Eviction writes the tombstone
+ * under that monitor and removes the mapping only after releasing it, with an identity-matched
+ * {@code windows.remove}. Creation runs under the map's bin lock and may take the entry monitor, so
+ * the lock order is bin lock → entry monitor; eviction never takes the bin lock while holding the
+ * monitor. The cap-relief path takes the reclaimer lock outside every map lock. The slot add and
+ * the window-sum read stay lock-free.
  *
- * <h2>Concurrency</h2>
- * <ul>
- * <li>The {@link VarHandle} provides atomic access to each packed slot. Reads and the sum use
- * opaque mode; a slice is an independent statistical counter, so a summation that races an add
- * sees either the previous or the new word. The add is a CAS loop because the tag and the count
- * must change together: a slot whose tag belongs to another rotation restarts at zero instead of
- * accumulating onto stale traffic.</li>
- * <li>The slice-number read‑modify‑write runs under the {@link KeyWindow} monitor. Eviction uses
- * that monitor as a leaf lock: it re-checks the idle bound, writes the {@code lastSlice}
- * tombstone, releases the monitor, and only then removes the mapping with an identity-matched
- * {@code windows.remove}. Creation still runs its remapping function under the CHM bin lock and
- * may take the entry monitor, but eviction never holds the monitor while taking the bin lock, so
- * the two orders cannot deadlock. The tombstone is the seat state: a window whose
- * {@code lastSlice} is {@code EVICTED} owns no seat, so no second flag records it. The
- * cap-relief path adds the reclaimer lock outside every map lock (reclaimer → entry monitor,
- * then the bin lock after the monitor is released); no path takes the reclaimer lock from inside
- * a bin lock. The slot add and the window-sum read run lock-free outside the monitor.</li>
- * <li>The tag closes the pause-after-map-read race without putting the add under the entry
- * monitor. A thread that samples an old slice, stalls through a later writer's window rotation,
- * and then lands on a recycled slot sees the newer tag on the CAS retry and drops its add. A write
- * that still lands with an old tag is ignored by every reader. A window whose tag is missing or
- * different is never summed, so a stale count cannot be re-attributed to a newer slice.</li>
- * <li>The aggregated sum is a statistical signal for hotspot detection,
- * where an occasional missed or double‑counted access does not
- * materially affect the HOT/COOL decision.</li>
- * <li><b>Slice-gated fast path:</b> {@link #addCountAtSlice} skips the slice-number update entirely when
- * the key's slice is not behind the caller's sample — the slice number is refreshed at most once
- * per slice. The no-lost-add guarantee against eviction holds while the eviction staleness
- * threshold is at least one slice (any real configuration: minutes vs tens of ms) — a window old
- * enough for the evictor to target routes every arriving add through the timestamp-refreshing
- * slow path. A thread that stalls for longer than the eviction threshold between its map read and
- * its slot write can still land on an entry the evictor removed; the add is then lost, never
- * attributed to another key.</li>
- * </ul>
+ * <p>
+ * A write sums the {@code windowSize} slices ending at the slice it wrote plus one guard slice, so
+ * the covered span is {@code [W, W + slice)} and the same traffic crosses a threshold the same way
+ * whatever millisecond it is sampled. A read-only sum starts at the key's last write: later slices
+ * are empty, and the current ring slot may still hold a write from two windows ago.
  *
- * <h2>Memory management</h2>
- * The {@link #evictStale(long)} method must be called periodically (e.g. on the detection sweep's
- * cadence) by a scheduler. It removes any key that has not been accessed
- * within the given timeout, freeing the associated buffer and map entry.
+ * <p>
+ * {@link #evictStale(long)} must run periodically (the detection sweep) to bound memory.
  *
- * <h2>Window span</h2>
- * A write sums the {@code windowSize} slices ending at the slice it just wrote, plus <b>one</b>
- * guard slice. The guard makes the covered time span {@code [W, W + slice)}, so the same traffic
- * does not cross a threshold differently depending on the millisecond it was sampled (design
- * decisions: worker detection).
- *
- * <p>A read-only sum starts at the slice of the key's last write instead of at the current slice.
- * Slices after the last write hold no data, and the ring slot at the current index can still carry
- * a write from two windows ago once the index has wrapped; starting at the last write skips both.
- * The guard slot is read only while it lies inside the range that ends at the last write.
- *
- * @see io.github.hyshmily.zeta.worker.detection.DetectionPipeline#sweep()
+ * <p>
+ * design decisions: worker detection
  */
 public class SlidingWindowDetector {
 
   /**
    * Element access for every {@link KeyWindow#slices}. One static handle instead of one
-   * {@code AtomicLongArray} per key keeps the per-key footprint to the array itself. Reads use
-   * opaque mode: the slots are independent statistical counters, so the summation needs per-slot
-   * atomicity and coherence, not a volatile barrier per element.
-   *
-   * <p>A slot is one {@code long}: high 32 bits are the absolute slice's low 32 bits (the tag) and
-   * low 32 bits the count. The tag is what lets the add stay lock-free: a write that lands after a
-   * rotation still carries its old slice, the reader ignores it instead of summing it as current
-   * traffic, and an add that finds a newer tag on its CAS retry drops itself instead of replacing
-   * that newer count. The count saturates at {@link Integer#MAX_VALUE}. The tag aliases only after
-   * {@code 2^32} slices, roughly 49.7 days at a 1 ms slice.
+   * {@code AtomicLongArray} per key keeps the per-key footprint to the array itself. A slot is one
+   * {@code long}: high 32 bits the absolute slice tag, low 32 bits the count, saturating at
+   * {@link Integer#MAX_VALUE}. The tag aliases only after {@code 2^32} slices, roughly 49.7 days at
+   * a 1 ms slice.
    */
   private static final VarHandle SLICES = MethodHandles.arrayElementVarHandle(long[].class);
 
   /**
-   * Number of live entries sampled when a new key arrives at the capacity cap. Fixed so the
-   * relief path costs a bounded handful of hash-bin visits; a sample that finds nothing idle means
-   * the tracked set is genuinely active, and the key waits for the accelerated scan instead of
-   * pushing a live entry out. Every eligible entry in the sample is reclaimed, so one walk can
-   * release several seats for the admissions queued behind it.
+   * Number of live entries sampled when a new key arrives at the capacity cap. The relief path is
+   * bounded to a handful of hash-bin visits; every eligible entry in the sample is reclaimed, so one
+   * walk can release several seats for the admissions queued behind it.
    */
   private static final int EVICTION_SAMPLE = 32;
   private final ConcurrentHashMap<String, KeyWindow> windows = new ConcurrentHashMap<>();
@@ -138,38 +89,31 @@ public class SlidingWindowDetector {
 
   private final int windowSize;
 
-  /**
-   * Bitmask for circular buffer index (length - 1, where length is a power of
-   * two).
-   */
+  /** Bitmask for the circular buffer index ({@code 2 * windowSize - 1}). */
   private final int lengthMask;
 
   /** One key's window state: the doubled ring and the absolute slice of its last write. */
   private static final class KeyWindow {
 
     /**
-     * Tombstone: the entry has been removed from the map and may only be replaced, never reused.
-     * No timestamp this process can observe divides down to {@link Long#MIN_VALUE}, so the value is
-     * distinguishable from every real slice.
+     * Tombstone: the entry has been removed from the map and may only be replaced. No timestamp
+     * this process can observe divides down to {@link Long#MIN_VALUE}.
      */
     private static final long EVICTED = Long.MIN_VALUE;
 
     /**
-     * Doubled circular buffer of packed per-slice slots ({@code 2 * windowSize} slots), accessed
-     * through {@link #SLICES}. The doubling keeps every slot the {@code windowSize + 1} sum covers
-     * from being overwritten by the next rotation; a slot is reused only after {@code 2 * windowSize}
-     * slices. The packed tag lets a late write detect that reuse and drop itself instead of
-     * replacing the newer count.
+     * Doubled circular buffer of packed per-slice slots ({@code 2 * windowSize}), accessed through
+     * {@link #SLICES}. A slot is reused only after {@code 2 * windowSize} slices, so the packed tag
+     * lets a late write detect the reuse and drop itself instead of replacing the newer count.
      */
     final long[] slices;
 
     /**
      * Absolute slice number ({@code floorDiv(monotonicMillis, sliceMs)}) of the last write, written
-     * only under this entry's monitor — under the slice-gated fast path at most once per slice (a
-     * same-slice add leaves the slice alone). Eviction sets {@link #EVICTED} under the same
-     * monitor before removing the mapping, so an add holding this reference can tell that the entry
-     * is gone. {@code volatile} makes the lock-free eviction scan and diagnostics read harmless:
-     * the re-check under the monitor is authoritative.
+     * under this entry's monitor — at most once per slice on the fast path. Eviction sets
+     * {@link #EVICTED} under the same monitor before removing the mapping. {@code volatile} makes
+     * the lock-free eviction scan and diagnostics read harmless; the re-check under the monitor is
+     * authoritative.
      *
      * <p>The tombstone is also the admission-seat state: {@code EVICTED} means the entry has
      * returned its seat, any other value means it owns one.
@@ -218,33 +162,16 @@ public class SlidingWindowDetector {
    * current sliding window.
    *
    * <p>
-   * If this is the first access for the key, a new window entry is created
-   * atomically. The slice-number write of a resident entry runs under its monitor;
-   * eviction removes through {@code windows.compute} and re-checks under the same
-   * monitor (see the class Javadoc). The tagged slot add and the window-sum read run
-   * lock-free outside it.
+   * A first access creates the window through the admission gate. The slice-gated fast path skips
+   * the entry monitor when the key's slice is not behind the caller's sample; eviction thresholds
+   * are minutes against a slice of tens of milliseconds, so a window old enough for the evictor
+   * always takes the slice-refreshing slow path. The returned sum walks the ring because concurrent
+   * adders share the window, so a cached sum would go stale.
    *
-   * <p><b>Slice-gated fast path:</b> when the key already has a window and its sampled slice is
-   * not ahead of the window's slice, the compute is skipped entirely — within the same slice the
-   * timestamp would not move, and a thread whose sample is older than a concurrent adder's has
-   * nothing to refresh either. Eviction thresholds are configured
-   * in minutes while a slice is tens of ms, so every window old enough for the evictor to target
-   * routes its arriving adds through the slice-refreshing slow path. Widely-hot keys reported
-   * by many App instances within one slice then pay one lock-free map read instead of the entry
-   * monitor on most calls. The return sum walks the O(windowSize) loop over the
-   * circular buffer for an existing window: concurrent adders from many App instances share the
-   * same window, so a cached sum would go stale between adds. Callers that do not consume the sum
-   * use {@link #recordCountAtSlice(String, long, long)}.
-   *
-   * <p><b>Admission at the cap:</b> a brand-new key arriving while the admission cap is reached
-   * asks the reclaimer to reclaim idle windows in one bounded pass; the add is dropped only when
-   * the hard ledger is also exhausted. A pass another admission holds yields an admission, not
-   * a rejection, but only by reserving a seat from the hard ledger. A completed pass that finds
-   * nothing opens the reclaimer's saturation window for the arrivals behind it, while its own
-   * admission still uses the hard headroom; other new keys are rejected without another pass: the
-   * scan's microsecond-scale hold must not be outrun by admissions that miss its
-   * lock by nanoseconds. The hard ledger is the true total bound; the soft cap only gates when a
-   * sampling pass runs.
+   * <p>
+   * A brand-new key at the cap asks the reclaimer for one bounded reclaim pass; the add is dropped
+   * only when the hard ledger is also exhausted. Callers that do not consume the sum use
+   * {@link #recordCountAtSlice(String, long, long)}.
    *
    * @param key      the cache key; must not be {@code null}
    * @param count    the number of accesses to record (typically the batched add reported by an
@@ -269,16 +196,13 @@ public class SlidingWindowDetector {
   }
 
   /**
-   * Records an access at the caller's slice without computing the window sum.
-   *
-   * <p>The already-hot report path needs the count in the window for the cool-down, but its
-   * promotion decision is already settled; walking {@code windowSize + 1} slots there only to
-   * discard the result would put the hot traffic on the most expensive read of the window.
+   * Records an access at the caller's slice without computing the window sum. The already-hot report
+   * path needs the count for the cool-down but has no promotion decision pending, so walking the
+   * ring only to discard the result would put hot traffic on the most expensive read.
    *
    * <p>The key already holds a registry seat, so its window is admitted even at or above the
    * tracked-key cap: losing the count would make a live hot key look quiet to
-   * {@code COOL_FOR_LOW_QPS}. The overshoot beyond the hard ledger is bounded by the HOT seat count,
-   * and the cap already admits an approximate size.
+   * {@code COOL_FOR_LOW_QPS}. The overshoot is bounded by the HOT seat count.
    *
    * @param key      the cache key; must not be {@code null}
    * @param count    the number of accesses to record; non-positive values are ignored
@@ -335,7 +259,18 @@ public class SlidingWindowDetector {
     // the whole window is dropped; one still inside the span keeps its honest slice tag.
     long latestSlice = window.lastSlice;
     if (latestSlice == KeyWindow.EVICTED) {
-      return null;
+      // The fast path read the entry just before a concurrent eviction tombstoned and removed it.
+      // Rebuild through the admission gate instead of dropping the add: for an already-hot key the
+      // count feeds COOL_FOR_LOW_QPS, and losing it would understate live traffic and cool the key
+      // early. A non-hot key pays the same gate it would have paid as a first touch.
+      window = admitAndCreate(key, nowSlice, alreadyHot);
+      if (window == null) {
+        return null;
+      }
+      latestSlice = window.lastSlice;
+      if (latestSlice == KeyWindow.EVICTED) {
+        return null;
+      }
     }
     if (latestSlice - nowSlice <= windowSize) {
       addToSlot((int) (nowSlice & lengthMask), (int) Math.min(count, Integer.MAX_VALUE), window.slices, nowSlice);
@@ -345,13 +280,11 @@ public class SlidingWindowDetector {
 
   /**
    * Adds {@code delta} to the slot for {@code addSlice}. The tag and the count change together, so
-   * a slot left by a previous rotation is replaced from zero rather than accumulated onto. A
-   * {@code getAndAdd} plus MAX repair is not atomic: a concurrent adder can observe a wrapped
-   * negative count before the repair lands.
-   *
-   * <p>A slot already owned by a newer rotation is left untouched. The add is then older than
-   * every readable slice, so dropping it loses no visible traffic; replacing the newer word would
-   * erase a write the current window still sums.
+   * a slot left by a previous rotation is replaced from zero rather than accumulated onto; a
+   * {@code getAndAdd} plus MAX repair is not atomic, and a concurrent adder could observe a wrapped
+   * negative count before the repair lands. A slot already owned by a newer rotation is left
+   * untouched: the add is outside every readable range, while replacing the newer word would erase
+   * a write the current window still sums.
    *
    * @param index    the slot index, {@code addSlice & lengthMask}
    * @param delta    the positive count to add
@@ -405,18 +338,14 @@ public class SlidingWindowDetector {
    * Reserves one admission seat and publishes the key's window, or advances the window a concurrent
    * admission published first.
    *
-   * <p>The admission gate runs before {@code windows.compute}: a sampling pass removes a different
-   * key, and a remapping function must not modify the map it is remapping. A new key and a
-   * tombstone both sample when the soft cap is reached; only a hot-key report takes a hot seat
-   * without sampling. The eviction predicate runs under the reclaimer's lock but before any bin or
-   * entry lock is taken here, so the order stays reclaimer → CHM bin → entry monitor. The lock-free
-   * staleness test comes first: a sample over active keys must not take 32 bin locks and 32 entry
-   * monitors only to find every candidate live.
+   * <p>The admission gate runs before {@code windows.compute} because a sampling pass removes a
+   * different key and a remapping function must not modify the map it is remapping. The lock order
+   * stays reclaimer → CHM bin → entry monitor.
    *
-   * @param key             the key being admitted
-   * @param nowSlice        the caller's absolute slice number
-   * @param alreadyHot      whether this report belongs to a key that already holds a HOT seat and
-   *                        is admitted regardless of the tracked-key bound
+   * @param key        the key being admitted
+   * @param nowSlice   the caller's absolute slice number
+   * @param alreadyHot whether this report belongs to a key that already holds a HOT seat and is
+   *                   admitted regardless of the tracked-key bound
    * @return the live window, or {@code null} when the cap refused the seat
    */
   @Nullable
@@ -426,22 +355,26 @@ public class SlidingWindowDetector {
       // bound does not apply. A tombstone left by a concurrent eviction is replaced under the same
       // exemption: the key's count still feeds its cool-down.
       reclaimer.reserveHotSeat();
-      return computeWindow(key, nowSlice);
+    } else if (!reclaimer.tryAdmit(key, nowSlice, sampledEvictor)) {
+      // A sampled tombstone already returned its seat when it was set, so the replacement is a new
+      // admission: it must pass the same soft-cap sample and saturation gate as a first touch.
+      return null;
     }
-    // A sampled tombstone already returned its seat when it was set, so the replacement is a new
-    // admission: it must pass the same soft-cap sample and saturation gate as a first touch.
-    return reclaimer.tryAdmit(key, nowSlice, sampledEvictor) ? computeWindow(key, nowSlice) : null;
+    try {
+      return computeWindow(key, nowSlice);
+    } catch (RuntimeException | Error e) {
+      // The reservation is this call's alone until computeWindow consumes it. A failed allocation
+      // must return it; otherwise every failed admission permanently shrinks the ledger.
+      reclaimer.releaseSeat();
+      throw e;
+    }
   }
 
   /**
    * The reclaimer's per-candidate test: reclaim the sampled window when this pass is the one that
-   * tombstoned it.
-   *
-   * <p>The lock-free staleness pre-check keeps a sample over active keys from taking entry monitors
-   * only to find every candidate live. The re-check under the monitor is authoritative, and the
-   * return value is {@code true} only for the call that wrote the tombstone; a concurrent periodic
-   * sweep's tombstone leaves this call returning {@code false}. The reclaimer accounts for the
-   * reclaimed seat from that verdict, so this method does not release it.
+   * tombstoned it. The re-check under the monitor is authoritative, so a concurrent periodic sweep
+   * makes this call return {@code false}; the reclaimer accounts for the reclaimed seat from that
+   * verdict.
    *
    * @param entry    the sampled entry
    * @param nowSlice the pass's absolute slice number
@@ -452,11 +385,9 @@ public class SlidingWindowDetector {
   }
 
   /**
-   * Advances a live resident window across a slice boundary under its own monitor.
-   *
-   * <p>A resident, live entry is updated under its own monitor: the slice number belongs to the
-   * entry, and no map mutation happens, so re-entering the CHM compute would only rehash the key and
-   * take the bin lock once per slice.
+   * Advances a live resident window across a slice boundary under its own monitor. No map mutation
+   * happens, so re-entering the CHM compute would only rehash the key and take the bin lock once per
+   * slice.
    *
    * @param window   the sampled live window
    * @param nowSlice the caller's absolute slice number
@@ -480,12 +411,7 @@ public class SlidingWindowDetector {
   /**
    * Creates the mapping or advances the window already published by a concurrent admission. The
    * caller holds a reserved seat: the mapping consumes it when it creates a window and returns it
-   * when it finds a live one.
-   *
-   * <p>{@code ConcurrentHashMap.compute} runs this remapping function exactly once for the key
-   * under its bin lock, so the seat the caller already reserved is consumed by returning a new
-   * window, or returned with {@code releaseSeat()} when a concurrent admission published a live
-   * one. No reservation object crosses the call.
+   * with {@code releaseSeat()} when it finds a live one.
    *
    * @param key      the key being admitted
    * @param nowSlice the caller's absolute slice number
@@ -529,14 +455,10 @@ public class SlidingWindowDetector {
 
   /**
    * Re-checks one sampled victim under its own monitor, tombstones it when it is still idle, and
-   * removes the mapping with an identity-matched remove.
-   *
-   * <p>The monitor is a leaf lock: it is acquired first and released before the map's bin lock is
-   * taken. Only the call that writes {@code lastSlice = EVICTED} reports {@code true}; a concurrent
-   * periodic sweep that tombstoned the same window first makes this call observe the tombstone and
-   * return {@code false}. The periodic sweep returns the reclaimed seat through
-   * {@link SamplingReclaimer#releaseSeat()}; the capacity sample leaves the seat to its own
-   * admission, which {@code SamplingReclaimer} accounts for from this return value.
+   * removes the mapping with an identity-matched remove. The monitor is released before the map's
+   * bin lock is taken. Only the call that writes the tombstone reports {@code true}; the periodic
+   * sweep returns the seat through {@link SamplingReclaimer#releaseSeat()}, the capacity sample
+   * leaves it to its own admission.
    *
    * @param key         the candidate key
    * @param window      the candidate window
@@ -565,11 +487,8 @@ public class SlidingWindowDetector {
   }
 
   /**
-   * Consume the "an admission at the cap found nothing idle" signal.
-   *
-   * <p>The periodic scan uses it to run once with the window-aligned idle
-   * boundary instead of the configured retention, bounding how long a key can
-   * stay locked out by an unlucky sample.
+   * Consume the "an admission at the cap found nothing idle" signal, so the periodic scan can run
+   * once with the window-aligned idle boundary and a key is locked out for at most one sweep.
    *
    * @return {@code true} if relief was requested since the previous call
    */
@@ -578,22 +497,36 @@ public class SlidingWindowDetector {
   }
 
   /**
-   * Sums the slots for the absolute slices {@code [endSlice - length + 1, endSlice]}. A slot is
+   * Sums the slots for the absolute slices {@code [endSlice - slotCount + 1, endSlice]}. A slot is
    * included only when its tag equals the slice it would represent, so a late write from a previous
-   * rotation is ignored rather than re-attributed. The doubled ring guarantees the range never
-   * covers the same physical slot twice.
+   * rotation is ignored rather than re-attributed. The walk is split at the ring's end into at most
+   * two forward runs, which keeps ascending indexes for the hardware prefetcher and pays no mask per
+   * slot.
    *
-   * @param slices    the doubled ring
-   * @param endSlice  the newest absolute slice in the range
-   * @param slotCount the number of slices, at most {@code slices.length}
+   * @param slices     the doubled ring
+   * @param endSlice   the newest absolute slice in the range
+   * @param slotCount  the number of slices, at most {@code slices.length}
    * @param lengthMask bitmask for the doubled buffer index
    * @return the range's sum
    */
   static long sumRange(long[] slices, long endSlice, int slotCount, int lengthMask) {
+    if (slotCount <= 0) {
+      return 0L;
+    }
     long sum = 0L;
-    for (int i = 0; i < slotCount; i++) {
-      long slice = endSlice - i;
-      long packed = (long) SLICES.getOpaque(slices, (int) (slice & lengthMask));
+    long slice = endSlice - slotCount + 1L;
+    int start = (int) (slice & lengthMask);
+    int capacity = lengthMask + 1;
+    int firstRun = Math.min(slotCount, capacity - start);
+    for (int i = 0; i < firstRun; i++, slice++) {
+      long packed = (long) SLICES.getOpaque(slices, start + i);
+      if (tag(packed) == (int) slice) {
+        sum += count(packed);
+      }
+    }
+    int remaining = slotCount - firstRun;
+    for (int i = 0; i < remaining; i++, slice++) {
+      long packed = (long) SLICES.getOpaque(slices, i);
       if (tag(packed) == (int) slice) {
         sum += count(packed);
       }
@@ -602,19 +535,15 @@ public class SlidingWindowDetector {
   }
 
   /**
-   * Read-only window sum for the given key, computed from the circular buffer without any side
-   * effects.
+   * Read-only window sum for the given key.
    *
-   * <p>The sum starts at the slice of the last write rather than at the current slice: slices
-   * after the last write are known empty, and the ring slot at the current index can still hold a
-   * write from two windows ago after the index has wrapped. Starting at the last write skips both,
-   * so a full window of silence reads only that write. Beyond one full window the key contributes
-   * zero and the buffer is not walked at all.
+   * <p>The sum starts at the slice of the last write: later slices are empty, and the ring slot at
+   * the current index can still hold a write from two windows ago after the index wraps. Beyond one
+   * full window the key contributes zero and the buffer is not walked.
    *
-   * <p>The cool-down path's only window read: {@code COOL_FOR_LOW_QPS} re-reads the sum under the
-   * key lock instead of reusing the sample a report carried, so a decision is never made on an
-   * observation taken outside the lock. {@code addCountAtSlice} already returns the same quantity for the
-   * report it is judging, so the hot path does not call this.
+   * <p>The cool-down path's only window read: {@code COOL_FOR_LOW_QPS} re-reads the sum under the key
+   * lock instead of reusing the sample a report carried. {@code addCountAtSlice} already returns the
+   * same quantity for the report it is judging, so the hot path does not call this.
    *
    * @param key the cache key
    * @return the sliding-window sum at the current time, or {@code 0}
@@ -660,11 +589,8 @@ public class SlidingWindowDetector {
   }
 
   /**
-   * The absolute slice a monotonic timestamp belongs to — the quantity the circular index is
-   * derived from.
-   *
-   * <p>{@code floorDiv}, not {@code /}: a test can shift the monotonic axis negative, and
-   * truncation toward zero would put instants on opposite sides of the epoch into the same slice.
+   * The absolute slice a monotonic timestamp belongs to. {@code floorDiv}, not {@code /}: a negative
+   * monotonic axis must not put instants on opposite sides of the epoch into the same slice.
    *
    * @param timestampMillis monotonic milliseconds
    * @return the absolute slice number
@@ -674,49 +600,35 @@ public class SlidingWindowDetector {
   }
 
   /**
-   * Evicts every window whose last write is outside the summation range every reader
-   * covers — the slice-aligned "contributes zero" boundary used by capacity relief.
-   *
-   * <p>This is the same predicate {@link #isStale(KeyWindow, long, long)} uses, so a relief pass
-   * can never reclaim a guard slice a concurrent read still sums.
+   * Evicts every window outside the slice-aligned "contributes zero" boundary, the predicate a
+   * capacity reclaim and a concurrent read share.
    */
   public void evictIdle() {
     evict(windowSize);
   }
 
   /**
-   * Evicts stale tracking entries for keys that have not been accessed within the given timeout.
+   * Evicts stale tracking entries for keys idle longer than the given timeout.
    *
-   * <p>This is the explicit retention bound: the caller decides how long an idle entry is kept,
-   * independently of the summation range. The cap-relief path uses {@link #evictIdle()} for
-   * the slice-aligned "contributes zero" test.
+   * <p>The retention bound is the caller's explicit memory bound, independent of the summation
+   * range. Scan-then-recheck: a lock-free pass visits the entries, then each candidate is re-checked
+   * and removed under its entry monitor with an identity-matched map removal. Because
+   * {@link #addCountAtSlice} refreshes the slice under the same monitor, the two operations are
+   * serialized per key and no add is lost.
    *
-   * <p>Scan-then-recheck: a lock-free pass visits the entries, then each candidate is re-checked
-   * under its entry monitor and removed with an identity-matched map removal. Because the
-   * consumer's {@link #addCountAtSlice} refreshes the slice under the <em>same</em> monitor, the two
-   * operations are fully serialized per key: if {@code addCountAtSlice} ran first, the refreshed slice
-   * fails the re-check and the entry is kept; if the eviction ran first, it tombstones the entry
-   * and the concurrent {@code addCountAtSlice} re-creates a fresh window through the admission path, so
-   * no add is lost.
-   *
-   * <p>The retention threshold is a duration, so it is quantized to whole slices once per scan:
-   * an entry is dropped on the first slice boundary strictly more than {@code staleAfterMs} after
-   * the slice of its last write. The quantization is at most one slice, while every real retention
-   * is orders of magnitude larger.
-   *
-   * <p>Must be called periodically (e.g. via
-   * {@link io.github.hyshmily.zeta.worker.detection.DetectionPipeline#sweep()}) to prevent
-   * unbounded memory growth from keys that are no longer accessed.
+   * <p>The duration is quantized to whole slices once per scan (at most one slice of error) and
+   * floored at one slice: the slice a fast-path writer may still be adding to must never be
+   * reclaimed as idle.
    *
    * @param staleAfterMs maximum idle time in milliseconds before a key is considered stale and
-   *                     evicted; must be non-negative
+   *                     evicted; must be non-negative, and at least one slice in effect
    * @throws IllegalArgumentException when {@code staleAfterMs} is negative
    */
   public void evictStale(long staleAfterMs) {
     if (staleAfterMs < 0L) {
       throw new IllegalArgumentException("staleAfterMs must be non-negative, got " + staleAfterMs);
     }
-    evict(staleAfterMs / timeMillisPerSlice);
+    evict(Math.max(1L, staleAfterMs / timeMillisPerSlice));
   }
 
   /** Evicts every window outside the given slice-aligned idle bound. */
@@ -736,13 +648,7 @@ public class SlidingWindowDetector {
   }
 
   /**
-   * Returns the number of keys currently being tracked by this detector.
-   *
-   * <p>
-   * This includes all keys with allocated circular buffers, regardless
-   * of whether they have expired but have not yet been evicted.
-   *
-   * @return the number of active keys in the windows map
+   * @return the number of tracked keys, including entries not yet evicted after going idle
    */
   public int activeWindows() {
     return windows.size();

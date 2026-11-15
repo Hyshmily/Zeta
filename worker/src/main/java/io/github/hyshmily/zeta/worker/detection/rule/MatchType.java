@@ -20,8 +20,11 @@ import java.util.regex.Pattern;
 /**
  * How a rule's pattern selects keys.
  *
- * <p>Specificity is also the second sort key of a {@link RuleSet} (after {@code priority}):
- * an exact rule outranks a prefix rule, which outranks a regex rule at the same priority.
+ * <p>
+ * Specificity is also the second sort key of a {@link RuleSet} (after
+ * {@code priority}):
+ * an exact rule outranks a prefix rule, which outranks a regex rule at the same
+ * priority.
  */
 public enum MatchType {
   /** {@code key.equals(pattern)}. */
@@ -37,7 +40,10 @@ public enum MatchType {
     this.specificity = specificity;
   }
 
-  /** Lower is more specific; used only as a deterministic tiebreak inside one priority. */
+  /**
+   * Lower is more specific; used only as a deterministic tiebreak inside one
+   * priority.
+   */
   public int specificity() {
     return specificity;
   }
@@ -46,7 +52,8 @@ public enum MatchType {
    * Tests one key against this rule's pattern.
    *
    * @param pattern the configured pattern; never {@code null}
-   * @param regex   the compiled pattern for {@link #REGEX}, {@code null} for the other types
+   * @param regex   the compiled pattern for {@link #REGEX}, {@code null} for the
+   *                other types
    * @param key     the cache key
    * @return {@code true} when the rule selects the key
    */

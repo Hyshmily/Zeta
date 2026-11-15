@@ -34,7 +34,7 @@ import io.github.hyshmily.zeta.worker.detection.rule.RuleBinding;
  * are additionally {@code volatile} so the endpoint can read them lock-free. The wheel links are
  * guarded by the owning wheel's lock. {@link #wheelState} is written under that lock except for one
  * hand-off: the registry clears {@code DETACHED} to {@code UNSCHEDULED} under the key's stripe lock
- * after {@link TimerWheel#pollDetached()} has removed the node from every list. A stale read of the
+ * after {@link TimerWheel#pollAndDetached()} has removed the node from every list. A stale read of the
  * volatile fields costs a misleading diagnostic, never a wrong decision.
  */
 public final class HE {

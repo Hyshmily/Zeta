@@ -23,34 +23,22 @@ import io.github.hyshmily.zeta.worker.detection.window.SlidingWindowDetector;
 import io.github.hyshmily.zeta.worker.dispatch.DecisionDispatcher;
 
 /**
- * The detection entry point: window first, rules only when the sum is worth
- * resolving.
+ * The detection entry point: window first, rules only when the sum is worth resolving.
  *
  * <p>
- * Every report takes the same short path. Two cheap exits keep the expensive
- * work off the hot keys and the cold ones:
- *
- * <ul>
- * <li><b>Already hot</b> — one map read. The count is still added to the window
- * (cooling needs it), but the
- * window sum is not computed: the cooling check re-reads it under the key lock,
- * and no promotion decision is pending
- * for this report.</li>
- * <li><b>Below the floor</b> — one integer compare against the smallest
- * {@code hotCount} that the floor can gate. An
- * effective {@code EXACT} rule is checked by its own O(1) index first and its
- * own threshold decides, so a special key
- * with a low threshold does not lower the floor for everyone else, and a cold
- * report for one does not enter the match
- * cache.</li>
- * </ul>
+ * Two cheap exits keep the expensive work off the hot and cold paths. An <b>already-hot</b> key pays
+ * one map read: the count still enters the window for the cool-down, but the sum is not computed
+ * because the cooling check re-reads it under the key lock. A report <b>below the floor</b> pays one
+ * integer compare against the smallest {@code hotCount} the floor can gate; an effective
+ * {@code EXACT} rule is checked by its own O(1) index first and its own threshold decides. Only a key
+ * between the floor and its rule's threshold pays for a resolution.
  *
  * <p>
- * Only a key between the floor and its rule's threshold pays for a resolution;
- * the resolver caches a non-exact answer
- * and serves an effective exact key from its index. The pipeline owns no
- * detection state: the window, the rules, the
- * HOT set and the cool-down wheels are each owned by exactly one component.
+ * The pipeline owns no detection state: the window, the rules, the HOT set and the cool-down wheels
+ * are each owned by exactly one component.
+ *
+ * <p>
+ * design decisions: worker pipeline
  */
 public class DetectionPipeline {
 
@@ -133,29 +121,23 @@ public class DetectionPipeline {
     }
     HE promoted = registry.promote(key, binding, nowMs);
     if (promoted != null) {
-      // From here the dispatcher owns delivery and returns the seat if the HOT is refused or dropped
-      // before it reaches the broker (design decisions: decision delivery). The entry carries the
-      // key and version, so the decision needs no second map lookup.
+      // From here the dispatcher owns delivery and returns the seat if the HOT is refused, dropped
+      // before it reaches the broker, or the submission itself fails (design decisions: decision
+      // delivery). The entry carries the key and version, so the decision needs no second map lookup.
       dispatcher.submit(promoted);
     }
   }
 
   /**
-   * Periodic housekeeping: reclaim idle windows, then re-link overdue cool-down
-   * checks.
+   * Periodic housekeeping: reclaim idle windows, then re-link overdue cool-down checks.
    *
    * <p>
-   * A rejected admission at the tracked-key cap arms the reclaimer's relief
-   * signal, so the next scan runs with the
-   * detector's window-aligned idle boundary instead of the configured retention:
-   * a key is locked out for at most one
-   * sweep interval, not for the full retention. The boundary is the same slice
-   * predicate the read path and the capacity
-   * sampler use, so a guard slice a concurrent read still covers is never
-   * reclaimed. The configured retention remains
-   * the caller's explicit memory bound.
+   * A rejected admission at the tracked-key cap arms the reclaimer's relief signal, so the next scan
+   * uses the detector's window-aligned idle boundary instead of the configured retention: a key is
+   * locked out for at most one sweep interval. The configured retention remains the explicit memory
+   * bound.
    *
-   * @return the number of entries the repair pass selected as overdue
+   * @return the number of overdue cool-down checks the repair pass re-linked
    */
   public int sweep() {
     if (detector.consumeReliefRequest()) {

@@ -22,18 +22,27 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.Objects;
 import java.util.Set;
 
 /**
- * An immutable, totally ordered rule snapshot plus its derived promotion floor and fingerprint.
+ * An immutable, totally ordered rule snapshot plus its derived promotion floor
+ * and fingerprint.
  *
- * <p>The snapshot is what the resolver publishes; replacing it publishes a new instance, so a
- * reader never sees half of an edit. The precedence order, the promotion floor and the fingerprint
+ * <p>
+ * The snapshot is what the resolver publishes; replacing it publishes a new
+ * instance, so a
+ * reader never sees half of an edit. The precedence order, the promotion floor
+ * and the fingerprint
  * are derived in the constructor, so they cannot disagree with the rules.
  *
- * <p>{@link #hash()} is a fingerprint of the effective rule text, computed once per publication and
- * exposed by the Worker's detection endpoint: every Worker loading the same YAML computes the same
- * value, so comparing two Workers' endpoints is the observable signal that they judge traffic
+ * <p>
+ * {@link #hash()} is a fingerprint of the effective rule text, computed once
+ * per publication and
+ * exposed by the Worker's detection endpoint: every Worker loading the same
+ * YAML computes the same
+ * value, so comparing two Workers' endpoints is the observable signal that they
+ * judge traffic
  * differently.
  */
 public final class RuleSet {
@@ -45,8 +54,10 @@ public final class RuleSet {
   private final String hash;
 
   /**
-   * Derives every fact the snapshot exposes from the already-sorted rules. The constructor is
-   * private so the order, floor and fingerprint can only be produced together; {@link #of} is the
+   * Derives every fact the snapshot exposes from the already-sorted rules. The
+   * constructor is
+   * private so the order, floor and fingerprint can only be produced together;
+   * {@link #of} is the
    * single entry point.
    *
    * @param ordered     the rules in precedence order, excluding the default
@@ -61,25 +72,35 @@ public final class RuleSet {
   }
 
   /**
-   * Builds a snapshot from an unordered rule list: sorts the rules into precedence order, derives
+   * Builds a snapshot from an unordered rule list: sorts the rules into
+   * precedence order, derives
    * the promotion floor, and fingerprints the canonical text, all once.
    *
-   * <p>This is the only factory. It keeps the derived facts — order, floor and fingerprint —
-   * consistent by construction, so a caller cannot publish a snapshot whose floor disagrees with
+   * <p>
+   * This is the only factory. It keeps the derived facts — order, floor and
+   * fingerprint —
+   * consistent by construction, so a caller cannot publish a snapshot whose floor
+   * disagrees with
    * its rules or whose hash describes a temporary object.
    *
-   * <p>Rule ids must be unique across {@code rules} and the default rule: the resolver keys its
-   * counters and meter series by id, so a duplicate would make two rules share one counter set.
+   * <p>
+   * Rule ids must be unique across {@code rules} and the default rule: the
+   * resolver keys its
+   * counters and meter series by id, so a duplicate would make two rules share
+   * one counter set.
    *
    * @param rules       the configured rules, in any order
    * @param defaultRule the rule unmatched keys resolve to; always present
    * @return the immutable snapshot
-   * @throws IllegalArgumentException when the default is missing or two rules share an id
+   * @throws NullPointerException     when {@code rules} is {@code null}
+   * @throws IllegalArgumentException when the default is missing or two rules
+   *                                  share an id
    */
   public static RuleSet of(List<HotKeyRule> rules, HotKeyRule defaultRule) {
     if (defaultRule == null) {
       throw new IllegalArgumentException("a rule set needs a default rule");
     }
+    Objects.requireNonNull(rules, "rules");
     List<HotKeyRule> ordered = new ArrayList<>(rules);
     ordered.sort(null);
     Set<String> ids = new HashSet<>(ordered.size() + 1);
@@ -103,8 +124,10 @@ public final class RuleSet {
   }
 
   /**
-   * The lowest {@code hotCount} among the rules the floor can gate (the default and non-{@code
-   * EXACT} rules); an effective exact rule is indexed and checked before the floor.
+   * The lowest {@code hotCount} among the rules the floor can gate (the default
+   * and non-{@code
+   * EXACT} rules); an effective exact rule is indexed and checked before the
+   * floor.
    *
    * @return the promotion floor
    */
@@ -112,14 +135,18 @@ public final class RuleSet {
     return minHotCount;
   }
 
-  /** @return the first 16 hex characters of the SHA-256 of the canonical rule text */
+  /**
+   * @return the first 16 hex characters of the SHA-256 of the canonical rule text
+   */
   public String hash() {
     return hash;
   }
 
   /**
-   * Every rule the snapshot exposes, the default first: the rule unmatched keys resolve to, then
-   * the precedence-ordered rules. The endpoint, the resolver's binding map and the fingerprint all
+   * Every rule the snapshot exposes, the default first: the rule unmatched keys
+   * resolve to, then
+   * the precedence-ordered rules. The endpoint, the resolver's binding map and
+   * the fingerprint all
    * read this one view instead of each rebuilding "default plus rules".
    *
    * @return an immutable list; the default rule is element {@code 0}
@@ -131,8 +158,11 @@ public final class RuleSet {
   /**
    * Resolves the rule that governs a key.
    *
-   * <p>Linear by design: the rule count is an operator-authored constant (tens, not thousands), and
-   * the resolver caches the answer per key, so the scan runs once per distinct key.
+   * <p>
+   * Linear by design: the rule count is an operator-authored constant (tens, not
+   * thousands), and
+   * the resolver caches the answer per key, so the scan runs once per distinct
+   * key.
    *
    * @param key the cache key
    * @return the first matching rule, or {@link #defaultRule()} when none matches
@@ -149,7 +179,8 @@ public final class RuleSet {
   /**
    * Builds the canonical text the fingerprint is taken over.
    *
-   * @return a stable, order-sensitive representation of every rule's effective parameters
+   * @return a stable, order-sensitive representation of every rule's effective
+   *         parameters
    */
   public String canonical() {
     return canonical(allRules);
@@ -173,8 +204,10 @@ public final class RuleSet {
 
   private static long floor(List<HotKeyRule> rules, HotKeyRule defaultRule) {
     long floor = defaultRule.hotCount();
-    // An exact rule is indexed by key and checked before the floor, so one special key with a low
-    // threshold cannot pull every warm key into the match cache; its own threshold gates that key.
+    // An exact rule is indexed by key and checked before the floor, so one special
+    // key with a low
+    // threshold cannot pull every warm key into the match cache; its own threshold
+    // gates that key.
     for (HotKeyRule rule : rules) {
       if (rule.type() != MatchType.EXACT) {
         floor = Math.min(floor, rule.hotCount());

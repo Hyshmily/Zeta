@@ -69,7 +69,7 @@ class TimerWheelTest {
       for (long now = 1; now <= 6_000; now++) {
         wheel.advance(now);
         HE node;
-        while ((node = wheel.pollDetached()) != null) {
+        while ((node = wheel.pollAndDetached()) != null) {
           int index = Integer.parseInt(node.key().substring(1));
           assertThat(node.nextCheckAt).isEqualTo(due[index]);
           assertThat(now).as("fired early").isGreaterThanOrEqualTo(node.nextCheckAt);
@@ -95,10 +95,10 @@ class TimerWheelTest {
       wheel.schedule(node);
 
       wheel.advance(599_999L);
-      assertThat(wheel.pollDetached()).isNull();
+      assertThat(wheel.pollAndDetached()).isNull();
 
       wheel.advance(600_000L);
-      assertThat(wheel.pollDetached()).isSameAs(node);
+      assertThat(wheel.pollAndDetached()).isSameAs(node);
     } finally {
       TimeSource.setTimeOffsetForTest(0, 0);
     }
@@ -120,14 +120,14 @@ class TimerWheelTest {
       // The top level rotates every 524_288 ms; a two-hour deadline outlives thirteen rotations.
       for (long now = 524_288L; now <= 6_815_744L; now += 524_288L) {
         wheel.advance(now);
-        assertThat(wheel.pollDetached()).as("fired early at %d ms", now).isNull();
+        assertThat(wheel.pollAndDetached()).as("fired early at %d ms", now).isNull();
       }
 
       wheel.advance(7_199_999L);
-      assertThat(wheel.pollDetached()).as("fired before the deadline").isNull();
+      assertThat(wheel.pollAndDetached()).as("fired before the deadline").isNull();
 
       wheel.advance(7_200_000L);
-      assertThat(wheel.pollDetached()).isSameAs(node);
+      assertThat(wheel.pollAndDetached()).isSameAs(node);
       assertThat(wheel.scheduledCount()).isZero();
     } finally {
       TimeSource.setTimeOffsetForTest(0, 0);
@@ -329,11 +329,11 @@ class TimerWheelTest {
       assertThat(wheel.scheduledCount()).isEqualTo(1);
 
       wheel.advance(100L);
-      assertThat(wheel.pollDetached()).as("the moved deadline is not due yet").isNull();
+      assertThat(wheel.pollAndDetached()).as("the moved deadline is not due yet").isNull();
 
       wheel.advance(200L);
-      assertThat(wheel.pollDetached()).isSameAs(moved);
-      assertThat(wheel.pollDetached()).as("the cancelled check never fires").isNull();
+      assertThat(wheel.pollAndDetached()).isSameAs(moved);
+      assertThat(wheel.pollAndDetached()).as("the cancelled check never fires").isNull();
       assertThat(wheel.scheduledCount()).isZero();
     } finally {
       TimeSource.setTimeOffsetForTest(0, 0);
@@ -351,15 +351,15 @@ class TimerWheelTest {
       wheel.schedule(node);
 
       wheel.advance(10L);
-      assertThat(wheel.pollDetached()).isSameAs(node);
-      assertThat(wheel.pollDetached()).isNull();
+      assertThat(wheel.pollAndDetached()).isSameAs(node);
+      assertThat(wheel.pollAndDetached()).isNull();
 
       // The registry's hand-off after the poll clears the state, then its re-arm links it again.
       node.wheelState = TimerWheel.UNSCHEDULED;
       node.nextCheckAt = 20L;
       wheel.reschedule(node);
       wheel.advance(20L);
-      assertThat(wheel.pollDetached()).isSameAs(node);
+      assertThat(wheel.pollAndDetached()).isSameAs(node);
     } finally {
       TimeSource.setTimeOffsetForTest(0, 0);
     }
@@ -382,7 +382,7 @@ class TimerWheelTest {
       node.nextCheckAt = 50L;
       wheel.reschedule(node);
 
-      HE detached = wheel.pollDetached();
+      HE detached = wheel.pollAndDetached();
       assertThat(detached).isSameAs(node);
       assertThat(node.wheelState).as("the hand-off stays detached for the registry").isEqualTo(TimerWheel.DETACHED);
       // The registry clears the hand-off under the key's stripe lock before it re-arms.
@@ -391,9 +391,9 @@ class TimerWheelTest {
       wheel.reschedule(node);
 
       wheel.advance(49L);
-      assertThat(wheel.pollDetached()).isNull();
+      assertThat(wheel.pollAndDetached()).isNull();
       wheel.advance(50L);
-      assertThat(wheel.pollDetached()).isSameAs(node);
+      assertThat(wheel.pollAndDetached()).isSameAs(node);
     } finally {
       TimeSource.setTimeOffsetForTest(0, 0);
     }
@@ -440,9 +440,9 @@ class TimerWheelTest {
       wheel.schedule(second);
       wheel.advance(20L);
 
-      assertThat(wheel.pollDetached()).isSameAs(first);
-      assertThat(wheel.pollDetached()).isSameAs(second);
-      assertThat(wheel.pollDetached()).isNull();
+      assertThat(wheel.pollAndDetached()).isSameAs(first);
+      assertThat(wheel.pollAndDetached()).isSameAs(second);
+      assertThat(wheel.pollAndDetached()).isNull();
     } finally {
       TimeSource.setTimeOffsetForTest(0, 0);
     }
