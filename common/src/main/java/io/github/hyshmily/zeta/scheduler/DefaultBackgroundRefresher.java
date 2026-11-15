@@ -186,11 +186,13 @@ public class DefaultBackgroundRefresher implements BackgroundRefresher {
     public void accept(Object value, Throwable failure) {
       try {
         if (failure != null) {
-          // Peel one CompletionException layer: supplier failures arrive
-          // wrapped (supplyAsync encodeThrowable semantics) while orTimeout
-          // timeouts arrive bare — the classifier must see the real cause.
+          // Peel one CompletionException layer for the classifier: supplier failures
+          // arrive wrapped (supplyAsync encodeThrowable semantics) while orTimeout
+          // timeouts arrive bare. The log discriminator stays on the outer instance:
+          // only the bare TimeoutException is this refresh's own 30s budget, while a
+          // supplier's inner Future timeout arrives wrapped.
           Throwable cause = firstCause(failure);
-          if (cause instanceof TimeoutException) {
+          if (failure instanceof TimeoutException) {
             log.warn("Background soft refresh timed out after {}s: {}", REFRESH_TIMEOUT_SECONDS, key);
           } else {
             log.warn("Background soft refresh failed: {}", key, failure);
@@ -484,10 +486,9 @@ public class DefaultBackgroundRefresher implements BackgroundRefresher {
 
   /**
    * Unwrap one {@code CompletionException}/{@code ExecutionException} layer so
-   * the classifier and the timeout log see the real cause: supplier failures
-   * arrive wrapped (supplyAsync encodeThrowable semantics) while orTimeout
-   * timeouts arrive bare. Mirrors {@code SingleFlightImpl}'s join-side
-   * {@code getCause()} handling.
+   * the classifier sees the real cause: supplier failures arrive wrapped
+   * (supplyAsync encodeThrowable semantics) while orTimeout timeouts arrive
+   * bare. Mirrors {@code LoadFlights}'s join-side {@code getCause()} handling.
    *
    * @param error the raw {@code whenComplete} error (never {@code null} here)
    * @return the peeled cause, or the error itself when it carries no cause
@@ -579,10 +580,10 @@ public class DefaultBackgroundRefresher implements BackgroundRefresher {
           return EntryDraft.of(entry, ttlPolicy).expiryAt(now - 1L, now - 1L).build();
         }
 
-        // A refused lease must not leave the entry soft-expired while hard-valid:
-        // every read would re-arm the refresh and hammer a failing source for the
-        // rest of the hard window. Close the retry window at the hard deadline and
-        // let the entry expire naturally (the 30-minute cap's documented response).
+        // A refused lease must not leave the entry soft-expired while hard-valid: every read
+        // would re-arm the refresh and hammer a failing source. Close the retry window at the
+        // hard deadline and let the entry expire naturally (the documented staleness-cap
+        // response).
         if (entry.isLeaseStaleCapped(TimeSource.monotonicSecondsSinceBoot())) {
           ticket.leaseOutcome = LeaseOutcome.CAPPED;
           log.debug("Lease-on-failure: staleness cap refused lease for key={}, closing retry window", ticket.key);
@@ -605,13 +606,9 @@ public class DefaultBackgroundRefresher implements BackgroundRefresher {
         // passage, not halving.
         long leaseTtlMs = Math.max(remainingMs, floorMs);
         long leaseExpireAtMs = now + leaseTtlMs;
-        // The soft timestamp sits at the midpoint of the lease: the entry spends
-        // the second half of every lease soft-expired while still hard-valid, so
-        // the next read re-arms the refresh (retry window). soft == hard would
-        // close the window entirely — the read path checks hard expiry before
-        // soft expiry, so the entry would die at lease end without ever retrying.
-        // NB: the halving applies to the lease DURATION only — shifting the full
-        // epoch timestamp (now + lease) would land it decades in the past.
+        // The soft timestamp sits at the lease midpoint: the second half of every lease is the
+        // read-triggered retry window (see the method contract). The halving applies to the
+        // DURATION only — halving the epoch timestamp would land it decades in the past.
         long leaseSoftExpireAtMs = now + (leaseTtlMs >> 1);
         log.debug(
           "Lease-on-failure: extending stale entry for key={} by {}ms (floor {}ms)",
@@ -720,77 +717,36 @@ public class DefaultBackgroundRefresher implements BackgroundRefresher {
   }
 
   /**
-   * Atomically applies a soft-refresh result to the cache, guarded by
-   * a data-stamp check to prevent stale overwrites.
+   * Applies a soft-refresh result to the cache under the snapshot guard: the refresh applies
+   * unless a newer write landed in flight (the resident stamp is strictly above the ticket's
+   * creation-time snapshot), so an ordinary refresh extends the TTLs while a concurrent
+   * writer's fresher value survives (design decisions: version stamps). An absent entry is
+   * rebuilt from the ticket's snapshot; an entry invalidated during the refresh is left
+   * untouched (anti-resurrection, design decisions: invalidation). Values are stored as passed
+   * by the caller (no codec).
    *
-   * <p><b>Logic:</b>
-   * <ol>
-   *   <li>Extract version metadata and keyState from the snapshot taken at
-   *       refresh-creation time.</li>
-   *   <li>Call Caffeine {@code compute} on the map:
-   *       <ul>
-   *         <li><b>Snapshot guard (design decisions: version stamps):</b> the result carries the stamp
-   *             taken before the value read. Acceptance is decided against the
-   *             creation-time <i>snapshot</i>, not the incoming stamp: the
-   *             refresh applies unless a newer write landed in flight (entry
-   *             stamp strictly above the snapshot). A stamp comparison is wrong
-   *             in both directions — equal-skip discards every ordinary refresh
-   *             (entry == incoming with no concurrent write, so SWR would never
-   *             extend TTLs), while equal-apply re-applies a stale value over a
-   *             concurrent writer's fresh entry when the stamp was taken after
-   *             the write.</li>
-   *         <li><b>Entry exists, version not superseded:</b> replace the entry
-   *             value, keep the higher of the entry's and the incoming stamp,
-   *             and apply the soft TTL.</li>
-   *         <li><b>Entry absent:</b> create a fresh entry preserving the
-   *             snapshot's decision stamp and key state (see
-   *             {@link #rebuildEvictedEntry}) and the snapshot's own hard TTL
-   *             (so a per-call TTL override survives eviction+refresh instead
-   *             of reverting to the configured default), stamped with the
-   *             incoming stamp, and the given soft TTL.</li>
-   *       </ul>
-   *   </li>
-   * </ol>
-   *
-   * <p>Values are stored as passed by the caller (no codec).
-   * This method is only called from {@link #createRefreshTask}'s
-   * {@code whenComplete} callback on the async-thread pool, so {@code compute}
-   * ensures safe atomic visibility under concurrent reads and writes.
-   *
-   * @param loaded the freshly-loaded value paired with the pre-read
-   *               {@code dataVersion} stamp (design decisions: version stamps)
+   * @param loaded the freshly-loaded value paired with the pre-read {@code dataVersion} stamp
    * @param ticket the refresh whose snapshot and soft TTL apply
    */
   private void applyRefreshTask(VersionedValue loaded, RefreshTicket ticket) {
-    // Values are stored as passed (no codec): the drafts below take the raw value directly.
     Object value = loaded.value();
     String key = ticket.key;
 
     cache
       .asMap()
       .compute(key, (k, entry) -> {
-        // Anti-resurrection: the refresh read its value before this compute, so
-        // an INVALIDATE / clearAll that landed in between outranks it. The
-        // entry may be absent for two very different reasons — capacity
-        // eviction (rebuild is correct) or an explicit removal (rebuild would
-        // revive the pre-invalidation value) — and only the tombstone tells
-        // them apart. Returning the resident (possibly null) keeps both
-        // outcomes: a newer entry survives, an absent one stays absent.
+        // Anti-resurrection: the refresh read its value before this compute, so an
+        // INVALIDATE / clearAll that landed in between outranks it. Only the tombstone can
+        // tell an explicit removal (keep absent) from capacity eviction (rebuild).
         if (entryLifecycle.staleAgainstInvalidation(key, loaded.dataVersion())) {
           log.debug("Async refresh discarded: key was invalidated during the refresh: {}", key);
           return entry;
         }
 
         if (entry != null) {
-          // Snapshot guard (not incoming-stamp guard): discard only when a
-          // newer write landed while the refresh was in flight. Comparing the
-          // entry against the INCOMING stamp is wrong in both directions —
-          // with no concurrent write entry == incoming, so an equal-skip
-          // (shouldSkipForSync) discards every ordinary refresh and SWR never
-          // extends TTLs; with equal-apply (shouldSkipForRefresh) a stamp taken
-          // after a concurrent write re-applies the stale value over the
-          // writer's fresh entry. The snapshot taken at creation time is the
-          // correct baseline in both cases.
+          // Snapshot guard: discard only when a newer write landed while the refresh was in
+          // flight. Comparing against the INCOMING stamp would discard every ordinary refresh
+          // (entry == incoming with no concurrent write).
           if (entry.getDataVersion() > ticket.dataVersion) {
             log.debug("Async refresh discarded: newer version exists: {}", key);
             return entry;

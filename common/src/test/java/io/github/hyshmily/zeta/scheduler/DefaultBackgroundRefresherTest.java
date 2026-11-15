@@ -210,10 +210,10 @@ class DefaultBackgroundRefresherTest {
   }
 
   /**
-   * The C1 regression: a stamped refresh with NO concurrent write must apply —
-   * entry == probe, so a probe-version guard with equal-skip discarded every
-   * ordinary refresh and SWR never extended TTLs. The snapshot guard applies
-   * it (same version as the snapshot, no boundary crossed).
+   * A stamped refresh with NO concurrent write must apply: the entry's stamp equals the
+   * refresh's pre-read stamp, so the snapshot guard accepts it. An equal-skip comparison
+   * against the incoming stamp would discard every ordinary refresh and SWR would never
+   * extend TTLs.
    */
   @Test
   void triggerBackgroundRefresh_stampedNoConcurrentWrite_shouldApply() {
