@@ -74,24 +74,24 @@ class TtlPolicyTest {
    * promotion must not turn permanent into finite.
    */
   @Test
-  void resolveEffectiveHotHard_permanentHotDefaultWinsOverFiniteNormalTtl() {
+  void resolveHotHardTtl_permanentHotDefaultWinsOverFiniteNormalTtl() {
     ttlConfig.setHotHardTtlMs(0L);
     TtlPolicy policy = new TtlPolicy(ttlConfig);
 
-    assertThat(policy.resolveEffectiveHotHard(120_000L)).isZero();
-    assertThat(policy.resolveEffectiveHotHard(Long.MAX_VALUE)).isZero();
+    assertThat(policy.resolveHotHardTtl(120_000L)).isZero();
+    assertThat(policy.resolveHotHardTtl(Long.MAX_VALUE)).isZero();
   }
 
   /**
    * A permanent normal TTL survives promotion: the hot default is a floor, never a cap.
    */
   @Test
-  void resolveEffectiveHotHard_permanentNormalTtlSurvivesPromotion() {
+  void resolveHotHardTtl_permanentNormalTtlSurvivesPromotion() {
     ttlConfig.setHardTtlMs(0L);
     ttlConfig.setHotHardTtlMs(3_600_000L);
     TtlPolicy policy = new TtlPolicy(ttlConfig);
 
-    assertThat(policy.resolveEffectiveHotHard(0L)).isZero();
+    assertThat(policy.resolveHotHardTtl(0L)).isZero();
   }
 
   /**
@@ -99,11 +99,11 @@ class TtlPolicyTest {
    * re-enable it.
    */
   @Test
-  void resolveEffectiveHotSoft_disabledHotDefaultWinsOverFiniteNormalSoftTtl() {
+  void resolveHotSoftTtl_disabledHotDefaultWinsOverFiniteNormalSoftTtl() {
     ttlConfig.setHotSoftTtlMs(0L);
     TtlPolicy policy = new TtlPolicy(ttlConfig);
 
-    assertThat(policy.resolveEffectiveHotSoft(30_000L)).isZero();
+    assertThat(policy.resolveHotSoftTtl(30_000L)).isZero();
   }
 
   /**
@@ -429,6 +429,23 @@ class TtlPolicyTest {
   }
 
   // ── Timestamp-threading overloads (single-now hit path) ────────────────
+
+  /**
+   * Metadata-only transitions keep an already-expired soft window, replace the
+   * disabled/permanent sentinels, and compute a fresh finite window from the caller's
+   * {@code now} rather than a second clock read.
+   */
+  @Test
+  void transitionSoftExpireAt_handlesSentinelsAndPreservesStaleWindow() {
+    long now = 1_000_000L;
+    CacheEntry stale = entryWithExpiries(now + 60_000, now - 1);
+    CacheEntry fresh = entryWithExpiries(now + 60_000, now + 30_000);
+
+    assertThat(ttlPolicy.transitionSoftExpireAt(stale, 5_000, 0.0, now)).isEqualTo(now - 1);
+    assertThat(ttlPolicy.transitionSoftExpireAt(stale, 0L, 0.0, now)).isZero();
+    assertThat(ttlPolicy.transitionSoftExpireAt(stale, Long.MAX_VALUE, 0.0, now)).isEqualTo(Long.MAX_VALUE);
+    assertThat(ttlPolicy.transitionSoftExpireAt(fresh, 5_000, 0.0, now)).isEqualTo(now + 5_000);
+  }
 
   private static CacheEntry entryWithExpiries(long hardExpireAtMs, long softExpireAtMs) {
     return EntryDraft.blank(null)

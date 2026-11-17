@@ -31,8 +31,8 @@ import io.github.hyshmily.zeta.cache.cachesupport.lifecycle.EntryLifecycle;
 import io.github.hyshmily.zeta.cache.cachesupport.lifecycle.EntryLifecycleImpl;
 import io.github.hyshmily.zeta.cache.cachesupport.loader.LoadStatus;
 import io.github.hyshmily.zeta.cache.cachesupport.loader.LoaderOutcome;
+import io.github.hyshmily.zeta.cache.cachesupport.loader.singleflight.LoadFlights;
 import io.github.hyshmily.zeta.cache.cachesupport.loader.singleflight.SingleFlight;
-import io.github.hyshmily.zeta.cache.cachesupport.loader.singleflight.SingleFlightImpl;
 import io.github.hyshmily.zeta.cache.cachesupport.policy.GetPolicy;
 import io.github.hyshmily.zeta.cache.cachesupport.policy.InvalidatePolicy;
 import io.github.hyshmily.zeta.cache.cachesupport.policy.StalePolicy;
@@ -621,42 +621,54 @@ class ZetaCacheTest {
     assertThat(caffeineCache.getIfPresent("key1")).as("a suppressed load must not pin a negative sentinel").isNull();
   }
 
-  /** Every suppression reason with a closed breaker surfaces instead of masquerading as a miss. */
+  /** Every suppression reason surfaces with nothing servable, regardless of breaker state. */
   @Test
   void get_allSuppressionReasons_shouldThrowAndNotWriteNullSentinel() {
-    for (LoadStatus status : List.of(
-      LoadStatus.SUPPRESSED_BREAKER,
-      LoadStatus.SUPPRESSED_TIMEOUT,
-      LoadStatus.SUPPRESSED_EXECUTOR
-    )) {
-      caffeineCache.invalidateAll();
-      SingleFlightStubs.stubLoad(singleFlight, LoaderOutcome.suppressed(status));
-      when(singleFlight.isBreakerOpen(anyString())).thenReturn(false);
+    for (boolean breakerOpen : List.of(false, true)) {
+      for (LoadStatus status : List.of(
+        LoadStatus.SUPPRESSED_BREAKER,
+        LoadStatus.SUPPRESSED_TIMEOUT,
+        LoadStatus.SUPPRESSED_EXECUTOR
+      )) {
+        caffeineCache.invalidateAll();
+        SingleFlightStubs.stubLoad(singleFlight, LoaderOutcome.suppressed(status));
+        when(singleFlight.isBreakerOpen(anyString())).thenReturn(breakerOpen);
 
-      assertThatThrownBy(() -> hotKeyCache.get("key1", () -> "loaded", GetPolicy.defaults()))
-        .as("status %s", status)
-        .isInstanceOf(io.github.hyshmily.zeta.exception.ZetaSuppressedException.class);
-      assertThat(caffeineCache.getIfPresent("key1")).as("status %s must not write a sentinel", status).isNull();
+        assertThatThrownBy(() -> hotKeyCache.get("key1", () -> "loaded", GetPolicy.defaults()))
+          .as("breakerOpen=%s status=%s", breakerOpen, status)
+          .isInstanceOf(io.github.hyshmily.zeta.exception.ZetaSuppressedException.class);
+        assertThat(caffeineCache.getIfPresent("key1"))
+          .as("breakerOpen=%s status=%s must not write a sentinel", breakerOpen, status)
+          .isNull();
+      }
     }
   }
 
   /**
-   * Control for the above: a suppressed load under an OPEN breaker with a
-   * hard-valid entry still serves that stale value — the graceful-degradation
-   * path is intact, it is only the sentinel write that is gone.
+   * A hard-valid stale entry is served for every suppression reason, regardless
+   * of breaker state. {@code REVALIDATE} is required to make the stale hit reach
+   * the load path; {@code RETURN} would serve it before the loader runs.
    */
   @Test
-  void get_suppressedLoad_withBreakerOpenAndStaleEntry_shouldServeStaleNotSentinel() {
-    caffeineCache.put("key1", staleHitEntry("stale"));
-    SingleFlightStubs.stubLoad(singleFlight, LoaderOutcome.suppressed(LoadStatus.SUPPRESSED_BREAKER));
-    when(singleFlight.isBreakerOpen(anyString())).thenReturn(true);
+  void get_suppressedLoad_withStaleEntry_shouldServeStaleRegardlessOfBreakerState() {
+    for (boolean breakerOpen : List.of(false, true)) {
+      for (LoadStatus status : List.of(
+        LoadStatus.SUPPRESSED_BREAKER,
+        LoadStatus.SUPPRESSED_TIMEOUT,
+        LoadStatus.SUPPRESSED_EXECUTOR
+      )) {
+        caffeineCache.put("key1", staleHitEntry("stale"));
+        SingleFlightStubs.stubLoad(singleFlight, LoaderOutcome.suppressed(status));
+        when(singleFlight.isBreakerOpen(anyString())).thenReturn(breakerOpen);
 
-    assertThat(
-      (Object) hotKeyCache.get("key1", () -> "loaded", GetPolicy.of(0L, 0L, true, StalePolicy.RETURN))
-    ).isEqualTo("stale");
-    assertThat(((CacheEntry) caffeineCache.getIfPresent("key1")).getValue())
-      .as("the surviving entry must remain the stale value, not a NullValue sentinel")
-      .isEqualTo("stale");
+        assertThat((Object) hotKeyCache.get("key1", () -> "loaded", GetPolicy.of(0L, 0L, true, StalePolicy.REVALIDATE)))
+          .as("breakerOpen=%s status=%s", breakerOpen, status)
+          .isEqualTo("stale");
+        assertThat(((CacheEntry) caffeineCache.getIfPresent("key1")).getValue())
+          .as("the surviving entry must remain the stale value, not a NullValue sentinel")
+          .isEqualTo("stale");
+      }
+    }
   }
 
   /**
@@ -2086,7 +2098,7 @@ class ZetaCacheTest {
       byte[] payload = "refreshed-payload".getBytes(java.nio.charset.StandardCharsets.UTF_8);
       when(publisher.serializePutPayload("refreshed")).thenReturn(payload);
 
-      hotKeyCache.refresh("key1", () -> "refreshed", 0L, 0L, true);
+      hotKeyCache.refresh("key1", () -> "refreshed", true);
 
       assertThat((Object) hotKeyCache.peek("key1")).isEqualTo("refreshed");
       verify(publisher).serializePutPayload("refreshed");
@@ -2102,7 +2114,7 @@ class ZetaCacheTest {
     @Test
     @DisplayName("refresh(sync=false) applies locally without any broadcast")
     void refresh_syncFalse_appliesLocallyWithoutBroadcast() {
-      hotKeyCache.refresh("key2", () -> "local-only", 0L, 0L, false);
+      hotKeyCache.refresh("key2", () -> "local-only", false);
 
       assertThat((Object) hotKeyCache.peek("key2")).isEqualTo("local-only");
       verify(publisher, never()).serializePutPayload(any());
@@ -2372,14 +2384,12 @@ class ZetaCacheTest {
    */
   @Test
   void tag_shouldUseKeyAsIs_queryStringIsDistinctKey() {
-    hotKeyCache.recordAccess("a?x=1");
-    hotKeyCache.recordAccess("b?y=2", Zeta.TagMode.RECORD);
+    hotKeyCache.recordAccess("a?x=1", 1L, Zeta.TagMode.RECORD);
+    hotKeyCache.recordAccess("b?y=2", 1L, Zeta.TagMode.RECORD);
 
     // design decisions: access counting: one merged add per read into the shared counter.
-    verify(accessCounter).record("a?x=1", Zeta.TagMode.RECORD);
-    verify(accessCounter).record("b?y=2", Zeta.TagMode.RECORD);
-    verify(accessCounter, never()).add("a");
-    verify(accessCounter, never()).add("b");
+    verify(accessCounter).record("a?x=1", 1L, Zeta.TagMode.RECORD);
+    verify(accessCounter).record("b?y=2", 1L, Zeta.TagMode.RECORD);
   }
 
   /**
@@ -2429,7 +2439,7 @@ class ZetaCacheTest {
 
   /**
    * Write/invalidation → dedup-cache coherence and load-path version guards
-   * (design decisions: dedup lifecycle). Uses a REAL {@link SingleFlightImpl} so the completed-future
+   * (design decisions: dedup lifecycle). Uses a REAL {@link LoadFlights} so the completed-future
    * reuse window (design decisions: dedup lifecycle) is exercised end-to-end against the invalidation
    * and write paths.
    */
@@ -2450,7 +2460,7 @@ class ZetaCacheTest {
       // Registry-based construction path (see ZetaAutoConfiguration): every key's shard is the mock.
       CircuitBreakerRegistry breakerRegistry = mock(CircuitBreakerRegistry.class);
       when(breakerRegistry.breakerFor(anyString())).thenReturn(breaker);
-      SingleFlight realSingleFlight = new SingleFlightImpl(1000, 5, 5, Runnable::run, breakerRegistry);
+      SingleFlight realSingleFlight = new LoadFlights(1000, 5, 5, Runnable::run, breakerRegistry);
       stampClock = mock(StampClock.class);
       // Monotone per call: a load that began first holds the lower stamp.
       AtomicLong stampSequence = new AtomicLong(3L);
@@ -2479,9 +2489,9 @@ class ZetaCacheTest {
     }
 
     /**
-     * The AUDIT-2 regression: a completed dedup future carrying the pre-write
-     * value must not be replayed onto a post-write miss — putThrough
-     * invalidates the dedup entry, so the next miss re-invokes the reader.
+     * A completed dedup future carrying the pre-write value must not be replayed
+     * onto a post-write miss — putThrough invalidates the dedup entry, so the
+     * next miss re-invokes the reader.
      */
     @Test
     void putThrough_invalidatesDedupEntry_postWriteMissRereadsSource() {

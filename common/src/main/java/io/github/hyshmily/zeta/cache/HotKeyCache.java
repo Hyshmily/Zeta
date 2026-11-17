@@ -27,6 +27,7 @@ import io.github.hyshmily.zeta.cache.cachesupport.loader.LoaderOutcome;
 import io.github.hyshmily.zeta.cache.cachesupport.loader.singleflight.SingleFlight;
 import io.github.hyshmily.zeta.cache.cachesupport.policy.GetPolicy;
 import io.github.hyshmily.zeta.cache.cachesupport.policy.InvalidatePolicy;
+import io.github.hyshmily.zeta.cache.cachesupport.policy.PutPolicy;
 import io.github.hyshmily.zeta.cache.cachesupport.policy.StalePolicy;
 import io.github.hyshmily.zeta.cache.cachesupport.raw.*;
 import io.github.hyshmily.zeta.exception.ZetaSuppressedException;
@@ -209,46 +210,26 @@ public class HotKeyCache {
   }
 
   /**
-   * Record a cache access as potentially hot, reporting it to the Worker
-   * without performing a cache read.
+   * Record {@code count} cache accesses under an explicit recording mode without performing a
+   * cache lookup.
    *
-   * <p>
-   * This is essentially a fire-and-forget hint: it updates the local
-   * HeavyKeeper sketch and enqueues the key for batch reporting to the
-   * Worker cluster, exactly as {@code get()} would, but without touching
-   * the L1 cache or invoking any reader/loader. Useful when the caller
-   * already has the value in hand (e.g. from a write path or an external
-   * source) and wants the hot-key detector and Worker to know about the
-   * access without a redundant cache lookup.
-   *
-   * @param cacheKey the key to record
-   */
-  public void recordAccess(String cacheKey) {
-    recordAccess(cacheKey, Zeta.TagMode.RECORD);
-  }
-
-  /**
-   * Record a cache access with an explicit recording mode.
-   *
-   * @param cacheKey the key to record
+   * @param cacheKey the validated key to record
+   * @param count    the positive number of accesses to add
    * @param mode     how much of the pipeline to run (never {@code null})
    */
-  public void recordAccess(String cacheKey, Zeta.TagMode mode) {
-    accessCounter.record(cacheKey, mode);
+  public void recordAccess(String cacheKey, long count, Zeta.TagMode mode) {
+    accessCounter.record(cacheKey, count, mode);
   }
 
   /**
-   * Record {@code add} accesses in one call, on the normal pipeline (local
-   * detection <b>and</b> Worker reporting). The counts travel through the
-   * shared access counter's tide, so a batch replay behaves exactly like the
-   * equivalent number of {@link #recordAccess(String)} calls.
+   * Batch form of {@link #recordAccess(String, long, Zeta.TagMode)}: record weighted accesses
+   * for multiple validated keys under a shared mode.
    *
-   * @param cacheKey the key to record
-   * @param count    the number of accesses to add (must be positive; the
-   *                 facade rejects non-positive counts)
+   * @param keyCounts validated map of cacheKey to a positive access count
+   * @param mode      how much of the pipeline to run (never {@code null})
    */
-  public void recordAccess(String cacheKey, long count) {
-    accessCounter.add(cacheKey, count);
+  public void recordAccess(Map<String, Long> keyCounts, Zeta.TagMode mode) {
+    accessCounter.recordAll(keyCounts, mode);
   }
 
   /**
@@ -278,10 +259,6 @@ public class HotKeyCache {
     if (entry == null) {
       return null;
     }
-    // evictIfExpired judges a concurrent replacement against the same clock
-    // sample, so a non-null return is live and needs no second check. Expiry is
-    // not a mutation: the dedup flight is left alone because a concurrent load
-    // is fresh data and the version guards already reject anything older.
     return entryLifecycle.evictIfExpired(key, entry, TimeSource.currentTimeMillis());
   }
 
@@ -350,12 +327,6 @@ public class HotKeyCache {
    * {@code SOFT_REFRESH} arms a background refresh, {@code REVALIDATE} blocks
    * on a reload, {@code RETURN} serves as-is.
    *
-   * <p>
-   * The TTL suppliers are evaluated lazily — at most once per call, and only
-   * when an entry is created, promoted, or a soft-expire refresh is scheduled;
-   * never on a plain NORMAL-entry hit (the {@link GetPolicy} contract), so
-   * SpEL-based TTL expressions cost nothing on the hit path.
-   *
    * @param key     the key to retrieve
    * @param reader  the value supplier for cache misses (may be
    *                {@code null} — a miss then resolves to {@code null}
@@ -378,11 +349,9 @@ public class HotKeyCache {
     CacheEntry entry = caffeineCache.getIfPresent(key);
     if (entry == null) {
       requestMisses.increment();
-      return loadAndCache(key, readContext(key, reader, loader, options));
+      return loadAndCache(key, readContext(reader, loader, options));
     }
 
-    // One clock sample serves the classification and the reconciliation: a plain
-    // hit pays one TimeSource read.
     long now = TimeSource.currentTimeMillis();
     HitClassification hit = classifyHit(key, entry, StalePolicy.orDefault(options.stalePolicy()), now);
     if (hit.isPlainServe()) {
@@ -395,12 +364,8 @@ public class HotKeyCache {
       // A reconciliation may consume this call's memoized TTLs and still end in a
       // reload; the fallback load reuses the same context, so one call never
       // evaluates the suppliers twice.
-      ReadContext ctx = readContext(key, reader, loader, options);
+      ReadContext ctx = readContext(reader, loader, options);
       if (hit.reload()) {
-        // Apply the state correction (notably a Decision-Validity demotion) before the
-        // reload
-        // decides the write regime; the reload itself records the single access and
-        // hit/miss.
         applyHit(key, hit, ctx, now);
         requestMisses.increment();
         return loadAndCache(key, ctx);
@@ -414,23 +379,27 @@ public class HotKeyCache {
       return loadAndCache(key, ctx);
     }
     requestMisses.increment();
-    return loadAndCache(key, readContext(key, reader, loader, options));
+    return loadAndCache(key, readContext(reader, loader, options));
   }
 
   /**
    * Builds the per-call context only when a read actually needs it: a plain hit
-   * returns
-   * before this method is called, so the loader-backed path allocates neither
-   * lambda on
-   * the hit path.
+   * returns before this method is called, so the adapter for a plain supplier
+   * is allocated only on the miss/reconcile path.
    */
+  @SuppressWarnings("unchecked")
   private <T> ReadContext readContext(
-    String key,
     @Nullable Supplier<T> reader,
     @Nullable CacheLoader<String, T> loader,
     GetPolicy options
   ) {
-    return loader == null ? ReadContext.of(reader, options) : ReadContext.ofLoader(loader, key, options);
+    CacheLoader<String, Object> source = null;
+    if (loader != null) {
+      source = (CacheLoader<String, Object>) loader;
+    } else if (reader != null) {
+      source = key -> reader.get();
+    }
+    return ReadContext.of(source, options);
   }
 
   /**
@@ -493,21 +462,11 @@ public class HotKeyCache {
   }
 
   /**
-   * The single classification both read paths share: an entry is judged once
-   * against hard expiry, the per-call stale policy, its key state and the two
-   * read-path corrections, so the single-key and batch probes cannot drift.
-   *
-   * <p>
-   * A hard-expired entry is evicted here, under the identity guard (a
-   * concurrent replacement is left alone). Expiry is not a mutation: the dedup
-   * flight is untouched, because a load already in flight is fresh. A concurrent
-   * replacement is re-judged in the loop rather than recursively.
-   *
-   * <p>
-   * The returned {@link HitAction} names the single rewrite a
-   * {@link #reconcileHit} call must perform (when any), so the reconciliation
-   * never re-runs the classification's predicates or probe the TopK sketch a
-   * second time.
+   * The single classification both read paths share, so the single-key and
+   * batch probes cannot drift. A hard-expired entry is evicted here under the
+   * identity guard; expiry is not a mutation, so the dedup flight is untouched.
+   * The returned {@link HitAction} names the single rewrite
+   * {@link #reconcileHit} must perform, so no predicate runs twice.
    *
    * @param key    the key being read
    * @param entry  the resident entry (never {@code null})
@@ -544,7 +503,7 @@ public class HotKeyCache {
    */
   private HitAction resolveStateAction(String key, CacheEntry entry) {
     if (entry.getKeyState() != KeyState.HOT) {
-      return promotion.isPromotable(key, entry) ? HitAction.PROMOTE : HitAction.NONE;
+      return promotion.isDegradedPromotable(key, entry) ? HitAction.PROMOTE : HitAction.NONE;
     }
     if (entryLifecycle.needsDemotion(entry)) {
       return HitAction.DEMOTE;
@@ -569,7 +528,9 @@ public class HotKeyCache {
    * Worker reporting continue unchanged.
    *
    * @param cacheKeys the keys to retrieve, already validated
-   * @param reader    the value function for cache misses
+   * @param reader    the value function for cache misses, or {@code null} when
+   *                  no load is desired (a miss then resolves to the stale
+   *                  fallback only)
    * @param options   the shared per-invocation read options
    * @param <T>       the value type
    * @return a map of key → loaded or cached value (never {@code null});
@@ -577,7 +538,7 @@ public class HotKeyCache {
    */
   public <T> Map<String, T> get(
     List<String> cacheKeys,
-    Function<? super String, ? extends T> reader,
+    @Nullable Function<? super String, ? extends T> reader,
     GetPolicy options
   ) {
     // The batch pipeline has no per-key lazy-TTL path: evaluate the override
@@ -605,8 +566,8 @@ public class HotKeyCache {
    * refresh, REVALIDATE blocks on a reload, RETURN serves as-is).
    *
    * @param cacheKeys the keys to retrieve, already validated
-   * @param reader    the value function for cache misses (and hit-phase
-   *                  refreshes)
+   * @param reader    the value function for cache misses and hit-phase
+   *                  refreshes, or {@code null} for a cache-only read
    * @param options   the shared per-invocation read options
    * @param hardTtlMs the batch-resolved hard TTL override (0 = default)
    * @param softTtlMs the batch-resolved soft TTL override (0 = default)
@@ -616,31 +577,16 @@ public class HotKeyCache {
    */
   private <T> Map<String, T> batchGet(
     List<String> cacheKeys,
-    Function<? super String, ? extends T> reader,
+    @Nullable Function<? super String, ? extends T> reader,
     GetPolicy options,
     long hardTtlMs,
     long softTtlMs
   ) {
     List<String> misses = new ArrayList<>(cacheKeys.size());
     Map<String, T> results = new LinkedHashMap<>(mapCapacity(cacheKeys.size()));
-    // GetPolicy is an immutable record: the report flag is batch-wide, not per key.
     boolean report = options.report();
-    // One clock sample per batch: every key's expiry decisions below judge
-    // against the same `now` instead of re-reading the system clock up to three
-    // times per hit (logical expiry, soft expiry, refresh arming). A batch is
-    // a single logical read, so its keys resolving against a single instant is
-    // both cheaper and more consistent.
     long now = TimeSource.currentTimeMillis();
-    // Duplicate keys are probed, counted and loaded once. Without this a
-    // repeated key ("k1", "k1") double-counts the read and, worse, misfires
-    // the batched load's in-flight guard: the first iteration releases the
-    // key's dedup ticket, so the second sees `!isCurrent` and treats its own
-    // release as a concurrent invalidation — skipping the store and adding a
-    // second access record for one logical read.
     Set<String> seen = new HashSet<>(mapCapacity(cacheKeys.size()));
-    // The batch resolves the tri-state policy once, the same way ReadContext does
-    // for
-    // the single-key path: a null option means the engine default, never "RETURN".
     StalePolicy stalePolicy = StalePolicy.orDefault(options.stalePolicy());
 
     for (String key : cacheKeys) {
@@ -648,15 +594,12 @@ public class HotKeyCache {
         continue;
       }
 
-      T hit = probeBatchHit(key, reader, stalePolicy, hardTtlMs, softTtlMs, report, now);
+      T hit = batchHit(key, reader, stalePolicy, hardTtlMs, softTtlMs, report, now);
       if (hit != null) {
         requestHits.increment();
         results.put(key, hit);
       } else {
         requestMisses.increment();
-        // The misses keep the caller's key form (keys are never normalized,
-        // design decisions: api surface); only a miss is consulted by the batched load
-        // below.
         misses.add(key);
       }
     }
@@ -683,9 +626,9 @@ public class HotKeyCache {
    * @return the served value, or {@code null} on a miss, an expired entry, or a
    *         reload
    */
-  private <T> T probeBatchHit(
+  private <T> T batchHit(
     String key,
-    Function<? super String, ? extends T> reader,
+    @Nullable Function<? super String, ? extends T> reader,
     StalePolicy stalePolicy,
     long hardTtlMs,
     long softTtlMs,
@@ -699,62 +642,39 @@ public class HotKeyCache {
 
     HitClassification hit = classifyHit(key, entry, stalePolicy, now);
     if (hit.isPlainServe()) {
-      return hit.entry() == null ? null : servePlain(key, hit.entry(), report);
+      return servePlain(key, hit.entry(), report);
     }
     if (hit.reload()) {
-      // The batched load is the reload; apply the state correction first so its write
-      // does not
-      // preserve a Worker-HOT regime whose Worker is no longer authoritative.
-      applyHit(key, hit, ReadContext.ofBatch(null, hardTtlMs, softTtlMs, report, stalePolicy), now);
+      applyHit(key, hit, hardTtlMs, softTtlMs, now);
       return null;
     }
-    // EXPIRED defers to the batched load: the key joins the one loadAndCache
-    // instead
-    // of reloading inline.
-    if (!hit.needsReconcile() || hit.entry() == null) {
+    if (!hit.needsReconcile()) {
       return null;
     }
     // A stale Worker decision, a degraded-mode promotion or a soft-expired entry
-    // needs the context. The reader is armed for every SOFT_REFRESH hit: a
-    // concurrent peer invalidation can close a Worker-managed entry's soft window
-    // between this probe and reconcileHit(), and the demotion that follows
-    // preserves that past deadline.
-    Supplier<?> refreshReader = stalePolicy == StalePolicy.SOFT_REFRESH ? () -> reader.apply(key) : null;
-    return reconcileHit(key, hit, ReadContext.ofBatch(refreshReader, hardTtlMs, softTtlMs, report, stalePolicy), now);
+    // needs the context; arm the reader for every SOFT_REFRESH hit, because a
+    // concurrent invalidation can close the soft window between this probe and
+    // reconcileHit() (design decisions: read path).
+    CacheLoader<String, Object> refreshLoader =
+      stalePolicy == StalePolicy.SOFT_REFRESH && reader != null ? reader::apply : null;
+    return reconcileHit(key, hit, ReadContext.ofBatch(refreshLoader, hardTtlMs, softTtlMs, report, stalePolicy), now);
   }
 
   /**
-   * Trigger a background refresh if the raw value is a soft-expired
-   * {@link CacheEntry}. HOT and COOL entries are refreshed — their value must
-   * stay fresh while the Worker has not re-decided; a successful refresh
-   * downgrades COOL to NORMAL (see {@code BackgroundRefresher#applyRefreshTask}).
-   * NORMAL entries are refreshed too, mirroring the read path's
-   * SOFT_REFRESH branch: the refresh re-arms whenever the entry is soft-expired
-   * (stale-while-revalidate semantics of {@code zeta.local.soft-ttl-ms})
-   * and keeps the entry inside its hard-TTL bound (design decisions: expiry and
-   * refresh). This is what makes
-   * {@code Zeta.registerRefresh} hold its documented "every cycle triggers an
-   * async refresh" contract for normal keys.
+   * Arm a background refresh for a soft-expired entry — HOT, COOL and NORMAL
+   * alike, so every stale read re-arms its refresh regardless of the TTL regime
+   * (design decisions: expiry and refresh).
    *
    * <p>
-   * Timestamp-threading form: judges soft expiry against the caller's single
-   * per-call {@code now} sample instead of reading the clock again.
-   *
-   * <p>
-   * <b>Zero lookups on a fresh hit.</b> The soft-expiry test runs against the
-   * entry the caller already holds and returns before the table is touched; only
-   * a
-   * genuinely soft-expired entry confirms that it is still the resident one
-   * before
-   * arming — the refresh re-warms the key, so it must not fire for an entry a
-   * concurrent invalidate removed.
+   * Judged against the caller's single {@code now} sample, and with zero lookups
+   * on a fresh hit: only a genuinely soft-expired entry confirms it is still
+   * resident before arming, because the refresh re-warms the key and must not
+   * fire for an entry a concurrent invalidate removed.
    *
    * @param key   the cache key
    * @param entry the L1 entry in force for this read (never {@code null})
-   * @param ctx   the per-call read context (refresh reader {@code null}
-   *              skips the refresh — convenience policies carry no separate
-   *              refresh reader; the soft TTL override is consumed lazily
-   *              through the memoized supplier)
+   * @param ctx   the per-call read context (no source skips the refresh — a
+   *              call without a reader or loader has nothing to reload)
    * @param now   the current epoch-millis (a single per-call sample)
    */
   private void refreshSoftExpire(String key, CacheEntry entry, ReadContext ctx, long now) {
@@ -766,27 +686,32 @@ public class HotKeyCache {
     if (current == null) {
       return;
     }
-    // Only a concurrent replacement needs the soft-expiry test re-applied; the
-    // snapshot that reached this point was already judged soft-expired.
     if (current != entry && !ttlPolicy.isSoftExpired(current, now)) {
       return;
     }
 
     long softTtl = ttlPolicy.resolveRefreshSoftTtl(current, ctx.softTtlMs());
-    // design decisions: version stamps — the refresh task takes its stamp BEFORE
-    // reading the value, so the result is a lower bound and any write allocated
-    // after the load began wins. The admission filter gates L1 storage here too: a
-    // rejected value resolves to null, which the refresher treats as "skip the
-    // apply".
     backgroundRefresher.triggerBackgroundRefresh(
       key,
       () -> {
         long stamp = nextStamp();
-        Object value = ctx.refreshValue();
+        Object value = ctx.refreshValue(key);
         return ctx.admits(value) ? new VersionedValue(value, stamp) : null;
       },
       softTtl
     );
+  }
+
+  /**
+   * Resolve the promotion TTLs only when the classification actually promotes. A demotion,
+   * reassertion or plain rewrite must not evaluate a SpEL-backed TTL supplier: the batch path
+   * uses the long-taking form below with values it already resolved once for the whole batch.
+   */
+  private CacheEntry applyHit(String key, HitClassification hit, ReadContext ctx, long now) {
+    if (hit.action() == HitAction.PROMOTE) {
+      return applyHit(key, hit, ctx.hardTtlMs(), ctx.softTtlMs(), now);
+    }
+    return applyHit(key, hit, 0L, 0L, now);
   }
 
   /**
@@ -796,22 +721,29 @@ public class HotKeyCache {
    * the caller reloads instead of serving the pre-lock snapshot. A reload
    * discards the returned image; it calls this only for the correction.
    *
-   * @param key the cache key
-   * @param hit the classification whose action to apply
-   * @param ctx the per-call read context (TTL overrides stay lazy)
-   * @param now the per-call clock sample
+   * @param key                the cache key
+   * @param hit                the classification whose action to apply
+   * @param hardTtlOverrideMs the per-call hard TTL override (0 = none)
+   * @param softTtlOverrideMs the per-call soft TTL override (0 = none)
+   * @param now                the per-call clock sample
    * @return the entry to serve, or {@code null} when the key is gone
    */
   @Nullable
-  private CacheEntry applyHit(String key, HitClassification hit, ReadContext ctx, long now) {
+  private CacheEntry applyHit(
+    String key,
+    HitClassification hit,
+    long hardTtlOverrideMs,
+    long softTtlOverrideMs,
+    long now
+  ) {
     CacheEntry entry = hit.entry();
     if (entry == null) {
       return null;
     }
     return switch (hit.action()) {
-      case DEMOTE -> entryLifecycle.demoteIfRemoteNodeIdInvalid(key, entry, now).current();
+      case DEMOTE -> entryLifecycle.demoteIfDecisionInvalid(key, entry, now).current();
       case REASSERT -> promotion.reassertIfNeeded(key, entry, now).current();
-      case PROMOTE -> promotion.promoteDegraded(key, ctx, now).current();
+      case PROMOTE -> promotion.promoteDegraded(key, hardTtlOverrideMs, softTtlOverrideMs, now).current();
       case NONE -> entry;
       case EXPIRED -> null;
     };
@@ -819,27 +751,17 @@ public class HotKeyCache {
 
   /**
    * Reconcile a classified hit: perform the one state rewrite the
-   * classification named (demote an invalid Worker decision, reassert a
-   * recovered COOL lease, or promote a degraded-mode COOL entry), then serve the
-   * post-image the rewrite's bin lock observed — no second table lookup and no
-   * fallback to the pre-lock snapshot. A concurrent invalidation or eviction
-   * therefore resolves as a miss instead of serving the removed entry.
-   * Both the single-key and batch hit paths converge here (design decisions: hot
-   * state).
+   * classification named, then serve the post-image its bin lock observed — no
+   * second table lookup and no fallback to the pre-lock snapshot, so a
+   * concurrent invalidation or eviction resolves as a miss. Both read paths
+   * converge here (design decisions: hot state).
    *
    * <p>
-   * The {@code SOFT_REFRESH} arming lives here rather than in the caller so the
-   * refresh is judged against the entry <em>in force</em> — a demotion above
-   * replaces the snapshot in place, and arming on the stale one would refresh a
-   * demoted key at the hot cadence on every hit — while leaving the caller with
-   * no second table lookup of its own. A plain serve never reaches this method;
-   * a rewrite or a genuine soft-expire does.
-   *
-   * <p>
-   * <b>The access is recorded only when the read serves.</b> The expired branch
-   * records nothing: the caller's reload (or the batch loader) records exactly
-   * once, so one logical read cannot be counted twice
-   * (design decisions: access counting).
+   * A {@code SOFT_REFRESH} is armed here, against the entry <em>in force</em>: a
+   * demotion above replaces the snapshot in place, and arming on the stale one
+   * would refresh a demoted key at the hot cadence. The access is recorded only
+   * when the read serves; the expired branch records nothing and the caller's
+   * reload records once (design decisions: access counting).
    *
    * @param key the cache key
    * @param hit the classification and the resident it applies to
@@ -877,27 +799,17 @@ public class HotKeyCache {
   }
 
   /**
-   * Load via SingleFlight, detect hot key, cache with HOT or NORMAL TTL, and
-   * return value.
-   *
-   * <p>
-   * The option's {@code callerRunsLoader} flag selects the dedup election:
-   * {@code true} runs the leader's reader on this thread (annotation reads use
-   * this, so the business body keeps its transaction, security context and
-   * MDC), while same-key followers still join its future. The default keeps the
-   * reader on the load executor.
+   * Load via SingleFlight, stamp the value, and store it with the HOT or NORMAL
+   * TTL regime. The option's {@code callerRunsLoader} flag selects the dedup
+   * election: {@code true} runs the leader's reader on this thread (annotation
+   * reads keep their transaction, security context and MDC), while same-key
+   * followers still join its future; the default runs it on the load executor.
    *
    * <p>
    * A caller-affine load inside an active transaction is isolated: the reader
-   * still runs on this
-   * thread, but no flight is published and no L1 store is registered. The value
-   * may include the
-   * transaction's own uncommitted writes, so a follower must not observe it and a
-   * rollback must not
-   * leave it cached; the pre-read stamp also cannot be ordered against the
-   * transaction's own
-   * deferred invalidations without letting a stale fill outrank a concurrent
-   * write.
+   * runs on this thread, but no flight is published and no L1 store is
+   * registered, because the value may include the transaction's own uncommitted
+   * writes (design decisions: read path).
    *
    * @param key the key to load
    * @param ctx the per-call read context (loader/reader source and the loader's
@@ -914,13 +826,9 @@ public class HotKeyCache {
 
     long hardTtl = ttlPolicy.resolveEffectiveHardTtl(ctx.hardTtlMs());
     long softTtl = ttlPolicy.resolveEffectiveSoftTtl(ctx.softTtlMs());
-    // design decisions: version stamps — the stamp is taken BEFORE reader.get(),
-    // so it is a lower bound and any write allocated after the load began outranks
-    // it. Outside a transaction the store runs inside the leader's commit, before
-    // the followers wake; inside one it waits for afterCommit.
     Supplier<VersionedValue> stampedReader = () -> {
       long stamp = nextStamp();
-      T loaded = (T) ctx.loadValue();
+      T loaded = (T) ctx.loadValue(key);
       return loaded == null ? null : new VersionedValue(loaded, stamp);
     };
     boolean transactionalCaller = ctx.callerRunsLoader() && TransactionSupport.isDeferred(false);
@@ -942,7 +850,7 @@ public class HotKeyCache {
    *                  check); caller's original key form, kept for reader
    *                  parity and result-map identity
    * @param reader    the value function for cache misses (called on executor
-   *                  threads)
+   *                  threads), or {@code null} for a cache-only read
    * @param hardTtlMs hard TTL override (0 = use configured default)
    * @param softTtlMs soft TTL override (0 = use configured default)
    * @param report    whether the batch feeds Worker reporting
@@ -953,18 +861,25 @@ public class HotKeyCache {
    */
   private <T> void loadAndCache(
     List<String> cacheKeys,
-    Function<? super String, ? extends T> reader,
+    @Nullable Function<? super String, ? extends T> reader,
     long hardTtlMs,
     long softTtlMs,
     boolean report,
     Map<String, T> into
   ) {
+    if (reader == null) {
+      // No load is desired: a miss resolves like the single-key path's null reader, including the
+      // breaker-open stale fallback, instead of dereferencing null on the load executor.
+      for (String key : cacheKeys) {
+        T value = resolveNullAnswer(key, report);
+        if (value != null) {
+          into.put(key, value);
+        }
+      }
+      return;
+    }
     final long effectiveHardTtlMs = ttlPolicy.resolveEffectiveHardTtl(hardTtlMs);
     final long effectiveSoftTtlMs = ttlPolicy.resolveEffectiveSoftTtl(softTtlMs);
-    // design decisions: version stamps: every key's stamp is allocated BEFORE the
-    // batch load
-    // starts and as one contiguous block per chunk, so a concurrent single write is
-    // ordered against the whole batch instead of interleaving between two keys.
     Map<String, Long> stamps = new HashMap<>(mapCapacity(cacheKeys.size()));
     allocateStampBlocks(cacheKeys, stamps);
 
@@ -985,11 +900,6 @@ public class HotKeyCache {
           into.put(key, value);
         }
       } catch (RuntimeException | Error e) {
-        // The batch closes before the throw: the remaining keys are processed first, so
-        // a
-        // leader that abandoned them here would leave every follower with a value this
-        // node
-        // never wrote. The first failure is rethrown with the rest suppressed.
         failure = collectFailure(failure, e);
       }
     }
@@ -1047,35 +957,28 @@ public class HotKeyCache {
   }
 
   /**
-   * A suppressed load: the stale fallback is tried once, without a second breaker probe. A
-   * suppression that <em>can</em> be degraded serves the stale entry even when the breaker has
-   * closed in the meantime — re-asking it would race a recovery that already happened and turn a
-   * designed degradation into a thrown {@link ZetaSuppressedException}. With nothing servable a
-   * breaker suppression surfaces like a timeout or an executor rejection: the reader never ran,
-   * so the caller must be able to tell that from "no data" (`SOURCE_EMPTY`). An open breaker with
-   * nothing servable still resolves as a miss, the documented stale-first degradation.
+   * A suppressed load: the reader never ran, so the caller must be able to tell
+   * this from "no data" ({@code SOURCE_EMPTY}). Try the hard-valid stale entry
+   * once — without a second breaker probe, so a recovery that landed between
+   * admission and resolution cannot turn a designed degradation into an
+   * exception — and throw when nothing is servable. A <em>failed</em> load with
+   * an open breaker is a different contract: it still degrades to a miss (see
+   * {@link #resolveFailed}).
    *
    * @param key    the key whose load was suppressed
    * @param status the suppression reason
    * @param report whether this read feeds Worker reporting
    * @param <T>    the value type
-   * @return the stale value, or {@code null} for an open breaker with nothing servable
+   * @return the stale value
+   * @throws ZetaSuppressedException when no hard-valid stale value is servable
    */
   private <T> T resolveSuppressed(String key, LoadStatus status, boolean report) {
-    boolean breakerSuppressed = status == LoadStatus.SUPPRESSED_BREAKER;
-    if (!breakerSuppressed && !singleFlight.isBreakerOpen(key)) {
-      throw new ZetaSuppressedException(key, status);
-    }
     T stale = serveStaleEntry(key, report);
     if (stale != null) {
       logSuppressedLoad(key, status);
       return stale;
     }
-    if (breakerSuppressed) {
-      throw new ZetaSuppressedException(key, status);
-    }
-    logSuppressedLoad(key, status);
-    return null;
+    throw new ZetaSuppressedException(key, status);
   }
 
   /**
@@ -1169,38 +1072,17 @@ public class HotKeyCache {
    * stale entry when the circuit breaker is open, otherwise resolve {@code null}.
    *
    * <p>
-   * A null answer arrives in two shapes: the built-in paths wrap the reader
-   * result in a {@link VersionedValue}, so a source {@code null} surfaces as
-   * {@code LOADED} with a null payload; a custom {@code SingleFlight} may report
-   * it as {@link LoadStatus#SOURCE_EMPTY} instead. Both converge here, and so do
-   * the no-answer statuses (reader failure, suppression) — the degraded answer is
-   * the same for all of them (design decisions: read path).
-   *
-   * <p>
-   * <b>Null is never cached:</b> a null loader result writes no entry and
-   * returns {@code null} — the next read re-invokes the loader. Callers needing
-   * penetration protection apply it at their loader (a placeholder value +
-   * {@code isCacheable}) instead.
-   *
-   * <p>
-   * Only entries whose hard TTL has <b>not</b> expired may serve as the
-   * stale fallback — the hard TTL contract (see CONTEXT.md "Expire") is never
-   * bypassed, even during a source outage. A hard-expired entry resolves to
-   * {@code null} and is evicted right here — this is the one path that inspects
-   * the entry with no reader behind it, so waiting for the next read would
-   * leave a dead entry resident for that whole window.
-   *
-   * <p>
-   * A stale serve is a served read and is recorded as one
-   * (design decisions: access counting): without it a breaker-open window
-   * silently erases the
-   * key's access history, and a key that is hot enough to be read during the
-   * outage stops looking hot exactly when the Worker needs to know.
+   * A source {@code null} arrives as {@code LOADED} with a null payload from the
+   * built-in paths, or as {@link LoadStatus#SOURCE_EMPTY} from a custom
+   * {@code SingleFlight}; the no-answer statuses (failure, suppression) resolve
+   * the same way (design decisions: read path). <b>Null is never cached:</b> the
+   * next read re-invokes the loader; callers needing penetration protection
+   * decline the value at their loader instead.
    *
    * @param key    the key whose load produced a null or no answer
    * @param report whether this batch/call feeds Worker reporting
    * @param <T>    the expected value type
-   * @return a stale value if the circuit breaker is open and a cached entry
+   * @return a stale value when the circuit breaker is open and a cached entry
    *         exists within its hard TTL; {@code null} otherwise
    */
   private <T> T resolveNullAnswer(String key, boolean report) {
@@ -1225,7 +1107,7 @@ public class HotKeyCache {
     }
     CacheEntry resident = entryLifecycle.evictIfExpired(key, stale, TimeSource.currentTimeMillis());
     if (resident == null) {
-      log.debug("CB open, discarding hard-expired entry for key={}", key);
+      log.debug("Degraded read, discarding hard-expired entry for key={}", key);
       return null;
     }
     T value = unwrap(resident);
@@ -1235,22 +1117,22 @@ public class HotKeyCache {
       return null;
     }
     accessCounter.record(key, report);
-    log.debug("CB open, returning stale entry for key={}", key);
+    log.debug("Degraded read, returning stale entry for key={}", key);
     return value;
   }
 
   /**
-   * Suppression log for the {@code loadAndCache} paths: a swallowed
-   * {@code SUPPRESSED_*} outcome produces no exception, so without this line
-   * the self-protection would be invisible (the FAILED path is logged by the
-   * caller's failure policy instead). DEBUG — a suppression is the guard
-   * working as designed, not a fault.
+   * Suppression log for the {@code loadAndCache} paths: a suppression that
+   * serves a stale value produces no exception, so without this line the
+   * degradation would be invisible (a suppression with nothing servable throws
+   * and needs no log). DEBUG — a suppression is the guard working as designed,
+   * not a fault.
    *
    * @param key    the key whose load was suppressed
    * @param status the suppression cause (breaker, timeout, or executor)
    */
   private void logSuppressedLoad(String key, LoadStatus status) {
-    log.debug("HotKeyCache load suppressed for key={} (status={}; returning empty/stale)", key, status);
+    log.debug("HotKeyCache load suppressed for key={} (status={}; returning the stale entry)", key, status);
   }
 
   /**
@@ -1316,7 +1198,7 @@ public class HotKeyCache {
     // never leaves those writes in L1. Outside a transaction it runs inline.
     TransactionSupport.run(false, () ->
       EntryMutations.mutate(caffeineCache, key, entry ->
-        buildEntryOnWrite(key, entry, value, stamp, normalHardTtl, normalSoftTtl, false, hot)
+        entryForWrite(key, entry, value, stamp, normalHardTtl, normalSoftTtl, false, hot)
       )
     );
   }
@@ -1365,23 +1247,14 @@ public class HotKeyCache {
    * INVALIDATE.
    *
    * <p>
-   * <b>The version must already be allocated</b> — call {@link #nextStamp()}
-   * before
-   * the L1 removal and pass the result here, so the batch path cannot drift from
-   * the single-key
-   * order. Allocating after the drop reopens the stale-reload window: a reader
-   * that misses after
-   * the drop reloads at the old version {@code v}, the INVALIDATE then carries
-   * {@code v+1}, and
-   * the guard treats the reloaded entry as newer and skips it — pinning the stale
-   * value for its
-   * whole TTL. Bumping first makes every racing reload stamp {@code v+1}, so the
-   * mutation
-   * supersedes it (design decisions: invalidation).
+   * <b>The version must already be allocated</b> by {@link #nextStamp()} before
+   * the drop, so a racing reload carries the same stamp and the mutation
+   * supersedes it instead of pinning the stale value (design decisions:
+   * invalidation).
    *
    * <p>
    * The tombstone is recorded for local-only invalidations too: {@code broadcast}
-   * gates the peer send, never the local guard (design decisions: invalidation).
+   * gates the peer send, never the local guard.
    *
    * @param key       the cache key
    * @param stamp     the version allocated before the drop (positive)
@@ -1423,6 +1296,9 @@ public class HotKeyCache {
    *                  active-transaction deferral
    */
   public void invalidate(List<String> cacheKeys, InvalidatePolicy policy) {
+    if (cacheKeys.isEmpty()) {
+      return;
+    }
     // Transactional timing: defer every bump into afterCommit so registration order
     // becomes version order (same rule as putThrough) and a rollback leaks nothing.
     // Only a deferred run outlives this call, so only it needs the list frozen.
@@ -1437,12 +1313,11 @@ public class HotKeyCache {
    * the chunk's key/version pairs when the policy includes peers.
    *
    * <p>
-   * The versions inside a chunk are reserved as <b>one contiguous block
-   * before any drop</b> (design decisions: invalidation), so a concurrent single
-   * write cannot interleave inside the chunk's version block — the per-key guard
-   * orders it against the chunk all-or-nothing: older than every chunk entry
-   * (the batch supersedes it) or newer than every chunk entry (its value
-   * survives every batch apply), never partially applied between two keys.
+   * The versions inside a chunk are reserved as <b>one contiguous block before
+   * any drop</b>, so a concurrent single write is ordered against the chunk
+   * all-or-nothing: older than every entry (the batch supersedes it) or newer
+   * than every one (it survives), never partially applied (design decisions:
+   * invalidation).
    *
    * @param keys   the validated keys (never empty)
    * @param policy where the invalidations apply
@@ -1469,60 +1344,111 @@ public class HotKeyCache {
   }
 
   /**
-   * Refresh the given key: allocate the version <b>before</b> the load, then
-   * apply the loaded value through the write-through guard.
+   * Refresh the given key from a caller supplier: allocate the version before
+   * the load, resolve the value-only TTL policy, then apply the loaded value
+   * through the write-through guard.
    *
-   * <p>
-   * <b>Ordering:</b> the version is allocated before the load, so a
-   * concurrent sync write landing during the load holds the newer version and
-   * this refresh's stale apply is skipped instead of regressing it (design
-   * decisions: version stamps). A burned version on loader failure is a
-   * harmless watermark hole.
+   * <p><b>Value-only renewal.</b> A resident entry keeps its lifecycle policy:
+   * a {@code HOT}/{@code COOL} entry keeps its state, Worker decision lease and
+   * hard deadline (only the value, stamp and soft window move), and a
+   * {@code NORMAL} entry keeps its stored normal hard/soft TTL baselines. An
+   * absent or hard-expired key is rebuilt from the configured defaults.
+   * Changing a TTL is a {@code put}, never a refresh.
    *
-   * <p>
-   * A {@code null} loader result skips the refresh entirely (DEBUG): L1 keeps
-   * its current entry — a refresh that learned nothing
-   * must not evict the value it was asked to renew. Outside a transaction the
-   * whole bump-load-apply runs inline on the caller thread; inside a
+   * <p><b>Ordering:</b> the version is allocated before the resident probe and
+   * the load, so a concurrent write landing after the allocation holds the
+   * newer version and this refresh's stale apply is skipped instead of
+   * regressing it (design decisions: version stamps). A burned version on
+   * loader failure is a harmless watermark hole.
+   *
+   * <p>A {@code null} loader result <b>skips the refresh</b> entirely
+   * (DEBUG): L1 keeps its current entry — a refresh that learned nothing must
+   * not evict the value it was asked to renew. Outside a transaction the whole
+   * bump-probe-load-apply runs inline on the caller thread; inside a
    * transaction it waits for {@code afterCommit}, so the loader observes
    * committed data and registration order becomes version order.
    *
-   * @param cacheKey  the key to refresh
-   * @param loader    the value supplier (caller thread outside a transaction,
-   *                  commit thread inside one)
-   * @param hardTtlMs hard TTL override (0 = use configured default)
-   * @param softTtlMs soft TTL override (0 = use configured default)
-   * @param sync      whether to broadcast the refresh to peers
-   * @param <V>       the value type
+   * @param cacheKey the key to refresh
+   * @param reader   the value supplier (caller thread outside a transaction,
+   *                 commit thread inside one)
+   * @param sync     whether to broadcast the applied value to peers
+   * @param <V>      the value type
    */
-  public <V> void refresh(String cacheKey, Supplier<V> loader, long hardTtlMs, long softTtlMs, boolean sync) {
-    TransactionSupport.run(false, () -> executeRefreshNow(cacheKey, loader, hardTtlMs, softTtlMs, sync));
+  public <V> void refresh(String cacheKey, Supplier<V> reader, boolean sync) {
+    TransactionSupport.run(false, () -> executeRefreshNow(cacheKey, reader, null, sync));
   }
 
   /**
-   * Bump-then-load-then-apply refresh body: invoked inline outside a
+   * Refresh the given key through a typed loader: the value comes from
+   * {@link CacheLoader#reload} and is applied under the same value-only contract
+   * as {@link #refresh(String, Supplier, boolean)}. The loader's
+   * {@link CacheLoader#isCacheable} admission is honored; a declined value
+   * skips the apply exactly like a {@code null} reload.
+   *
+   * <p>{@code reload}, not {@code load}, is the refresh seam: a refresh can run
+   * on an after-commit or caller-owned scheduler thread where the original
+   * call's transaction, security context and MDC are gone.
+   *
+   * @param cacheKey the key to refresh
+   * @param loader   the loader whose {@code reload} produces the value
+   * @param sync     whether to broadcast the applied value to peers
+   * @param <V>      the value type
+   */
+  public <V> void refresh(String cacheKey, CacheLoader<String, V> loader, boolean sync) {
+    TransactionSupport.run(false, () -> executeRefreshNow(cacheKey, null, loader, sync));
+  }
+
+  /**
+   * Bump-then-probe-then-load-then-apply refresh body: invoked inline outside a
    * transaction and from {@code afterCommit} inside one, so bump-before-load
    * holds either way, the loader observes committed data, and the allocated
    * version follows registration order.
+   *
+   * <p>The stamp is allocated before the resident probe on purpose: a write
+   * landing after the allocation carries a newer stamp and refuses this apply,
+   * so the probed TTL baseline cannot overwrite a baseline the refresh did not
+   * observe. A write landing before the allocation is what the probe sees.
+   *
+   * @param key    the key to refresh
+   * @param reader the supplier source, or {@code null} when a {@code loader} is
+   *               supplied
+   * @param loader the loader source, or {@code null} when a {@code reader} is
+   *               supplied
+   * @param sync   whether to broadcast the applied value to peers
+   * @param <V>    the value type
    */
-  private <V> void executeRefreshNow(String key, Supplier<V> loader, long hardTtlMs, long softTtlMs, boolean sync) {
+  private <V> void executeRefreshNow(
+    String key,
+    @Nullable Supplier<V> reader,
+    @Nullable CacheLoader<String, V> loader,
+    boolean sync
+  ) {
     long stamp = nextStamp();
-    V value = loader.get();
+    CacheEntry resident = quietCache.getIfPresent(key);
+    CacheEntry live = resident != null && !ttlPolicy.isLogicallyExpired(resident) ? resident : null;
+    // Value-only renewal: the resident owns the lifecycle policy, so its stored
+    // normal baselines (0 = unset) win; only an absent/hard-expired key falls
+    // back to the configured defaults. A HOT/COOL entry ignores these values:
+    // EntryLifecycle.writeValue keeps its active regime and hard deadline.
+    long hardTtlMs = live != null ? live.getNormalHardTtlMs() : ttlPolicy.effectiveHardTtlMs();
+    if (hardTtlMs == 0L) {
+      hardTtlMs = ttlPolicy.effectiveHardTtlMs();
+    }
+    long softTtlMs = live != null ? live.getNormalSoftTtlMs() : ttlPolicy.effectiveSoftTtlMs();
+    // The inherited baseline is known only here; the facade validated the
+    // configured default before entering the engine.
+    PutPolicy.requireSyncable(ttlPolicy.normalHardBaseline(hardTtlMs), sync);
+
+    V value = loader != null ? loader.reload(key) : reader.get();
     if (value == null) {
-      // Null is never cached: a null loader result must neither overwrite the
-      // resident entry with a null value nor broadcast a refresh for a value
-      // that was never loaded.
       log.debug("refresh loader returned null for key={}, refresh skipped (L1 keeps current entry)", key);
       return;
     }
-    writeThroughApply(
-      key,
-      value,
-      stamp,
-      ttlPolicy.resolveEffectiveHardTtl(hardTtlMs),
-      ttlPolicy.resolveEffectiveSoftTtl(softTtlMs),
-      sync
-    );
+    if (loader != null && !loader.isCacheable(value)) {
+      log.debug("refresh loader declined cacheability for key={}, refresh skipped (L1 keeps current entry)", key);
+      return;
+    }
+    writeThroughApply(key, value, stamp, hardTtlMs, softTtlMs, sync);
   }
 
   /**
@@ -1561,13 +1487,10 @@ public class HotKeyCache {
    *
    * <p>
    * <b>A refused store broadcasts nothing.</b> The guard inside
-   * {@link #buildEntryOnWrite} can refuse the apply — a strictly newer
-   * resident, or a tombstone from an INVALIDATE/CLEAR that landed between the
-   * stamp allocation and this compute. Broadcasting a refused write would ship
-   * a value this node has already superseded (or invalidated) to peers that
-   * may not hold the newer entry, re-warming data the local tombstone just
-   * removed. The same applied/refused distinction the load path makes before
-   * touching the dedup entry.
+   * {@link #entryForWrite} can refuse the apply — a strictly newer resident, or
+   * a tombstone recorded between the stamp allocation and this compute.
+   * Broadcasting it would re-warm on peers a value this node has already
+   * superseded or invalidated.
    */
   private void writeThroughApply(
     String key,
@@ -1579,7 +1502,7 @@ public class HotKeyCache {
   ) {
     boolean hot = hotKeyDetector.contains(key);
     CacheEntry applied = EntryMutations.mutate(caffeineCache, key, entry ->
-      buildEntryOnWrite(key, entry, value, stamp, normalHardTtl, normalSoftTtl, true, hot)
+      entryForWrite(key, entry, value, stamp, normalHardTtl, normalSoftTtl, true, hot)
     );
     singleFlight.invalidate(key);
     // Only an applied store reaches peers: a refused write returns the untouched
@@ -1621,7 +1544,7 @@ public class HotKeyCache {
    * @param hot           whether the local TopK currently holds the key
    * @return the entry to store; the resident unchanged when the write is refused
    */
-  private CacheEntry buildEntryOnWrite(
+  private CacheEntry entryForWrite(
     String key,
     @Nullable CacheEntry entry,
     Object value,
@@ -1635,9 +1558,7 @@ public class HotKeyCache {
       return entry;
     }
 
-    boolean promoteHot =
-      hot && (entry == null || ttlPolicy.isLogicallyExpired(entry) || promotion.mayPromoteLocally(entry));
-
+    boolean promoteHot = hot && (entry == null || ttlPolicy.isLogicallyExpired(entry) || promotion.mayPromote(entry));
     return entryLifecycle.writeValue(entry, value, stamp, normalHardTtl, normalSoftTtl, promoteHot);
   }
 
@@ -1959,20 +1880,6 @@ public class HotKeyCache {
     for (String key : cacheKeys) {
       singleFlight.invalidate(key);
     }
-  }
-
-  /**
-   * Resolve the effective soft TTL in milliseconds.
-   * <p>
-   * A non-positive value (meaning "use configured default") resolves to the
-   * configured soft TTL; a positive value is returned as-is.
-   *
-   * @param softTtlMs the soft TTL value to resolve (0 = use configured default)
-   * @return the effective soft TTL in milliseconds ({@code 0} = soft expiry
-   *         disabled)
-   */
-  public long resolveEffectiveSoftTtl(long softTtlMs) {
-    return ttlPolicy.resolveEffectiveSoftTtl(softTtlMs);
   }
 
   /**

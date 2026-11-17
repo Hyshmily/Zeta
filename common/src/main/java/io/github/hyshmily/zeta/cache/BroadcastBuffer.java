@@ -32,6 +32,7 @@ import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.function.LongPredicate;
 import lombok.extern.slf4j.Slf4j;
 import org.jspecify.annotations.Nullable;
+import org.springframework.beans.factory.DisposableBean;
 
 /**
  * The sync plane's single send outlet: a lossy deferred buffer for PUT/REFRESH
@@ -74,17 +75,19 @@ import org.jspecify.annotations.Nullable;
  * total serialized payload bytes; crossing either cap triggers an immediate
  * flush (off-loaded to the scheduler thread) rather than deferring further.
  *
- * <p>The internal {@code pending} map is allocated eagerly at construction;
- * entries only appear once the first {@link #record} arrives.
- *
  * <p>Send-failure logging is aggregated to one WARN per flush (design decisions: buffering and ordering). The send loop can additionally be handed off to a
  * dedicated executor (design decisions: buffering and ordering) so a broker outage never stalls the
  * shared scheduler — production wiring must pass the executor for that
  * guarantee to hold; without one, sends run synchronously on the calling thread.
+ *
+ * <p>Shutdown drains the last deferral window synchronously on the closing
+ * thread ({@link #destroy()}), before Spring destroys the send executor. A
+ * broker failure during that drain still drops the batch: the buffer is lossy
+ * and the sync plane is at-most-once.
  */
 @Slf4j
 @Internal
-public class BroadcastBuffer {
+public class BroadcastBuffer implements DisposableBean {
 
   /** Default cap (64MB) on total pending serialized value payload bytes. */
   public static final long DEFAULT_MAX_PENDING_PAYLOAD_BYTES = 64L * 1024 * 1024;
@@ -155,7 +158,7 @@ public class BroadcastBuffer {
 
   /**
    * Cumulative put/refresh broadcasts that failed to send (broker errors in
-   * {@link #doSend}) — the attribution counter behind
+   * {@link #send}) — the attribution counter behind
    * {@code zeta.stall.broadcast_storm.stopped.total}.
    */
   private final AtomicLong sendFailureCounter = new AtomicLong();
@@ -282,6 +285,9 @@ public class BroadcastBuffer {
    *                      to admit every record
    */
   public void record(String key, long version, byte@Nullable [] payload, @Nullable LongPredicate stillCurrent) {
+    if (publisher == null) {
+      return;
+    }
     long sizeAfter;
     long bytesAfter;
     // Holding the read side until the merge finishes keeps the record in the
@@ -311,7 +317,7 @@ public class BroadcastBuffer {
       // Over a cap: the buffer is bounded, so flush now — re-using the pending task so a
       // burst across the cap costs at most one extra schedule rather than one per record.
       ensureFlushScheduled(sizeAfter > MAX_PENDING_ENTRIES || bytesAfter > maxPendingPayloadBytes);
-    } catch (RejectedExecutionException e) {
+    } catch (RejectedExecutionException ignored) {
       // Scheduler saturated or shutting down — the pending entry would never be
       // flushed by a scheduled task, so flush on the calling thread. Without
       // this, a lost REFRESH leaves peers on the stale value until the next
@@ -334,6 +340,11 @@ public class BroadcastBuffer {
    * value cannot be carried (not JSON-serializable or over
    * {@code zeta.sync.put-max-bytes}) — peers reload through their own loader.
    *
+   * <p>The currentness predicate is checked once before serialization and again
+   * inside {@link #record}: the first check avoids serializing a payload that is
+   * already dead, the second closes the invalidation race that opens while the
+   * payload is being built.
+   *
    * @param key          the affected cache key
    * @param value        the value just written (never {@code null} — the facade
    *                     rejects null puts)
@@ -343,7 +354,7 @@ public class BroadcastBuffer {
    */
   public void put(String key, Object value, long version, @Nullable LongPredicate stillCurrent) {
     CacheSyncPublisher pub = publisherFor("PUT");
-    if (pub == null) {
+    if (pub == null || (stillCurrent != null && !stillCurrent.test(version))) {
       return;
     }
     record(key, version, pub.serializePutPayload(value), stillCurrent);
@@ -465,7 +476,7 @@ public class BroadcastBuffer {
           log.debug("INVALIDATE send failed on send executor: {}", e.toString());
         }
       });
-    } catch (RuntimeException rejected) {
+    } catch (RuntimeException ignored) {
       long total = invalidatesDropped.incrementAndGet();
       log.debug(
         "INVALIDATE send dropped: send executor saturated (cumulativeDrops={}; peers converge via hard TTL)",
@@ -710,6 +721,27 @@ public class BroadcastBuffer {
    * immediately instead of batching.
    */
   public void flush() {
+    drain(true);
+  }
+
+  /**
+   * Drain the last window on shutdown. Sends synchronously on the closing thread
+   * instead of handing the batch to {@code zetaSendExecutor}, whose own destroy
+   * is {@code shutdownNow}: an asynchronous handoff here could be discarded
+   * before it runs. A broker failure still drops the batch — the buffer is
+   * lossy and the sync plane is at-most-once.
+   */
+  @Override
+  public void destroy() {
+    drain(false);
+  }
+
+  /**
+   * The shared flush body. {@code async} selects the send outlet: {@code true}
+   * uses the dedicated executor when wired, {@code false} sends inline so a
+   * shutdown drain cannot be cancelled by the executor's own shutdown.
+   */
+  private void drain(boolean async) {
     ConcurrentHashMap<String, VersionInfo> toFlush;
     synchronized (scheduleLock) {
       // Cancel BEFORE the swap (program order: cancel → swap). A record that
@@ -737,10 +769,10 @@ public class BroadcastBuffer {
       }
     }
 
-    if (sendExecutor != null) {
+    if (async && sendExecutor != null) {
       submitSendChunks(toFlush);
     } else {
-      doSend(toFlush.entrySet());
+      send(toFlush.entrySet());
     }
   }
 
@@ -792,7 +824,7 @@ public class BroadcastBuffer {
   private void submitSendChunk(Collection<Map.Entry<String, VersionInfo>> chunk) {
     try {
       // submitSendChunks is only called on the send-executor branch of flush().
-      sendExecutor.execute(() -> doSend(chunk));
+      sendExecutor.execute(() -> send(chunk));
     } catch (RuntimeException e) {
       logExecutorDrop(chunk.size(), e);
     }
@@ -807,7 +839,7 @@ public class BroadcastBuffer {
    * @param toFlush the swapped-out entries (see {@link #submitSendChunks});
    *                never mutated by this method
    */
-  private void doSend(Collection<Map.Entry<String, VersionInfo>> toFlush) {
+  private void send(Collection<Map.Entry<String, VersionInfo>> toFlush) {
     if (publisher == null) {
       return;
     }
@@ -842,22 +874,22 @@ public class BroadcastBuffer {
   }
 
   /**
-   * Cumulative add of put/refresh broadcasts that failed to send (broker
+   * Cumulative count of put/refresh broadcasts that failed to send (broker
    * errors) since startup. Monotonic; safe to read from any thread.
    *
-   * @return the total send-failure add
+   * @return the total send-failure count
    */
   public long sendFailures() {
     return sendFailureCounter.get();
   }
 
   /**
-   * Cumulative add of put/refresh broadcasts dropped because the send
+   * Cumulative count of put/refresh broadcasts dropped because the send
    * executor refused the batch (saturated, shutting down, or a custom executor
    * threw a submission failure) since startup. Monotonic; safe to read from any
    * thread.
    *
-   * @return the total executor-drop add
+   * @return the total executor-drop count
    */
   public long saturationDrops() {
     return saturationDropCounter.get();
@@ -880,6 +912,7 @@ public class BroadcastBuffer {
    * Reports a batch dropped because the send executor refused it.
    *
    * @param dropped the number of dropped put/refresh broadcasts
+   * @param cause   the submission failure
    */
   private void logExecutorDrop(int dropped, RuntimeException cause) {
     saturationDropCounter.addAndGet(dropped);

@@ -76,7 +76,7 @@ public final class CircuitBreakerRegistry implements AutoCloseable {
    * @return the responsible breaker (never {@code null})
    */
   public CircuitBreaker breakerFor(String cacheKey) {
-    return breakers.get(prefixOf(cacheKey), prefix -> new CircuitBreakerImpl(config));
+    return breakers.get(prefixOf(cacheKey), prefix -> new SlidingWindowBreaker(config));
   }
 
   /**
@@ -89,21 +89,6 @@ public final class CircuitBreakerRegistry implements AutoCloseable {
   public boolean isOpen(String cacheKey) {
     CircuitBreaker breaker = breakers.getIfPresent(prefixOf(cacheKey));
     return breaker != null && breaker.isOpen();
-  }
-
-  /**
-   * Whether any live breaker is currently open (the no-key aggregate behind
-   * the stall gauges).
-   *
-   * @return {@code true} when at least one shard is open
-   */
-  public boolean isAnyOpen() {
-    for (CircuitBreaker breaker : breakers.asMap().values()) {
-      if (breaker.isOpen()) {
-        return true;
-      }
-    }
-    return false;
   }
 
   /**

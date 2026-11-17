@@ -16,13 +16,17 @@
 package io.github.hyshmily.zeta.cache;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import io.github.hyshmily.zeta.autoconfigure.ZetaProperties;
 import io.github.hyshmily.zeta.cache.cachesupport.lifecycle.EntryLifecycle;
 import io.github.hyshmily.zeta.cache.cachesupport.lifecycle.EntryLifecycleImpl;
+import io.github.hyshmily.zeta.cache.cachesupport.policy.GetPolicy;
+import io.github.hyshmily.zeta.cache.cachesupport.policy.StalePolicy;
 import io.github.hyshmily.zeta.cache.cachesupport.raw.CacheEntry;
+import io.github.hyshmily.zeta.cache.cachesupport.raw.EntryDraft;
 import io.github.hyshmily.zeta.model.DecisionStamp;
 import io.github.hyshmily.zeta.model.KeyState;
 import io.github.hyshmily.zeta.util.TimeSource;
@@ -194,5 +198,21 @@ class ValueWriteTtlTest {
 
     assertThat(updated.getSoftTtlMs()).isZero();
     assertThat(updated.getSoftExpireAtMs()).isZero();
+  }
+
+  /**
+   * A TTL the packed entry cannot represent must fail where the caller supplied it, not during an
+   * L1 compute or a transaction's after-commit hook.
+   */
+  @Test
+  void unrepresentableTtlIsRejectedAtTheOptionAndDraftBoundaries() {
+    long tooLarge = Long.MAX_VALUE - 1L;
+
+    assertThatThrownBy(() -> GetPolicy.of(tooLarge, 0L, true, StalePolicy.SOFT_REFRESH))
+      .isInstanceOf(IllegalArgumentException.class)
+      .hasMessageContaining("out of range");
+    assertThatThrownBy(() -> EntryDraft.blank(null).ttl(tooLarge, 0L))
+      .isInstanceOf(IllegalArgumentException.class)
+      .hasMessageContaining("hardTtlMs");
   }
 }

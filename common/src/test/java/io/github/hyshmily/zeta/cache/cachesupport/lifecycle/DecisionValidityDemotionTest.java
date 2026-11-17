@@ -99,7 +99,7 @@ class DecisionValidityDemotionTest {
 
     EntryLifecycleImpl em = entryLifecycle();
     CacheEntry raw = caffeineCache.getIfPresent("k");
-    EntryMutations.Applied demoted = em.demoteIfRemoteNodeIdInvalid("k", raw, TimeSource.currentTimeMillis());
+    EntryMutations.Applied demoted = em.demoteIfDecisionInvalid("k", raw, TimeSource.currentTimeMillis());
 
     assertThat(demoted.changed()).as("demotion applies").isTrue();
     CacheEntry entry = (CacheEntry) caffeineCache.getIfPresent("k");
@@ -121,7 +121,7 @@ class DecisionValidityDemotionTest {
     caffeineCache.put("k", hotEntry("w1", 5L, 60_000, 15_000));
 
     EntryLifecycleImpl em = entryLifecycle();
-    EntryMutations.Applied demoted = em.demoteIfRemoteNodeIdInvalid(
+    EntryMutations.Applied demoted = em.demoteIfDecisionInvalid(
       "k",
       caffeineCache.getIfPresent("k"),
       TimeSource.currentTimeMillis()
@@ -139,7 +139,7 @@ class DecisionValidityDemotionTest {
     caffeineCache.put("k", hotEntry("w1", 5L, 60_000, 15_000));
 
     EntryLifecycleImpl em = entryLifecycle();
-    EntryMutations.Applied demoted = em.demoteIfRemoteNodeIdInvalid(
+    EntryMutations.Applied demoted = em.demoteIfDecisionInvalid(
       "k",
       caffeineCache.getIfPresent("k"),
       TimeSource.currentTimeMillis()
@@ -157,7 +157,7 @@ class DecisionValidityDemotionTest {
     caffeineCache.put("k", hotEntry("w1", 5L, 60_000, 15_000));
 
     EntryLifecycleImpl em = entryLifecycle();
-    EntryMutations.Applied demoted = em.demoteIfRemoteNodeIdInvalid(
+    EntryMutations.Applied demoted = em.demoteIfDecisionInvalid(
       "k",
       caffeineCache.getIfPresent("k"),
       TimeSource.currentTimeMillis()
@@ -172,7 +172,7 @@ class DecisionValidityDemotionTest {
     caffeineCache.put("k", hotEntry(null, 0L, 60_000, 15_000));
 
     EntryLifecycleImpl em = entryLifecycle();
-    EntryMutations.Applied demoted = em.demoteIfRemoteNodeIdInvalid(
+    EntryMutations.Applied demoted = em.demoteIfDecisionInvalid(
       "k",
       caffeineCache.getIfPresent("k"),
       TimeSource.currentTimeMillis()
@@ -189,7 +189,7 @@ class DecisionValidityDemotionTest {
     caffeineCache.put("k", cool);
 
     EntryLifecycleImpl em = entryLifecycle();
-    EntryMutations.Applied demoted = em.demoteIfRemoteNodeIdInvalid(
+    EntryMutations.Applied demoted = em.demoteIfDecisionInvalid(
       "k",
       caffeineCache.getIfPresent("k"),
       TimeSource.currentTimeMillis()
@@ -205,7 +205,7 @@ class DecisionValidityDemotionTest {
     caffeineCache.put("k", normalEntry());
 
     EntryLifecycleImpl em = entryLifecycle();
-    EntryMutations.Applied demoted = em.demoteIfRemoteNodeIdInvalid(
+    EntryMutations.Applied demoted = em.demoteIfDecisionInvalid(
       "k",
       caffeineCache.getIfPresent("k"),
       TimeSource.currentTimeMillis()
@@ -220,7 +220,7 @@ class DecisionValidityDemotionTest {
     caffeineCache.put("k", hotEntry("w1", 5L, 60_000, 15_000));
 
     EntryLifecycleImpl em = entryLifecycleWithoutHealthView();
-    EntryMutations.Applied demoted = em.demoteIfRemoteNodeIdInvalid(
+    EntryMutations.Applied demoted = em.demoteIfDecisionInvalid(
       "k",
       caffeineCache.getIfPresent("k"),
       TimeSource.currentTimeMillis()
@@ -241,7 +241,7 @@ class DecisionValidityDemotionTest {
 
     CacheEntry staleRaw = hotEntry("w1", 5L, 60_000, 15_000);
     EntryLifecycleImpl em = entryLifecycle();
-    EntryMutations.Applied demoted = em.demoteIfRemoteNodeIdInvalid("k", staleRaw, TimeSource.currentTimeMillis());
+    EntryMutations.Applied demoted = em.demoteIfDecisionInvalid("k", staleRaw, TimeSource.currentTimeMillis());
 
     assertThat(demoted.changed()).as("no demotion applies").isFalse();
     CacheEntry entry = (CacheEntry) caffeineCache.getIfPresent("k");
@@ -255,8 +255,8 @@ class DecisionValidityDemotionTest {
     caffeineCache.put("k", hotEntry("w1", 5L, 60_000, 15_000));
 
     EntryLifecycleImpl em = entryLifecycle();
-    em.demoteIfRemoteNodeIdInvalid("k", caffeineCache.getIfPresent("k"), TimeSource.currentTimeMillis());
-    EntryMutations.Applied second = em.demoteIfRemoteNodeIdInvalid(
+    em.demoteIfDecisionInvalid("k", caffeineCache.getIfPresent("k"), TimeSource.currentTimeMillis());
+    EntryMutations.Applied second = em.demoteIfDecisionInvalid(
       "k",
       caffeineCache.getIfPresent("k"),
       TimeSource.currentTimeMillis()
@@ -272,7 +272,7 @@ class DecisionValidityDemotionTest {
     caffeineCache.put("k", hotEntry("w1", 5L, 0, 0));
 
     EntryLifecycleImpl em = entryLifecycle();
-    EntryMutations.Applied demoted = em.demoteIfRemoteNodeIdInvalid(
+    EntryMutations.Applied demoted = em.demoteIfDecisionInvalid(
       "k",
       caffeineCache.getIfPresent("k"),
       TimeSource.currentTimeMillis()
@@ -295,7 +295,7 @@ class DecisionValidityDemotionTest {
     CacheEntry hot = hotEntry("w1", 5L, 60_000, 15_000);
     caffeineCache.put("k", hot);
 
-    EntryMutations.Applied applied = entryLifecycle().demoteIfRemoteNodeIdInvalid(
+    EntryMutations.Applied applied = entryLifecycle().demoteIfDecisionInvalid(
       "k",
       caffeineCache.getIfPresent("k"),
       TimeSource.currentTimeMillis()
@@ -326,7 +326,7 @@ class DecisionValidityDemotionTest {
       .build();
     caffeineCache.put("k", hot);
 
-    EntryMutations.Applied applied = entryLifecycle().demoteIfRemoteNodeIdInvalid(
+    EntryMutations.Applied applied = entryLifecycle().demoteIfDecisionInvalid(
       "k",
       caffeineCache.getIfPresent("k"),
       TimeSource.currentTimeMillis()

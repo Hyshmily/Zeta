@@ -33,7 +33,7 @@ import org.springframework.util.ClassUtils;
  * <p>States: {@code CLOSED → OPEN} on failure rate, {@code OPEN → HALF_OPEN} after the
  * timeout, {@code HALF_OPEN → CLOSED} only after consecutive probe successes (any probe
  * failure reopens). The machine — state, episode generation, live probe quota, consecutive
- * successes, the episode clock and the probe-credit multiplier — is one immutable
+ * successes, the last-activity clock and the probe-credit multiplier — is one immutable
  * {@link Epoch} swapped by a single compare-and-set, so no reader can observe a state
  * without the quota and the timer that belong to it, and every transition has exactly one
  * winner. A HALF_OPEN episode whose
@@ -41,17 +41,18 @@ import org.springframework.util.ClassUtils;
  * cannot pin the breaker.
  *
  * <p>The failure window is a clock-driven ring: a settlement stamps its bucket with the
- * aligned window index it belongs to and zeroes it when that index moved on, so the window
- * advances with traffic instead of with a timer. There is no background task, no
- * {@code start()}/{@code close()} lifecycle and no cross-window watermark to version, so a
- * stalled shared scheduler cannot freeze the trip decision.
+ * aligned effective window index it belongs to and zeroes it when that index moved on, so the
+ * window advances with traffic instead of with a timer. There is no background task and no
+ * {@code start()}/{@code close()} lifecycle; a CLOSED transition publishes a window floor in
+ * the same epoch CAS, so a stalled shared scheduler cannot freeze the trip decision and a
+ * losing closer cannot erase a winner's counts.
  *
  * <p>Exception filtering and the asymmetric probe credit are specified in design
  * decisions: load protection — this class implements them, so change both together.
  */
 @Slf4j
 @Internal
-public class CircuitBreakerImpl implements CircuitBreaker {
+public class SlidingWindowBreaker implements CircuitBreaker {
 
   /**
    * Maximum cause-chain depth for {@link #isIgnorableException}: a cyclic cause
@@ -110,9 +111,7 @@ public class CircuitBreakerImpl implements CircuitBreaker {
    * <p>Never recycles an instance — a CAS compares by identity, so reusing one would let a
    * read from an older epoch succeed against a newer one.
    */
-  private final AtomicReference<Epoch> epoch = new AtomicReference<>(
-    new Epoch(CircuitBreakerState.CLOSED, 0L, 0, 0, 0L, PROBE_CREDIT_BASELINE)
-  );
+  private final AtomicReference<Epoch> epoch = new AtomicReference<>();
 
   /**
    * Exception classes that must NOT trip the breaker, resolved at construction from
@@ -148,27 +147,45 @@ public class CircuitBreakerImpl implements CircuitBreaker {
   private final long slideMs;
 
   /**
+   * Age beyond which the 24-bit window floor is no longer meaningful: after half a ring of
+   * slices every bucket has wrapped at least once, so the floor is ignored and the normal
+   * forward-distance test decides. Kept as a duration so the guard is one 64-bit compare.
+   */
+  private final long halfRingMs;
+
+  /**
    * @param config circuit breaker configuration (buckets, thresholds, exception lists);
    *               read live on every decision so runtime toggles keep working (design decisions: load protection).
    */
-  public CircuitBreakerImpl(ZetaProperties.CircuitBreaker config) {
+  public SlidingWindowBreaker(ZetaProperties.CircuitBreaker config) {
     Assert.notNull(config, "config must not be null");
     Assert.isTrue(config.getWindowBuckets() > 0, "window-buckets (" + config.getWindowBuckets() + ") must be > 0");
     Assert.isTrue(
       config.getWindowTimeMs() >= config.getWindowBuckets(),
       "window-time-ms (" + config.getWindowTimeMs() + ") must be >= window-buckets (" + config.getWindowBuckets() + ")"
     );
+    Assert.isTrue(
+      config.getWindowBuckets() <= (WINDOW_MASK >>> 1),
+      "window-buckets (" + config.getWindowBuckets() + ") must be <= " + (WINDOW_MASK >>> 1)
+    );
+    Assert.isTrue(
+      config.getWindowTimeMs() <= Long.MAX_VALUE / (WINDOW_MASK >>> 1),
+      "window-time-ms (" + config.getWindowTimeMs() + ") is too large for the 24-bit window"
+    );
     this.config = config;
     this.bucketSize = config.getWindowBuckets();
-    this.buckets = new AtomicLongArray(bucketSize);
     // >= 1 guaranteed by the window-time >= window-buckets assertion above
     this.slideMs = config.getWindowTimeMs() / bucketSize;
+    long halfRingSlices = WINDOW_MASK >>> 1;
+    this.halfRingMs = halfRingSlices > Long.MAX_VALUE / slideMs ? Long.MAX_VALUE : halfRingSlices * slideMs;
+    long now = monotonicMillis();
+    long initialWindow = currentWindowIndex(now);
+    this.epoch.set(new Epoch(CircuitBreakerState.CLOSED, 0L, 0, 0, 0L, PROBE_CREDIT_BASELINE, 0L, initialWindow, now));
+    this.buckets = new AtomicLongArray(bucketSize);
     this.excludeClasses = resolveClasses(config.getExcludeExceptions());
     this.includeClasses = resolveClasses(config.getIncludeExceptions());
-    // Every slot starts on the current window with zero counters, so the first
-    // settlement in each slot is a same-window increment instead of a rotation
-    // race against an uninitialised slot.
-    resetBuckets();
+    // Construction-time only: every slot starts on the current window with zero counters.
+    initializeBuckets(initialWindow);
   }
 
   /**
@@ -207,40 +224,51 @@ public class CircuitBreakerImpl implements CircuitBreaker {
           return STAMP_CLOSED;
         }
         case OPEN -> {
-          long now = monotonicMillis();
-          if (now - e.anchorMillis <= config.getSingleTestIntervalMs()) {
-            return STAMP_REJECTED;
-          }
-          Epoch episode = e.startNew(now);
-          if (epoch.compareAndSet(e, episode)) {
-            if (config.isLogEnabled()) {
-              log.info("CB HALF_OPEN probe");
-            }
-            return episode.generation;
+          long stamp = tryStartHalfOpen(e, monotonicMillis(), false);
+          if (stamp != 0L) {
+            return stamp;
           }
         }
         case HALF_OPEN -> {
           int maxProbes = Math.max(1, (int) (config.getHalfOpenMaxProbes() * e.probeCredit));
+          long now = monotonicMillis();
           if (e.inflight < maxProbes) {
-            if (epoch.compareAndSet(e, e.slotAcquire())) {
+            if (epoch.compareAndSet(e, e.acquireSlot(now))) {
               return e.generation;
             }
             continue;
           }
-          long now = monotonicMillis();
-          if (now - e.anchorMillis <= config.getSingleTestIntervalMs()) {
-            return STAMP_REJECTED;
-          }
-          Epoch episode = e.startNew(now);
-          if (epoch.compareAndSet(e, episode)) {
-            if (config.isLogEnabled()) {
-              log.info("CB HALF_OPEN episode reset (no probe settled within {} ms)", config.getSingleTestIntervalMs());
-            }
-            return episode.generation;
+          long stamp = tryStartHalfOpen(e, now, true);
+          if (stamp != 0L) {
+            return stamp;
           }
         }
       }
     }
+  }
+
+  /**
+   * Start a fresh HALF_OPEN episode when the current one has been idle for the probe timeout.
+   * The two callers (OPEN cooldown elapsed, HALF_OPEN probe quota exhausted) share the same
+   * interval test and CAS; {@code reset} only selects the log line. A lost CAS returns {@code 0}
+   * so the outermost admission loop re-derives the state.
+   */
+  private long tryStartHalfOpen(Epoch e, long now, boolean reset) {
+    if (now - e.lastActivityMs <= config.getSingleTestIntervalMs()) {
+      return STAMP_REJECTED;
+    }
+    Epoch episode = e.startNew(now);
+    if (!epoch.compareAndSet(e, episode)) {
+      return 0L;
+    }
+    if (config.isLogEnabled()) {
+      if (reset) {
+        log.info("CB HALF_OPEN episode reset (no probe activity within {} ms)", config.getSingleTestIntervalMs());
+      } else {
+        log.info("CB HALF_OPEN probe");
+      }
+    }
+    return episode.generation;
   }
 
   /**
@@ -282,14 +310,20 @@ public class CircuitBreakerImpl implements CircuitBreaker {
       probe(stamp, success);
       return;
     }
-    if (epoch.get().state == CircuitBreakerState.CLOSED) {
+    Epoch e = epoch.get();
+    if (e.state == CircuitBreakerState.CLOSED) {
       // One clock sample for the settlement and the evaluation it triggers: a
       // rotation between the two would otherwise let the evaluation judge a window
       // the failure did not land in.
       long now = monotonicMillis();
-      record(success, now);
+      // The floor belongs to the epoch sampled above. A close/reopen between the two
+      // reads must not let this settlement write into the new window with the old offset.
+      if (epoch.get() != e) {
+        return;
+      }
+      record(e, success, now);
       if (!success) {
-        evaluateThreshold(now);
+        evaluateThreshold(e, now);
       }
     }
   }
@@ -343,8 +377,8 @@ public class CircuitBreakerImpl implements CircuitBreaker {
    * tighten the breaker must not admit traffic on its way out.
    *
    * <p>A success that crosses the recovery threshold closes in that same CAS:
-   * the window is cleared before publishing CLOSED, so an evaluation never sees
-   * CLOSED with the pre-recovery failure surplus. No transient HALF_OPEN with a
+   * the window floor moves to the current slice in the published epoch, so an
+   * evaluation never counts a pre-recovery bucket. No transient HALF_OPEN with a
    * released slot is published between the threshold check and the close.
    *
    * @param stamp   the generation the probe was admitted under
@@ -362,8 +396,8 @@ public class CircuitBreakerImpl implements CircuitBreaker {
       }
 
       if (success && e.consecutiveSuccesses + 1 >= threshold) {
-        resetBuckets();
-        if (epoch.compareAndSet(e, e.closed(true))) {
+        long now = monotonicMillis();
+        if (epoch.compareAndSet(e, e.closed(true, now / slideMs, now))) {
           if (config.isLogEnabled()) {
             log.info("CB CLOSED after {} consecutive successes", e.consecutiveSuccesses + 1);
           }
@@ -387,11 +421,11 @@ public class CircuitBreakerImpl implements CircuitBreaker {
 
   /**
    * Forces the breaker CLOSED while disabled, retiring any live episode and
-   * clearing the window — otherwise stale failure buckets would re-trip OPEN
-   * on every slide until they slid out, flapping the breaker and its log while
-   * disabled. The window is cleared before CLOSED is published (the recovery
-   * path's ordering) and the clearance is idempotent, so the retry after a lost
-   * CAS is harmless. The CAS makes one concurrent caller the only cleaner.
+   * moving the window floor to the current slice — otherwise stale failure
+   * buckets would re-trip OPEN on every slide until they slid out, flapping the
+   * breaker and its log while disabled. The floor and the state publish in one
+   * CAS, so a losing cleaner cannot erase a bucket a winner already published.
+   * The clearance is idempotent, so the retry after a lost CAS is harmless.
    */
   private void forceClosedWhenDisabled() {
     for (;;) {
@@ -400,8 +434,8 @@ public class CircuitBreakerImpl implements CircuitBreaker {
         return;
       }
 
-      resetBuckets();
-      if (epoch.compareAndSet(e, e.closed(false))) {
+      long now = monotonicMillis();
+      if (epoch.compareAndSet(e, e.closed(false, now / slideMs, now))) {
         return;
       }
     }
@@ -419,27 +453,37 @@ public class CircuitBreakerImpl implements CircuitBreaker {
    * <p>A slot advanced by at most one ring is an out-of-order settlement and is
    * discarded; a slot behind by any larger distance is the previous slice or a
    * bucket idle past half the window-id range and is rotated to the caller's
-   * slice. The residual ambiguity is the wrap: a bucket within one ring width
-   * before {@code 2^24} slices is discarded for at most that many settlements,
-   * and a bucket exactly {@code 2^24} slices old contributes its stale counts
-   * once before the next settlement rotates it.
+   * slice. A bucket older than the epoch's closed-window floor is rotated too,
+   * unless more than half a ring has elapsed since that floor was recorded; then
+   * the 24-bit comparison has wrapped and the normal forward-distance test is
+   * authoritative. The residual ambiguity is the wrap: a bucket within one ring
+   * width before {@code 2^24} slices is discarded for at most that many
+   * settlements, and a bucket exactly {@code 2^24} slices old contributes its
+   * stale counts once before the next settlement rotates it.
    *
+   * @param e       the CLOSED epoch the caller sampled, carrying the window floor
    * @param success {@code true} for a success, {@code false} for a failure
    * @param now     the caller's clock sample — the same one its evaluation uses
    */
-  private void record(boolean success, long now) {
-    long windowIndex = now / slideMs;
+  private void record(Epoch e, boolean success, long now) {
+    long windowIndex = now / slideMs + e.windowOffset;
     long window = windowIndex & WINDOW_MASK;
     int index = (int) Math.floorMod(windowIndex, (long) bucketSize);
     int shift = success ? 0 : FAIL_SHIFT;
     long increment = 1L << shift;
+    boolean filterFloor = now - e.closedAtMs < halfRingMs;
+    long closedFloor = e.closedWindowIndex;
 
     for (;;) {
       long raw = buckets.get(index);
       long stored = raw >>> WINDOW_SHIFT;
       long forward = (stored - windowIndex) & WINDOW_MASK;
       long next;
-      if (forward == 0L) {
+      if (filterFloor && isWindowBefore(stored, closedFloor)) {
+        // A pre-close settlement: replace the bucket with the caller's window and count
+        // only this outcome.
+        next = (window << WINDOW_SHIFT) | increment;
+      } else if (forward == 0L) {
         if (((raw >>> shift) & COUNT_MASK) >= COUNT_MASK) {
           return;
         }
@@ -471,24 +515,25 @@ public class CircuitBreakerImpl implements CircuitBreaker {
    * ring width.
    *
    * <p>The CAS on the read snapshot makes one thread the only transitioner, so a
-   * storm produces a single {@code anchorMillis} stamp and a single OPEN log, and
+   * storm produces a single cooldown stamp and a single OPEN log, and
    * once OPEN this method short-circuits.
    *
    * @param now the caller's clock sample, shared with the settlement that triggered it
    */
-  private void evaluateThreshold(long now) {
-    Epoch e = epoch.get();
-    if (e.state != CircuitBreakerState.CLOSED || !config.isEnabled()) {
+  private void evaluateThreshold(Epoch e, long now) {
+    if (!config.isEnabled()) {
       return;
     }
 
-    long current = (now / slideMs) & WINDOW_MASK;
+    long current = (now / slideMs + e.windowOffset) & WINDOW_MASK;
+    boolean filterFloor = now - e.closedAtMs < halfRingMs;
+    long closedFloor = e.closedWindowIndex;
     long totalFail = 0L;
     long totalSuccess = 0L;
     for (int i = 0; i < bucketSize; i++) {
       long raw = buckets.get(i);
       long stored = raw >>> WINDOW_SHIFT;
-      if (((current - stored) & WINDOW_MASK) < bucketSize) {
+      if (((current - stored) & WINDOW_MASK) < bucketSize && (!filterFloor || !isWindowBefore(stored, closedFloor))) {
         totalSuccess += raw & COUNT_MASK;
         totalFail += (raw >>> FAIL_SHIFT) & COUNT_MASK;
       }
@@ -519,10 +564,9 @@ public class CircuitBreakerImpl implements CircuitBreaker {
         // against this class's loader and miss business exception types in
         // layered-classloader deployments.
         resolved.add(ClassUtils.forName(name, null));
-      } catch (ClassNotFoundException | LinkageError e) {
+      } catch (ClassNotFoundException | LinkageError ignored) {
         // Resolution runs exactly once per breaker (constructor), so each missing
-        // name warns at most once per breaker lifetime — inherently rate-limited;
-        // no recurring-WARN window needed here.
+        // name warns at most once per breaker lifetime.
         log.warn("Exception class not loadable: {}", name);
       }
     }
@@ -588,22 +632,34 @@ public class CircuitBreakerImpl implements CircuitBreaker {
   }
 
   /**
-   * Zeros every bucket at the current window, so the next settlement in every
-   * slot is a same-window increment and a pre-clear settlement is discarded as
-   * older. Called before publishing CLOSED: every path that reaches CLOSED
-   * clears the window, so the failure surplus of the previous episode can never
-   * re-trip the breaker the instant it heals.
+   * Construction-time initialization: every slot starts on {@code window} with zero counters, so
+   * the first settlement in each slot is a same-window increment instead of a rotation race
+   * against an uninitialised slot.
    */
-  private void resetBuckets() {
-    long empty = ((monotonicMillis() / slideMs) & WINDOW_MASK) << WINDOW_SHIFT;
+  private void initializeBuckets(long window) {
+    long empty = (window & WINDOW_MASK) << WINDOW_SHIFT;
     for (int i = 0; i < bucketSize; i++) {
       buckets.set(i, empty);
     }
   }
 
+  /** The 24-bit ring index of the slice owning {@code now}. */
+  private long currentWindowIndex(long now) {
+    return (now / slideMs) & WINDOW_MASK;
+  }
+
+  /**
+   * Whether {@code window} is older than {@code floor} in the 24-bit ring. Valid only while the
+   * caller has checked that less than half a ring has elapsed since the floor was recorded;
+   * after that every window has wrapped and the comparison is meaningless.
+   */
+  private static boolean isWindowBefore(long window, long floor) {
+    return ((window - floor) & WINDOW_MASK) > (WINDOW_MASK >>> 1);
+  }
+
   /**
    * Immutable snapshot of the breaker machine: the state, the HALF_OPEN episode
-   * generation, the live probe slots, the consecutive probe successes, the episode
+   * generation, the live probe slots, the consecutive probe successes, the last-activity
    * clock and the probe-credit multiplier. One reference keeps them mutually
    * consistent; a reader can never observe a state without the quota and the timer
    * that belong to it.
@@ -616,38 +672,68 @@ public class CircuitBreakerImpl implements CircuitBreaker {
    *                             before it is dead
    * @param inflight             probe slots currently held by admitted requests
    * @param consecutiveSuccesses the number of consecutive successful probes
-   * @param anchorMillis         the instant this epoch's clock started counting: the
+   * @param lastActivityMs       the last admission or settlement of this episode: the
    *                             open timestamp while OPEN (the cooldown anchor), the
-   *                             last probe activity while HALF_OPEN (the wedged-episode
-   *                             anchor), unused while CLOSED
+   *                             last probe admission or settlement while HALF_OPEN (the
+   *                             wedged-episode anchor), unused while CLOSED
    * @param probeCredit          the probe-quota multiplier over {@code halfOpenMaxProbes},
    *                             clamped to {@code [PROBE_CREDIT_FLOOR, PROBE_CREDIT_BASELINE]}
+   * @param windowOffset         added to the clock's slice index; bumped on every close so a
+   *                             same-slice pre-close bucket is behind the new floor
+   * @param closedWindowIndex    the 24-bit effective window index in force when this epoch last
+   *                             entered CLOSED; buckets older than it are stale
+   * @param closedAtMs           the monotonic time that floor was recorded, so a floor that has
+   *                             wrapped more than half the ring is ignored
    */
   private record Epoch(
     CircuitBreakerState state,
     long generation,
     int inflight,
     int consecutiveSuccesses,
-    long anchorMillis,
-    double probeCredit
+    long lastActivityMs,
+    double probeCredit,
+    long windowOffset,
+    long closedWindowIndex,
+    long closedAtMs
   ) {
     private static double clampCredit(double credit) {
       return Math.max(PROBE_CREDIT_FLOOR, Math.min(PROBE_CREDIT_BASELINE, credit));
     }
 
-    private Epoch slotAcquire() {
+    /**
+     * The monotone last-activity anchor: a clock sample taken before a pause must not
+     * rewind an anchor a later transition already advanced.
+     */
+    private long anchor(long now) {
+      return Math.max(lastActivityMs, now);
+    }
+
+    private Epoch acquireSlot(long now) {
       return new Epoch(
         CircuitBreakerState.HALF_OPEN,
         generation,
         inflight + 1,
         consecutiveSuccesses,
-        anchorMillis,
-        probeCredit
+        anchor(now),
+        probeCredit,
+        windowOffset,
+        closedWindowIndex,
+        closedAtMs
       );
     }
 
     private Epoch slotReleased(long now) {
-      return new Epoch(CircuitBreakerState.HALF_OPEN, generation, inflight - 1, consecutiveSuccesses, now, probeCredit);
+      return new Epoch(
+        CircuitBreakerState.HALF_OPEN,
+        generation,
+        inflight - 1,
+        consecutiveSuccesses,
+        anchor(now),
+        probeCredit,
+        windowOffset,
+        closedWindowIndex,
+        closedAtMs
+      );
     }
 
     private Epoch probeSucceeded(long now) {
@@ -656,14 +742,27 @@ public class CircuitBreakerImpl implements CircuitBreaker {
         generation,
         inflight - 1,
         consecutiveSuccesses + 1,
-        now,
-        probeCredit
+        anchor(now),
+        probeCredit,
+        windowOffset,
+        closedWindowIndex,
+        closedAtMs
       );
     }
 
     /** Opens with a fresh cooldown, keeping the credit that produced this episode's outcome. */
     private Epoch opened(long now) {
-      return new Epoch(CircuitBreakerState.OPEN, generation + 1, 0, 0, now, probeCredit);
+      return new Epoch(
+        CircuitBreakerState.OPEN,
+        generation + 1,
+        0,
+        0,
+        anchor(now),
+        probeCredit,
+        windowOffset,
+        closedWindowIndex,
+        closedAtMs
+      );
     }
 
     /** A failed probe reopens in the same CAS that applies the episode's credit penalty. */
@@ -673,25 +772,46 @@ public class CircuitBreakerImpl implements CircuitBreaker {
         generation + 1,
         0,
         0,
-        now,
-        clampCredit(probeCredit * K_PROBE_PENALTY_RATIO)
+        anchor(now),
+        clampCredit(probeCredit * K_PROBE_PENALTY_RATIO),
+        windowOffset,
+        closedWindowIndex,
+        closedAtMs
       );
     }
 
     /** Starts a HALF_OPEN episode owning exactly one slot — the transitioner's. */
     private Epoch startNew(long now) {
-      return new Epoch(CircuitBreakerState.HALF_OPEN, generation + 1, 1, 0, now, probeCredit);
+      return new Epoch(
+        CircuitBreakerState.HALF_OPEN,
+        generation + 1,
+        1,
+        0,
+        anchor(now),
+        probeCredit,
+        windowOffset,
+        closedWindowIndex,
+        closedAtMs
+      );
     }
 
-    /** Recovery or a forced close; {@code reward} applies the credit reward in the same CAS. */
-    private Epoch closed(boolean reward) {
+    /**
+     * Recovery or a forced close; {@code reward} applies the credit reward in the same CAS. The
+     * window offset advances with the state, so every bucket stamped before this close is behind
+     * {@code closedWindowIndex} even when the clock slice did not move.
+     */
+    private Epoch closed(boolean reward, long rawWindowIndex, long closedAtMs) {
+      long nextOffset = windowOffset + 1;
       return new Epoch(
         CircuitBreakerState.CLOSED,
         generation + 1,
         0,
         0,
         0L,
-        reward ? clampCredit(probeCredit * K_PROBE_RECOVER_RATIO) : probeCredit
+        reward ? clampCredit(probeCredit * K_PROBE_RECOVER_RATIO) : probeCredit,
+        nextOffset,
+        (rawWindowIndex + nextOffset) & WINDOW_MASK,
+        closedAtMs
       );
     }
   }

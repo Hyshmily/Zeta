@@ -17,7 +17,6 @@ package io.github.hyshmily.zeta.cache;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-import io.github.hyshmily.zeta.util.NodeIdentity;
 import io.github.hyshmily.zeta.util.clock.MonotonicStampClock;
 import io.github.hyshmily.zeta.util.clock.StampClock;
 import io.github.hyshmily.zeta.util.version.VersionGuard;
@@ -34,7 +33,7 @@ class LaggingClockConvergesTest {
   @DisplayName("a lagging node's next write outranks the stamp it observed")
   void observedFloor_raisesTheNextStamp() {
     MonotonicStampClock clock = new MonotonicStampClock(
-      NodeIdentity.getNodeId(),
+      1L,
       MonotonicStampClock.DEFAULT_MAX_FORWARD_DRIFT_MS
     );
     // A peer 30s ahead of local time: inside the 60s anti-drift bound, so the

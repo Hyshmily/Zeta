@@ -132,9 +132,8 @@ class BroadcastBufferTest {
   /**
    * Verifies that a send-executor rejection under a chunked snapshot drops only
    * the rejected chunk: the first chunk's entries still reach the publisher and
-   * {@code saturationDrops} counts only the tail. (Previously one rejection
-   * stranded the whole flushed snapshot — up to 100k PUT/REFRESH broadcasts,
-   * leaving peers to converge only via their hard TTL.)
+   * {@code saturationDrops} counts only the tail, so one saturated window
+   * strands at most a chunk of broadcasts.
    */
   @Test
   void flush_chunkedSend_executorRejectsTail_shouldDeliverHeadAndCountDrops() {
@@ -284,8 +283,8 @@ class BroadcastBufferTest {
    * Records do not cancel/re-arm the pending flush: a record arriving while a
    * flush is already scheduled rides the ORIGINAL schedule — the flush swaps
    * the whole pending map at fire time, so the later record is included in the
-   * same send cycle. The old per-record reschedule would have pushed the flush
-   * out by another full delay on every write.
+   * same send cycle, and a steady write stream cannot push the flush out by
+   * another full delay per write.
    */
   @Test
   void record_whileFlushPending_shouldRideOriginalSchedule() throws Exception {
@@ -466,14 +465,8 @@ class BroadcastBufferTest {
 
   /**
    * Verifies that crossing the pending cap does not submit one scheduler task per
-   * record.
-   *
-   * <p>The over-the-cap branch used to call {@code scheduler.execute(flushAndReset)}
-   * unconditionally, so a burst across the cap enqueued an unbounded number of
-   * tasks into the shared scheduler's queue — delaying the reporter flush tick
-   * and the sketch decay that share the pool, and each of which had to run
-   * before the queue could be serviced. The cap path now arms (or re-arms) a
-   * single task instead.
+   * record: the cap path arms (or re-arms) a single task, so a burst cannot bury
+   * the reporter flush tick or the sketch decay that share the pool.
    *
    * <p>Pinned by asserting {@code execute} is never used for the forced flush
    * and that scheduling stays bounded as the burst continues.
@@ -494,7 +487,7 @@ class BroadcastBufferTest {
       buf.record("key-" + i, i, null, null);
     }
 
-    // The forced flush never uses execute() — that was the unbounded path.
+    // The forced flush never uses execute(): the deferred task is the only outlet.
     verify(scheduler, never()).execute(any(Runnable.class));
     // A burst across the cap must not schedule a task per record: one arm for the
     // deferral window plus at most one re-arm when the cap is first crossed.
@@ -694,5 +687,29 @@ class BroadcastBufferTest {
   void broadcastPut_withoutPublisher_isNoOp() {
     BroadcastBuffer buf = new BroadcastBuffer(scheduler, null, 5000L, 2_000L, null);
     assertThatCode(() -> buf.put("key11", "v", 7L, null)).doesNotThrowAnyException();
+  }
+
+  /** A version already invalidated must not pay for serialization on its way out. */
+  @Test
+  void broadcastPut_staleVersion_skipsSerialization() {
+    BroadcastBuffer buf = new BroadcastBuffer(scheduler, publisher, 5000L, 2_000L, null);
+
+    buf.put("key12", "v", 8L, version -> false);
+
+    verify(publisher, never()).serializePutPayload(any());
+    buf.flush();
+    verify(publisher, never()).broadcastPut(anyString(), anyLong(), any());
+  }
+
+  /** Shutdown sends the last window inline, so the send executor's own shutdown cannot drop it. */
+  @Test
+  void destroy_drainsPendingSynchronouslyEvenWithExecutor() {
+    Executor neverRuns = command -> {};
+    BroadcastBuffer buf = new BroadcastBuffer(scheduler, publisher, 5000L, 2_000L, neverRuns);
+    buf.record("key13", 9L, null, null);
+
+    buf.destroy();
+
+    verify(publisher).broadcastRefresh("key13", 9L);
   }
 }

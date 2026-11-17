@@ -200,6 +200,59 @@ class EntryLifecycleImplTest {
     assertThat(entry.getKeyState()).isEqualTo(KeyState.NORMAL);
   }
 
+  /**
+   * A COOL rewrite with a disabled normal soft TTL must clear a stale soft deadline; keeping it
+   * would mark the entry stale forever and re-arm a refresh on every read.
+   */
+  @Test
+  void cool_withDisabledNormalSoftTtl_clearsTheSoftDeadline() {
+    long now = TimeSource.currentTimeMillis();
+    CacheEntry hot = entryLifecycle
+      .newEntry()
+      .value("v")
+      .version(1)
+      .decision(DecisionStamp.hot(1, "w1", 1))
+      .ttl(60_000, 15_000, 60_000, 0)
+      .expiryAt(now + 60_000, now - 1_000)
+      .keyState(KeyState.HOT)
+      .build();
+
+    CacheEntry cooled = entryLifecycle.cool(hot, DecisionStamp.cool(2, "w1", 1));
+
+    assertThat(cooled.getKeyState()).isEqualTo(KeyState.COOL);
+    assertThat(cooled.getSoftTtlMs()).isZero();
+    assertThat(cooled.getSoftExpireAtMs()).isZero();
+  }
+
+  /**
+   * A degraded-mode value write must lift a COOL entry to HOT, not keep the short COOL regime
+   * just because the entry is elevated.
+   */
+  @Test
+  void writeValue_promotesACoolEntryWhenAllowed() {
+    CacheEntry cool = entryLifecycle
+      .newEntry()
+      .value("old")
+      .version(1)
+      .decision(DecisionStamp.cool(7, "w1", 1))
+      .ttl(60_000, 15_000, 60_000, 15_000)
+      .keyState(KeyState.COOL)
+      .build();
+
+    CacheEntry written = entryLifecycle.writeValue(cool, "new", 2, 60_000, 15_000, true);
+
+    assertThat(written.getKeyState()).isEqualTo(KeyState.HOT);
+    assertThat(written.getValue()).isEqualTo("new");
+    assertThat(written.decision()).isSameAs(cool.decision());
+    assertThat(written.getNormalHardTtlMs()).isEqualTo(60_000);
+    assertThat(written.getNormalSoftTtlMs()).isEqualTo(15_000);
+    assertThat(written.getHardTtlMs()).isEqualTo(3_600_000);
+    assertThat(written.getSoftTtlMs()).isEqualTo(300_000);
+
+    CacheEntry keptCool = entryLifecycle.writeValue(cool, "newer", 3, 60_000, 15_000, false);
+    assertThat(keptCool.getKeyState()).isEqualTo(KeyState.COOL);
+  }
+
   // ── clear watermarks: prefix lifecycle ────────────────────────────
 
   /**
@@ -239,7 +292,7 @@ class EntryLifecycleImplTest {
    * Past the prefix cap the whole live set folds into the table-wide
    * watermark at the highest stamp involved — every folded prefix keeps its
    * protection — and the capacity is reclaimed, so the next distinct prefix is
-   * scoped again instead of folding too (the formerly irreversible saturation).
+   * scoped again.
    */
   @Test
   void recordPrefixClear_pastTheCap_foldsTheMaxStampAndReclaimsCapacity() {
@@ -250,27 +303,31 @@ class EntryLifecycleImplTest {
     MonotonicStampClock clock = new MonotonicStampClock(1, MonotonicStampClock.DEFAULT_MAX_FORWARD_DRIFT_MS);
     long base = clock.nextStamps(65);
     for (int i = 0; i < 64; i++) {
-      entryLifecycle.recordPrefixClear("p" + i + " ", base + i);
+      entryLifecycle.recordPrefixClear("p" + i + "\u0000", base + i);
     }
 
     // The 65th distinct prefix triggers the fold.
-    entryLifecycle.recordPrefixClear("p64 ", base + 64);
+    entryLifecycle.recordPrefixClear("p64\u0000", base + 64);
     long foldStamp = base + 64;
 
-    assertThat(entryLifecycle.staleAgainstInvalidation("p0 k", foldStamp)).as("folded prefix keeps protection").isTrue();
-    assertThat(entryLifecycle.staleAgainstInvalidation("p0 k", foldStamp - 1))
+    assertThat(entryLifecycle.staleAgainstInvalidation("p0\u0000k", foldStamp))
       .as("folded prefix keeps protection")
       .isTrue();
-    assertThat(entryLifecycle.staleAgainstInvalidation("p0 k", foldStamp + 1)).as("post-fold writes admitted").isFalse();
+    assertThat(entryLifecycle.staleAgainstInvalidation("p0\u0000k", foldStamp - 1))
+      .as("folded prefix keeps protection")
+      .isTrue();
+    assertThat(entryLifecycle.staleAgainstInvalidation("p0\u0000k", foldStamp + 1))
+      .as("post-fold writes admitted")
+      .isFalse();
 
     // Capacity is reclaimed: a fresh prefix is recorded scoped, not folded.
     long freshStamp = clock.nextStamp();
-    entryLifecycle.recordPrefixClear("fresh ", freshStamp);
-    assertThat(entryLifecycle.staleAgainstInvalidation("p0 k", foldStamp + 1))
+    entryLifecycle.recordPrefixClear("fresh\u0000", freshStamp);
+    assertThat(entryLifecycle.staleAgainstInvalidation("p0\u0000k", foldStamp + 1))
       .as("no second fold: the fresh prefix is recorded scoped, not folded")
       .isFalse();
-    assertThat(entryLifecycle.staleAgainstInvalidation("fresh k", freshStamp)).as("scoped refusal").isTrue();
-    assertThat(entryLifecycle.staleAgainstInvalidation("other k", freshStamp))
+    assertThat(entryLifecycle.staleAgainstInvalidation("fresh\u0000k", freshStamp)).as("scoped refusal").isTrue();
+    assertThat(entryLifecycle.staleAgainstInvalidation("other\u0000k", freshStamp))
       .as("unrelated namespace admitted")
       .isFalse();
   }
@@ -287,13 +344,13 @@ class EntryLifecycleImplTest {
     // distinct prefix evicts them all (expired) and records itself scoped —
     // the table-wide watermark must stay untouched.
     for (int i = 0; i < 64; i++) {
-      entryLifecycle.recordPrefixClear("old" + i + " ", i + 1L);
+      entryLifecycle.recordPrefixClear("old" + i + "\u0000", i + 1L);
     }
-    entryLifecycle.recordPrefixClear("new ", 4096L);
+    entryLifecycle.recordPrefixClear("new\u0000", 4096L);
 
     // No fold: the table-wide watermark stays untouched; the fresh one still refuses its namespace.
-    assertThat(entryLifecycle.staleAgainstInvalidation("new k", 4096L)).isTrue();
-    assertThat(entryLifecycle.staleAgainstInvalidation("new k", 4097L)).isFalse();
+    assertThat(entryLifecycle.staleAgainstInvalidation("new\u0000k", 4096L)).isTrue();
+    assertThat(entryLifecycle.staleAgainstInvalidation("new\u0000k", 4097L)).isFalse();
   }
 
   /**

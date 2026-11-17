@@ -238,7 +238,7 @@ public final class EntryDraft {
    * @throws IllegalArgumentException when a duration is negative
    */
   public EntryDraft ttl(long hardTtlMs, long softTtlMs) {
-    requireNonNegativeTtls(hardTtlMs, softTtlMs);
+    requireEncodableTtls(hardTtlMs, softTtlMs);
     this.hardTtlMs = normalizeHardTtl(hardTtlMs);
     this.softTtlMs = softTtlMs;
     this.hardExpireAtMs = computedHardExpiryAt(this.hardTtlMs);
@@ -257,7 +257,7 @@ public final class EntryDraft {
    * @throws IllegalArgumentException when a duration is negative
    */
   public EntryDraft ttlDurations(long hardTtlMs, long softTtlMs) {
-    requireNonNegativeTtls(hardTtlMs, softTtlMs);
+    requireEncodableTtls(hardTtlMs, softTtlMs);
     this.hardTtlMs = normalizeHardTtl(hardTtlMs);
     this.softTtlMs = softTtlMs;
     return this;
@@ -271,14 +271,12 @@ public final class EntryDraft {
    *
    * @param hardTtlMs the resolved hard TTL
    * @param softTtlMs the resolved soft TTL
-   * @throws IllegalArgumentException when a duration is negative
+   * @throws IllegalArgumentException when a duration is negative or above the packed maximum
+   *                                  other than {@link Long#MAX_VALUE}
    */
-  static void requireNonNegativeTtls(long hardTtlMs, long softTtlMs) {
-    if (hardTtlMs < 0L || softTtlMs < 0L) {
-      throw new IllegalArgumentException(
-        "TTL must not be negative: hard=" + hardTtlMs + "ms, soft=" + softTtlMs + "ms"
-      );
-    }
+  static void requireEncodableTtls(long hardTtlMs, long softTtlMs) {
+    CacheEntry.requireEncodableTtl(hardTtlMs, "hardTtlMs");
+    CacheEntry.requireEncodableTtl(softTtlMs, "softTtlMs");
   }
 
   /**
@@ -296,7 +294,7 @@ public final class EntryDraft {
    * @throws IllegalArgumentException when a duration is negative
    */
   public EntryDraft ttl(long hardTtlMs, long softTtlMs, long normalHardTtlMs, long normalSoftTtlMs) {
-    requireNonNegativeTtls(normalHardTtlMs, normalSoftTtlMs);
+    requireEncodableTtls(normalHardTtlMs, normalSoftTtlMs);
     ttl(hardTtlMs, softTtlMs);
     this.normalHardTtlMs = normalHardTtlMs;
     this.normalSoftTtlMs = normalSoftTtlMs;
@@ -312,7 +310,7 @@ public final class EntryDraft {
    * @throws IllegalArgumentException when {@code softTtlMs} is negative
    */
   public EntryDraft softTtl(long softTtlMs) {
-    requireNonNegativeTtls(0L, softTtlMs);
+    CacheEntry.requireEncodableTtl(softTtlMs, "softTtlMs");
     this.softTtlMs = softTtlMs;
     this.softExpireAtMs = computedSoftExpiryAt(softTtlMs);
     return this;

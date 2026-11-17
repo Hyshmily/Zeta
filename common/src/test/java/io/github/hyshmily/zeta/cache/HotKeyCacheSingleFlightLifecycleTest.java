@@ -27,7 +27,7 @@ import io.github.hyshmily.zeta.cache.cachesupport.circuitbreaker.CircuitBreakerR
 import io.github.hyshmily.zeta.cache.cachesupport.lifecycle.EntryLifecycleImpl;
 import io.github.hyshmily.zeta.cache.cachesupport.loader.CacheLoader;
 import io.github.hyshmily.zeta.cache.cachesupport.loader.singleflight.SingleFlight;
-import io.github.hyshmily.zeta.cache.cachesupport.loader.singleflight.SingleFlightImpl;
+import io.github.hyshmily.zeta.cache.cachesupport.loader.singleflight.LoadFlights;
 import io.github.hyshmily.zeta.cache.cachesupport.policy.GetPolicy;
 import io.github.hyshmily.zeta.cache.cachesupport.policy.StalePolicy;
 import io.github.hyshmily.zeta.cache.cachesupport.raw.CacheEntry;
@@ -156,7 +156,8 @@ class HotKeyCacheSingleFlightLifecycleTest {
     assertThat(first).isEqualTo("v1");
 
     // Outlive the 150 ms hard TTL (±5 % jitter) while staying far inside the
-    // 5 s dedup retention: exactly the window the old replay served stale from.
+    // 5 s dedup retention: exactly the window in which a replayed completed
+    // future would serve the stale value.
     Thread.sleep(400);
 
     String second = shortLived.get(

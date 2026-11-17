@@ -45,7 +45,6 @@ import io.github.hyshmily.zeta.sharding.HealthView;
 import io.github.hyshmily.zeta.sync.local.CacheSyncListener;
 import io.github.hyshmily.zeta.sync.local.CacheSyncProperties;
 import io.github.hyshmily.zeta.sync.local.DefaultSyncContext;
-import io.github.hyshmily.zeta.sync.local.SyncContext;
 import io.github.hyshmily.zeta.sync.local.SyncPolicy;
 import io.github.hyshmily.zeta.sync.local.SyncMessage;
 import io.github.hyshmily.zeta.sync.local.SyncType;
@@ -183,8 +182,16 @@ class VersionStampedLoadTest {
     CacheSyncProperties props = new CacheSyncProperties();
     props.setJitterMs(0);
     SyncPolicy handler = new SyncPolicy() {};
-    SyncContext context = new DefaultSyncContext(cache, loader, entryLifecycle, List.of(), null, null);
-    CacheSyncListener l = new CacheSyncListener(props, scheduler, handler, context, null, null);
+    DefaultSyncContext context = new DefaultSyncContext(cache, loader, entryLifecycle, List.of(), null, null);
+    CacheSyncListener l = new CacheSyncListener(
+      props,
+      scheduler,
+      handler,
+      context,
+      null,
+      null,
+      new io.github.hyshmily.zeta.util.NodeIdentity("test", 1L)
+    );
     return l;
   }
 

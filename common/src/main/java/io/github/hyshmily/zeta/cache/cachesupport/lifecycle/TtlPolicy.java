@@ -44,6 +44,13 @@ import org.jspecify.annotations.Nullable;
  * pipeline. {@link EntryDraft#ttl}/{@link EntryDraft#rearmExpiry} apply the
  * result.
  *
+ * <p><b>Clock axis.</b> Deadlines are epoch milliseconds on the cached wall clock
+ * ({@link TimeSource#currentTimeMillis()}), the same axis {@link #isLogicallyExpired} and
+ * {@link #isSoftExpired} judge. The monotonic axis ({@link TimeSource#monotonicMillis()}) is for
+ * elapsed-time arithmetic and birth stamps; minting an expiry from it would place a closed soft
+ * window in the future of the wall-clock predicate after a clock step.
+
+ *
  * <p>
  * Instances are cheap and hold no mutable state of their own: the
  * underlying {@link ZetaProperties} is read on every call, so runtime
@@ -56,7 +63,7 @@ public final class TtlPolicy implements EntryDraft.ExpiryArithmetic {
   /** Fallback hard TTL for a COOL entry whose normal baseline is unknown. */
   private static final long COOL_DEFAULT_PROTECTION_HARD_TTL_MS = 120_000L;
   /** Jitter ratio for the COOL protection window. */
-  private static final double COOL_PROTECTION_JITTER_RATIO = 0.2;
+  static final double COOL_PROTECTION_JITTER_RATIO = 0.2;
 
   /** TTL configuration providing normal and hot-key TTL values. */
   private final ZetaProperties ttlConfig;
@@ -142,7 +149,7 @@ public final class TtlPolicy implements EntryDraft.ExpiryArithmetic {
    * @param normalHardTtlMs the resolved normal hard TTL ({@code 0} = permanent)
    * @return effective hot-key hard TTL duration in milliseconds ({@code 0} = permanent)
    */
-  public long resolveEffectiveHotHard(long normalHardTtlMs) {
+  public long resolveHotHardTtl(long normalHardTtlMs) {
     long hotDefault = effectiveHotHardTtlMs();
     if (normalHardTtlMs <= 0L || hotDefault == 0L) {
       return 0L;
@@ -195,7 +202,7 @@ public final class TtlPolicy implements EntryDraft.ExpiryArithmetic {
    * @param normalSoftTtlMs the resolved normal soft TTL ({@code 0} = disabled)
    * @return effective hot-key soft TTL duration in milliseconds ({@code 0} = disabled)
    */
-  public long resolveEffectiveHotSoft(long normalSoftTtlMs) {
+  public long resolveHotSoftTtl(long normalSoftTtlMs) {
     long hotDefault = effectiveHotSoftTtlMs();
     if (hotDefault == 0L) {
       return 0L;
@@ -271,13 +278,40 @@ public final class TtlPolicy implements EntryDraft.ExpiryArithmetic {
   }
 
   /**
-   * Absolute soft deadline for a COOL rewrite, with the COOL jitter ratio.
+   * The soft deadline for a metadata-only state transition (NORMAL → HOT or HOT → COOL).
+   * A disabled ({@code <= 0}) or permanent ({@link Long#MAX_VALUE}) new TTL is the new regime
+   * and replaces the old deadline; an already soft-expired entry keeps its past deadline so a
+   * metadata change can never make stale data look fresh. Otherwise the new finite window is
+   * computed from the caller's {@code now} sample, not a fresh clock read.
    *
-   * @param coolSoftTtlMs the COOL soft TTL already resolved from the entry
-   * @return the absolute epoch-millis soft deadline
+   * @param entry          the entry being transitioned
+   * @param newSoftTtlMs   the new regime's soft TTL in milliseconds
+   * @param ttlJitterRatio the jitter ratio to apply to a new finite window
+   * @param now            the caller's epoch-millis sample
+   * @return the absolute soft deadline, {@code 0} when disabled, or {@link Long#MAX_VALUE}
    */
-  public long coolSoftExpireAt(long coolSoftTtlMs) {
-    return softExpireAt(coolSoftTtlMs, COOL_PROTECTION_JITTER_RATIO);
+  public long transitionSoftExpireAt(CacheEntry entry, long newSoftTtlMs, double ttlJitterRatio, long now) {
+    if (newSoftTtlMs <= 0L) {
+      return 0L;
+    }
+    if (newSoftTtlMs == Long.MAX_VALUE) {
+      return Long.MAX_VALUE;
+    }
+    return isSoftExpired(entry, now)
+      ? entry.getSoftExpireAtMs()
+      : expireAtFromNow(now, newSoftTtlMs, computeTtlJitter(newSoftTtlMs, ttlJitterRatio));
+  }
+
+  /**
+   * {@link #transitionSoftExpireAt(CacheEntry, long, double, long)} with the configured jitter.
+   *
+   * @param entry        the entry being transitioned
+   * @param newSoftTtlMs the new regime's soft TTL in milliseconds
+   * @param now          the caller's epoch-millis sample
+   * @return the absolute soft deadline
+   */
+  public long transitionSoftExpireAt(CacheEntry entry, long newSoftTtlMs, long now) {
+    return transitionSoftExpireAt(entry, newSoftTtlMs, ttlConfig.getTtlJitterRatio(), now);
   }
 
   /**
@@ -344,23 +378,21 @@ public final class TtlPolicy implements EntryDraft.ExpiryArithmetic {
   }
 
   /**
-   * {@code now + max(1, ttl + jitter)}, saturating instead of wrapping. A TTL
-   * near
-   * {@link Long#MAX_VALUE} (a caller-supplied override of "effectively forever")
-   * must
-   * yield a far-future deadline: the plain addition wrapped negative, and every
-   * expiry
-   * predicate reads a negative deadline as "expired since forever", so the entry
-   * died
-   * on the write that created it.
+   * {@code now + max(1, ttl + jitter)}, saturating instead of wrapping: a TTL
+   * near {@link Long#MAX_VALUE} (a caller-supplied override of "effectively
+   * forever") must yield a far-future deadline, because a wrapped negative
+   * deadline reads as "expired" on every expiry predicate.
    *
    * @param ttlMs    the resolved TTL duration (positive)
    * @param jitterMs the signed jitter offset to apply
    * @return the absolute epoch-ms deadline, never earlier than {@code now + 1}
    */
   private static long expireAtFromNow(long ttlMs, long jitterMs) {
+    return expireAtFromNow(TimeSource.currentTimeMillis(), ttlMs, jitterMs);
+  }
+
+  private static long expireAtFromNow(long now, long ttlMs, long jitterMs) {
     long delta = jitterMs > 0L && ttlMs > Long.MAX_VALUE - jitterMs ? Long.MAX_VALUE : Math.max(1L, ttlMs + jitterMs);
-    long now = TimeSource.currentTimeMillis();
     return delta == Long.MAX_VALUE || now > Long.MAX_VALUE - delta ? Long.MAX_VALUE : now + delta;
   }
 

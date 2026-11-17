@@ -31,7 +31,6 @@ import io.github.hyshmily.zeta.util.clock.StampClock;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 import lombok.extern.slf4j.Slf4j;
 import org.jspecify.annotations.Nullable;
@@ -69,8 +68,8 @@ public class EntryLifecycleImpl implements EntryLifecycle {
   /** Pure TTL/expiry policy — all stateless lifecycle arithmetic lives here. */
   private final TtlPolicy ttlPolicy;
 
-  /** Highest clear stamp applied; {@code 0} = none. */
-  private final AtomicLong clearWatermark = new AtomicLong();
+  /** Highest clear stamp applied; {@code 0} = none. Written only under {@link #watermarkLock}. */
+  private volatile long clearWatermark;
 
   /**
    * Serializes the two low-frequency watermark writers. The read path stays
@@ -88,7 +87,7 @@ public class EntryLifecycleImpl implements EntryLifecycle {
 
   /**
    * Scoped clear watermarks (namespace prefix → highest clear stamp)
-   * plus the highest stamp ever recorded, in one immutable snapshot.
+   * plus the highest live stamp, in one immutable snapshot.
    *
    * <p>Copy-on-write: the snapshot is immutable and replaced under
    * {@link #watermarkLock} by the two low-frequency clear writers. The maximum
@@ -103,22 +102,26 @@ public class EntryLifecycleImpl implements EntryLifecycle {
    * past the cap the whole live set folds into the table-wide watermark at
    * the highest stamp involved and the map resets. Folding refuses strictly
    * more writes, which is the safe direction — it can only reject stale
-   * fills, never admit them. The max is monotonic: pruning keeps it, because
-   * it gates only whether the walk runs, never whether a write is refused.
+   * fills, never admit them. The max is recomputed from the live entries on
+   * every rewrite: it gates only whether the walk runs, never whether a write
+   * is refused, and a pruned high stamp must not make later writes pay for a
+   * walk that cannot match.
    */
   private volatile PrefixWatermarks prefixClearWatermarks = PrefixWatermarks.EMPTY;
 
   /**
-   * Callback fired once per successful {@link #demoteIfRemoteNodeIdInvalid}
+   * Callback fired once per successful {@link #demoteIfDecisionInvalid}
    * demotion; {@code null} disables the notification. Volatile: registered
    * once at engine construction, read on every demotion.
    */
   private volatile @Nullable Consumer<String> demotedSink;
 
   /**
-   * Immutable prefix-watermark snapshot. {@code maxStamp} is the highest stamp
-   * ever recorded, pruned entries included: a write above it cannot match any
-   * live prefix, so the walk is skipped.
+   * Immutable prefix-watermark snapshot. {@code maxStamp} is the highest
+   * <em>live</em> stamp, or {@code 0} when {@code stamps} is empty: a write
+   * above it cannot match any live prefix, so the walk is skipped. Pruning
+   * recomputes it, so a removed high stamp does not leave a stale fast-path
+   * bound behind.
    */
   private record PrefixWatermarks(Map<String, Long> stamps, long maxStamp) {
     static final PrefixWatermarks EMPTY = new PrefixWatermarks(Map.of(), 0L);
@@ -212,7 +215,7 @@ public class EntryLifecycleImpl implements EntryLifecycle {
    *         {@code false} when no demotion applied
    */
   @Override
-  public Applied demoteIfRemoteNodeIdInvalid(String key, @Nullable CacheEntry entry, long now) {
+  public Applied demoteIfDecisionInvalid(String key, @Nullable CacheEntry entry, long now) {
     if (entry == null || (!ttlPolicy.isLogicallyExpired(entry, now) && !needsDemotion(entry))) {
       return EntryMutations.unchanged(entry);
     }
@@ -261,12 +264,10 @@ public class EntryLifecycleImpl implements EntryLifecycle {
    * never incarnation-invalid — the Worker is the sole authority for cooling the key down, so only
    * it can orphan a HOT stamp.
    *
-   * <p><b>Zero-allocation shape.</b> NORMAL/COOL entries — the overwhelming majority of the table —
-   * exit on the first state read; every invalid shape requires a HOT entry. The stamp's fields are
-   * read through the entry's plain getters; the entry already holds the immutable
-   * {@link io.github.hyshmily.zeta.model.DecisionStamp} by reference, so no record is built on this
-   * hot path. The probe is the fused {@code isCurrentIncarnation(nodeId, epoch)} lookup: one map
-   * read answers both liveness and the epoch equality.
+   * <p>
+   * The probe is allocation-free: the stamp is read through the entry's plain
+   * getters, and {@code isCurrentIncarnation(nodeId, epoch)} answers liveness and
+   * epoch equality in one map read.
    *
    * @param entry the L1 entry to inspect (never {@code null})
    * @return {@code true} when the entry carries a stale Worker decision
@@ -333,6 +334,21 @@ public class EntryLifecycleImpl implements EntryLifecycle {
   ) {
     CacheEntry live = entry != null && !ttlPolicy.isLogicallyExpired(entry) ? entry : null;
     if (live != null && live.isElevated()) {
+      if (live.getKeyState() == KeyState.COOL && promoteHot) {
+        // Degraded-mode local promotion on a value write: the write path must reach the same
+        // COOL -> HOT state the read path's reconciliation would, while retaining the COOL lease
+        // for the recovery reassertion.
+        long hotHard = ttlPolicy.resolveHotHardTtl(hardTtlMs);
+        long hotSoft = ttlPolicy.resolveHotSoftTtl(softTtlMs);
+        return editEntry(live)
+          .value(value)
+          .version(version)
+          .birthStampSec(TimeSource.monotonicSecondsSinceBoot())
+          .ttlDurations(hotHard, hotSoft)
+          .expiryAt(ttlPolicy.hardExpireAt(hotHard), ttlPolicy.softExpireAt(hotSoft))
+          .keyState(KeyState.HOT)
+          .build();
+      }
       // The elevated regime owns its soft window; a stored 0 is the disabled sentinel and must
       // not be re-enabled by the caller's normal soft TTL.
       long soft = live.getSoftTtlMs();
@@ -347,8 +363,8 @@ public class EntryLifecycleImpl implements EntryLifecycle {
     }
 
     KeyState target = promoteHot ? KeyState.HOT : KeyState.NORMAL;
-    long activeHard = promoteHot ? ttlPolicy.resolveEffectiveHotHard(hardTtlMs) : hardTtlMs;
-    long activeSoft = promoteHot ? ttlPolicy.resolveEffectiveHotSoft(softTtlMs) : softTtlMs;
+    long activeHard = promoteHot ? ttlPolicy.resolveHotHardTtl(hardTtlMs) : hardTtlMs;
+    long activeSoft = promoteHot ? ttlPolicy.resolveHotSoftTtl(softTtlMs) : softTtlMs;
     return newEntry()
       .value(value)
       .version(version)
@@ -360,12 +376,17 @@ public class EntryLifecycleImpl implements EntryLifecycle {
 
   @Override
   public CacheEntry cool(CacheEntry entry, DecisionStamp stamp) {
+    long now = TimeSource.currentTimeMillis();
     long hardTtl = ttlPolicy.coolHardTtlMs(entry);
     long softTtl = ttlPolicy.coolSoftTtlMs(entry);
+    // A COOL rewrite is metadata-only: an already-expired soft window stays expired so
+    // the next read still arms the refresh that was due. A still-fresh window keeps the
+    // COOL cadence; only a value write or a successful refresh re-arms an expired one.
+    long softExpireAt = ttlPolicy.transitionSoftExpireAt(entry, softTtl, TtlPolicy.COOL_PROTECTION_JITTER_RATIO, now);
     return editEntry(entry)
       .decision(stamp)
       .ttlDurations(hardTtl, softTtl)
-      .expiryAt(ttlPolicy.coolHardExpireAt(hardTtl), ttlPolicy.coolSoftExpireAt(softTtl))
+      .expiryAt(ttlPolicy.coolHardExpireAt(hardTtl), softExpireAt)
       .keyState(KeyState.COOL)
       .build();
   }
@@ -373,7 +394,7 @@ public class EntryLifecycleImpl implements EntryLifecycle {
   /**
    * The demotion rewrite: normal TTLs, NORMAL state and the decision stamp cleared in one draft
    * copy. The caller supplies the judgment through
-   * {@link #demoteIfRemoteNodeIdInvalid(String, CacheEntry, long)}, which re-runs the full predicate
+   * {@link #demoteIfDecisionInvalid(String, CacheEntry, long)}, which re-runs the full predicate
    * under the bin lock.
    *
    * <p>Demotion is not a refresh: the value keeps its age, so the normal-life deadline caps the
@@ -440,7 +461,7 @@ public class EntryLifecycleImpl implements EntryLifecycle {
       return invalidatedAt.getIfPresent(key) != null;
     }
 
-    if (version <= clearWatermark.get() || staleAgainstPrefixClear(key, version)) {
+    if (version <= clearWatermark || staleAgainstPrefixClear(key, version)) {
       return true;
     }
 
@@ -486,7 +507,7 @@ public class EntryLifecycleImpl implements EntryLifecycle {
    */
   @Override
   public void recordPrefixClear(String prefix, long clearStamp) {
-    if (prefix == null || prefix.isEmpty() || clearStamp <= clearWatermark.get()) {
+    if (prefix == null || prefix.isEmpty() || clearStamp <= clearWatermark) {
       return;
     }
     Long prev = prefixClearWatermarks.stamps().get(prefix);
@@ -498,20 +519,12 @@ public class EntryLifecycleImpl implements EntryLifecycle {
 
   /**
    * Record several namespace clear watermarks as one snapshot swap; only an
-   * increase is stored.
-   *
-   * <p>The whole batch runs under {@link #watermarkLock}, so concurrent clears
-   * never lose each other and the write path sees one new immutable snapshot.
-   * Entries the table-wide watermark already covers are dropped on the way in —
-   * a stamp at or below it refuses every write the prefix stamp would, so
-   * keeping them would only burden the write-path walk. Past
-   * {@link #MAX_PREFIX_WATERMARKS} the older entries first shed their expired
-   * ones (a watermark only has to outlive the in-flight window); if that leaves
-   * the cap exceeded, the whole live set folds into the table-wide watermark at
-   * the highest stamp involved, which reclaims the capacity and restores the
-   * max-stamp fast path. The stamps being recorded by this call are never
-   * age-evicted: they are the in-flight window's protection, and the wall clock
-   * their stamp encodes can lag a peer's.
+   * increase is stored. Runs under {@link #watermarkLock}, so concurrent clears
+   * never lose each other. Covered stamps are dropped, then past
+   * {@link #MAX_PREFIX_WATERMARKS} the expired entries shed, then the live set
+   * folds into the table-wide watermark. A stamp this call records or raises is
+   * never age-evicted: its encoded wall clock can lag a peer's (design
+   * decisions: cache table).
    *
    * @param clears merged {@code prefix -> clear stamp} entries
    */
@@ -522,17 +535,15 @@ public class EntryLifecycleImpl implements EntryLifecycle {
     }
 
     synchronized (watermarkLock) {
-      long globalWatermark = clearWatermark.get();
       PrefixWatermarks snapshot = prefixClearWatermarks;
       Map<String, Long> previous = snapshot.stamps();
       Map<String, Long> updated = new HashMap<>(previous);
-      boolean changed = updated.values().removeIf(stamp -> stamp <= globalWatermark);
+      boolean changed = updated.values().removeIf(stamp -> stamp <= clearWatermark);
 
-      long maxStamp = snapshot.maxStamp();
       for (Map.Entry<String, Long> clear : clears.entrySet()) {
         String prefix = clear.getKey();
         Long clearStamp = clear.getValue();
-        if (prefix == null || prefix.isEmpty() || clearStamp == null || clearStamp <= globalWatermark) {
+        if (prefix == null || prefix.isEmpty() || clearStamp == null || clearStamp <= clearWatermark) {
           continue;
         }
         Long existing = updated.get(prefix);
@@ -540,13 +551,14 @@ public class EntryLifecycleImpl implements EntryLifecycle {
           continue;
         }
         updated.put(prefix, clearStamp);
-        maxStamp = Math.max(maxStamp, clearStamp);
         changed = true;
       }
+      // Fast return
       if (!changed) {
         return;
       }
 
+      //--------------------Age Eviction : memory control for cache(similar to LRU)--------------------------
       if (updated.size() > MAX_PREFIX_WATERMARKS) {
         long expireAtMs =
           TimeSource.currentTimeMillis() - TimeUnit.SECONDS.toMillis(cacheConfig.getTombstoneTtlSeconds());
@@ -557,16 +569,18 @@ public class EntryLifecycleImpl implements EntryLifecycle {
             // A stamp this call adds or raises is that call's own in-flight window:
             // its encoded wall clock may lag a peer's, so it is never age-evicted.
             boolean recordedHere =
-              recorded != null && recorded > globalWatermark && recorded > previous.getOrDefault(mark.getKey(), 0L);
+              recorded != null && recorded > clearWatermark && recorded > previous.getOrDefault(mark.getKey(), 0L);
             return !recordedHere && StampClock.timestampOf(mark.getValue()) <= expireAtMs;
           });
+
+        //-------------------Utimate Eviction : fold the whole live set into the table-wide watermark--------
         if (updated.size() > MAX_PREFIX_WATERMARKS) {
           // The age escape did not reclaim enough room: fold the whole live set
           // into the table-wide watermark at the highest stamp involved. Folding
           // refuses strictly more writes, which is the safe direction.
-          long foldStamp = updated.values().stream().mapToLong(Long::longValue).max().orElse(globalWatermark);
-          clearWatermark.accumulateAndGet(foldStamp, Math::max);
-          prefixClearWatermarks = new PrefixWatermarks(Map.of(), maxStamp);
+          long foldStamp = updated.values().stream().mapToLong(Long::longValue).max().orElse(clearWatermark);
+          clearWatermark = Math.max(clearWatermark, foldStamp);
+          prefixClearWatermarks = new PrefixWatermarks(Map.of(), 0L);
           log.debug(
             "Prefix clear watermarks saturated at {} with {} still live; folding into the table-wide watermark at stamp {}",
             MAX_PREFIX_WATERMARKS,
@@ -577,7 +591,8 @@ public class EntryLifecycleImpl implements EntryLifecycle {
         }
       }
 
-      prefixClearWatermarks = new PrefixWatermarks(updated.isEmpty() ? Map.of() : Map.copyOf(updated), maxStamp);
+      long liveMax = updated.values().stream().mapToLong(Long::longValue).max().orElse(0L);
+      prefixClearWatermarks = new PrefixWatermarks(updated.isEmpty() ? Map.of() : Map.copyOf(updated), liveMax);
     }
   }
 
@@ -621,28 +636,24 @@ public class EntryLifecycleImpl implements EntryLifecycle {
     }
 
     synchronized (watermarkLock) {
-      long globalWatermark = clearWatermark.accumulateAndGet(clearStamp, Math::max);
+      clearWatermark = Math.max(clearWatermark, clearStamp);
       PrefixWatermarks snapshot = prefixClearWatermarks;
       Map<String, Long> current = snapshot.stamps();
       if (current.isEmpty()) {
         return;
       }
-      if (globalWatermark >= snapshot.maxStamp()) {
+      if (clearWatermark >= snapshot.maxStamp()) {
         // Every live prefix stamp is subsumed: publish the empty snapshot without
         // allocating a map or walking it.
-        prefixClearWatermarks = new PrefixWatermarks(Map.of(), globalWatermark);
+        prefixClearWatermarks = new PrefixWatermarks(Map.of(), 0L);
         return;
       }
       Map<String, Long> pruned = new HashMap<>(current);
-      if (!pruned.values().removeIf(stamp -> stamp <= globalWatermark)) {
+      if (!pruned.values().removeIf(stamp -> stamp <= clearWatermark)) {
         return;
       }
-      // The max is monotonic: a pruned stamp still bounds every future walk, so
-      // the fast path survives the clear that removed it.
-      prefixClearWatermarks = new PrefixWatermarks(
-        pruned.isEmpty() ? Map.of() : Map.copyOf(pruned),
-        snapshot.maxStamp()
-      );
+      long liveMax = pruned.values().stream().mapToLong(Long::longValue).max().orElse(0L);
+      prefixClearWatermarks = new PrefixWatermarks(pruned.isEmpty() ? Map.of() : Map.copyOf(pruned), liveMax);
     }
   }
 }

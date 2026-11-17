@@ -15,6 +15,8 @@
  */
 package io.github.hyshmily.zeta.cache.cachesupport;
 
+import static org.springframework.transaction.support.TransactionSynchronization.STATUS_COMMITTED;
+
 import io.github.hyshmily.zeta.cache.HotKeyCache;
 import io.github.hyshmily.zeta.util.Internal;
 import org.springframework.transaction.support.TransactionSynchronization;
@@ -62,22 +64,36 @@ import org.springframework.transaction.support.TransactionSynchronizationManager
 public final class TransactionSupport {
 
   /**
+   * Depth of the current thread's {@code afterCommit} callback stack. A task that registers another
+   * task while this is positive must run inline: Spring snapshots the synchronization list before
+   * invoking {@code afterCommit}, so a callback registered from inside one is never visited and
+   * would be discarded at cleanup.
+   *
+   * <p>No initial value: {@code null} is depth zero. A transaction-path read therefore creates no
+   * {@code ThreadLocalMap} entry on a business thread that never enters {@code runInAfterCommit}.
+   */
+  private static final ThreadLocal<Integer> AFTER_COMMIT_DEPTH = new ThreadLocal<>();
+
+  /**
    * Utility class — no instantiation.
    */
   private TransactionSupport() {}
 
   /**
-   * Whether a Spring transaction synchronization is active on the current thread.
+   * Whether a Spring transaction synchronization is active on the current thread and the caller is
+   * not already inside one of this class's {@code afterCommit} callbacks.
    *
    * <p>Write paths consult this to decide version-allocation timing: inside a transaction the
    * version bump must wait for {@code afterCommit} (registration order = version order),
    * otherwise an uncommitted bump leaks on rollback and a same-transaction put-then-invalidate
-   * inverts versions.
+   * inverts versions. {@link TransactionSynchronizationManager#isSynchronizationActive()} stays
+   * true for the whole {@code afterCommit}/{@code afterCompletion} phase, so the transaction flag
+   * alone would defer a nested write into a callback Spring has already snapshotted.
    *
    * @return {@code true} when deferred work would run in {@code afterCommit}
    */
   private static boolean isTransactionActive() {
-    return TransactionSynchronizationManager.isSynchronizationActive();
+    return TransactionSynchronizationManager.isSynchronizationActive() && AFTER_COMMIT_DEPTH.get() == null;
   }
 
   /**
@@ -117,18 +133,52 @@ public final class TransactionSupport {
    * Registers the task on the current transaction's afterCommit hook. The caller
    * has already established that a synchronization is active.
    *
+   * <p>A task registered by another synchronization's {@code afterCommit} callback is absent from
+   * the snapshot Spring is already iterating. Its own {@code afterCommit} is therefore skipped, so
+   * it runs from {@code afterCompletion} when the transaction committed instead of being silently
+   * discarded at cleanup.
+   *
    * @param task the task to run after commit
    */
   private static void registerAfterCommit(Runnable task) {
     TransactionSynchronizationManager.registerSynchronization(
       new TransactionSynchronization() {
+        private boolean ran;
+
         @Override
         public void afterCommit() {
+          ran = true;
           // The committing thread runs one deferred task; a failure reaches the commit caller
           // as a transaction-system error instead of being silently skipped.
-          task.run();
+          runInAfterCommit(task);
+        }
+
+        @Override
+        public void afterCompletion(int status) {
+          if (!ran && status == STATUS_COMMITTED) {
+            ran = true;
+            runInAfterCommit(task);
+          }
         }
       }
     );
+  }
+
+  /**
+   * Runs one deferred task with the after-commit depth raised, so a cache write or invalidation it
+   * triggers runs inline instead of registering a callback the current commit cannot visit.
+   */
+  private static void runInAfterCommit(Runnable task) {
+    Integer depth = AFTER_COMMIT_DEPTH.get();
+    AFTER_COMMIT_DEPTH.set(depth == null ? 1 : depth + 1);
+    try {
+      task.run();
+    } finally {
+      if (depth == null) {
+        AFTER_COMMIT_DEPTH.remove();
+      } else {
+        AFTER_COMMIT_DEPTH.set(depth);
+      }
+    }
   }
 }

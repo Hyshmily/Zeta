@@ -21,6 +21,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import io.github.hyshmily.zeta.cache.cachesupport.TransactionSupport;
 import java.util.concurrent.atomic.AtomicBoolean;
 import org.junit.jupiter.api.Test;
+import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 /**
@@ -107,6 +108,61 @@ class TransactionSupportTest {
       assertThatThrownBy(() -> TransactionSynchronizationManager.getSynchronizations().forEach(s -> s.afterCommit()))
         .isInstanceOf(IllegalStateException.class)
         .hasMessage("post-commit-fail");
+    } finally {
+      TransactionSynchronizationManager.clear();
+    }
+  }
+
+  /**
+   * Spring snapshots the synchronization list before invoking {@code afterCommit}, so a task
+   * registered from inside our callback is never visited. It must run inline instead of being
+   * silently discarded with the transaction.
+   */
+  @Test
+  void aTaskRegisteredInsideAfterCommitRunsInline() {
+    TransactionSynchronizationManager.initSynchronization();
+    try {
+      AtomicBoolean executed = new AtomicBoolean(false);
+      TransactionSupport.run(false, () -> TransactionSupport.run(false, () -> executed.set(true)));
+
+      assertThat(TransactionSynchronizationManager.getSynchronizations()).hasSize(1);
+      TransactionSynchronizationManager.getSynchronizations().forEach(TransactionSynchronization::afterCommit);
+
+      assertThat(executed).isTrue();
+      assertThat(TransactionSynchronizationManager.getSynchronizations())
+        .as("the nested task did not register a callback the commit cannot visit")
+        .hasSize(1);
+    } finally {
+      TransactionSynchronizationManager.clear();
+    }
+  }
+
+  /**
+   * A task registered by another synchronization's {@code afterCommit} callback is absent from the
+   * snapshot Spring is iterating. Its own callback runs from {@code afterCompletion} instead of
+   * being lost at cleanup.
+   */
+  @Test
+  void aTaskRegisteredByAnotherAfterCommitCallbackRunsOnCompletion() {
+    TransactionSynchronizationManager.initSynchronization();
+    try {
+      AtomicBoolean executed = new AtomicBoolean(false);
+      TransactionSynchronizationManager.registerSynchronization(
+        new TransactionSynchronization() {
+          @Override
+          public void afterCommit() {
+            TransactionSupport.run(false, () -> executed.set(true));
+          }
+        }
+      );
+
+      TransactionSynchronizationManager.getSynchronizations().forEach(TransactionSynchronization::afterCommit);
+      assertThat(executed).as("the commit snapshot cannot revisit the late callback").isFalse();
+
+      TransactionSynchronizationManager.getSynchronizations().forEach(s ->
+        s.afterCompletion(TransactionSynchronization.STATUS_COMMITTED)
+      );
+      assertThat(executed).isTrue();
     } finally {
       TransactionSynchronizationManager.clear();
     }

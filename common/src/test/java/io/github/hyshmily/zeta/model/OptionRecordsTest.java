@@ -90,7 +90,7 @@ class OptionRecordsTest {
     void negativeTtlIsRejected() {
       assertThatThrownBy(() -> GetPolicy.of(-1L, 0L, true, StalePolicy.SOFT_REFRESH))
         .isInstanceOf(IllegalArgumentException.class)
-        .hasMessageContaining("must not be negative");
+        .hasMessageContaining("out of range");
     }
 
     @Test
@@ -110,7 +110,7 @@ class OptionRecordsTest {
     void negativeDurationIsRejected() {
       assertThatThrownBy(() -> EntryDraft.blank(null).value("v").version(1L).ttl(-1L, 0L))
         .isInstanceOf(IllegalArgumentException.class)
-        .hasMessageContaining("must not be negative");
+        .hasMessageContaining("out of range");
       assertThatThrownBy(() -> EntryDraft.blank(null).value("v").version(1L).ttl(0L, -1L)).isInstanceOf(
         IllegalArgumentException.class
       );

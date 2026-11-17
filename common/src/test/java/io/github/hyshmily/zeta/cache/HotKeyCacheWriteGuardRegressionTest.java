@@ -16,6 +16,7 @@
 package io.github.hyshmily.zeta.cache;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
@@ -31,10 +32,11 @@ import io.github.hyshmily.zeta.cache.cachesupport.circuitbreaker.CircuitBreaker;
 import io.github.hyshmily.zeta.cache.cachesupport.circuitbreaker.CircuitBreakerRegistry;
 import io.github.hyshmily.zeta.cache.cachesupport.lifecycle.EntryLifecycle;
 import io.github.hyshmily.zeta.cache.cachesupport.lifecycle.EntryLifecycleImpl;
+import io.github.hyshmily.zeta.cache.cachesupport.loader.CacheLoader;
 import io.github.hyshmily.zeta.cache.cachesupport.loader.LoadStatus;
 import io.github.hyshmily.zeta.cache.cachesupport.loader.LoaderOutcome;
+import io.github.hyshmily.zeta.cache.cachesupport.loader.singleflight.LoadFlights;
 import io.github.hyshmily.zeta.cache.cachesupport.loader.singleflight.SingleFlight;
-import io.github.hyshmily.zeta.cache.cachesupport.loader.singleflight.SingleFlightImpl;
 import io.github.hyshmily.zeta.cache.cachesupport.policy.GetPolicy;
 import io.github.hyshmily.zeta.cache.cachesupport.policy.InvalidatePolicy;
 import io.github.hyshmily.zeta.cache.cachesupport.policy.StalePolicy;
@@ -61,27 +63,22 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 /**
- * Regression tests for the write-path guard gaps found while auditing
- * {@link HotKeyCache} against the load/populate paths
+ * Pins the write-path guard contracts of {@link HotKeyCache}
  * (design decisions: invalidation, write path, dedup lifecycle, version stamps):
  *
  * <ul>
- *   <li><b>putThrough/refresh resurrection:</b> the write-through apply shared no
- *       anti-resurrection barrier with the other L1 write paths, so an
- *       INVALIDATE landing between the stamp allocation and the compute was
- *       undone by the apply.</li>
- *   <li><b>Refused writes broadcast:</b> a write the local guard refused (newer
- *       resident, or tombstoned) still shipped its stale (value, stamp) to
- *       peers.</li>
- *   <li><b>Worker-regime clobber:</b> the write-through rebuild reset a COOL/HOT
- *       entry's active TTL timestamps to the configured defaults while keeping
- *       the Worker state, and dropped the decision lease with them.</li>
- *   <li><b>Batch duplicate keys:</b> a repeated key was probed, counted and
- *       access-recorded twice, and misfired the batched load's in-flight guard
- *       against its own released ticket.</li>
- *   <li><b>Stale serve is silent:</b> a breaker-open stale fallback recorded no
- *       access, erasing the key's hot-key history for the length of the
- *       outage.</li>
+ *   <li><b>putThrough/refresh anti-resurrection:</b> the write-through apply
+ *       consults the invalidation barrier, so an INVALIDATE landing between the
+ *       stamp allocation and the compute is never undone by the apply.</li>
+ *   <li><b>Refused writes never broadcast:</b> a write the local guard refuses
+ *       (newer resident, or tombstoned) ships nothing to peers.</li>
+ *   <li><b>Worker-regime preservation:</b> the write-through rebuild keeps a
+ *       COOL/HOT entry's active TTL timestamps and its decision lease.</li>
+ *   <li><b>Batch duplicate keys:</b> a repeated key is probed, counted and
+ *       access-recorded once, and never misfires the batched load's in-flight
+ *       guard.</li>
+ *   <li><b>Stale serve records:</b> a breaker-open stale fallback records the
+ *       access, so the key's hot-key history survives the outage.</li>
  * </ul>
  */
 class HotKeyCacheWriteGuardRegressionTest {
@@ -175,8 +172,6 @@ class HotKeyCacheWriteGuardRegressionTest {
         cache.invalidate("k", new InvalidatePolicy(InvalidatePolicy.Scope.LOCAL, false));
         return "refreshed";
       },
-      0L,
-      0L,
       false
     );
 
@@ -197,7 +192,7 @@ class HotKeyCacheWriteGuardRegressionTest {
     caffeineCache.put("k", normalEntry("v1", 5L));
 
     for (int i = 0; i < 3; i++) {
-      cache.refresh("k", () -> null, 0L, 0L, false);
+      cache.refresh("k", () -> null, false);
     }
 
     CacheEntry entry = caffeineCache.getIfPresent("k");
@@ -246,11 +241,9 @@ class HotKeyCacheWriteGuardRegressionTest {
 
   /**
    * The Worker owns the TTL regime of a COOL entry: a putThrough/refresh is a
-   * value write, not a regime change. The former rebuild through
-   * {@code newEntry} reset the active hard/soft timestamps to the configured
-   * defaults while keeping the COOL state — extending the cooling window past
-   * the Worker's bound — and silently dropped the decision lease, the demotion
-   * anchor for orphaned HOT entries.
+   * value write, not a regime change, so the active hard/soft timestamps and the
+   * decision lease — the demotion anchor for orphaned HOT entries — survive
+   * verbatim.
    */
   @Test
   @DisplayName("refresh on a COOL entry keeps the Worker's TTL regime, state, stamp and lease")
@@ -260,7 +253,7 @@ class HotKeyCacheWriteGuardRegressionTest {
     CacheEntry cool = workerCoolEntry("w1", 5L);
     caffeineCache.put("k", cool);
 
-    cache.refresh("k", () -> "v2", 0L, 0L, false);
+    cache.refresh("k", () -> "v2", false);
 
     CacheEntry entry = (CacheEntry) caffeineCache.getIfPresent("k");
     assertThat(entry.getValue()).isEqualTo("v2");
@@ -297,15 +290,134 @@ class HotKeyCacheWriteGuardRegressionTest {
     assertThat(entry.getNormalHardTtlMs()).isEqualTo(cool.getNormalHardTtlMs());
   }
 
+  // ── Value-only renewal: the resident's TTL policy survives a refresh ──
+
+  /**
+   * A refresh must not reset a NORMAL entry's stored TTL baseline to the
+   * configured default: the entry owns its lifecycle policy, and a TTL change
+   * belongs to a put. This pins the pre-fix behavior where a default-options
+   * refresh collapsed a custom-TTL entry onto the global default.
+   */
+  @Test
+  @DisplayName("refresh on a NORMAL entry keeps its stored normal TTL baseline")
+  void refresh_normalEntry_keepsStoredTtlBaseline() {
+    when(stampClock.nextStamp()).thenReturn(10L);
+    HotKeyCache cache = newCache();
+    long now = TimeSource.currentTimeMillis();
+    caffeineCache.put(
+      "k",
+      EntryDraft.blank(null)
+        .value("v1")
+        .version(1L)
+        .ttl(4_000L, 1_000L, 4_000L, 1_000L)
+        .expiryAt(now + 4_000L, now + 1_000L)
+        .keyState(KeyState.NORMAL)
+        .build()
+    );
+
+    cache.refresh("k", () -> "v2", false);
+
+    CacheEntry entry = (CacheEntry) caffeineCache.getIfPresent("k");
+    assertThat(entry.getValue()).isEqualTo("v2");
+    assertThat(entry.getHardTtlMs()).isEqualTo(4_000L);
+    assertThat(entry.getSoftTtlMs()).isEqualTo(1_000L);
+    assertThat(entry.getNormalHardTtlMs()).isEqualTo(4_000L);
+    assertThat(entry.getNormalSoftTtlMs()).isEqualTo(1_000L);
+  }
+
+  /** The loader overload is the refresh seam: it calls reload, never load. */
+  @Test
+  @DisplayName("refresh with a CacheLoader calls reload, not load")
+  void refresh_cacheLoader_usesReload() {
+    when(stampClock.nextStamp()).thenReturn(10L);
+    HotKeyCache cache = newCache();
+    AtomicInteger loads = new AtomicInteger();
+    CacheLoader<String, String> loader = new CacheLoader<>() {
+      @Override
+      public String load(String key) {
+        loads.incrementAndGet();
+        return "loaded";
+      }
+
+      @Override
+      public String reload(String key) {
+        return "reloaded";
+      }
+    };
+
+    cache.refresh("k", loader, false);
+
+    assertThat((Object) cache.peek("k")).isEqualTo("reloaded");
+    assertThat(loads.get()).isZero();
+  }
+
+  /** A value the loader declines never takes L1 residency, even on an explicit refresh. */
+  @Test
+  @DisplayName("refresh with a loader-declined value leaves the resident untouched")
+  void refresh_cacheLoaderDeclined_leavesResident() {
+    when(stampClock.nextStamp()).thenReturn(10L);
+    HotKeyCache cache = newCache();
+    caffeineCache.put("k", normalEntry("v1", 1L));
+    CacheLoader<String, String> loader = new CacheLoader<>() {
+      @Override
+      public String load(String key) {
+        return "v2";
+      }
+
+      @Override
+      public boolean isCacheable(String value) {
+        return false;
+      }
+    };
+
+    cache.refresh("k", loader, false);
+
+    CacheEntry entry = (CacheEntry) caffeineCache.getIfPresent("k");
+    assertThat(entry.getValue()).isEqualTo("v1");
+    assertThat(entry.getDataVersion()).isEqualTo(1L);
+  }
+
+  /** The inherited permanent baseline is validated before the source is called. */
+  @Test
+  @DisplayName("a synced refresh of a permanent NORMAL entry is rejected before the load")
+  void refresh_syncedPermanentResident_rejectedBeforeLoad() {
+    when(stampClock.nextStamp()).thenReturn(10L);
+    HotKeyCache cache = newCache();
+    long now = TimeSource.currentTimeMillis();
+    caffeineCache.put(
+      "k",
+      EntryDraft.blank(null)
+        .value("v1")
+        .version(1L)
+        .ttl(Long.MAX_VALUE, 30_000L, Long.MAX_VALUE, 30_000L)
+        .expiryAt(Long.MAX_VALUE, now + 30_000L)
+        .keyState(KeyState.NORMAL)
+        .build()
+    );
+    AtomicInteger loads = new AtomicInteger();
+
+    assertThatThrownBy(() ->
+      cache.refresh(
+        "k",
+        () -> {
+          loads.incrementAndGet();
+          return "v2";
+        },
+        true
+      )
+    )
+      .isInstanceOf(IllegalArgumentException.class)
+      .hasMessageContaining("permanent entry cannot be synced");
+    assertThat(loads.get()).isZero();
+    assertThat(((CacheEntry) caffeineCache.getIfPresent("k")).getValue()).isEqualTo("v1");
+  }
+
   // ── Batch reads dedup their keys ──
 
   /**
-   * A repeated key ("k", "k") used to be probed, counted and access-recorded
-   * twice, and the batched load then misfired its own in-flight guard: the
-   * first iteration released the key's dedup ticket, so the second saw
-   * {@code !isCurrent} and treated its own release as a concurrent
-   * invalidation — skipping the store and adding a second access record for
-   * one logical read.
+   * A repeated key ("k", "k") is probed, counted and access-recorded once, and
+   * the batched load releases its dedup ticket exactly once, so one logical read
+   * never looks like a concurrent invalidation and the store is not skipped.
    */
   @Test
   @DisplayName("batch get probes, counts and loads each unique key once")
@@ -329,7 +441,7 @@ class HotKeyCacheWriteGuardRegressionTest {
     verify(accessCounter, times(1)).record("k", true);
   }
 
-  /** Control for the duplicate-key fix: a repeated HIT counts once as well. */
+  /** Control for the duplicate-key contract: a repeated HIT counts once as well. */
   @Test
   @DisplayName("batch get counts a repeated hit once")
   void batchGet_duplicateHitKeys_countedOnce() {
@@ -344,13 +456,26 @@ class HotKeyCacheWriteGuardRegressionTest {
     verify(accessCounter, times(1)).record("k", true);
   }
 
+  /** A null batch reader is cache-only, matching the single-key engine contract. */
+  @Test
+  @DisplayName("batch get with a null reader serves hits and omits misses")
+  void batchGet_nullReader_servesHitsAndOmitsMisses() {
+    HotKeyCache cache = newCache();
+    caffeineCache.put("hit", normalEntry("v", 3L));
+
+    Map<String, String> result = cache.get(List.of("hit", "miss"), null, GetPolicy.defaults());
+
+    assertThat(result).containsOnlyKeys("hit").containsEntry("hit", "v");
+    assertThat(cache.stats().hitCount()).isEqualTo(1);
+    assertThat(cache.stats().missCount()).isEqualTo(1);
+  }
+
   // ── A stale serve is a served read ──
 
   /**
    * Under an open breaker the suppressed load degrades to a hard-valid stale
-   * entry. That serve used to record no access, so a key hot enough to be read
-   * throughout the outage stopped looking hot exactly when the Worker needed
-   * to know — the access history of the outage window was silently erased.
+   * entry, and that serve records the access, so a key read throughout the
+   * outage keeps its hot-key signal exactly when the Worker needs to know.
    */
   @Test
   @DisplayName("breaker-open stale serve records the access")

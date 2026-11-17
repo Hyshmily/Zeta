@@ -60,9 +60,8 @@ class BroadcastBufferMergeTest {
   }
 
   /**
-   * The P1 regression: record(v6) followed by an out-of-order record(v5) must keep
-   * v6 pending — the flush must send the newest write's REFRESH, not the regressed
-   * one a peer would skip.
+   * record(v6) followed by an out-of-order record(v5) keeps v6 pending: the flush
+   * sends the newest write's REFRESH, never the regressed one a peer would skip.
    */
   @Test
   void record_outOfOrderRecords_shouldKeepNewestVersion() {

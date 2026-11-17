@@ -21,7 +21,7 @@ import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 
 import io.github.hyshmily.zeta.autoconfigure.ZetaProperties;
 import io.github.hyshmily.zeta.cache.cachesupport.circuitbreaker.CircuitBreaker;
-import io.github.hyshmily.zeta.cache.cachesupport.circuitbreaker.CircuitBreakerImpl;
+import io.github.hyshmily.zeta.cache.cachesupport.circuitbreaker.SlidingWindowBreaker;
 import io.github.hyshmily.zeta.util.TimeSource;
 import java.io.IOException;
 import java.io.Serializable;
@@ -35,21 +35,21 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 /**
- * Tests for {@link CircuitBreakerImpl} covering all state transitions,
+ * Tests for {@link SlidingWindowBreaker} covering all state transitions,
  * backoff scenarios and the disabled path.
  *
  * <p>Admission is explicit-stamp only: every {@code tryAcquireStamp} result
  * is settled exactly once with its own stamp — batch (one thread, many keys)
  * and nested calls can never cross-consume probes.
  */
-class CircuitBreakerImplTest {
+class SlidingWindowBreakerTest {
 
   /** Exception type exercising the direct-interface filter walk: {@code Serializable} is only on this class. */
   @SuppressWarnings("serial")
   private static final class SerializableRuntimeException extends RuntimeException implements Serializable {}
 
   private ZetaProperties.CircuitBreaker config;
-  private CircuitBreakerImpl breaker;
+  private SlidingWindowBreaker breaker;
 
   @BeforeEach
   void setUp() {
@@ -61,13 +61,13 @@ class CircuitBreakerImplTest {
     config.setWindowBuckets(10);
     config.setSingleTestIntervalMs(100);
     config.setLogEnabled(false);
-    breaker = new CircuitBreakerImpl(config);
+    breaker = new SlidingWindowBreaker(config);
   }
 
   @Test
   void tryAcquireStamp_whenDisabled_shouldReturnClosed() {
     config.setEnabled(false);
-    CircuitBreakerImpl cb = new CircuitBreakerImpl(config);
+    SlidingWindowBreaker cb = new SlidingWindowBreaker(config);
     assertThat(cb.tryAcquireStamp()).isEqualTo(CircuitBreaker.STAMP_CLOSED);
   }
 
@@ -94,7 +94,7 @@ class CircuitBreakerImplTest {
   @Test
   void onSuccess_whenDisabled_shouldDoNothing() {
     config.setEnabled(false);
-    CircuitBreakerImpl cb = new CircuitBreakerImpl(config);
+    SlidingWindowBreaker cb = new SlidingWindowBreaker(config);
     cb.onSuccess(CircuitBreaker.STAMP_CLOSED);
     assertThat(cb.isOpen()).isFalse();
   }
@@ -103,7 +103,7 @@ class CircuitBreakerImplTest {
   void onSuccess_whenClosed_shouldIncrementSuccess() throws Exception {
     config.setFailThreshold(0.4);
     config.setRequestVolumeThreshold(3);
-    breaker = new CircuitBreakerImpl(config);
+    breaker = new SlidingWindowBreaker(config);
     breaker.onSuccess(CircuitBreaker.STAMP_CLOSED);
     breaker.onSuccess(CircuitBreaker.STAMP_CLOSED);
     failClosedThrice(breaker);
@@ -122,15 +122,15 @@ class CircuitBreakerImplTest {
   }
 
   /**
-   * Regression: the OPEN→HALF_OPEN transitioner probe owns its stamp, so its
-   * settlement releases exactly its own slot and the half-open quota keeps
-   * admitting exactly {@code halfOpenMaxProbes} probes.
+   * The OPEN→HALF_OPEN transitioner probe owns its stamp, so its settlement
+   * releases exactly its own slot and the half-open quota keeps admitting exactly
+   * {@code halfOpenMaxProbes} probes.
    */
   @Test
   void halfOpenProbeQuota_notLeakedByTransitionerOnSuccess() throws Exception {
     config.setHalfOpenMaxProbes(2);
     config.setConsecutiveSuccessThreshold(100); // stay HALF_OPEN for the whole test
-    breaker = new CircuitBreakerImpl(config);
+    breaker = new SlidingWindowBreaker(config);
     triggerOpen();
     Thread.sleep(config.getSingleTestIntervalMs() + 50);
 
@@ -153,7 +153,7 @@ class CircuitBreakerImplTest {
   void halfOpenStamps_settleIndependentlyOnOneThread() throws Exception {
     config.setHalfOpenMaxProbes(2);
     config.setConsecutiveSuccessThreshold(100); // stay HALF_OPEN for the whole test
-    breaker = new CircuitBreakerImpl(config);
+    breaker = new SlidingWindowBreaker(config);
     triggerOpen();
     Thread.sleep(config.getSingleTestIntervalMs() + 50);
 
@@ -176,7 +176,7 @@ class CircuitBreakerImplTest {
   void halfOpenStamps_staleGeneration_isIgnored() throws Exception {
     config.setHalfOpenMaxProbes(1);
     config.setConsecutiveSuccessThreshold(100);
-    breaker = new CircuitBreakerImpl(config);
+    breaker = new SlidingWindowBreaker(config);
     triggerOpen();
     Thread.sleep(config.getSingleTestIntervalMs() + 50);
 
@@ -202,7 +202,7 @@ class CircuitBreakerImplTest {
   @Test
   void onFailure_whenDisabled_shouldDoNothing() {
     config.setEnabled(false);
-    CircuitBreakerImpl cb = new CircuitBreakerImpl(config);
+    SlidingWindowBreaker cb = new SlidingWindowBreaker(config);
     cb.onFailure(new RuntimeException("ignored"), CircuitBreaker.STAMP_CLOSED);
   }
 
@@ -215,7 +215,7 @@ class CircuitBreakerImplTest {
   @Test
   void isOpen_whenDisabled_shouldReturnFalse() {
     config.setEnabled(false);
-    CircuitBreakerImpl cb = new CircuitBreakerImpl(config);
+    SlidingWindowBreaker cb = new SlidingWindowBreaker(config);
     cb.onFailure(new RuntimeException("x"), CircuitBreaker.STAMP_CLOSED);
     cb.onFailure(new RuntimeException("x"), CircuitBreaker.STAMP_CLOSED);
     assertThat(cb.isOpen()).isFalse();
@@ -281,7 +281,7 @@ class CircuitBreakerImplTest {
     config.setLogEnabled(true);
     config.setFailThreshold(0.1);
     config.setRequestVolumeThreshold(1);
-    CircuitBreakerImpl cb = new CircuitBreakerImpl(config);
+    SlidingWindowBreaker cb = new SlidingWindowBreaker(config);
 
     cb.onFailure(new RuntimeException("trip"), CircuitBreaker.STAMP_CLOSED);
     // tryAcquireStamp on open breaker triggers log in half-open path
@@ -299,7 +299,7 @@ class CircuitBreakerImplTest {
     config.setFailThreshold(0.1);
     config.setRequestVolumeThreshold(1);
     config.setIncludeExceptions(List.of("java.lang.RuntimeException"));
-    breaker = new CircuitBreakerImpl(config);
+    breaker = new SlidingWindowBreaker(config);
 
     breaker.onFailure(new NullPointerException("boom"), CircuitBreaker.STAMP_CLOSED);
 
@@ -310,7 +310,7 @@ class CircuitBreakerImplTest {
   @Test
   void onFailure_includeUnrelated_shouldTreatAsIgnorable() {
     config.setIncludeExceptions(List.of("java.lang.IllegalStateException"));
-    breaker = new CircuitBreakerImpl(config);
+    breaker = new SlidingWindowBreaker(config);
 
     breaker.onFailure(new NullPointerException("unrelated"), CircuitBreaker.STAMP_CLOSED);
 
@@ -323,7 +323,7 @@ class CircuitBreakerImplTest {
     config.setFailThreshold(0.1);
     config.setRequestVolumeThreshold(1);
     config.setIncludeExceptions(List.of(Serializable.class.getName()));
-    breaker = new CircuitBreakerImpl(config);
+    breaker = new SlidingWindowBreaker(config);
 
     // Serializable is not on RuntimeException's superclass chain — only the
     // direct-interface walk can match it.
@@ -338,7 +338,7 @@ class CircuitBreakerImplTest {
     config.setFailThreshold(0.1);
     config.setRequestVolumeThreshold(1);
     config.setIncludeExceptions(List.of("java.io.IOException"));
-    breaker = new CircuitBreakerImpl(config);
+    breaker = new SlidingWindowBreaker(config);
 
     breaker.onFailure(new RuntimeException("wrapped", new IOException("root")), CircuitBreaker.STAMP_CLOSED);
 
@@ -357,7 +357,7 @@ class CircuitBreakerImplTest {
     // must COUNT the failure, and the depth cap must terminate the walk even
     // though the cycle a → b → a never produces a new node.
     config.setIncludeExceptions(List.of("java.lang.RuntimeException"));
-    breaker = new CircuitBreakerImpl(config);
+    breaker = new SlidingWindowBreaker(config);
 
     RuntimeException a = new RuntimeException("a");
     RuntimeException b = new RuntimeException("b");
@@ -373,7 +373,7 @@ class CircuitBreakerImplTest {
   @Test
   void onFailure_excludeMatched_shouldBeIgnorable() {
     config.setExcludeExceptions(List.of("java.lang.IllegalStateException"));
-    breaker = new CircuitBreakerImpl(config);
+    breaker = new SlidingWindowBreaker(config);
 
     for (int i = 0; i < 5; i++) {
       breaker.onFailure(new IllegalStateException("ignored"), CircuitBreaker.STAMP_CLOSED);
@@ -389,7 +389,7 @@ class CircuitBreakerImplTest {
     config.setRequestVolumeThreshold(1);
     config.setExcludeExceptions(List.of("java.io.IOException"));
     config.setIncludeExceptions(List.of("java.lang.Exception"));
-    breaker = new CircuitBreakerImpl(config);
+    breaker = new SlidingWindowBreaker(config);
 
     // Excluded wins: IOException ⊂ Exception, but the exclude list matched first.
     breaker.onFailure(new IOException("excluded"), CircuitBreaker.STAMP_CLOSED);
@@ -410,7 +410,7 @@ class CircuitBreakerImplTest {
     config.setFailThreshold(0.1);
     config.setRequestVolumeThreshold(1);
     config.setIncludeExceptions(List.of("com.missing.DoesNotExist", "java.lang.IllegalStateException"));
-    breaker = new CircuitBreakerImpl(config);
+    breaker = new SlidingWindowBreaker(config);
 
     // Unrelated to the only resolvable include name → ignorable.
     breaker.onFailure(new NullPointerException("unrelated"), CircuitBreaker.STAMP_CLOSED);
@@ -431,7 +431,7 @@ class CircuitBreakerImplTest {
     config.setFailThreshold(0.1);
     config.setRequestVolumeThreshold(1);
     config.setIncludeExceptions(List.of("com.missing.DoesNotExist"));
-    breaker = new CircuitBreakerImpl(config);
+    breaker = new SlidingWindowBreaker(config);
 
     breaker.onFailure(new NullPointerException("any"), CircuitBreaker.STAMP_CLOSED);
     assertThat(breaker.isOpen()).isTrue();
@@ -449,7 +449,7 @@ class CircuitBreakerImplTest {
   void probeCredit_failedEpisodes_tightenQuota() throws Exception {
     config.setHalfOpenMaxProbes(2);
     config.setConsecutiveSuccessThreshold(100); // stay HALF_OPEN for the whole test
-    breaker = new CircuitBreakerImpl(config);
+    breaker = new SlidingWindowBreaker(config);
     triggerOpen();
 
     // Episode 1: the transitioner probe fails → credit 1.0 → 0.8.
@@ -483,7 +483,7 @@ class CircuitBreakerImplTest {
   void probeCredit_probeSuccessDoesNotWidenQuotaMidEpisode() throws Exception {
     config.setHalfOpenMaxProbes(3);
     config.setConsecutiveSuccessThreshold(100); // stay HALF_OPEN for the whole test
-    breaker = new CircuitBreakerImpl(config);
+    breaker = new SlidingWindowBreaker(config);
     triggerOpen();
 
     // Episode 1 fails: credit 1.0 → 0.8, so the next quota is (int) (3 × 0.8) = 2.
@@ -512,7 +512,7 @@ class CircuitBreakerImplTest {
   void probeCredit_failedEpisodePenalizesOnce() throws Exception {
     config.setHalfOpenMaxProbes(3);
     config.setConsecutiveSuccessThreshold(100);
-    breaker = new CircuitBreakerImpl(config);
+    breaker = new SlidingWindowBreaker(config);
     triggerOpen();
 
     Thread.sleep(150);
@@ -544,7 +544,7 @@ class CircuitBreakerImplTest {
     config.setHalfOpenMaxProbes(2);
     config.setConsecutiveSuccessThreshold(1);
     config.setSingleTestIntervalMs(40);
-    breaker = new CircuitBreakerImpl(config);
+    breaker = new SlidingWindowBreaker(config);
     triggerOpen();
 
     // Episode 1 fails → credit 0.8, quota (int) (2 × 0.8) = 1.
@@ -563,7 +563,7 @@ class CircuitBreakerImplTest {
       }
       breaker.onSuccess(probe);
       assertThat(breaker.isOpen()).isFalse();
-      // Re-open from CLOSED (the window was cleared on recovery): a failed episode is the
+      // Re-open from CLOSED (the window floor advanced on recovery): a failed episode is the
       // only thing that penalizes, and this is not one.
       breaker.onFailure(new RuntimeException("trip"), CircuitBreaker.STAMP_CLOSED);
     }
@@ -575,7 +575,7 @@ class CircuitBreakerImplTest {
     assertThat(breaker.tryAcquireStamp()).isEqualTo(CircuitBreaker.STAMP_REJECTED);
   }
 
-  // ── Concurrency & lifecycle regressions ──
+  // ── Concurrency & lifecycle ──
 
   /**
    * {@code STAMP_REJECTED} settled as success must not dilute the window: counted,
@@ -586,7 +586,7 @@ class CircuitBreakerImplTest {
   void onSuccess_withRejectedStamp_shouldNotPolluteWindow() {
     config.setFailThreshold(0.4);
     config.setRequestVolumeThreshold(1);
-    breaker = new CircuitBreakerImpl(config);
+    breaker = new SlidingWindowBreaker(config);
     breaker.onSuccess(CircuitBreaker.STAMP_REJECTED);
     breaker.onSuccess(CircuitBreaker.STAMP_REJECTED);
     breaker.onFailure(new RuntimeException("trip"), CircuitBreaker.STAMP_CLOSED);
@@ -601,7 +601,7 @@ class CircuitBreakerImplTest {
   @Test
   void onSuccess_staleProbeStampInClosed_shouldNotPolluteWindow() throws Exception {
     config.setFailThreshold(0.4);
-    breaker = new CircuitBreakerImpl(config);
+    breaker = new SlidingWindowBreaker(config);
     breaker.onFailure(new RuntimeException("trip"), CircuitBreaker.STAMP_CLOSED);
     breaker.onFailure(new RuntimeException("trip"), CircuitBreaker.STAMP_CLOSED);
     assertThat(breaker.isOpen()).isTrue();
@@ -623,8 +623,8 @@ class CircuitBreakerImplTest {
   }
 
   /**
-   * Disabling a breaker mid-incident must not flap: the forced CLOSED clears the
-   * window, so a re-enabled breaker does not re-trip on the failure surplus that
+   * Disabling a breaker mid-incident must not flap: the forced CLOSED advances the
+   * window floor, so a re-enabled breaker does not re-trip on the failure surplus that
    * was live when it was disabled (which would OPEN/CLOSED-flap and re-log until
    * the old buckets aged out).
    */
@@ -633,7 +633,7 @@ class CircuitBreakerImplTest {
     config.setWindowTimeMs(200);
     config.setFailThreshold(0.1);
     config.setRequestVolumeThreshold(1);
-    breaker = new CircuitBreakerImpl(config);
+    breaker = new SlidingWindowBreaker(config);
     breaker.onFailure(new RuntimeException("trip"), CircuitBreaker.STAMP_CLOSED);
     assertThat(breaker.isOpen()).isTrue();
 
@@ -653,7 +653,7 @@ class CircuitBreakerImplTest {
     config.setHalfOpenMaxProbes(1);
     config.setConsecutiveSuccessThreshold(100); // stay HALF_OPEN for the whole test
     config.setSingleTestIntervalMs(80);
-    breaker = new CircuitBreakerImpl(config);
+    breaker = new SlidingWindowBreaker(config);
     triggerOpen();
 
     Thread.sleep(150);
@@ -668,29 +668,66 @@ class CircuitBreakerImplTest {
     assertThat(revived).isNotEqualTo(wedged);
   }
 
+  /**
+   * An idle HALF_OPEN episode must not look wedged when a burst starts. The first
+   * acquisition of the burst is activity and re-anchors the clock, so the surplus
+   * admission within the same interval is rejected instead of resetting the
+   * episode and retiring the probes that just started.
+   */
+  @Test
+  void idleHalfOpenEpisode_burstAdmission_doesNotResetTheEpisode() {
+    config.setFailThreshold(0.1);
+    config.setRequestVolumeThreshold(1);
+    config.setHalfOpenMaxProbes(2);
+    config.setConsecutiveSuccessThreshold(100); // stay HALF_OPEN for the whole test
+    config.setSingleTestIntervalMs(80);
+    breaker = new SlidingWindowBreaker(config);
+    breaker.onFailure(new RuntimeException("trip"), CircuitBreaker.STAMP_CLOSED);
+
+    try {
+      TimeSource.setTimeOffsetForTest(0L, 100L);
+      long settle = breaker.tryAcquireStamp();
+      assertThat(settle).isGreaterThan(CircuitBreaker.STAMP_CLOSED);
+      breaker.onSuccess(settle); // inflight back to 0, episode stays HALF_OPEN
+
+      // Idle past the wedged-episode interval; the next burst re-anchors on its first slot.
+      TimeSource.setTimeOffsetForTest(0L, 200L);
+      long first = breaker.tryAcquireStamp();
+      long second = breaker.tryAcquireStamp();
+      assertThat(first).isGreaterThan(CircuitBreaker.STAMP_CLOSED);
+      assertThat(second).isEqualTo(first);
+
+      // Both slots are held and the burst is fresh: a surplus is rejected, not reset.
+      assertThat(breaker.tryAcquireStamp()).isEqualTo(CircuitBreaker.STAMP_REJECTED);
+
+      breaker.onSuccess(first);
+      breaker.onSuccess(second);
+    } finally {
+      TimeSource.setTimeOffsetForTest(0L, 0L);
+    }
+  }
+
   /** Bucket/window validation fails fast before any array or division happens. */
   @Test
   void constructor_rejectsInvalidWindowConfig() {
     config.setWindowBuckets(0);
-    assertThatThrownBy(() -> new CircuitBreakerImpl(config)).isInstanceOf(IllegalArgumentException.class);
+    assertThatThrownBy(() -> new SlidingWindowBreaker(config)).isInstanceOf(IllegalArgumentException.class);
 
     config.setWindowBuckets(10);
     config.setWindowTimeMs(5); // < window-buckets
-    assertThatThrownBy(() -> new CircuitBreakerImpl(config)).isInstanceOf(IllegalArgumentException.class);
+    assertThatThrownBy(() -> new SlidingWindowBreaker(config)).isInstanceOf(IllegalArgumentException.class);
   }
 
-  // ── Window accounting regressions ──
+  // ── Window accounting ──
 
   /**
-   * The trip gate in front of the success sweep must be exact, never collapsing:
-   * every (success, failure) combination must reach the verdict the rate/volume
+   * The trip gate in front of the success sweep is exact, never collapsing:
+   * every (success, failure) combination reaches the verdict the rate/volume
    * rule gives.
    *
-   * <p>Each row feeds the whole failure count in one burst, so a gate derived from
-   * the <em>previous</em> evaluation's success total is exercised across several
-   * volume/ratio shapes — including rows where a second evaluation happens at a
-   * higher failure total, which is what a stale cross-window watermark used to
-   * turn into a non-terminating compare-and-set.
+   * <p>Each row feeds the whole failure count in one burst across several
+   * volume/ratio shapes, including rows where a second evaluation happens at a
+   * higher failure total.
    */
   @Test
   void evaluateThreshold_matchesRateRuleForEveryVolumeAndRatio() {
@@ -701,7 +738,7 @@ class CircuitBreakerImplTest {
 
     for (long success : successes) {
       for (long failure : failures) {
-        CircuitBreakerImpl cb = new CircuitBreakerImpl(config);
+        SlidingWindowBreaker cb = new SlidingWindowBreaker(config);
         for (long i = 0; i < success; i++) {
           cb.onSuccess(CircuitBreaker.STAMP_CLOSED);
         }
@@ -717,15 +754,13 @@ class CircuitBreakerImplTest {
   }
 
   /**
-   * Regression: a window that evaluates once, stays CLOSED, then keeps failing must
-   * reach a second evaluation at the higher failure total.
+   * A window that evaluates once, stays CLOSED, then keeps failing reaches a
+   * second evaluation at the higher failure total.
    *
-   * <p>The gate used to be derived from a packed watermark whose low bits held the
-   * previous success total; the follow-up CAS compared the <em>shifted</em> window
-   * version against the raw packed value, so it never succeeded and the loop spun
-   * forever on the settling thread. Every row here cross the gate twice while a
-   * non-zero success total is in the window — the first row ({@code success=1},
-   * {@code failure=19}) is the smallest shape that reproduces it.
+   * <p>Every row here crosses the gate twice while a non-zero success total is in
+   * the window, so the burst terminates in a trip instead of spinning on the
+   * settling thread; the first row ({@code success=1}, {@code failure=19}) is the
+   * smallest such shape.
    */
   @Test
   void evaluateThreshold_repeatsAtHigherFailureTotal_terminatesAndTrips() {
@@ -734,7 +769,7 @@ class CircuitBreakerImplTest {
     long[][] rows = { { 1, 19 }, { 19, 20 }, { 20, 101 }, { 100, 101 } };
 
     for (long[] row : rows) {
-      CircuitBreakerImpl cb = new CircuitBreakerImpl(config);
+      SlidingWindowBreaker cb = new SlidingWindowBreaker(config);
       for (long i = 0; i < row[0]; i++) {
         cb.onSuccess(CircuitBreaker.STAMP_CLOSED);
       }
@@ -758,7 +793,7 @@ class CircuitBreakerImplTest {
     config.setWindowBuckets(4);
     config.setFailThreshold(0.5);
     config.setRequestVolumeThreshold(2);
-    breaker = new CircuitBreakerImpl(config);
+    breaker = new SlidingWindowBreaker(config);
 
     for (int i = 0; i < 3; i++) {
       breaker.onFailure(new RuntimeException("trip"), CircuitBreaker.STAMP_CLOSED);
@@ -766,7 +801,7 @@ class CircuitBreakerImplTest {
     assertThat(breaker.isOpen()).isTrue();
 
     config.setEnabled(false);
-    breaker.tryAcquireStamp(); // forced CLOSED, window cleared
+    breaker.tryAcquireStamp(); // forced CLOSED, window floor advanced
     config.setEnabled(true);
 
     Thread.sleep(300);
@@ -775,15 +810,14 @@ class CircuitBreakerImplTest {
   }
 
   /**
-   * A bucket idle past half the 24-bit window-id range must rotate to the current
-   * slice, not be mistaken for an out-of-order settlement. The old distance test
-   * discarded every settlement until the id wrapped, so a cold prefix resumed with
-   * a breaker that could no longer trip.
+   * A bucket idle past half the 24-bit window-id range rotates to the current
+   * slice instead of being mistaken for an out-of-order settlement, so a cold
+   * prefix resumes with a breaker that can still trip.
    */
   @Test
   void bucketIdlePastHalfTheWindowRange_stillCountsTheNextSettlement() {
     config.setRequestVolumeThreshold(1);
-    breaker = new CircuitBreakerImpl(config);
+    breaker = new SlidingWindowBreaker(config);
     // Default slide is 1 s; move the monotonic clock a little past 2^23 slices.
     long offsetMs = ((1L << 23) + 1_000L) * 1_000L;
     TimeSource.setTimeOffsetForTest(0L, offsetMs);
@@ -797,14 +831,14 @@ class CircuitBreakerImplTest {
 
   /**
    * Re-enabling a breaker must not inherit the window that was live when it was disabled:
-   * the forced CLOSED clears the buckets before it publishes the state, so the first
+   * the forced CLOSED advances the window floor in the same epoch CAS, so the first
    * failure afterwards evaluates a fresh window instead of the pre-disable surplus.
    */
   @Test
   void reEnabledBreaker_doesNotTripFromTheDisabledWindow() throws Exception {
     config.setFailThreshold(0.5);
     config.setRequestVolumeThreshold(20);
-    breaker = new CircuitBreakerImpl(config);
+    breaker = new SlidingWindowBreaker(config);
 
     for (int i = 0; i < 30; i++) {
       breaker.onFailure(new RuntimeException("trip"), CircuitBreaker.STAMP_CLOSED);
@@ -837,7 +871,7 @@ class CircuitBreakerImplTest {
     config.setConsecutiveSuccessThreshold(2);
     config.setSingleTestIntervalMs(1);
     config.setLogEnabled(false);
-    breaker = new CircuitBreakerImpl(config);
+    breaker = new SlidingWindowBreaker(config);
     triggerOpen();
 
     int threads = 4;
@@ -903,7 +937,7 @@ class CircuitBreakerImplTest {
     config.setFailThreshold(0.1);
     config.setRequestVolumeThreshold(1);
     // Re-create with new config
-    breaker = new CircuitBreakerImpl(config);
+    breaker = new SlidingWindowBreaker(config);
     breaker.onFailure(new RuntimeException("trip"), CircuitBreaker.STAMP_CLOSED);
     Thread.sleep(50);
   }

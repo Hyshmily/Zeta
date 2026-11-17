@@ -33,12 +33,12 @@ import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.AppenderBase;
 import io.github.hyshmily.zeta.autoconfigure.ZetaProperties;
 import io.github.hyshmily.zeta.cache.cachesupport.circuitbreaker.CircuitBreaker;
-import io.github.hyshmily.zeta.cache.cachesupport.circuitbreaker.CircuitBreakerImpl;
+import io.github.hyshmily.zeta.cache.cachesupport.circuitbreaker.SlidingWindowBreaker;
 import io.github.hyshmily.zeta.cache.cachesupport.circuitbreaker.CircuitBreakerRegistry;
 import io.github.hyshmily.zeta.cache.cachesupport.loader.LoadStatus;
 import io.github.hyshmily.zeta.cache.cachesupport.loader.LoaderOutcome;
 import io.github.hyshmily.zeta.cache.cachesupport.loader.singleflight.SingleFlight;
-import io.github.hyshmily.zeta.cache.cachesupport.loader.singleflight.SingleFlightImpl;
+import io.github.hyshmily.zeta.cache.cachesupport.loader.singleflight.LoadFlights;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -76,7 +76,7 @@ class SingleFlightTest {
   @BeforeEach
   void setUp() {
     executor = Executors.newCachedThreadPool();
-    disabledBreaker = new CircuitBreakerImpl(new ZetaProperties.CircuitBreaker());
+    disabledBreaker = new SlidingWindowBreaker(new ZetaProperties.CircuitBreaker());
     singleFlight = new TestSingleFlight(1000, 10, 5, executor, registryOf(disabledBreaker));
   }
 
@@ -623,7 +623,7 @@ class SingleFlightTest {
     cfg.setEnabled(true);
     cfg.setFailThreshold(0.1);
     cfg.setRequestVolumeThreshold(1);
-    CircuitBreakerImpl breaker = new CircuitBreakerImpl(cfg);
+    SlidingWindowBreaker breaker = new SlidingWindowBreaker(cfg);
     breaker.onFailure(new RuntimeException("trip"), CircuitBreaker.STAMP_CLOSED);
     TestSingleFlight sf = new TestSingleFlight(1000, 10, 5, executor, registryOf(breaker));
     assertThat(sf.loadOutcome("key", () -> "val").status()).isEqualTo(LoadStatus.SUPPRESSED_BREAKER);
@@ -668,7 +668,7 @@ class SingleFlightTest {
     cfg.setEnabled(true);
     cfg.setFailThreshold(0.1);
     cfg.setRequestVolumeThreshold(1);
-    CircuitBreakerImpl breaker = new CircuitBreakerImpl(cfg);
+    SlidingWindowBreaker breaker = new SlidingWindowBreaker(cfg);
     breaker.onFailure(new RuntimeException("trip"), CircuitBreaker.STAMP_CLOSED);
     TestSingleFlight sf = new TestSingleFlight(1000, 10, 5, executor, registryOf(breaker));
 
@@ -758,7 +758,7 @@ class SingleFlightTest {
   @Test
   void loadCollection_timeout_shouldResolveEmptyAndRetry() throws Exception {
     CountDownLatch slowReader = new CountDownLatch(1);
-    CircuitBreaker breaker = new CircuitBreakerImpl(new ZetaProperties.CircuitBreaker());
+    CircuitBreaker breaker = new SlidingWindowBreaker(new ZetaProperties.CircuitBreaker());
     TestSingleFlight shortTimeout = new TestSingleFlight(1000, 10, 1, executor, registryOf(breaker)); // 1s timeout
 
     Map<String, LoaderOutcome<String>> outcomes = shortTimeout.loadOutcome(List.of("slow", "fast"), key -> {
@@ -842,7 +842,7 @@ class SingleFlightTest {
     cfg.setEnabled(true);
     cfg.setFailThreshold(0.1);
     cfg.setRequestVolumeThreshold(1);
-    CircuitBreakerImpl breaker = new CircuitBreakerImpl(cfg);
+    SlidingWindowBreaker breaker = new SlidingWindowBreaker(cfg);
     breaker.onFailure(new RuntimeException("trip"), CircuitBreaker.STAMP_CLOSED);
     TestSingleFlight sf = new TestSingleFlight(1000, 10, 5, executor, registryOf(breaker));
 
@@ -1130,7 +1130,7 @@ class SingleFlightTest {
     ExecutorService pool = Executors.newFixedThreadPool(8);
     CollectingAppender appender = new CollectingAppender();
     ch.qos.logback.classic.Logger logger = ((LoggerContext) LoggerFactory.getILoggerFactory()).getLogger(
-      SingleFlightImpl.class
+      LoadFlights.class
     );
     Level originalLevel = logger.getLevel();
     logger.setLevel(Level.DEBUG);

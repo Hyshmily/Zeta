@@ -60,23 +60,29 @@ final class TestSync {
   }
 
   void handleRefresh(SyncMessage message) {
-    policy.value(value(message), context);
+    context.apply(value(message), policy);
   }
 
   void handlePut(SyncMessage message) {
-    policy.value(value(message), context);
+    context.apply(value(message), policy);
   }
 
   void handleLocalInvalidate(SyncMessage message) {
-    policy.invalidate(value(message), context);
+    context.apply(value(message), policy);
   }
 
   void handleClearAll(long stamp) {
-    policy.clear(new Batch.Clear(List.of(new SyncMessage(0L, "clear-all", SyncType.INVALIDATE_ALL, stamp))), context);
+    context.apply(
+      new Batch.Clear(List.of(new SyncMessage(0L, "clear-all", SyncType.INVALIDATE_ALL, stamp))),
+      policy
+    );
   }
 
   void handleClearPrefix(String prefix, long stamp) {
-    policy.clear(new Batch.Clear(List.of(new SyncMessage(0L, prefix, SyncType.INVALIDATE_PREFIX, stamp))), context);
+    context.apply(
+      new Batch.Clear(List.of(new SyncMessage(0L, prefix, SyncType.INVALIDATE_PREFIX, stamp))),
+      policy
+    );
   }
 
   private static Batch.Value value(SyncMessage message) {

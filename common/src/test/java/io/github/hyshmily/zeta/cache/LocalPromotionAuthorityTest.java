@@ -95,10 +95,10 @@ class LocalPromotionAuthorityTest {
     CacheEntry normal = lifecycle.editEntry(coolEntry()).keyState(KeyState.NORMAL).build();
 
     when(healthView.isClusterHealthy()).thenReturn(false);
-    assertThat(promotion.isPromotable("k", normal)).isTrue();
+    assertThat(promotion.isDegradedPromotable("k", normal)).isTrue();
 
     when(healthView.isClusterHealthy()).thenReturn(true);
-    assertThat(promotion.isPromotable("k", normal)).isFalse();
+    assertThat(promotion.isDegradedPromotable("k", normal)).isFalse();
   }
 
   @Test
@@ -145,6 +145,89 @@ class LocalPromotionAuthorityTest {
     assertThat(promoted.decision()).isNull();
     assertThat(promoted.isWorkerManaged()).isFalse();
     assertThat(promoted.isLocalOverrideHot()).isFalse();
+  }
+
+  /**
+   * A promotion is metadata-only: it must not move an already-expired soft window
+   * into the future, or the next read would serve stale data without arming the
+   * refresh that was due.
+   */
+  @Test
+  void promotingASoftExpiredEntryKeepsItsExpiredSoftDeadline() {
+    when(healthView.isClusterHealthy()).thenReturn(false);
+    long now = TimeSource.currentTimeMillis();
+    CacheEntry softExpired = lifecycle
+      .editEntry(coolEntry())
+      .ttlDurations(60_000, 15_000)
+      .expiryAt(now + 60_000, now - 1_000)
+      .build();
+    cache.put("k", softExpired);
+
+    promotion.onAdmitted("k");
+    assertThat(promotion.promoteAdmitted()).isEqualTo(1);
+
+    CacheEntry promoted = cache.getIfPresent("k");
+    assertThat(promoted.getKeyState()).isEqualTo(KeyState.HOT);
+    assertThat(promoted.getSoftExpireAtMs()).isEqualTo(softExpired.getSoftExpireAtMs());
+    assertThat(promoted.getSoftExpireAtMs()).isLessThan(TimeSource.currentTimeMillis());
+  }
+
+  /**
+   * A disabled hot soft TTL is the new regime: the past soft deadline must be cleared, or every
+   * read of the promoted entry stays stale and re-arms a refresh forever.
+   */
+  @Test
+  void promotingASoftExpiredEntryWithDisabledHotSoftTtlClearsTheDeadline() {
+    ZetaProperties disabledHotSoft = new ZetaProperties();
+    disabledHotSoft.setHotSoftTtlMs(0L);
+    EntryLifecycle disabled = new EntryLifecycleImpl(cache, disabledHotSoft, healthView);
+    LocalPromotion hot = new LocalPromotion(cache, detector, disabled, healthView);
+    when(healthView.isClusterHealthy()).thenReturn(false);
+    long now = TimeSource.currentTimeMillis();
+    CacheEntry softExpired = disabled
+      .newEntry()
+      .value("v")
+      .version(1)
+      .ttl(60_000, 15_000, 60_000, 15_000)
+      .expiryAt(now + 60_000, now - 1_000)
+      .keyState(KeyState.NORMAL)
+      .build();
+    cache.put("k", softExpired);
+
+    hot.onAdmitted("k");
+    assertThat(hot.promoteAdmitted()).isEqualTo(1);
+
+    CacheEntry promoted = cache.getIfPresent("k");
+    assertThat(promoted.getKeyState()).isEqualTo(KeyState.HOT);
+    assertThat(promoted.getSoftTtlMs()).isZero();
+    assertThat(promoted.getSoftExpireAtMs()).isZero();
+    assertThat(disabled.ttlPolicy().isSoftExpired(promoted, now)).isFalse();
+  }
+
+  /** The COOL reassertion is the same metadata-only rewrite and keeps the expired window. */
+  @Test
+  void reassertingASoftExpiredEntryKeepsItsExpiredSoftDeadline() {
+    when(healthView.isClusterHealthy()).thenReturn(false);
+    cache.put("k", coolEntry());
+    promotion.onAdmitted("k");
+    promotion.promoteAdmitted();
+
+    CacheEntry promoted = cache.getIfPresent("k");
+    long now = TimeSource.currentTimeMillis();
+    CacheEntry softExpired = lifecycle
+      .editEntry(promoted)
+      .ttlDurations(promoted.getHardTtlMs(), promoted.getSoftTtlMs())
+      .expiryAt(promoted.getHardExpireAtMs(), now - 1_000)
+      .build();
+    cache.put("k", softExpired);
+
+    when(healthView.isClusterHealthy()).thenReturn(true);
+    when(healthView.isCurrentIncarnation("w1", 1L)).thenReturn(true);
+    promotion.reassertIfNeeded("k", softExpired, now);
+
+    CacheEntry reasserted = cache.getIfPresent("k");
+    assertThat(reasserted.getKeyState()).isEqualTo(KeyState.COOL);
+    assertThat(reasserted.getSoftExpireAtMs()).isEqualTo(softExpired.getSoftExpireAtMs());
   }
 
   private CacheEntry coolEntry() {

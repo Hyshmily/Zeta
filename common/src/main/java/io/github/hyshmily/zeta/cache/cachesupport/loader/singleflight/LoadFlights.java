@@ -55,7 +55,7 @@ import org.springframework.util.Assert;
  */
 @Slf4j
 @Internal
-public class SingleFlightImpl implements SingleFlight {
+public class LoadFlights implements SingleFlight {
 
   private final CircuitBreakerRegistry breakerRegistry;
   /** Key → the flight currently serving it. */
@@ -67,7 +67,7 @@ public class SingleFlightImpl implements SingleFlight {
 
   /** Readers executing right now — the in-flight gauge. */
   private final AtomicInteger runningLoads = new AtomicInteger();
-  /** Loads submitted but not yet settled — the backlog the high-water WARN watches. */
+  /** Loads submitted but not yet settled — the backlog the high-water DEBUG line watches. */
   private final AtomicInteger pendingLoads = new AtomicInteger();
   /** Leader-only reader timeouts, the source-degraded stall signal. */
   private final AtomicLong timeoutCounter = new AtomicLong();
@@ -84,7 +84,7 @@ public class SingleFlightImpl implements SingleFlight {
    * @param executor        executor running non-caller-affine readers
    * @param breakerRegistry per-prefix breaker shards
    */
-  public SingleFlightImpl(
+  public LoadFlights(
     int maxSize,
     int ttlSec,
     int timeoutSeconds,
@@ -326,11 +326,12 @@ public class SingleFlightImpl implements SingleFlight {
       breaker.onSuccess(stamp);
       return value == null ? LoaderOutcome.sourceEmpty() : LoaderOutcome.loaded(value);
     } catch (Throwable t) {
-      breaker.onFailure(causeOf(t), stamp);
+      Throwable cause = causeOf(t);
+      breaker.onFailure(cause, stamp);
       if (t instanceof Error err) {
         throw err;
       }
-      return LoaderOutcome.failed(causeOf(t));
+      return LoaderOutcome.failed(cause);
     } finally {
       runningLoads.decrementAndGet();
     }
@@ -447,20 +448,17 @@ public class SingleFlightImpl implements SingleFlight {
       throw e;
     }
     boolean leader = flight != null && flight == created[0];
-    if (leader) {
-      if (closed.get()) {
-        // close() may have drained the table before this insertion became visible, and a
-        // concurrent invalidate(key) may have removed the flight in the same window. Settle and
-        // fail the flight unconditionally: a withdrawal gated on "the removal won" would leak the
-        // breaker probe and leave a follower that already joined waiting forever.
-        inFlightLoads.asMap().remove(key, flight);
-        if (flight.trySettle() && flight.breaker() != null) {
-          flight.breaker().onAbandoned(flight.stamp());
-        }
-        flight.completeExceptionally(new RejectedExecutionException("SingleFlight closed"));
-        return new Election(CLOSED, false);
+    if (leader && closed.get()) {
+      // close() may have drained the table before this insertion became visible, and a
+      // concurrent invalidate(key) may have removed the flight in the same window. Settle and
+      // fail the flight unconditionally: a withdrawal gated on "the removal won" would leak the
+      // breaker probe and leave a follower that already joined waiting forever.
+      inFlightLoads.asMap().remove(key, flight);
+      if (flight.trySettle() && flight.breaker() != null) {
+        flight.breaker().onAbandoned(flight.stamp());
       }
-      logHighBacklog();
+      flight.completeExceptionally(new RejectedExecutionException("SingleFlight closed"));
+      return new Election(CLOSED, false);
     }
     return flight == null ? new Election(DENIED, false) : new Election(flight, leader);
   }
@@ -481,6 +479,7 @@ public class SingleFlightImpl implements SingleFlight {
       }
       throw e;
     }
+    logHighBacklog();
     submitted.whenComplete((result, error) -> finishFlight(key, flight, result, error));
     return flight;
   }
@@ -536,7 +535,7 @@ public class SingleFlightImpl implements SingleFlight {
   private void finishFlight(String key, InFlight flight, Object result, Throwable error) {
     boolean retired = inFlightLoads.asMap().remove(key, flight);
     // Decrement on settlement, not on return: a task queued behind a saturated
-    // executor must stay visible to the backlog WARN for its whole life. The
+    // executor must stay visible to the backlog DEBUG line for its whole life. The
     // shutdown drain may have released it first.
     if (flight.tryReleasePending()) {
       pendingLoads.decrementAndGet();
@@ -573,8 +572,8 @@ public class SingleFlightImpl implements SingleFlight {
    * timeout would interrupt the caller's own work and there is no pool slot to release.
    */
   private <T> LoaderOutcome<T> runInline(String key, InFlight flight, Supplier<T> reader, Consumer<? super T> commit) {
-    pendingLoads.incrementAndGet();
-    flight.claimPending();
+    // Inline loads never enter the executor: pendingLoads is the executor backlog gauge, so
+    // this path must not claim or release it. runningLoads is maintained by executeLeaderTask.
     T value;
     try {
       value = executeLeaderTask(flight, reader, commit);
@@ -701,14 +700,14 @@ public class SingleFlightImpl implements SingleFlight {
   }
 
   /**
-   * Reports a newly elected leader that takes the backlog over its threshold. Runs
-   * after the dedup insertion, outside the Caffeine bin lock, and before this load's
-   * own submission is counted, so the reading excludes it.
+   * Reports a newly submitted leader that takes the executor backlog over its threshold. Runs
+   * after a successful submission, outside the Caffeine bin lock, so only loads that actually
+   * entered the executor count.
    */
   private void logHighBacklog() {
-    long backlogAfterThisLoad = pendingLoads.get() + 1;
-    if (backlogAfterThisLoad > highInFlightThreshold) {
-      log.debug("SingleFlight in-flight queue is high: {}/{}", backlogAfterThisLoad, inFlightMaxSize);
+    long backlog = pendingLoads.get();
+    if (backlog > highInFlightThreshold) {
+      log.debug("SingleFlight in-flight queue is high: {}/{}", backlog, inFlightMaxSize);
     }
   }
 

@@ -15,16 +15,19 @@
  */
 package io.github.hyshmily.zeta.cache;
 
+import static io.github.hyshmily.zeta.constants.ZetaConstants.TOPK_INCR;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
 
 import io.github.hyshmily.zeta.Zeta;
 import io.github.hyshmily.zeta.hotkeydetector.HotKeyDetector;
 import io.github.hyshmily.zeta.reporting.KeyReporter;
+import java.util.Map;
 import java.util.concurrent.ScheduledExecutorService;
 import org.junit.jupiter.api.Test;
 
@@ -36,76 +39,118 @@ class AccessCounterRecordTest {
   private final ScheduledExecutorService scheduler = mock(ScheduledExecutorService.class);
 
   private AccessCounter counter() {
-    AccessCounter counter = spy(new AccessCounter(detector, reporter, scheduler, 50L, 500L));
-    doNothing().when(counter).add(anyString());
-    doNothing().when(counter).addDetection(anyString());
-    doNothing().when(counter).addReportOnly(anyString());
-    return counter;
+    return new AccessCounter(detector, reporter, scheduler, 50L, 500L);
   }
 
   @Test
-  void recordWithReportingUsesTheMergedPath() {
+  void readPathReportFeedsTheMergedReservoir() {
     AccessCounter counter = counter();
 
     counter.record("k", true);
 
-    verify(counter).add("k");
-    verify(counter, never()).addDetection(anyString());
-    verify(counter, never()).addReportOnly(anyString());
+    assertThat(counter.pendingKeyCount()).isPositive();
+    verify(detector, never()).addDirect(anyString(), anyLong());
+    verify(reporter, never()).publishDirect(anyMap());
   }
 
   @Test
-  void recordWithoutReportingUsesDetectionOnly() {
+  void readPathNoReportFeedsTheSketchDirectly() {
     AccessCounter counter = counter();
 
     counter.record("k", false);
 
-    verify(counter).addDetection("k");
-    verify(counter, never()).add(anyString());
-    verify(counter, never()).addReportOnly(anyString());
+    verify(detector).addDirect("k", TOPK_INCR);
+    assertThat(counter.pendingKeyCount()).isZero();
+    verify(reporter, never()).publishDirect(anyMap());
   }
 
   @Test
-  void tagModeRecordUsesTheMergedPath() {
+  void recordUsesTheMergedReservoir() {
     AccessCounter counter = counter();
 
-    counter.record("k", Zeta.TagMode.RECORD);
+    counter.record("k", 5L, Zeta.TagMode.RECORD);
 
-    verify(counter).add("k");
-    verify(counter, never()).addDetection(anyString());
-    verify(counter, never()).addReportOnly(anyString());
+    assertThat(counter.pendingKeyCount()).isPositive();
+    verify(detector, never()).addDirect(anyString(), anyLong());
+    verify(reporter, never()).publishDirect(anyMap());
   }
 
   @Test
-  void tagModeDetectOnlySkipsReporting() {
+  void detectOnlyUsesTheExplicitCount() {
     AccessCounter counter = counter();
 
-    counter.record("k", Zeta.TagMode.DETECT_ONLY);
+    counter.record("k", 5L, Zeta.TagMode.DETECT_ONLY);
 
-    verify(counter).addDetection("k");
-    verify(counter, never()).add(anyString());
-    verify(counter, never()).addReportOnly(anyString());
+    verify(detector).addDirect("k", 5L);
+    assertThat(counter.pendingKeyCount()).isZero();
+    verify(reporter, never()).publishDirect(anyMap());
   }
 
   @Test
-  void tagModeReportOnlySkipsLocalCounting() {
+  void reportOnlyUsesTheExplicitCount() {
     AccessCounter counter = counter();
 
-    counter.record("k", Zeta.TagMode.REPORT_ONLY);
+    counter.record("k", 5L, Zeta.TagMode.REPORT_ONLY);
 
-    verify(counter).addReportOnly("k");
-    verify(counter, never()).add(anyString());
-    verify(counter, never()).addDetection(anyString());
+    verify(reporter).publishDirect(Map.of("k", 5L));
+    assertThat(counter.pendingKeyCount()).isZero();
+    verify(detector, never()).addDirect(anyString(), anyLong());
   }
 
   @Test
-  void tagModeSilentRunsNothing() {
+  void silentRunsNothing() {
     AccessCounter counter = counter();
 
-    counter.record("k", Zeta.TagMode.SILENT);
+    counter.record("k", 5L, Zeta.TagMode.SILENT);
 
-    verify(counter, never()).add(anyString());
-    verify(counter, never()).addDetection(anyString());
-    verify(counter, never()).addReportOnly(anyString());
+    assertThat(counter.pendingKeyCount()).isZero();
+    verify(detector, never()).addDirect(anyString(), anyLong());
+    verify(reporter, never()).publishDirect(anyMap());
+  }
+
+  @Test
+  void recordAllRecordFeedsTheMergedReservoir() {
+    AccessCounter counter = counter();
+
+    counter.recordAll(Map.of("a", 2L, "b", 3L), Zeta.TagMode.RECORD);
+
+    assertThat(counter.pendingKeyCount()).isPositive();
+    verify(detector, never()).addDirect(anyString(), anyLong());
+    verify(reporter, never()).publishDirect(anyMap());
+  }
+
+  @Test
+  void recordAllDetectOnlyIngestsTheBatch() {
+    AccessCounter counter = counter();
+    Map<String, Long> batch = Map.of("a", 2L, "b", 3L);
+
+    counter.recordAll(batch, Zeta.TagMode.DETECT_ONLY);
+
+    verify(detector).ingest(batch);
+    assertThat(counter.pendingKeyCount()).isZero();
+    verify(reporter, never()).publishDirect(anyMap());
+  }
+
+  @Test
+  void recordAllReportOnlyPublishesTheBatch() {
+    AccessCounter counter = counter();
+    Map<String, Long> batch = Map.of("a", 2L, "b", 3L);
+
+    counter.recordAll(batch, Zeta.TagMode.REPORT_ONLY);
+
+    verify(reporter).publishDirect(batch);
+    assertThat(counter.pendingKeyCount()).isZero();
+    verify(detector, never()).addDirect(anyString(), anyLong());
+  }
+
+  @Test
+  void recordAllSilentRunsNothing() {
+    AccessCounter counter = counter();
+
+    counter.recordAll(Map.of("a", 2L), Zeta.TagMode.SILENT);
+
+    verify(detector, never()).ingest(anyMap());
+    verify(detector, never()).addDirect(anyString(), anyLong());
+    verify(reporter, never()).publishDirect(anyMap());
   }
 }

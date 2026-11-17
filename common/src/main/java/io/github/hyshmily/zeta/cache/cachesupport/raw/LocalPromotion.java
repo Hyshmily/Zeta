@@ -28,7 +28,6 @@ import io.github.hyshmily.zeta.util.Internal;
 import io.github.hyshmily.zeta.util.TimeSource;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
-import org.jspecify.annotations.Nullable;
 
 /**
  * Local-TopK promotion: the policy that lifts a NORMAL (or degraded COOL)
@@ -90,27 +89,28 @@ public final class LocalPromotion {
 
   /**
    * Performs the degraded-mode promotion the read path already admitted through
-   * {@link #isPromotable}: a COOL entry, or a NORMAL entry still carrying a COOL
+   * {@link #isDegradedPromotable}: a COOL entry, or a NORMAL entry still carrying a COOL
    * lease, may go HOT only while the Worker cluster fails the health gate. Plain
    * NORMAL promotion stays event-driven ({@link #onAdmitted} →
    * {@link #promoteAdmitted}), so an ordinary normal hit pays no TopK membership
    * probe.
    *
    * <p>The caller has checked TopK membership and cluster health; the compute
-   * re-verifies residency, logical expiry and {@link #mayPromoteLocally} under
-   * the bin lock. TTL overrides stay lazy through the context.
+   * re-verifies residency, logical expiry and {@link #mayPromote} under
+   * the bin lock. The two override values are passed explicitly, so promotion
+   * does not depend on a read context.
    *
-   * @param cacheKey the cache key
-   * @param ctx      the per-call read context (TTL overrides memoized, at most
-   *                 once per call)
-   * @param now      the per-call epoch-millis sample
+   * @param cacheKey           the cache key
+   * @param hardTtlOverrideMs the per-call hard TTL override (0 = none)
+   * @param softTtlOverrideMs the per-call soft TTL override (0 = none)
+   * @param now                the per-call epoch-millis sample
    * @return the images the bin lock observed ({@code current == null} means the
    *         resident was removed as hard-expired); {@link Applied#changed()} is
    *         {@code false} when the resident was absent, already promoted, or not
    *         promotable
    */
-  public Applied promoteDegraded(String cacheKey, ReadContext ctx, long now) {
-    return promoteIfAllowed(cacheKey, ctx, now);
+  public Applied promoteDegraded(String cacheKey, long hardTtlOverrideMs, long softTtlOverrideMs, long now) {
+    return promoteIfAllowed(cacheKey, hardTtlOverrideMs, softTtlOverrideMs, now);
   }
 
   /**
@@ -124,7 +124,7 @@ public final class LocalPromotion {
    * @param raw      the L1 entry just read (never {@code null})
    * @return {@code true} when the hit needs the promotion path
    */
-  public boolean isPromotable(String cacheKey, CacheEntry raw) {
+  public boolean isDegradedPromotable(String cacheKey, CacheEntry raw) {
     KeyState state = raw.getKeyState();
     DecisionStamp decision = raw.decision();
     boolean degradedCool =
@@ -133,7 +133,8 @@ public final class LocalPromotion {
   }
 
   /**
-   * Whether this write/load may promote the resident to local HOT.
+   * Whether this entry may be promoted to local HOT now, regardless of which
+   * path (read, write or admission drain) asks.
    *
    * <p>A Worker-COOL lease survives a COOL-to-NORMAL refresh, so checking only
    * the state would let a healthy cluster locally override a cool decision.
@@ -143,7 +144,7 @@ public final class LocalPromotion {
    * @param entry the resident entry
    * @return {@code true} when local promotion is allowed
    */
-  public boolean mayPromoteLocally(CacheEntry entry) {
+  public boolean mayPromote(CacheEntry entry) {
     KeyState state = entry.getKeyState();
     if (state == KeyState.HOT) {
       return false;
@@ -292,10 +293,10 @@ public final class LocalPromotion {
     // NORMAL with a COOL lease while healthy) is the common admission duplicate
     // and must not take the bin lock. An expired resident of any state still
     // reaches the compute, which removes it.
-    if (!ttlPolicy.isLogicallyExpired(snapshot, now) && !mayPromoteLocally(snapshot)) {
+    if (!ttlPolicy.isLogicallyExpired(snapshot, now) && !mayPromote(snapshot)) {
       return EntryMutations.unchanged(snapshot);
     }
-    return promoteIfAllowed(key, null, now);
+    return promoteIfAllowed(key, 0L, 0L, now);
   }
 
   /**
@@ -303,23 +304,22 @@ public final class LocalPromotion {
    * lock, then rewrites the entry with the caller's TTL overrides (if any) layered over the
    * entry's own normal baseline.
    *
-   * @param key the key to promote
-   * @param ctx the per-call read context supplying lazy TTL overrides, or {@code null} for none
-   * @param now the per-call epoch-millis sample
+   * @param key                the key to promote
+   * @param hardTtlOverrideMs the per-call hard TTL override (0 = none)
+   * @param softTtlOverrideMs the per-call soft TTL override (0 = none)
+   * @param now                the per-call epoch-millis sample
    * @return the images the bin lock observed; {@link Applied#changed()} is
    *         {@code false} when nothing changed
    */
-  private Applied promoteIfAllowed(String key, @Nullable ReadContext ctx, long now) {
+  private Applied promoteIfAllowed(String key, long hardTtlOverrideMs, long softTtlOverrideMs, long now) {
     return EntryMutations.apply(caffeineCache, key, entry -> {
       if (entry == null || ttlPolicy.isLogicallyExpired(entry, now)) {
         return null;
       }
-      if (!mayPromoteLocally(entry)) {
+      if (!mayPromote(entry)) {
         return entry;
       }
-      long hardOverrideMs = ctx != null ? ctx.hardTtlMs() : 0L;
-      long softOverrideMs = ctx != null ? ctx.softTtlMs() : 0L;
-      return promotedEntry(entry, hardOverrideMs, softOverrideMs);
+      return promotedEntry(entry, hardTtlOverrideMs, softTtlOverrideMs, now);
     });
   }
 
@@ -330,16 +330,26 @@ public final class LocalPromotion {
    *
    * <p>Promotion only ever extends life: the entry's normal TTL baseline is
    * the floor, and the caller's override may raise it further
-   * ({@link TtlPolicy#resolveEffectiveHotHard(long)} /
-   * {@link TtlPolicy#resolveEffectiveHotSoft(long)}). An entry written with a
+   * ({@link TtlPolicy#resolveHotHardTtl(long)} /
+   * {@link TtlPolicy#resolveHotSoftTtl(long)}). An entry written with a
    * longer explicit TTL therefore keeps that lifetime when it becomes HOT.
+   *
+   * <p>Promotion is a metadata rewrite, not a value refresh. A source entry
+   * that is already soft-expired keeps its past soft deadline: moving it to
+   * {@code now + hotSoftTtl} would make stale data look freshly loaded and
+   * suppress its next background refresh for the whole hot window. Only a value
+   * write or a successful refresh re-arms an expired soft window; a still-fresh
+   * window keeps the new regime's cadence. A disabled ({@code 0}) or permanent
+   * ({@code Long.MAX_VALUE}) hot soft TTL is the new regime and replaces the past
+   * deadline outright: keeping it would mark the entry stale on every read.
    *
    * @param entry             the entry to promote (not modified)
    * @param hardTtlOverrideMs the caller's hard TTL override (0 = none)
    * @param softTtlOverrideMs the caller's soft TTL override (0 = none)
+   * @param now               the per-call epoch-millis sample
    * @return the promoted entry to store back
    */
-  private CacheEntry promotedEntry(CacheEntry entry, long hardTtlOverrideMs, long softTtlOverrideMs) {
+  private CacheEntry promotedEntry(CacheEntry entry, long hardTtlOverrideMs, long softTtlOverrideMs, long now) {
     long normalHard = entry.getNormalHardTtlMs() > 0L ? entry.getNormalHardTtlMs() : ttlPolicy.effectiveHardTtlMs();
     long normalSoft = entry.getNormalSoftTtlMs() > 0L ? entry.getNormalSoftTtlMs() : ttlPolicy.effectiveSoftTtlMs();
     // A resolved normal hard baseline of 0 is permanent: a positive override must not turn it into
@@ -347,8 +357,14 @@ public final class LocalPromotion {
     // default may re-enable it — so the caller's override still raises the window.
     long baseHard = normalHard == 0L ? 0L : Math.max(hardTtlOverrideMs, normalHard);
     long baseSoft = Math.max(softTtlOverrideMs, normalSoft);
-    long hotHardTtl = ttlPolicy.resolveEffectiveHotHard(baseHard);
-    long hotSoftTtl = ttlPolicy.resolveEffectiveHotSoft(baseSoft);
-    return entryLifecycle.editEntry(entry).ttl(hotHardTtl, hotSoftTtl).keyState(KeyState.HOT).build();
+    long hotHardTtl = ttlPolicy.resolveHotHardTtl(baseHard);
+    long hotSoftTtl = ttlPolicy.resolveHotSoftTtl(baseSoft);
+    long softExpireAt = ttlPolicy.transitionSoftExpireAt(entry, hotSoftTtl, now);
+    return entryLifecycle
+      .editEntry(entry)
+      .ttlDurations(hotHardTtl, hotSoftTtl)
+      .expiryAt(ttlPolicy.hardExpireAt(hotHardTtl), softExpireAt)
+      .keyState(KeyState.HOT)
+      .build();
   }
 }

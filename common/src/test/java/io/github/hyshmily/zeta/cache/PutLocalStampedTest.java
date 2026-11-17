@@ -20,7 +20,6 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 import io.github.hyshmily.zeta.cache.cachesupport.raw.CacheEntry;
-import io.github.hyshmily.zeta.util.NodeIdentity;
 import io.github.hyshmily.zeta.util.clock.MonotonicStampClock;
 import io.github.hyshmily.zeta.util.clock.StampClock;
 import java.util.concurrent.atomic.AtomicLong;
@@ -38,7 +37,7 @@ class PutLocalStampedTest {
   void putLocal_stampsCreatedEntry() {
     try (
       StampTestSupport support = new StampTestSupport(
-        new MonotonicStampClock(NodeIdentity.getNodeId(), MonotonicStampClock.DEFAULT_MAX_FORWARD_DRIFT_MS)
+        new MonotonicStampClock(1L, MonotonicStampClock.DEFAULT_MAX_FORWARD_DRIFT_MS)
       )
     ) {
       support.cache.putLocal("k", "local", 0L, 0L);
@@ -54,7 +53,7 @@ class PutLocalStampedTest {
   void putLocal_stampsUpdatedEntry() {
     try (
       StampTestSupport support = new StampTestSupport(
-        new MonotonicStampClock(NodeIdentity.getNodeId(), MonotonicStampClock.DEFAULT_MAX_FORWARD_DRIFT_MS)
+        new MonotonicStampClock(1L, MonotonicStampClock.DEFAULT_MAX_FORWARD_DRIFT_MS)
       )
     ) {
       support.l1.put("k", StampTestSupport.entry("old", 5L));

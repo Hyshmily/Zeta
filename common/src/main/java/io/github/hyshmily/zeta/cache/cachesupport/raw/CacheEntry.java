@@ -56,7 +56,8 @@ import org.jspecify.annotations.Nullable;
  * 2^31 − 1 ms (≈ 24.8 days) round-trip exactly in milliseconds; longer TTLs are
  * stored in whole seconds, rounded up, with sub-second error (at most 1 s,
  * &lt; 0.001% relative for any TTL above a day). {@code Long.MAX_VALUE}
- * (permanent) is a dedicated sentinel. Negative TTLs are rejected. The absolute
+ * (permanent) is a dedicated sentinel. Negative TTLs and values above the packed
+ * maximum (other than {@code Long.MAX_VALUE}) are rejected at the boundary. The absolute
  * expire-at timestamps ({@code hardExpireAtMs}/{@code softExpireAtMs}) stay full
  * {@code long}s and are the actual expiry enforcement point; the stored TTLs are
  * nominal values used to rebuild an entry after a state transition and to size
@@ -370,18 +371,35 @@ public class CacheEntry {
    * @throws IllegalArgumentException for negative or out-of-range values
    */
   private static int encodeTtl(long ttlMs, String fieldName) {
+    requireEncodableTtl(ttlMs, fieldName);
     if (ttlMs == Long.MAX_VALUE) {
       return TTL_ENCODE_INFINITE;
+    }
+    if (ttlMs <= TTL_MAGNITUDE_MAX) {
+      return (int) ttlMs;
+    }
+    return (int) (TTL_UNIT_SECONDS | ceilDiv(ttlMs, 1_000L));
+  }
+
+  /**
+   * Validate a TTL duration before it reaches the packed entry fields. Every public TTL boundary
+   * calls this, so an unrepresentable duration fails where the value was supplied instead of
+   * during an L1 compute or a transaction's after-commit hook.
+   *
+   * @param ttlMs     the TTL duration in milliseconds
+   * @param fieldName the field name for the error message
+   * @throws IllegalArgumentException when {@code ttlMs} is negative or above the packed maximum
+   *                                  other than {@link Long#MAX_VALUE}
+   */
+  public static void requireEncodableTtl(long ttlMs, String fieldName) {
+    if (ttlMs == Long.MAX_VALUE) {
+      return;
     }
     if (ttlMs < 0 || ttlMs > TTL_MAX_MS) {
       throw new IllegalArgumentException(
         fieldName + " out of range [0, " + TTL_MAX_MS + "] or Long.MAX_VALUE: " + ttlMs
       );
     }
-    if (ttlMs <= TTL_MAGNITUDE_MAX) {
-      return (int) ttlMs;
-    }
-    return (int) (TTL_UNIT_SECONDS | ceilDiv(ttlMs, 1_000L));
   }
 
   /** Ceiling division for the positive TTL magnitudes encoded here. */

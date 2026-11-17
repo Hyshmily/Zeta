@@ -16,6 +16,7 @@
 package io.github.hyshmily.zeta.cache.cachesupport.policy;
 
 import io.github.hyshmily.zeta.cache.cachesupport.loader.CacheLoader;
+import io.github.hyshmily.zeta.cache.cachesupport.raw.CacheEntry;
 import java.util.function.LongSupplier;
 
 /**
@@ -86,14 +87,13 @@ public record GetPolicy(
    *
    * @param ttlMs the TTL override in milliseconds (0 = use configured default)
    * @return a supplier returning {@code ttlMs}
-   * @throws IllegalArgumentException when {@code ttlMs} is negative — a negative
-   *                                  duration has no meaning and would otherwise
-   *                                  resolve to "use the default"
+   * @throws IllegalArgumentException when {@code ttlMs} is negative or exceeds the
+   *                                  packed maximum other than {@link Long#MAX_VALUE} —
+   *                                  the option boundary rejects what the entry layer
+   *                                  could not encode
    */
   static LongSupplier ttlSupplier(long ttlMs) {
-    if (ttlMs < 0L) {
-      throw new IllegalArgumentException("TTL override must not be negative: " + ttlMs + "ms");
-    }
+    CacheEntry.requireEncodableTtl(ttlMs, "TTL override");
     return ttlMs == 0L ? ZERO : () -> ttlMs;
   }
 

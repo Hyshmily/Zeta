@@ -103,13 +103,13 @@ public interface EntryLifecycle {
    * @return the images the bin lock observed; {@link Applied#changed()} is
    *         {@code false} when no demotion applied
    */
-  Applied demoteIfRemoteNodeIdInvalid(String cacheKey, @Nullable CacheEntry raw, long now);
+  Applied demoteIfDecisionInvalid(String cacheKey, @Nullable CacheEntry raw, long now);
 
   /**
    * Read-only Decision-Validity check: whether {@code raw} is a Worker-sourced
    * {@link KeyState#HOT} entry whose issuing incarnation is no longer
    * authoritative. The read path uses it to decide whether a hit must enter
-   * reconciliation; {@link #demoteIfRemoteNodeIdInvalid(String, CacheEntry, long)}
+   * reconciliation; {@link #demoteIfDecisionInvalid(String, CacheEntry, long)}
    * performs the rewrite.
    *
    * @param raw the L1 entry to inspect (never {@code null})
@@ -119,7 +119,7 @@ public interface EntryLifecycle {
 
   /**
    * Registers the callback fired once per successful
-   * {@link #demoteIfRemoteNodeIdInvalid} demotion — the single notification point
+   * {@link #demoteIfDecisionInvalid} demotion — the single notification point
    * for "a Worker-HOT entry reverted to NORMAL", so the read paths and the
    * background sweeper cannot drift on whether the local promoter learns about
    * a demotion. {@code null} disables the notification.
@@ -260,15 +260,17 @@ public interface EntryLifecycle {
    * fresh lifetime instead of inheriting the dead entry's deadline. An
    * existing elevated entry (HOT or COOL) keeps its state, decision lease and
    * hard deadline; only the value, data stamp, birth stamp and capped soft
-   * window move. A NORMAL entry is rewritten with the caller's resolved TTLs,
-   * optionally promoted to local HOT.
+   * window move. A COOL entry is rewritten to HOT when {@code promoteHot} is
+   * set — the degraded-mode write path — while retaining its decision lease. A
+   * NORMAL entry is rewritten with the caller's resolved TTLs, optionally
+   * promoted to local HOT.
    *
    * @param existing     the resident entry, or {@code null}
    * @param value        the value to store (never {@code null})
    * @param version      the data stamp of the new value
    * @param hardTtlMs    the normal hard TTL for a fresh/NORMAL entry
    * @param softTtlMs    the normal soft TTL for a fresh/NORMAL entry
-   * @param promoteHot   whether this write may promote a NORMAL entry to local HOT
+   * @param promoteHot   whether this write may promote a NORMAL or COOL entry to local HOT
    * @return the entry to store
    */
   CacheEntry writeValue(
@@ -283,6 +285,14 @@ public interface EntryLifecycle {
   /**
    * The COOL rewrite shared by the Worker decision handler and the read-path
    * lease reassertion. The caller owns the version guard.
+   *
+   * <p>A metadata-only rewrite never fakes value freshness: when the source
+   * entry is already soft-expired, its past soft deadline is preserved so the
+   * next read still arms the refresh that was due. A disabled ({@code 0}) or
+   * permanent ({@code Long.MAX_VALUE}) COOL soft TTL replaces the past deadline
+   * instead: keeping it would mark the entry stale forever. Only a value write
+   * or a successful refresh re-arms an expired finite window; a still-fresh
+   * window keeps the new regime's cadence.
    *
    * @param existing the entry to cool
    * @param stamp    the COOL decision lease to store

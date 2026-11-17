@@ -17,19 +17,19 @@ package io.github.hyshmily.zeta.cache;
 
 import io.github.hyshmily.zeta.cache.cachesupport.circuitbreaker.CircuitBreakerRegistry;
 import io.github.hyshmily.zeta.cache.cachesupport.loader.LoaderOutcome;
-import io.github.hyshmily.zeta.cache.cachesupport.loader.singleflight.SingleFlightImpl;
+import io.github.hyshmily.zeta.cache.cachesupport.loader.singleflight.LoadFlights;
 import java.util.Map;
 import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.function.Supplier;
 
 /**
- * {@link SingleFlightImpl} with the convenience overloads the tests read best
+ * {@link LoadFlights} with the convenience overloads the tests read best
  * with: load without a commit sink, load on the caller's thread, and a batch
  * whose commit writes into a caller-supplied map. Every method delegates to
  * {@link #load(String, Supplier, boolean, Consumer)}; no behaviour lives here.
  */
-final class TestSingleFlight extends SingleFlightImpl {
+final class TestSingleFlight extends LoadFlights {
 
   TestSingleFlight(
     int maxSize,

@@ -66,7 +66,7 @@ public final class QuietCache<K, V> {
     try {
       cache.policy();
       return true;
-    } catch (UnsupportedOperationException e) {
+    } catch (UnsupportedOperationException ignored) {
       return false;
     }
   }

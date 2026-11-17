@@ -24,12 +24,12 @@ import static org.mockito.Mockito.*;
 
 import io.github.hyshmily.zeta.autoconfigure.ZetaProperties;
 import io.github.hyshmily.zeta.cache.cachesupport.circuitbreaker.CircuitBreaker;
-import io.github.hyshmily.zeta.cache.cachesupport.circuitbreaker.CircuitBreakerImpl;
+import io.github.hyshmily.zeta.cache.cachesupport.circuitbreaker.SlidingWindowBreaker;
 import io.github.hyshmily.zeta.cache.cachesupport.circuitbreaker.CircuitBreakerRegistry;
 import io.github.hyshmily.zeta.cache.cachesupport.loader.LoadStatus;
 import io.github.hyshmily.zeta.cache.cachesupport.loader.LoaderOutcome;
 import io.github.hyshmily.zeta.cache.cachesupport.loader.singleflight.SingleFlight;
-import io.github.hyshmily.zeta.cache.cachesupport.loader.singleflight.SingleFlightImpl;
+import io.github.hyshmily.zeta.cache.cachesupport.loader.singleflight.LoadFlights;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Executor;
@@ -54,7 +54,7 @@ class SingleFlightOutcomeTest {
 
   /** A registry wired the production way, whose every shard is a disabled (force-closed) breaker. */
   private static CircuitBreakerRegistry disabledRegistry() {
-    return registryOf(new CircuitBreakerImpl(new ZetaProperties.CircuitBreaker()));
+    return registryOf(new SlidingWindowBreaker(new ZetaProperties.CircuitBreaker()));
   }
 
   /** Production-shaped wiring (see {@code ZetaAutoConfiguration}): a registry whose every shard is {@code breaker}. */
@@ -284,17 +284,9 @@ class SingleFlightOutcomeTest {
   }
 
   /**
-   * Duplicate keys in one batch must elect exactly once: the reader runs a
-   * single time for the duplicated key, one stamped breaker admission is
-   * consumed and settled, and the key produces a single outcome entry.
-   *
-   * <p>Regression for the {@code putIfAbsent}-eager-evaluation defect: the
-   * previous batch loop ran {@code elect} for every duplicate (method
-   * arguments are evaluated before {@code putIfAbsent} can deduplicate), so
-   * in the window where the first election's future had already failed out of
-   * the dedup cache, the discarded second election consumed a second
-   * {@code HALF_OPEN} probe stamp that was never settled — a permanently
-   * leaked probe slot. {@code computeIfAbsent} never elects twice.
+   * Duplicate keys in one batch elect exactly once: the reader runs a single
+   * time for the duplicated key, one stamped breaker admission is consumed and
+   * settled, and the key produces a single outcome entry.
    */
   @Test
   void loadOutcome_duplicateKeys_electExactlyOnce() {

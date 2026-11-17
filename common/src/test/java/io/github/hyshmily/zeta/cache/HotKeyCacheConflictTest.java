@@ -32,7 +32,7 @@ import io.github.hyshmily.zeta.cache.cachesupport.circuitbreaker.CircuitBreakerR
 import io.github.hyshmily.zeta.cache.cachesupport.lifecycle.EntryLifecycle;
 import io.github.hyshmily.zeta.cache.cachesupport.lifecycle.EntryLifecycleImpl;
 import io.github.hyshmily.zeta.cache.cachesupport.loader.singleflight.SingleFlight;
-import io.github.hyshmily.zeta.cache.cachesupport.loader.singleflight.SingleFlightImpl;
+import io.github.hyshmily.zeta.cache.cachesupport.loader.singleflight.LoadFlights;
 import io.github.hyshmily.zeta.cache.cachesupport.policy.GetPolicy;
 import io.github.hyshmily.zeta.cache.cachesupport.policy.InvalidatePolicy;
 import io.github.hyshmily.zeta.cache.cachesupport.policy.StalePolicy;
@@ -64,8 +64,8 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 /**
- * Regression tests for call-chain conflicts found while tracing the public API
- * end to end (read / write / invalidate / fluent paths).
+ * Pins the call-chain contracts across the read / write / invalidate / fluent
+ * paths.
  *
  * <ul>
  *   <li><b>Writer-side equal-version guard:</b> {@code putThrough}'s local apply
@@ -82,8 +82,8 @@ import org.junit.jupiter.api.Test;
  *       repair clobbered TTLs — the same-decisionVersion guard skips the rebroadcast).</li>
  *   <li><b>NORMAL-entry soft refresh:</b> {@code getWithSoftExpire} must trigger the
  *       background refresh for a soft-expired NORMAL entry exactly like
- *       {@code computeIfAbsent} does — {@code registerRefresh}'s "every cycle
- *       triggers an async refresh" contract depends on it.</li>
+ *       {@code computeIfAbsent} does — the stale-while-revalidate contract
+ *       depends on it.</li>
  * </ul>
  */
 class HotKeyCacheConflictTest {
@@ -397,10 +397,8 @@ class HotKeyCacheConflictTest {
   /**
    * A soft-expired NORMAL entry with a reader must trigger the background
    * refresh on {@code getWithSoftExpire} exactly like {@code computeIfAbsent}
-   * does. {@code registerRefresh} schedules {@code getWithSoftExpire} ticks and
-   * documents "every cycle triggers an async refresh" — silently refusing
-   * NORMAL entries breaks that contract and the stale-while-revalidate semantics
-   * of {@code zeta.local.soft-ttl-ms}.
+   * does. Silently refusing NORMAL entries breaks the stale-while-revalidate
+   * semantics of {@code zeta.local.soft-ttl-ms}.
    */
   @Test
   @DisplayName("getWithSoftExpire triggers the background refresh for a soft-expired NORMAL entry")
@@ -419,10 +417,9 @@ class HotKeyCacheConflictTest {
 
   /**
    * A plain {@code get} whose policy is {@code SOFT_REFRESH} must arm the
-   * background refresh exactly like {@code getWithSoftExpire}. The read path
-   * used to hard-code "no soft refresh" for the plain overload, so a spec
-   * registered with {@code softTtl(...)} never refreshed: the caller kept
-   * reading an ever-older value with no reload until the hard TTL expired.
+   * background refresh exactly like {@code getWithSoftExpire}: a spec registered
+   * with {@code softTtl(...)} must never serve an ever-older value with no reload
+   * until the hard TTL expires.
    */
   @Test
   @DisplayName("plain get arms the background refresh when the policy is SOFT_REFRESH")
@@ -439,7 +436,7 @@ class HotKeyCacheConflictTest {
 
   /**
    * Control: {@code RETURN} is honoured as "serve stale, never refresh" — the
-   * fix must not turn every policy into a refresh.
+   * arming must not turn every policy into a refresh.
    */
   @Test
   @DisplayName("plain get with RETURN serves the stale value and refreshes nothing")

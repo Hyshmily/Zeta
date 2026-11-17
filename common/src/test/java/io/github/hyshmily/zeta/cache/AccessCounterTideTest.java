@@ -23,6 +23,8 @@ import static org.mockito.Mockito.verify;
 
 import io.github.hyshmily.zeta.hotkeydetector.HotKeyDetector;
 import io.github.hyshmily.zeta.util.TimeSource;
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -42,7 +44,7 @@ import org.mockito.ArgumentCaptor;
  */
 class AccessCounterTideTest {
 
-  /** Below the cap on its own, and exactly the overlap shape that used to double-count. */
+  /** Below the cap on its own, and exactly the overlap whose pre-merge sum would exceed it. */
   private static final int HOT_SET = 9_000;
 
   private static Map<String, Long> hotSet(String prefix, int size) {
@@ -160,5 +162,104 @@ class AccessCounterTideTest {
 
     assertThat(ingested).hasSize(1);
     assertThat(ingested.get(0)).hasSize(10).containsEntry("k0", 2L);
+  }
+
+  /**
+   * An empty tide is a reporter signal, not a detector ingest. It must not advance
+   * {@code lastDetectorFlushMs}, or the first real traffic after an idle period waits
+   * out a full detector interval instead of being ingested immediately.
+   */
+  @Test
+  void emptyTideAtCadenceBoundary_doesNotAdvanceTheDetectorAnchor() {
+    HotKeyDetector detector = mock(HotKeyDetector.class);
+    List<Map<String, Long>> ingested = new java.util.ArrayList<>();
+    org.mockito.Mockito.doAnswer(invocation -> {
+      ingested.add(new HashMap<>(invocation.getArgument(0)));
+      return null;
+    })
+      .when(detector)
+      .ingest(any());
+
+    AccessCounter counter = counterFor(detector);
+    try {
+      TimeSource.setTimeOffsetForTest(0L, 600L);
+      counter.onTide(Map.of(), 50L);
+
+      TimeSource.setTimeOffsetForTest(0L, 650L);
+      counter.onTide(Map.of("k", 1L), 50L);
+    } finally {
+      TimeSource.setTimeOffsetForTest(0L, 0L);
+    }
+
+    assertThat(ingested).hasSize(1);
+    assertThat(ingested.get(0)).containsEntry("k", 1L);
+  }
+
+  /**
+   * An empty tide at the boundary still drains a non-empty residual: the early
+   * return only suppresses the anchor advance, not the pending batch.
+   */
+  @Test
+  void emptyTideAtCadenceBoundary_drainsTheResidual() {
+    HotKeyDetector detector = mock(HotKeyDetector.class);
+    List<Map<String, Long>> ingested = new java.util.ArrayList<>();
+    org.mockito.Mockito.doAnswer(invocation -> {
+      ingested.add(new HashMap<>(invocation.getArgument(0)));
+      return null;
+    })
+      .when(detector)
+      .ingest(any());
+
+    AccessCounter counter = counterFor(detector);
+    counter.onTide(Map.of("k", 1L), 50L);
+    try {
+      TimeSource.setTimeOffsetForTest(0L, 600L);
+      counter.onTide(Map.of(), 50L);
+    } finally {
+      TimeSource.setTimeOffsetForTest(0L, 0L);
+    }
+
+    assertThat(ingested).hasSize(1);
+    assertThat(ingested.get(0)).containsEntry("k", 1L);
+  }
+
+  /** A task that started before cancellation must not drain the replacement schedule. */
+  @Test
+  void staleDetectorFlush_doesNotDrainTheReplacementSchedule() throws Exception {
+    HotKeyDetector detector = mock(HotKeyDetector.class);
+    List<Map<String, Long>> ingested = new java.util.ArrayList<>();
+    org.mockito.Mockito.doAnswer(invocation -> {
+      ingested.add(new HashMap<>(invocation.getArgument(0)));
+      return null;
+    })
+      .when(detector)
+      .ingest(any());
+
+    AccessCounter counter = counterFor(detector);
+    counter.onTide(Map.of("first", 1L), 50L);
+    long firstGeneration = detectorFlushGeneration(counter);
+    runDetectorFlush(counter, firstGeneration);
+    assertThat(ingested).hasSize(1);
+
+    counter.onTide(Map.of("second", 1L), 50L);
+    long secondGeneration = detectorFlushGeneration(counter);
+    runDetectorFlush(counter, firstGeneration);
+    assertThat(ingested).as("the stale task must not consume the new accumulation").hasSize(1);
+
+    runDetectorFlush(counter, secondGeneration);
+    assertThat(ingested).hasSize(2);
+    assertThat(ingested.get(1)).containsEntry("second", 1L);
+  }
+
+  private static long detectorFlushGeneration(AccessCounter counter) throws Exception {
+    Field field = AccessCounter.class.getDeclaredField("detectorFlushGen");
+    field.setAccessible(true);
+    return (long) field.get(counter);
+  }
+
+  private static void runDetectorFlush(AccessCounter counter, long generation) throws Exception {
+    Method method = AccessCounter.class.getDeclaredMethod("flushDetector", long.class);
+    method.setAccessible(true);
+    method.invoke(counter, generation);
   }
 }

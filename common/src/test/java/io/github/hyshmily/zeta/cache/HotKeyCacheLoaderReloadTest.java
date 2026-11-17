@@ -28,7 +28,7 @@ import io.github.hyshmily.zeta.cache.cachesupport.circuitbreaker.CircuitBreakerR
 import io.github.hyshmily.zeta.cache.cachesupport.lifecycle.EntryLifecycle;
 import io.github.hyshmily.zeta.cache.cachesupport.lifecycle.EntryLifecycleImpl;
 import io.github.hyshmily.zeta.cache.cachesupport.loader.CacheLoader;
-import io.github.hyshmily.zeta.cache.cachesupport.loader.singleflight.SingleFlightImpl;
+import io.github.hyshmily.zeta.cache.cachesupport.loader.singleflight.LoadFlights;
 import io.github.hyshmily.zeta.cache.cachesupport.policy.GetPolicy;
 import io.github.hyshmily.zeta.cache.cachesupport.policy.StalePolicy;
 import io.github.hyshmily.zeta.cache.cachesupport.raw.CacheEntry;
@@ -92,7 +92,7 @@ class HotKeyCacheLoaderReloadTest {
     hotKeyCache = new HotKeyCache(
       hotKeyDetector,
       caffeineCache,
-      new SingleFlightImpl(10_000, 5, 5, executor, breakerRegistry),
+      new LoadFlights(10_000, 5, 5, executor, breakerRegistry),
       entryLifecycle,
       backgroundRefresher,
       mock(AccessCounter.class),

@@ -21,7 +21,6 @@ import io.github.hyshmily.zeta.cache.cachesupport.policy.GetPolicy;
 import io.github.hyshmily.zeta.cache.cachesupport.policy.StalePolicy;
 import io.github.hyshmily.zeta.util.Internal;
 import java.util.function.LongSupplier;
-import java.util.function.Supplier;
 import org.jspecify.annotations.Nullable;
 
 /**
@@ -39,10 +38,13 @@ import org.jspecify.annotations.Nullable;
  * {@link GetPolicy} contract — allocates nothing extra.
  *
  * <p>
- * A loader-backed call keeps the loader and its key by reference instead of
- * building per-call {@code load}/{@code reload}/{@code isCacheable} adapters, so
- * the miss path allocates only the context. A plain or batch call keeps its
- * reader, which serves both the foreground load and the background refresh.
+ * One source abstraction: a typed {@link CacheLoader} or a plain supplier
+ * adapted to one. The context holds no per-call key; {@link #loadValue(String)}
+ * and {@link #refreshValue(String)} receive it from the caller, so a loader
+ * call binds the key once instead of storing it in every context. The adapter
+ * for a plain supplier is created lazily by {@link HotKeyCache} only when a
+ * miss or a reconciliation actually needs a context; a plain hit allocates
+ * neither the context nor the adapter.
  *
  * <p>
  * One instance per read call. The mutable memoization is confined to the
@@ -55,10 +57,7 @@ public final class ReadContext {
 
   /**
    * A resolved TTL is any value except {@link #UNRESOLVED}; the sentinel keeps
-   * one field per side instead of a value plus a resolved flag. It is
-   * {@link Long#MIN_VALUE}, not {@code -1}, so an invalid negative result from a
-   * supplier is still memoized once; the TTL policy resolves any non-positive
-   * value to the configured default.
+   * one field per side instead of a value plus a resolved flag.
    */
   private static final long UNRESOLVED = Long.MIN_VALUE;
 
@@ -69,15 +68,10 @@ public final class ReadContext {
   private final @Nullable LongSupplier rawHardTtlMs;
   private final @Nullable LongSupplier rawSoftTtlMs;
 
-  /** The loader and its bound key, or both {@code null} for a plain/batch reader. */
+  /** The single value source, or {@code null} when this call carries no source. */
   private final @Nullable CacheLoader<String, Object> loader;
-  private final @Nullable String loaderKey;
 
   private final StalePolicy stalePolicy;
-
-  /** The plain reader, or {@code null} when the call is loader-backed. */
-  private final @Nullable Supplier<?> reader;
-
   private final boolean callerRunsLoader;
   private final boolean report;
 
@@ -85,18 +79,14 @@ public final class ReadContext {
   private long softTtl = UNRESOLVED;
 
   private ReadContext(
-    @Nullable Supplier<?> reader,
     @Nullable CacheLoader<String, Object> loader,
-    @Nullable String loaderKey,
     StalePolicy stalePolicy,
     boolean report,
     boolean callerRunsLoader,
     @Nullable LongSupplier rawHardTtlMs,
     @Nullable LongSupplier rawSoftTtlMs
   ) {
-    this.reader = reader;
     this.loader = loader;
-    this.loaderKey = loaderKey;
     this.report = report;
     this.rawHardTtlMs = rawHardTtlMs;
     this.rawSoftTtlMs = rawSoftTtlMs;
@@ -109,43 +99,19 @@ public final class ReadContext {
   }
 
   /**
-   * Single-key read path with a plain reader: the TTL suppliers stay lazy and are memoized once
-   * per call, so SpEL-backed expressions are evaluated at most once regardless of how many
-   * downstream methods consume them. The reader serves both the foreground load and the
-   * background refresh, and admits every non-{@code null} value.
+   * Single-key read context: the TTL suppliers stay lazy and are memoized once
+   * per call, so SpEL-backed expressions are evaluated at most once regardless
+   * of how many downstream methods consume them. The loader is the single
+   * source; a plain supplier has already been adapted by the caller.
    *
-   * @param reader  the foreground miss reader (may be {@code null} = no load)
+   * @param loader  the value source (may be {@code null} = no load)
    * @param options the resolved per-invocation read options
    * @return the per-call context
    */
-  public static ReadContext of(@Nullable Supplier<?> reader, GetPolicy options) {
-    return new ReadContext(
-      reader,
-      null,
-      null,
-      options.stalePolicy(),
-      options.report(),
-      options.callerRunsLoader(),
-      options.hardTtlMs(),
-      options.softTtlMs()
-    );
-  }
-
-  /**
-   * Loader-backed single-key read: the loader and the key it is bound to travel
-   * by reference, so a miss allocates only the context.
-   *
-   * @param loader   the typed loader carried by the call
-   * @param cacheKey the key the loader is bound to
-   * @param options  the resolved per-invocation read options
-   * @return the per-call context
-   */
   @SuppressWarnings("unchecked")
-  public static ReadContext ofLoader(CacheLoader<String, ?> loader, String cacheKey, GetPolicy options) {
+  public static ReadContext of(@Nullable CacheLoader<String, ?> loader, GetPolicy options) {
     return new ReadContext(
-      null,
       (CacheLoader<String, Object>) loader,
-      cacheKey,
       options.stalePolicy(),
       options.report(),
       options.callerRunsLoader(),
@@ -161,52 +127,64 @@ public final class ReadContext {
    * asks for caller-runs, so its readers run on the load executor.
    *
    * <p>The batch path has no separate refresh source and no admission filter:
-   * the same reader serves a soft-expire background refresh, and every
-   * non-{@code null} value is stored.
+   * the same loader serves a soft-expire background refresh, and every
+   * non-{@code null} value is stored when the adapter's {@code isCacheable}
+   * defaults to true.
+   *
+   * @param loader     the refresh source (may be {@code null} when the policy
+   *                   has no refresh branch)
+   * @param hardTtlMs  the batch-resolved hard TTL override
+   * @param softTtlMs  the batch-resolved soft TTL override
+   * @param report     whether this batch feeds Worker reporting
+   * @param stalePolicy the batch-resolved stale policy
+   * @return the per-call context
    */
+  @SuppressWarnings("unchecked")
   public static ReadContext ofBatch(
-    @Nullable Supplier<?> reader,
+    @Nullable CacheLoader<String, ?> loader,
     long hardTtlMs,
     long softTtlMs,
     boolean report,
     StalePolicy stalePolicy
   ) {
-    ReadContext ctx = new ReadContext(reader, null, null, stalePolicy, report, false, null, null);
+    ReadContext ctx = new ReadContext((CacheLoader<String, Object>) loader, stalePolicy, report, false, null, null);
     ctx.hardTtl = hardTtlMs;
     ctx.softTtl = softTtlMs;
     return ctx;
   }
 
-  /** Whether this call has a value source (a loader or a plain reader). */
+  /** Whether this call has a value source. */
   public boolean hasSource() {
-    return loader != null || reader != null;
+    return loader != null;
   }
 
   /**
-   * Loads the foreground miss value: {@code loader.load(key)} for a
-   * loader-backed call, the plain reader otherwise.
+   * Loads the foreground miss value through the source.
    *
+   * @param cacheKey the key to load
    * @return the loaded value; {@code null} when the source produced none
    */
-  public @Nullable Object loadValue() {
-    return loader != null ? loader.load(loaderKey) : reader != null ? reader.get() : null;
+  public @Nullable Object loadValue(String cacheKey) {
+    return loader != null ? loader.load(cacheKey) : null;
   }
 
   /**
-   * Loads a background refresh value: {@code loader.reload(key)} for a
-   * loader-backed call — a refresh may not resume caller-bound state — and the
-   * plain reader otherwise.
+   * Loads a background refresh value through the source's reload seam — a
+   * refresh may not resume caller-bound state.
    *
+   * @param cacheKey the key to reload
    * @return the refreshed value; {@code null} when the source produced none
    */
-  public @Nullable Object refreshValue() {
-    return loader != null ? loader.reload(loaderKey) : reader != null ? reader.get() : null;
+  public @Nullable Object refreshValue(String cacheKey) {
+    return loader != null ? loader.reload(cacheKey) : null;
   }
 
   /**
    * Whether the given non-{@code null} loaded value may be stored in L1.
    * A {@code null} value is never admitted (never cached regardless of the
-   * loader); a call with no loader admits everything.
+   * loader). A call with no source, or a plain-supplier adapter whose
+   * {@code isCacheable} keeps its default {@code true}, admits every non-null
+   * value.
    *
    * @param value the loaded value
    * @return {@code true} when the value may take L1 residency
@@ -236,24 +214,39 @@ public final class ReadContext {
   /**
    * Memoized lazy hard TTL override (0 = use configured default): the
    * underlying (possibly SpEL-backed) supplier evaluates at most once per call.
+   * This is the boundary a lazy override is validated at: a negative result is
+   * rejected here, because the value does not exist until the supplier runs.
+   *
+   * @return the non-negative hard TTL override
+   * @throws IllegalArgumentException when the supplier returns a negative value
    */
   public long hardTtlMs() {
     long resolved = hardTtl;
     if (resolved == UNRESOLVED && rawHardTtlMs != null) {
-      hardTtl = resolved = rawHardTtlMs.getAsLong();
+      hardTtl = resolved = requireNonNegative(rawHardTtlMs.getAsLong(), "hardTtlMs");
     }
     return resolved;
   }
 
   /**
    * Memoized lazy soft TTL override (0 = use configured default), same contract
-   * as {@link #hardTtlMs()}.
+   * and validation as {@link #hardTtlMs()}.
+   *
+   * @return the non-negative soft TTL override
+   * @throws IllegalArgumentException when the supplier returns a negative value
    */
   public long softTtlMs() {
     long resolved = softTtl;
     if (resolved == UNRESOLVED && rawSoftTtlMs != null) {
-      softTtl = resolved = rawSoftTtlMs.getAsLong();
+      softTtl = resolved = requireNonNegative(rawSoftTtlMs.getAsLong(), "softTtlMs");
     }
     return resolved;
+  }
+
+  private static long requireNonNegative(long ttlMs, String name) {
+    if (ttlMs < 0) {
+      throw new IllegalArgumentException(name + " must not be negative");
+    }
+    return ttlMs;
   }
 }
