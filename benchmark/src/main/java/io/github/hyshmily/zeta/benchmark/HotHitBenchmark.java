@@ -37,9 +37,9 @@ import io.github.hyshmily.zeta.reporting.impl.KeyReporterImpl;
 import io.github.hyshmily.zeta.scheduler.BackgroundRefresher;
 import io.github.hyshmily.zeta.scheduler.DefaultBackgroundRefresher;
 import io.github.hyshmily.zeta.sharding.ConsistentHashRing;
-import io.github.hyshmily.zeta.sharding.ConsistentHashRingImpl;
+import io.github.hyshmily.zeta.sharding.HashRing;
 import io.github.hyshmily.zeta.sharding.HealthView;
-import io.github.hyshmily.zeta.sharding.HealthViewImpl;
+import io.github.hyshmily.zeta.sharding.ClusterHealth;
 import io.github.hyshmily.zeta.util.clock.MonotonicStampClock;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -182,7 +182,7 @@ public class HotHitBenchmark {
     // must mirror ZetaAutoConfiguration (buildL1Table), see HitPathAuditBenchmark.
     Cache<String, CacheEntry> caffeine = HitPathAuditBenchmark.buildL1Table(zetaProps);
     MonotonicStampClock stampClock = new MonotonicStampClock(1L, MonotonicStampClock.DEFAULT_MAX_FORWARD_DRIFT_MS);
-    HealthView healthView = new HealthViewImpl(30_000, 3, false, 0);
+    HealthView healthView = new ClusterHealth(30_000, 3, false, 0);
     HeavyKeeper sketch = new HeavyKeeper(
       zetaProps.getTopK(),
       zetaProps.getWidth(),
@@ -197,7 +197,7 @@ public class HotHitBenchmark {
     EntryLifecycle entryLifecycle = new EntryLifecycleImpl(caffeine, zetaProps, healthView);
     BackgroundRefresher refresher = new DefaultBackgroundRefresher(caffeine, Runnable::run, entryLifecycle, 10);
     BroadcastBuffer broadcast = new BroadcastBuffer(scheduler, null, 500, 2_000, null);
-    ConsistentHashRing ring = new ConsistentHashRingImpl(150);
+    ConsistentHashRing ring = new HashRing(150);
     KeyReporter reporter = new KeyReporterImpl(new DropPublisher(), "bench", 1000, 100, 1, ring, healthView);
     reporter.start();
     this.reporter = reporter;
@@ -229,9 +229,8 @@ public class HotHitBenchmark {
     String bigValue = "v".repeat(1024);
     for (int k = 0; k < KEY_SPACE; k++) {
       bigKeys[k] = "bench:big:" + k;
-      // Real write path, once per key: values are stored exactly as passed
-      // (design decisions: api surface removed the value codec), so every measured hit below is a
-      // plain L1 unwrap with no decode step.
+      // Real write path, once per key: values are stored exactly as passed (no value
+      // codec), so every measured hit below is a plain L1 unwrap with no decode step.
       cachePlain.putLocal(bigKeys[k], bigValue, 0, 0);
       detector.addDirect(bigKeys[k], 100_000L);
     }

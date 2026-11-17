@@ -142,7 +142,7 @@ public class CaffeineFloorBenchmark {
     if (variable) {
       return builder.expireAfter(new ProductionExpiry()).build();
     }
-    // The older benchmark's shape: a fixed write expiry, no per-entry callback.
+    // The no-variable cell: a fixed write expiry, no per-entry callback.
     builder.expireAfterWrite(1, TimeUnit.DAYS);
     return (Cache<String, CacheEntry>) (Cache<?, ?>) builder.build();
   }

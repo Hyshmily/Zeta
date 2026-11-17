@@ -24,7 +24,6 @@ import io.github.hyshmily.zeta.cache.BroadcastBuffer;
 import io.github.hyshmily.zeta.cache.HotKeyCache;
 import io.github.hyshmily.zeta.cache.cachesupport.lifecycle.EntryLifecycle;
 import io.github.hyshmily.zeta.cache.cachesupport.lifecycle.EntryLifecycleImpl;
-import io.github.hyshmily.zeta.cache.cachesupport.loader.LoaderOutcome;
 import io.github.hyshmily.zeta.cache.cachesupport.loader.singleflight.SingleFlight;
 import io.github.hyshmily.zeta.cache.cachesupport.policy.GetPolicy;
 import io.github.hyshmily.zeta.cache.cachesupport.raw.CacheEntry;
@@ -35,8 +34,8 @@ import io.github.hyshmily.zeta.model.DecisionStamp;
 import io.github.hyshmily.zeta.model.KeyState;
 import io.github.hyshmily.zeta.scheduler.BackgroundRefresher;
 import io.github.hyshmily.zeta.scheduler.DefaultBackgroundRefresher;
+import io.github.hyshmily.zeta.sharding.ClusterHealth;
 import io.github.hyshmily.zeta.sharding.HealthView;
-import io.github.hyshmily.zeta.sharding.HealthViewImpl;
 import io.github.hyshmily.zeta.sync.worker.WorkerHeartbeatMessage;
 import io.github.hyshmily.zeta.util.TimeSource;
 import io.github.hyshmily.zeta.util.clock.MonotonicStampClock;
@@ -66,19 +65,19 @@ import org.openjdk.jmh.annotations.Warmup;
 /**
  * Audit benchmark for the three production hit shapes of {@code HotKeyCache.get}
  * — the companion to {@link HotHitBenchmark}, which only covers the warmed-HOT
- * steady state (both benchmarks now build the L1 table through the same
+ * steady state (both benchmarks build the L1 table through the same
  * production-shaped wiring).
  *
  * <h2>What each {@code mode} means</h2>
  * <ul>
- *   <li><b>{@code LOCAL_NORMAL}</b> — a plain {@link KeyState#NORMAL} entry the
- *       local TopK does <em>not</em> track: the long-tail shape. Exercises the
- *       per-hit {@code hotKeyDetector.contains} probe
- *       ({@code LocalPromotion.isPromotable}).</li>
+ *   <li><b>{@code LOCAL_NORMAL}</b> — a plain {@link KeyState#NORMAL} entry with
+ *       no COOL lease: the long-tail shape. Exercises the classification
+ *       short-circuit; the TopK probe is not reached because the state/lease
+ *       gate fails first.</li>
  *   <li><b>{@code WORKER_HOT}</b> — a Worker-stamped HOT entry
  *       ({@code decisionNodeId} set, live health record): the highest-QPS shape.
  *       Exercises the per-hit Decision-Validity liveness probe
- *       ({@code EntryLifecycle.demoteIfRemoteNodeIdInvalid} →
+ *       ({@code EntryLifecycle.demoteIfDecisionInvalid} →
  *       {@code HealthView.isCurrentIncarnation(String, long)}).</li>
  *   <li><b>{@code SOFT_EXPIRED}</b> — a NORMAL entry past its soft TTL with a
  *       <b>slow</b> refresh source (500&nbsp;ms). This pins the steady state
@@ -205,7 +204,7 @@ public class HitPathAuditBenchmark {
 
     ZetaProperties props = new ZetaProperties();
     Cache<String, CacheEntry> caffeine = buildL1Table(props);
-    HealthView healthView = new HealthViewImpl(300_000L, 3, false, 0);
+    HealthView healthView = new ClusterHealth(300_000L, 3, false, 0);
     // A live, non-stale Worker incarnation so WORKER_HOT entries stay valid
     // (a dead one would demote on the first hit and drift into LOCAL_NORMAL).
     healthView.onHeartbeat(new WorkerHeartbeatMessage(1L, WORKER_NODE, WORKER_EPOCH, true, null));
@@ -235,7 +234,7 @@ public class HitPathAuditBenchmark {
     cache = new HotKeyCache(
       detector,
       caffeine,
-      new NoLoadFlight(),
+      new HotHitBenchmark.PassThroughFlight(),
       entryLifecycle,
       refresher,
       accessCounter,
@@ -342,52 +341,5 @@ public class HitPathAuditBenchmark {
     if (scheduler != null) {
       scheduler.shutdownNow();
     }
-  }
-
-  /**
-   * Hit paths must never touch dedup: any call fails the trial loudly instead of
-   * silently changing what is being measured.
-   */
-  static final class NoLoadFlight implements SingleFlight {
-
-    @Override
-    public boolean isBreakerOpen() {
-      return false;
-    }
-
-    @Override
-    public boolean isBreakerOpen(String cacheKey) {
-      return false;
-    }
-
-    @Override
-    public long estimatedInFlightSize() {
-      return 0;
-    }
-
-    @Override
-    public <T> LoaderOutcome<T> load(
-      String cacheKey,
-      Supplier<T> reader,
-      boolean callerRuns,
-      java.util.function.Consumer<? super T> leaderCommit
-    ) {
-      throw new AssertionError("SingleFlight.load invoked on an L1 hit");
-    }
-
-    @Override
-    public <T> LoaderOutcome<T> loadIsolated(
-      String cacheKey,
-      Supplier<T> reader,
-      java.util.function.Consumer<? super T> leaderCommit
-    ) {
-      throw new AssertionError("SingleFlight.loadIsolated invoked on an L1 hit");
-    }
-
-    @Override
-    public void invalidate(String cacheKey) {}
-
-    @Override
-    public void invalidateAll() {}
   }
 }
