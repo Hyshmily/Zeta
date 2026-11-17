@@ -94,8 +94,9 @@ curl -s "$APP/actuator/hotkey" \
          reportDropped: .local.reportQueueFullCount}'
 ```
 
-`limit` caps `topK` and `staleDebt`. The default is `100`; values below `1` are clamped to `1`, and
-`staleDebt` never returns more than 100 entries.
+`limit` caps `topK` and `staleDebt`. The default is `100`; a value below `1` is rejected with
+**400 Bad Request** (it is a caller error, not a clamp), `topK` is capped at 1000, and `staleDebt`
+never returns more than 100 entries.
 
 ### 2.2 Response shape
 
@@ -153,11 +154,11 @@ their component is absent (see §2.4).
 
 **Local: reporting**
 
-| Field                  | Meaning                                                                                                                                      | CONFIG                              |
-| ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------- |
-| `reportQueueDepth`     | Batches waiting in the reporter dispatch queue. A rising depth means the reporter is falling behind.                                         | [§6](CONFIG.md#6-report-queue)      |
-| `reportQueueFullCount` | Cumulative batches dropped when the dispatch queue stayed full past `queue-offer-timeout-ms`, or withdrawn because the dispatcher shut down. | [§6](CONFIG.md#6-report-queue)      |
-| `reportPendingKeys`    | Keys currently buffered in the shared access counter, waiting for the next tide.                                                             | [§5](CONFIG.md#5-reporting-cadence) |
+| Field                  | Meaning                                                                                                                                                                                                                               | CONFIG                              |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------- |
+| `reportQueueDepth`     | Batches waiting in the reporter dispatch queue. A rising depth means the reporter is falling behind.                                                                                                                                  | [§6](CONFIG.md#6-report-queue)      |
+| `reportQueueFullCount` | Cumulative batches not accepted by the dispatcher: the shared offer budget expired, the queue stayed full past it, the dispatcher was already closed, the batch was withdrawn during shutdown, or the consumer's health probe failed. | [§6](CONFIG.md#6-report-queue)      |
+| `reportPendingKeys`    | Keys currently buffered in the shared access counter, waiting for the next tide.                                                                                                                                                      | [§5](CONFIG.md#5-reporting-cadence) |
 
 **Local: refresh and version**
 
@@ -183,6 +184,7 @@ their component is absent (see §2.4).
 | ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------- |
 | `foreignAppDrops`  | Cumulative sync messages dropped for an `appName` mismatch.                                                                                           | [§8](CONFIG.md#8-cache-sync) |
 | `lastForeignApp`   | Most recent foreign sync sender; present only after a drop.                                                                                           | [§8](CONFIG.md#8-cache-sync) |
+| `dispatchRejections` | Sync messages the ordered dispatcher refused; each was applied by the no-hook consumer-thread fallback. A growing value signals dispatcher saturation. | [§8](CONFIG.md#8-cache-sync) |
 | `nodeIdCollisions` | Inbound sync messages from a peer sharing this node's `dataVersion` node id. A growing value means explicit `zeta.local.node-id` values are required. | [§8](CONFIG.md#8-cache-sync) |
 
 ### 2.4 Which parts appear, and what is deliberately omitted
@@ -211,7 +213,8 @@ since the last report flush is already absent; no synthetic traffic is needed to
 **Gate.** `zeta.local.consistent-hashing.enabled=true` (default) creates the endpoint; it gates
 inspection only — report routing always uses the ring even when the endpoint is disabled
 ([CONFIG §7](CONFIG.md#7-worker-listener-heartbeat-and-cluster-health)). The report plane must be
-wired; otherwise every call returns **503** with a message naming the cause.
+wired; otherwise every call returns **503** with a message naming the cause. A key-mapping request
+with no path segment or a blank key returns **400 Bad Request** before the ring is consulted.
 
 ### 3.1 Request templates
 
@@ -382,7 +385,7 @@ Caffeine metrics use Micrometer's standard `cache.*` namespace, tagged `cache=ze
 | Meter                                      | Type            | Meaning                                                                                                                                                                  |
 | ------------------------------------------ | --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `zeta.reporter.queue.depth`                | Gauge           | Batches waiting in the reporter dispatch queue                                                                                                                           |
-| `zeta.reporter.queue.dropped.total`        | FunctionCounter | Cumulative batches dropped because the queue was full or withdrawn during dispatcher shutdown                                                                            |
+| `zeta.reporter.queue.dropped.total`        | FunctionCounter | Cumulative batches dropped because the queue was full, withdrawn during dispatcher shutdown, or rejected after a failed health probe                                     |
 | `zeta.reporter.queue.expired.dead.total`   | FunctionCounter | Expired batches whose target Worker was no longer alive                                                                                                                  |
 | `zeta.reporter.queue.expired.stale.total`  | FunctionCounter | Expired batches that waited more than 5 s in the queue                                                                                                                   |
 | `zeta.reporter.pending.keys`               | Gauge           | Keys buffered in the shared access counter                                                                                                                               |
@@ -394,14 +397,15 @@ Caffeine metrics use Micrometer's standard `cache.*` namespace, tagged `cache=ze
 
 ### 5.5 Refresh, version and sync
 
-| Meter                                      | Type            | Meaning                                                                                                                                       |
-| ------------------------------------------ | --------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
-| `zeta.expire.refresh.available`            | Gauge           | Available background-refresh limiter permits                                                                                                  |
-| `zeta.expire.refresh.failure.leased.total` | FunctionCounter | Cumulative refresh failures granted a lease (the stale value stayed servable)                                                                 |
-| `zeta.expire.refresh.lease.debt.keys`      | Gauge           | Keys currently leased (the `staleDebt` size)                                                                                                  |
-| `zeta.version.clock.skew`                  | Gauge           | How far the newest known stamp — local stamp clock or observed peer stamp, refused outliers included — leads local physical time, in ms       |
-| `zeta.sync.send.failed.total`              | FunctionCounter | Cumulative sync-plane publish failures; pair with `zeta.sync.invalidate.dropped.total` for executor rejections before publish                 |
-| `zeta.sync.nodeid.collision.total`         | FunctionCounter | Inbound sync messages from a peer sharing this node's `dataVersion` node id; persistent growth calls for explicit `zeta.local.node-id` values |
+| Meter                                      | Type            | Meaning                                                                                                                                        |
+| ------------------------------------------ | --------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| `zeta.expire.refresh.available`            | Gauge           | Available background-refresh limiter permits                                                                                                   |
+| `zeta.expire.refresh.failure.leased.total` | FunctionCounter | Cumulative refresh failures granted a lease (the stale value stayed servable)                                                                  |
+| `zeta.expire.refresh.lease.debt.keys`      | Gauge           | Keys currently leased (the `staleDebt` size)                                                                                                   |
+| `zeta.version.clock.skew`                  | Gauge           | How far the newest known stamp — local stamp clock, or a refused peer stamp within the 60s retention window — leads local physical time, in ms |
+| `zeta.sync.send.failed.total`              | FunctionCounter | Cumulative sync-plane publish failures; pair with `zeta.sync.invalidate.dropped.total` for executor rejections before publish                  |
+| `zeta.sync.dispatch.rejected.total`        | FunctionCounter | Sync messages the ordered dispatcher refused and the no-hook consumer-thread fallback applied; persistent growth means dispatcher saturation    |
+| `zeta.sync.nodeid.collision.total`         | FunctionCounter | Inbound sync messages from a peer sharing this node's `dataVersion` node id; persistent growth calls for explicit `zeta.local.node-id` values  |
 
 ### 5.6 Worker detection plane
 
@@ -417,7 +421,7 @@ Caffeine metrics use Micrometer's standard `cache.*` namespace, tagged `cache=ze
 | `zeta.worker.hot.aborted`                             | Counter               | Promotions whose HOT never reached the broker; the seat was returned                                                                                                                                    |
 | `zeta.worker.decisions.hot` / `.cool`                 | Counter               | Decisions handed to the AMQP client without an exception; no publisher confirm is requested                                                                                                             |
 | `zeta.worker.decisions.dropped`                       | Counter, tag `type`   | Decisions lost without reaching the broker (publish failure, queue saturation, unexpected drain failure, shutdown)                                                                                      |
-| `zeta.worker.decisions.elided`                        | Counter, tag `type`   | Decisions elided as no-ops: same type inside the 100 ms debounce, a replay of the exact accepted version, or a COOL for a key the cluster already holds cold                                            |
+| `zeta.worker.decisions.elided`                        | Counter, tag `type`   | Decisions elided as no-ops: same type inside the 100 ms debounce, or a replay of the exact accepted version; a newer COOL is never elided by the last wire state                                        |
 | `zeta.worker.decisions.superseded`                    | Counter, tag `type`   | Decisions dropped because a strictly newer version for the key was already queued or accepted, or because the registry no longer holds the HOT's promotion                                              |
 | `zeta.worker.decisions.expired`                       | Counter, tag `type`   | Decisions that would have been sent but exceeded `max-decision-age-ms`; a decision the funnel elides or supersedes is counted there, not here                                                           |
 | `zeta.worker.broadcast.hot.depth` / `.cool.depth`     | Gauge                 | Pending decisions in each queue                                                                                                                                                                         |

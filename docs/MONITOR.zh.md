@@ -86,7 +86,7 @@ curl -s "$APP/actuator/hotkey" \
          reportDropped: .local.reportQueueFullCount}'
 ```
 
-`limit` 限制 `topK` 与 `staleDebt`。默认 `100`；小于 `1` 的值按 `1` 处理，`staleDebt` 最多返回 100 条。
+`limit` 限制 `topK` 与 `staleDebt`。默认 `100`；小于 `1` 的值返回 **400 Bad Request**（属于调用方错误，不做静默钳制），`topK` 最多 1000 条，`staleDebt` 最多返回 100 条。
 
 ### 2.2 响应结构
 
@@ -143,11 +143,11 @@ curl -s "$APP/actuator/hotkey" \
 
 **本地：上报**
 
-| 字段                   | 含义                                                                                         | CONFIG                        |
-| ---------------------- | -------------------------------------------------------------------------------------------- | ----------------------------- |
-| `reportQueueDepth`     | Reporter 分发队列中等待的批次数。持续上升说明 Reporter 正在落后。                            | [§6](CONFIG.zh.md#6-上报队列) |
-| `reportQueueFullCount` | 分发队列持续满超过 `queue-offer-timeout-ms` 后被丢弃，或 dispatcher 停机时撤回的累计批次数。 | [§6](CONFIG.zh.md#6-上报队列) |
-| `reportPendingKeys`    | 共享访问计数器中缓冲、等待下一轮 tide 的 key 数。                                            | [§5](CONFIG.zh.md#5-上报节拍) |
+| 字段                   | 含义                                                                                                                               | CONFIG                        |
+| ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------- | ----------------------------- |
+| `reportQueueDepth`     | Reporter 分发队列中等待的批次数。持续上升说明 Reporter 正在落后。                                                                  | [§6](CONFIG.zh.md#6-上报队列) |
+| `reportQueueFullCount` | dispatcher 未接受的累计批次数：整次 flush 的 offer 预算耗尽、队列持续满超过该预算、dispatcher 已停机、停机时撤回，或健康探针失败。 | [§6](CONFIG.zh.md#6-上报队列) |
+| `reportPendingKeys`    | 共享访问计数器中缓冲、等待下一轮 tide 的 key 数。                                                                                  | [§5](CONFIG.zh.md#5-上报节拍) |
 
 **本地：刷新与版本**
 
@@ -173,6 +173,7 @@ curl -s "$APP/actuator/hotkey" \
 | ------------------ | -------------------------------------------------------------------------------------------------------- | ----------------------------- |
 | `foreignAppDrops`  | 因 `appName` 不匹配而累计丢弃的同步消息数。                                                              | [§8](CONFIG.zh.md#8-缓存同步) |
 | `lastForeignApp`   | 最近一次外来同步发送方；仅在发生丢弃后出现。                                                             | [§8](CONFIG.zh.md#8-缓存同步) |
+| `dispatchRejections` | 被有序调度器拒绝、并由消费者线程无 Hook 兜底应用的同步消息数；持续增长说明调度器饱和。                  | [§8](CONFIG.zh.md#8-缓存同步) |
 | `nodeIdCollisions` | 与本节点共享 `dataVersion` node id 的对端发来的同步消息数。持续增长说明应显式配置 `zeta.local.node-id`。 | [§8](CONFIG.zh.md#8-缓存同步) |
 
 ### 2.4 哪些部分会出现，哪些被刻意省略
@@ -195,7 +196,7 @@ curl -s "$APP/actuator/hotkey" \
 
 端点在返回前会用健康视图重建哈希环，因此在上一次上报 flush 之后死亡的 Worker 已经不在列表中；检查故障转移不需要制造额外流量。
 
-**开关。** `zeta.local.consistent-hashing.enabled=true`（默认）会创建端点；它只控制巡检能力——即使关闭端点，上报路由仍始终使用哈希环（[CONFIG §7](CONFIG.zh.md#7-worker-监听心跳与集群健康)）。上报平面必须已接线，否则每次调用都返回 **503**，并在消息中说明原因。
+**开关。** `zeta.local.consistent-hashing.enabled=true`（默认）会创建端点；它只控制巡检能力——即使关闭端点，上报路由仍始终使用哈希环（[CONFIG §7](CONFIG.zh.md#7-worker-监听心跳与集群健康)）。上报平面必须已接线，否则每次调用都返回 **503**，并在消息中说明原因。路径中没有 key 段或 key 为空白时，在查询哈希环之前直接返回 **400 Bad Request**。
 
 ### 3.1 请求模板
 
@@ -353,7 +354,7 @@ Zeta 的 L1 始终启用 `recordStats()`；自定义缓存 Bean 若未开启，�
 | 指标                                       | 类型            | 含义                                                                                                             |
 | ------------------------------------------ | --------------- | ---------------------------------------------------------------------------------------------------------------- |
 | `zeta.reporter.queue.depth`                | Gauge           | Reporter 分发队列中等待的批次数                                                                                  |
-| `zeta.reporter.queue.dropped.total`        | FunctionCounter | 因队列满而丢弃，或 dispatcher 停机时撤回的累计批次数                                                             |
+| `zeta.reporter.queue.dropped.total`        | FunctionCounter | 因队列满、dispatcher 停机时撤回，或健康探针失败而丢弃的累计批次数                                                |
 | `zeta.reporter.queue.expired.dead.total`   | FunctionCounter | 目标 Worker 已死亡的过期批次数                                                                                   |
 | `zeta.reporter.queue.expired.stale.total`  | FunctionCounter | 在队列中等待超过 5 秒而过期的批次数                                                                              |
 | `zeta.reporter.pending.keys`               | Gauge           | 共享访问计数器中缓冲的 key 数                                                                                    |
@@ -370,8 +371,9 @@ Zeta 的 L1 始终启用 `recordStats()`；自定义缓存 Bean 若未开启，�
 | `zeta.expire.refresh.available`            | Gauge           | 后台刷新限流器可用许可数                                                                     |
 | `zeta.expire.refresh.failure.leased.total` | FunctionCounter | 获准续租的刷新失败累计数（陈旧值仍可服务）                                                   |
 | `zeta.expire.refresh.lease.debt.keys`      | Gauge           | 当前被租约持有的 key 数（`staleDebt` 大小）                                                  |
-| `zeta.version.clock.skew`                  | Gauge           | 最新已知版本戳（本地戳时钟或被观测到的对端戳，含被拒收的越界值）领先本地物理时间的毫秒数     |
+| `zeta.version.clock.skew`                  | Gauge           | 最新已知版本戳（本地戳时钟，或 60 秒保留窗口内被拒收的对端戳）领先本地物理时间的毫秒数       |
 | `zeta.sync.send.failed.total`              | FunctionCounter | 同步面发布失败累计数；与 `zeta.sync.invalidate.dropped.total` 配合覆盖发布前的线程池拒绝     |
+| `zeta.sync.dispatch.rejected.total`        | FunctionCounter | 被有序调度器拒绝、并由消费者线程无 Hook 兜底应用的同步消息数；持续增长说明调度器饱和          |
 | `zeta.sync.nodeid.collision.total`         | FunctionCounter | 与本节点共享 `dataVersion` node id 的对端同步消息数；持续增长应显式配置 `zeta.local.node-id` |
 
 ### 5.6 Worker 集群与决策面
@@ -388,7 +390,7 @@ Zeta 的 L1 始终启用 `recordStats()`；自定义缓存 Bean 若未开启，�
 | `zeta.worker.hot.aborted`                             | Counter               | HOT 未到达 broker 而被撤销的晋升（名额已归还）                                                                                        |
 | `zeta.worker.decisions.hot` / `.cool`                 | Counter               | 已交给 AMQP 客户端且未抛异常的决策；未启用 publisher confirm                                                                          |
 | `zeta.worker.decisions.dropped`                       | Counter，tag `type`   | 未到达 broker 即丢失的决策（发送失败、队列饱和、drain 异常、停机）                                                                    |
-| `zeta.worker.decisions.elided`                        | Counter，tag `type`   | 无状态变化、在内存中省略的决策：100ms 同类型去抖、已接受版本的精确重放，或集群已处于 COOL 状态时再次下发的 COOL                       |
+| `zeta.worker.decisions.elided`                        | Counter，tag `type`   | 无状态变化、在内存中省略的决策：100ms 同类型去抖，或已接受版本的精确重放；新的 COOL 不会因上次线上状态为 COOL 而被省略                |
 | `zeta.worker.decisions.superseded`                    | Counter，tag `type`   | 已有严格更新的版本排队或已被接受，或 registry 已不再持有该 HOT 的晋升，旧决策被淘汰                                                   |
 | `zeta.worker.decisions.expired`                       | Counter，tag `type`   | 本应下发但超过 `max-decision-age-ms` 的决策；被漏斗省略或取代的决策计入对应指标，不计入此处                                           |
 | `zeta.worker.broadcast.hot.depth` / `.cool.depth`     | Gauge                 | 两条待发队列深度                                                                                                                      |

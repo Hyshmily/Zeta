@@ -29,6 +29,9 @@ private final Zeta zeta;
 // 在同一命名空间中标记 key
 zeta.tag("product:123");
 
+// 或按权重批量标记
+zeta.tagAll(Map.of("product:123", 3L, "product:456", 1L));
+
 // 获取 key
 zeta.peek("product:123");
 ```
@@ -254,15 +257,15 @@ Zeta 不自带数据访问客户端，每个值都经提供的 loader 进入 L1�
 
 `io.github.hyshmily.zeta.cache.cachesupport.loader.CacheLoader<K, V>`：
 
-| 方法                       | 回答                                 | 默认     |
-| -------------------------- | ------------------------------------ | -------- |
-| `V load(K key)`            | 值从哪来——前台未命中时调用           | 抽象方法 |
-| `V reload(K key)`          | 后台刷新从哪取值——不在原调用栈上执行 | `load`   |
-| `boolean isCacheable(V v)` | 引擎代 loader 取得的值是否可写入 L1  | `true`   |
+| 方法                       | 回答                                | 默认     |
+| -------------------------- | ----------------------------------- | -------- |
+| `V load(K key)`            | 值从哪来——前台未命中时调用          | 抽象方法 |
+| `V reload(K key)`          | 刷新从哪取值——不在原调用栈上执行    | `load`   |
+| `boolean isCacheable(V v)` | 引擎代 loader 取得的值是否可写入 L1 | `true`   |
 
 ```java
 // reader —— 便捷形态，非 null 即缓存
-User a = zeta.get("user:1", () -> repo.findUser(1), GetPolicy.defaults());
+User a = zeta.get("user:1", () -> repo.findUser(1));
 
 // loader —— 同样的调用，外加一个准入决定
 CacheLoader<String, User> loader = new CacheLoader<>() {
@@ -277,14 +280,14 @@ CacheLoader<String, User> loader = new CacheLoader<>() {
   }
 };
 
-User b = zeta.get("user:1", loader, GetPolicy.defaults());
+User b = zeta.get("user:1", loader);
 ```
 
-| 消费者                                             | 用它来                            | 没有它时                                                           |
-| -------------------------------------------------- | --------------------------------- | ------------------------------------------------------------------ |
-| `WorkerListener` → `DefaultWorkerContext`  | 提升 key 为 HOT 前加载权威值      | 提升 L1 中已有的值；无可用条目时该 HOT 被跳过（`VALUE_NOT_FOUND`） |
-| `CacheSyncListener` → `DefaultSyncContext` | 对端 `REFRESH` 后重新加载         | 退化为本地失效，下一次读取回源                                     |
-| 同一个 context 的带值 `PUT`                        | 用 `isCacheable` 校验线上携带的值 | 无 loader 即无校验：携带的值按原样应用                             |
+| 消费者                                     | 用它来                            | 没有它时                                                               |
+| ------------------------------------------ | --------------------------------- | ---------------------------------------------------------------------- |
+| `WorkerListener` → `DefaultWorkerContext`  | 提升 key 为 HOT 前加载权威值      | 提升 L1 中已有的值；无可用条目时该 HOT 被跳过（`NO_PROMOTABLE_VALUE`） |
+| `CacheSyncListener` → `DefaultSyncContext` | 对端 `REFRESH` 后重新加载         | 退化为本地失效，下一次读取回源                                         |
+| 同一个 context 的带值 `PUT`                | 用 `isCacheable` 校验线上携带的值 | 无 loader 即无校验：携带的值按原样应用                                 |
 
 **自定义 per-entry TTL**
 
@@ -321,15 +324,17 @@ public WorkerDecisionHook myMonitorHook() {
 }
 ```
 
-| Hook                 | 方法                 | 触发时机                                                                                           |
-| -------------------- | -------------------- | -------------------------------------------------------------------------------------------------- |
-| `WorkerDecisionHook` | `afterHotPromotion`  | Key 被提升为 HOT（扩展 TTL）                                                                       |
-| `WorkerDecisionHook` | `afterCoolDowngrade` | Key 恢复为普通 TTL                                                                                 |
-| `WorkerDecisionHook` | `onHotSkipped`       | HOT 被跳过（`VERSION_STALE` 版本过旧 / `VALUE_NOT_FOUND` 无可用值 / `POLICY_REJECTED` 自定义拒绝） |
-| `WorkerDecisionHook` | `onCoolSkipped`      | COOL 被跳过（L1 中无对应 entry、版本过旧，或被同一批中更高版本的 COOL 覆盖）                       |
-| `SyncHook`           | `afterRefresh`       | 已应用对端 REFRESH 回源或带值 PUT                                                                  |
-| `SyncHook`           | `afterInvalidate`    | 因对端广播而从 L1 移除 key                                                                         |
-| `SyncHook`           | `onRefreshSkipped`   | REFRESH 或 PUT 未生效（版本过旧、值缺失、被失效水位拒绝，或被同批更高版本覆盖）                    |
+| Hook                 | 方法                 | 触发时机                                                                                                                                         |
+| -------------------- | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `WorkerDecisionHook` | `afterHotPromotion`  | Key 被提升为 HOT（扩展 TTL）                                                                                                                     |
+| `WorkerDecisionHook` | `afterCoolDowngrade` | Key 恢复为普通 TTL                                                                                                                               |
+| `WorkerDecisionHook` | `onHotSkipped`       | HOT 被跳过（`VERSION_STALE`、`NO_PROMOTABLE_VALUE`、`POLICY_REJECTED`、`POLICY_FAILED`）                                                         |
+| `WorkerDecisionHook` | `onCoolSkipped`      | COOL 被跳过（`VERSION_STALE`、`NOT_FOUND_OR_EXPIRED`、`GHOST_COOL`、`COVERED_BY_NEWER_DECISION`、`POLICY_REJECTED`、`POLICY_FAILED`）            |
+| `SyncHook`           | `afterValueApplied`  | 已写入对端 REFRESH 回源值或带值 PUT                                                                                                              |
+| `SyncHook`           | `afterValueDegraded` | 值事件被降级为本地失效（无可用值或策略拒绝；原因取值的侧因）                                                                                     |
+| `SyncHook`           | `afterInvalidate`    | 已应用对端 INVALIDATE                                                                                                                            |
+| `SyncHook`           | `afterClear`         | 一批 clear 完成一次扫描                                                                                                                          |
+| `SyncHook`           | `onSkipped`          | 事件未生效（`VERSION_STALE`、`INVALIDATION_TOMBSTONE`、`VALUE_NOT_FOUND`、`PAYLOAD_UNREADABLE`、`COVERED_BY_NEWER_EVENT`、`POLICY_REJECTED` 等） |
 
 **替换默认的广播处理逻辑**
 
@@ -339,29 +344,137 @@ public WorkerDecisionHook myMonitorHook() {
 public WorkerPolicy myPolicy() {
   return new WorkerPolicy() {
     @Override
-    public HotAction hot(WorkerDecision decision, HotValue value) {
-      return myPolicy(value.value())
-        ? new HotAction.Promote(value)
-        : new HotAction.Skip(HotSkipReason.POLICY_REJECTED);
+    public HotAction hot(WorkerDecision decision, HotValue value, EntryView current) {
+      // current 是策略调用时的 L1 快照；需要替换值时用 HotValue.supplied(value, 正版本号)。
+      return myPolicy(value.value()) ? new HotAction.Promote(value) : new HotAction.Skip(HotSkipReason.POLICY_REJECTED);
     }
 
-    // cool 继承默认：返回 true
+    @Override
+    public CoolAction cool(WorkerDecision decision, EntryView current) {
+      return myCoolPolicy(decision, current) ? CoolAction.DOWNGRADE : CoolAction.REJECT;
+    }
+  };
+}
+
+@Bean
+public SyncPolicy mySyncPolicy() {
+  return new SyncPolicy() {
+    @Override
+    public SyncAdmission admit(SyncEvent event, EntryView current) {
+      return tenantAllows(event) ? SyncAdmission.PROCEED : SyncAdmission.SKIP;
+    }
+
+    @Override
+    public SyncValueAction onValueResolved(SyncEvent event, Object value, EntryView current) {
+      return new SyncValueAction.Apply(redact(value));
+    }
   };
 }
 ```
 
-| 接口           | 方法                                                                                                        | 框架负责                                                                                       |
-| -------------- | ----------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
-| `WorkerPolicy` | `hot(WorkerDecision, HotValue)`, `cool(WorkerDecision)`，默认都走标准流水线                                | per-key 调度、`resolveHot`/`settleHot`/`cool`/`skip`、版本/墓碑守卫、Hook                   |
-| `SyncPolicy`   | `value(Batch.Value, SyncContext)`, `invalidate(Batch.Value, SyncContext)`, `clear(Batch.Clear, SyncContext)` | 批次归约、`value`/`invalidate`/`clear`/`skip`、版本/墓碑守卫、clear watermark、Hook          |
+| 接口           | 方法                                                                                            | 框架负责                                                                      |
+| -------------- | ----------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------- |
+| `WorkerPolicy` | `hot(WorkerDecision, HotValue, EntryView)`, `cool(WorkerDecision, EntryView)`，默认走标准流水线 | per-key 调度、`resolveHot`/`settleHot`/`settleCool`、版本/墓碑守卫、终态 Hook |
+| `SyncPolicy`   | `admit(SyncEvent, EntryView)`, `onValueResolved(SyncEvent, Object, EntryView)`                  | 批次归约、版本/墓碑/clear 守卫、值解码/回源、每个事件恰好一次终态 Hook        |
+
+**准入示例**
+
+`admit` 对 key 批次只调用一次生效事件（被覆盖的消息直接以 `COVERED_BY_NEWER_EVENT` 报告），对 clear 逐条调用；过期/墓碑预检先于策略执行。
+
+| `SyncAdmission`    | PUT / REFRESH                                       | INVALIDATE                    | INVALIDATE_ALL / INVALIDATE_PREFIX       |
+| ------------------ | --------------------------------------------------- | ----------------------------- | ---------------------------------------- |
+| `PROCEED`          | 解码/回源，随后 `onValueResolved`                   | 按事件版本逐出                | 记录水位 + 一次合并扫描                  |
+| `INVALIDATE_LOCAL` | 跳过解码/回源；本地失效（`DEGRADED_TO_INVALIDATE`） | 冗余（`POLICY_FAILED`）       | 视为 `PROCEED`（本身已在本地扫描）       |
+| `SKIP`             | 条目不变（`POLICY_REJECTED`）                       | 条目不变（`POLICY_REJECTED`） | 该 clear 不参与扫描（`POLICY_REJECTED`） |
+
+clear 基于前缀（`prefix() == null` 表示表级），`current` 恒为 `null`；被拒绝或失败的 clear 只跳过自身。策略抛异常或返回 `null` 按 `POLICY_FAILED` 结算，每条路径恰好触发一次 `SyncHook` 回调。
+
+**(1) 只保留一个命名空间**
+
+```java
+private static final String USERS = "users\u0000"; // 命名空间 + 分隔符
+
+@Bean
+public SyncPolicy usersOnlyPolicy() {
+  return new SyncPolicy() {
+    @Override
+    public SyncAdmission admit(SyncEvent event, EntryView current) {
+      // clear 携带的是前缀而不是 key，且 current 恒为 null。
+      if (event instanceof SyncEvent.ClearEvent clear) {
+        return clear.prefix() == null || clear.prefix().startsWith(USERS) || USERS.startsWith(clear.prefix())
+          ? SyncAdmission.PROCEED
+          : SyncAdmission.SKIP;
+      }
+      return ((SyncEvent.KeyEvent) event).cacheKey().startsWith(USERS) ? SyncAdmission.PROCEED : SyncAdmission.SKIP;
+    }
+  };
+}
+```
+
+**(2) 丢弃值路径**
+
+```java
+private static final String ORDERS = "orders\u0000";
+
+@Bean
+public SyncPolicy localSourcePolicy() {
+  return new SyncPolicy() {
+    @Override
+    public SyncAdmission admit(SyncEvent event, EntryView current) {
+      // 订单由本实例自己的存储回源，因此不能写入对端的值；但仍需删除旧副本。
+      // INVALIDATE_LOCAL 只对 PUT/REFRESH 有效——对 INVALIDATE 返回它会按 POLICY_FAILED 结算。
+      boolean valueBearing = event.type() == SyncType.PUT || event.type() == SyncType.REFRESH;
+      return valueBearing && ((SyncEvent.KeyEvent) event).cacheKey().startsWith(ORDERS)
+        ? SyncAdmission.INVALIDATE_LOCAL
+        : SyncAdmission.PROCEED;
+    }
+  };
+}
+```
+
+**(3) 值解析之后**
+
+`onValueResolved` 只处理已解码的 PUT 或已回源的 REFRESH；无法解析的值不会到达这里，而是降级为按版本本地失效（`PAYLOAD_UNREADABLE`、`VALUE_NOT_FOUND`、`VALUE_DECLINED_BY_LOADER`）。
+
+```java
+@Bean
+public SyncPolicy curatedValuePolicy() {
+  return new SyncPolicy() {
+    @Override
+    public SyncValueAction onValueResolved(SyncEvent event, Object value, EntryView current) {
+      if (value instanceof User user) {
+        if (user.deletedAt() != null) {
+          return SyncValueAction.INVALIDATE; // 不缓存软删除行
+        }
+        if (!user.isComplete()) {
+          return SyncValueAction.SKIP; // 保留常驻值直到它自己的 TTL
+        }
+      }
+      return new SyncValueAction.Apply(maskSecrets(value));
+    }
+  };
+}
+```
+
+| `SyncValueAction` | 效果                                                               |
+| ----------------- | ------------------------------------------------------------------ |
+| `Apply(value)`    | 按事件版本写入，写入前复检守卫与 `isCacheable`；被拒绝时降级为失效 |
+| `Invalidate()`    | 丢弃值，按版本本地失效（`DEGRADED_TO_INVALIDATE`）                 |
+| `Skip()`          | 常驻条目不变（`POLICY_REJECTED`）                                  |
+
+## 门面 API
+
+注入 `Zeta` Bean 即可编程调用：`get`、`put`、`invalidate` 及其批量形式，`refresh` / `refreshAll`，以及 `detector()`、`unsafe()` 视图。TTL、同步范围与部署模式行为见 [CONFIG.zh.md](docs/CONFIG.zh.md)。
 
 ## 注解
 
-| 注解              | 目标 | 作用                                                                                                                                                                                                                                                                                                                                                                                                      |
-| ----------------- | ---- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `@ZetaCached`     | M    | 读穿透：命中直接返回、不执行方法体；未命中执行一次并存储非 `null` 结果。方法体即 loader，因此软过期（stale-while-revalidate）与 SingleFlight 合并同样生效。key 与 TTL 在方法体之前解析，因此不可使用 `#result`；未知 SpEL 变量、保留参数名（`root`、`this`、`result`、`pN`、`aN`；方法只要编译了任一表达式就会校验）与超出 `long` 范围的纯数字 TTL 会在启动期失败。                                       |
-| `@ZetaPut`        | M    | 写穿透：先执行方法体，再写入非 `null` 结果。不读取 `#result` 的 key 在方法体之前解析（空参数、空 key 在事务前失败）；同步写入的动态 hard TTL 会在方法体前做 permanent+sync 预检。其余 TTL 与 `unless` 在方法体返回、结果非 `null` 且未被否决后求值。`sync = false` 表示只写本实例。                                                                                                                       |
-| `@ZetaInvalidate` | M    | 删除条目：默认在方法体之后执行，因此 key 可使用 `#result`；不读取 `#result` 的 key 在方法体之前解析。读取 `#result` 的 key 交给 SpEL 求值：方法体可能返回 `null` 时请用 `#result?.id`（结果为 `null` 即本次不删除），直接写 `#result.id` 遇到 `null` 会失败；带自身空值兜底的表达式仍会执行。`beforeInvocation = true` 改为方法体之前（立即）执行，此时不可使用 `#result`。`scope` 选择本地、远端或两者。 |
+| 注解              | 目标 | 作用                                                                                                                                     |
+| ----------------- | ---- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `@ZetaCached`     | M    | 读穿透：命中不执行方法体；未命中执行一次并缓存非 `null` 结果。软过期与 SingleFlight 生效；key/TTL 在方法体之前解析，不可使用 `#result`。 |
+| `@ZetaPut`        | M    | 写穿透：先执行方法体，再缓存非 `null` 结果。读取 `#result` 的 key 在方法体后解析；`sync = false` 只写本实例。                            |
+| `@ZetaInvalidate` | M    | 默认在方法体之后删除条目（key 可用 `#result`）；`beforeInvocation = true` 改为先删除。`scope` 选择本地、远端或两者。                     |
+
+未知 SpEL 变量（含未编译参数名）、函数调用、保留名或超出 `long` 范围的数字 TTL 会启动失败。JDK 动态代理（Spring Data Repository、MyBatis Mapper、Feign Client）按业务接口解析注解计划。
 
 ### `@ZetaCached`
 

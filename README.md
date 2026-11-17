@@ -29,6 +29,9 @@ private final Zeta zeta;
 // tag the key inside the shared namespace
 zeta.tag("product:123");
 
+// or tag a batch with explicit weights
+zeta.tagAll(Map.of("product:123", 3L, "product:456", 1L));
+
 // read it
 zeta.peek("product:123");
 ```
@@ -258,12 +261,12 @@ Zeta ships no data-access client; every value enters L1 through the loader you s
 | Method                     | Answers                                                                         | Default  |
 | -------------------------- | ------------------------------------------------------------------------------- | -------- |
 | `V load(K key)`            | where the value comes from — called on a foreground miss                        | abstract |
-| `V reload(K key)`          | where a background refresh reads it — never on the original call stack          | `load`   |
+| `V reload(K key)`          | where a refresh reads it — never on the original call stack                     | `load`   |
 | `boolean isCacheable(V v)` | whether a value the engine obtained on the loader's behalf may be written to L1 | `true`   |
 
 ```java
 // reader — the convenience form: anything non-null is cached
-User a = zeta.get("user:1", () -> repo.findUser(1), GetPolicy.defaults());
+User a = zeta.get("user:1", () -> repo.findUser(1));
 
 // loader — the same call plus an admission decision
 CacheLoader<String, User> loader = new CacheLoader<>() {
@@ -278,14 +281,14 @@ CacheLoader<String, User> loader = new CacheLoader<>() {
   }
 };
 
-User b = zeta.get("user:1", loader, GetPolicy.defaults());
+User b = zeta.get("user:1", loader);
 ```
 
-| Consumer                                           | Uses it to                                                 | Without it                                                                                     |
-| -------------------------------------------------- | ---------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
-| `WorkerListener` → `DefaultWorkerContext`  | load the authoritative value before promoting a key to HOT | promotes what L1 already holds; the HOT is skipped when no entry is usable (`VALUE_NOT_FOUND`) |
-| `CacheSyncListener` → `DefaultSyncContext` | reload after a peer `REFRESH`                              | degrades to a local invalidation — the next read goes back through your reader                 |
-| the same context's value-carrying `PUT`            | validate the value carried on the wire with `isCacheable`  | no loader, no validation: the carried value is applied as-is                                   |
+| Consumer                                   | Uses it to                                                 | Without it                                                                                         |
+| ------------------------------------------ | ---------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| `WorkerListener` → `DefaultWorkerContext`  | load the authoritative value before promoting a key to HOT | promotes what L1 already holds; the HOT is skipped when no entry is usable (`NO_PROMOTABLE_VALUE`) |
+| `CacheSyncListener` → `DefaultSyncContext` | reload after a peer `REFRESH`                              | degrades to a local invalidation — the next read goes back through your reader                     |
+| the same context's value-carrying `PUT`    | validate the value carried on the wire with `isCacheable`  | no loader, no validation: the carried value is applied as-is                                       |
 
 **Custom per-entry TTL**
 
@@ -322,15 +325,17 @@ public WorkerDecisionHook myMonitorHook() {
 }
 ```
 
-| Hook                 | Method               | Fires when                                                                                                                                                        |
-| -------------------- | -------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `WorkerDecisionHook` | `afterHotPromotion`  | a key is promoted to HOT (extended TTL)                                                                                                                           |
-| `WorkerDecisionHook` | `afterCoolDowngrade` | a key returns to the normal TTL                                                                                                                                   |
-| `WorkerDecisionHook` | `onHotSkipped`       | a HOT decision is skipped (`VERSION_STALE` stale version / `VALUE_NOT_FOUND` no usable value / `POLICY_REJECTED` custom refusal)                                  |
-| `WorkerDecisionHook` | `onCoolSkipped`      | a COOL decision is skipped (no matching entry in L1, stale version, or covered by a newer COOL in the same run)                                                   |
-| `SyncHook`           | `afterRefresh`       | a peer `REFRESH` read-back or a value-carrying `PUT` was applied                                                                                                  |
-| `SyncHook`           | `afterInvalidate`    | a key was removed from L1 because of a peer broadcast                                                                                                             |
-| `SyncHook`           | `onRefreshSkipped`   | a REFRESH or PUT did not take effect (stale version, missing value, rejected by the invalidation watermark, or overwritten by a higher version in the same batch) |
+| Hook                 | Method               | Fires when                                                                                                                                                       |
+| -------------------- | -------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `WorkerDecisionHook` | `afterHotPromotion`  | a key is promoted to HOT (extended TTL)                                                                                                                          |
+| `WorkerDecisionHook` | `afterCoolDowngrade` | a key returns to the normal TTL                                                                                                                                  |
+| `WorkerDecisionHook` | `onHotSkipped`       | a HOT decision is skipped (`VERSION_STALE`, `NO_PROMOTABLE_VALUE`, `POLICY_REJECTED`, `POLICY_FAILED`)                                                           |
+| `WorkerDecisionHook` | `onCoolSkipped`      | a COOL decision is skipped (`VERSION_STALE`, `NOT_FOUND_OR_EXPIRED`, `GHOST_COOL`, `COVERED_BY_NEWER_DECISION`, `POLICY_REJECTED`, `POLICY_FAILED`)              |
+| `SyncHook`           | `afterValueApplied`  | a peer `REFRESH` read-back or a value-carrying `PUT` was written                                                                                                 |
+| `SyncHook`           | `afterValueDegraded` | a value event was applied as a local invalidation (no value or policy declined; the reason is the value-side cause)                                              |
+| `SyncHook`           | `afterInvalidate`    | a peer `INVALIDATE` was applied                                                                                                                                  |
+| `SyncHook`           | `afterClear`         | a granted clear batch completed its one sweep                                                                                                                    |
+| `SyncHook`           | `onSkipped`          | an event produced no effect (`VERSION_STALE`, `INVALIDATION_TOMBSTONE`, `VALUE_NOT_FOUND`, `PAYLOAD_UNREADABLE`, `COVERED_BY_NEWER_EVENT`, `POLICY_REJECTED`, …) |
 
 **Replace the default broadcast handling**
 
@@ -340,29 +345,138 @@ public WorkerDecisionHook myMonitorHook() {
 public WorkerPolicy myPolicy() {
   return new WorkerPolicy() {
     @Override
-    public HotAction hot(WorkerDecision decision, HotValue value) {
-      return myPolicy(value.value())
-        ? new HotAction.Promote(value)
-        : new HotAction.Skip(HotSkipReason.POLICY_REJECTED);
+    public HotAction hot(WorkerDecision decision, HotValue value, EntryView current) {
+      // current is the L1 snapshot at policy time; replace the value with HotValue.supplied(value, positiveVersion).
+      return myPolicy(value.value()) ? new HotAction.Promote(value) : new HotAction.Skip(HotSkipReason.POLICY_REJECTED);
     }
 
-    // cool keeps the default: return true
+    @Override
+    public CoolAction cool(WorkerDecision decision, EntryView current) {
+      return myCoolPolicy(decision, current) ? CoolAction.DOWNGRADE : CoolAction.REJECT;
+    }
+  };
+}
+
+@Bean
+public SyncPolicy mySyncPolicy() {
+  return new SyncPolicy() {
+    @Override
+    public SyncAdmission admit(SyncEvent event, EntryView current) {
+      return tenantAllows(event) ? SyncAdmission.PROCEED : SyncAdmission.SKIP;
+    }
+
+    @Override
+    public SyncValueAction onValueResolved(SyncEvent event, Object value, EntryView current) {
+      return new SyncValueAction.Apply(redact(value));
+    }
   };
 }
 ```
 
-| Interface      | Methods                                                                                                                | Framework owns                                                                                         |
-| -------------- | ---------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
-| `WorkerPolicy` | `hot(WorkerDecision, HotValue)`, `cool(WorkerDecision)` — both default to the standard pipeline                        | per-key dispatch, `resolveHot`/`settleHot`/`cool`/`skip`, version/tombstone guards, hooks              |
-| `SyncPolicy`   | `value(Batch.Value, SyncContext)`, `invalidate(Batch.Value, SyncContext)`, `clear(Batch.Clear, SyncContext)`           | batch reduction, `value`/`invalidate`/`clear`/`skip`, version/tombstone guards, clear watermarks, hooks |
+| Interface      | Methods                                                                                                            | Framework owns                                                                                    |
+| -------------- | ------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------- |
+| `WorkerPolicy` | `hot(WorkerDecision, HotValue, EntryView)`, `cool(WorkerDecision, EntryView)` — defaults run the standard pipeline | per-key dispatch, `resolveHot`/`settleHot`/`settleCool`, version/tombstone guards, terminal hooks |
+| `SyncPolicy`   | `admit(SyncEvent, EntryView)`, `onValueResolved(SyncEvent, Object, EntryView)`                                     | batch reduction, version/tombstone/clear guards, value decode/load, one terminal hook per event   |
+
+**Admission examples**
+
+`admit` runs once for a key batch's effective event (covered messages report `COVERED_BY_NEWER_EVENT` without reaching it) and once per clear; the stale/tombstone pre-check runs first.
+
+| `SyncAdmission`    | PUT / REFRESH                                                   | INVALIDATE                    | INVALIDATE_ALL / INVALIDATE_PREFIX            |
+| ------------------ | --------------------------------------------------------------- | ----------------------------- | --------------------------------------------- |
+| `PROCEED`          | decode/load, then `onValueResolved`                             | evict at the event version    | record the watermark + one coalesced sweep    |
+| `INVALIDATE_LOCAL` | skip decode/load; local invalidation (`DEGRADED_TO_INVALIDATE`) | redundant (`POLICY_FAILED`)   | treated as `PROCEED` (already sweeps locally) |
+| `SKIP`             | untouched (`POLICY_REJECTED`)                                   | untouched (`POLICY_REJECTED`) | drop this clear (`POLICY_REJECTED`)           |
+
+A clear is prefix-based (`prefix() == null` = table-wide) and always passes `current == null`; a refused or failed clear drops out of the batch alone. An exception or `null` result settles as `POLICY_FAILED`, and every path fires exactly one terminal `SyncHook`.
+
+**(1) One namespace**
+
+```java
+private static final String USERS = "users\u0000"; // namespace + delimiter
+
+@Bean
+public SyncPolicy usersOnlyPolicy() {
+  return new SyncPolicy() {
+    @Override
+    public SyncAdmission admit(SyncEvent event, EntryView current) {
+      // A clear carries a prefix, not a key, and always arrives with current == null.
+      if (event instanceof SyncEvent.ClearEvent clear) {
+        return clear.prefix() == null || clear.prefix().startsWith(USERS) || USERS.startsWith(clear.prefix())
+          ? SyncAdmission.PROCEED
+          : SyncAdmission.SKIP;
+      }
+      return ((SyncEvent.KeyEvent) event).cacheKey().startsWith(USERS) ? SyncAdmission.PROCEED : SyncAdmission.SKIP;
+    }
+  };
+}
+```
+
+**(2) Value path → invalidation**
+
+```java
+private static final String ORDERS = "orders\u0000";
+
+@Bean
+public SyncPolicy localSourcePolicy() {
+  return new SyncPolicy() {
+    @Override
+    public SyncAdmission admit(SyncEvent event, EntryView current) {
+      // Orders are re-read from this instance's own store, so a peer value must not
+      // be written; the stale copy still has to go. INVALIDATE_LOCAL is valid only
+      // for PUT/REFRESH — on an INVALIDATE it settles as POLICY_FAILED.
+      boolean valueBearing = event.type() == SyncType.PUT || event.type() == SyncType.REFRESH;
+      return valueBearing && ((SyncEvent.KeyEvent) event).cacheKey().startsWith(ORDERS)
+        ? SyncAdmission.INVALIDATE_LOCAL
+        : SyncAdmission.PROCEED;
+    }
+  };
+}
+```
+
+**(3) After resolution**
+
+`onValueResolved` runs only for a decoded PUT or loaded REFRESH. An unresolvable value never reaches it; it degrades to a versioned invalidation (`PAYLOAD_UNREADABLE`, `VALUE_NOT_FOUND`, `VALUE_DECLINED_BY_LOADER`).
+
+```java
+@Bean
+public SyncPolicy curatedValuePolicy() {
+  return new SyncPolicy() {
+    @Override
+    public SyncValueAction onValueResolved(SyncEvent event, Object value, EntryView current) {
+      if (value instanceof User user) {
+        if (user.deletedAt() != null) {
+          return SyncValueAction.INVALIDATE; // never cache a soft-deleted row
+        }
+        if (!user.isComplete()) {
+          return SyncValueAction.SKIP; // keep the resident until its own TTL
+        }
+      }
+      return new SyncValueAction.Apply(maskSecrets(value));
+    }
+  };
+}
+```
+
+| `SyncValueAction` | Effect                                                                                              |
+| ----------------- | --------------------------------------------------------------------------------------------------- |
+| `Apply(value)`    | written at the event version after the guards and `isCacheable` re-check; a declined value degrades |
+| `Invalidate()`    | drop the value; versioned local invalidation (`DEGRADED_TO_INVALIDATE`)                             |
+| `Skip()`          | resident untouched (`POLICY_REJECTED`)                                                              |
+
+## Facade API
+
+Inject the `Zeta` bean for programmatic access: `get`, `put`, `invalidate` and their batch forms, `refresh` / `refreshAll`, plus the `detector()` and `unsafe()` views. TTLs, sync scope and deployment-mode behaviour are covered in [CONFIG.md](docs/CONFIG.md).
 
 ## Annotations
 
-| Annotation        | Target | Effect                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
-| ----------------- | ------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `@ZetaCached`     | M      | Read-through: a hit returns immediately without executing the method body; a miss executes it once and stores the non-`null` result. The body is the loader, so soft expiry (stale-while-revalidate) and SingleFlight coalescing apply as well. Key and TTLs resolve before the body, so `#result` is unavailable; unknown SpEL variables, reserved parameter names (`root`, `this`, `result`, `pN`, `aN`) when the method compiles an expression, and digits-only TTLs outside `long` fail startup.  |
-| `@ZetaPut`        | M      | Write-through: executes the body, then stores the non-`null` result. A key that does not read `#result` resolves before the body (a null argument or null key fails before the transaction); a synced dynamic hard TTL is pre-checked before the body for the permanent+sync rule. Other TTLs and `unless` resolve after the body, once the result is non-null and not vetoed. `sync = false` writes this instance only.                                                                              |
-| `@ZetaInvalidate` | M      | Removes entries: by default after the body, so the key may use `#result`. A key that does not read `#result` resolves before the body. A key that reads `#result` is evaluated by SpEL: use `#result?.id` when the body may return `null` (a null key is a no-op), while a plain `#result.id` on a null result fails; an expression with its own null fallback still runs. `beforeInvocation = true` removes before the body (where `#result` is unavailable). `scope` selects local, remote or both. |
+| Annotation        | Target | Effect                                                                                                                                                                                       |
+| ----------------- | ------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `@ZetaCached`     | M      | Read-through: a hit skips the body; a miss runs it once and caches the non-`null` result. Soft expiry and SingleFlight apply; key/TTLs resolve before the body, so `#result` is unavailable. |
+| `@ZetaPut`        | M      | Write-through: runs the body, then caches the non-`null` result. A key reading `#result` resolves after the body; `sync = false` writes this instance only.                                  |
+| `@ZetaInvalidate` | M      | Removes entries after the body by default (key may read `#result`); `beforeInvocation = true` removes first. `scope` covers local, remote or both.                                           |
+
+Unknown SpEL variables (including uncompiled parameter names), function calls, reserved names or an out-of-`long` numeric TTL fail startup. A JDK proxy (Spring Data repository, MyBatis mapper, Feign client) resolves the plan against its business interfaces.
 
 ### `@ZetaCached`
 
