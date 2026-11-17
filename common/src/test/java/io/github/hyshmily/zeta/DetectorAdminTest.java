@@ -17,7 +17,9 @@ package io.github.hyshmily.zeta;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -57,13 +59,31 @@ class DetectorAdminTest {
   @Test
   void detector_feeds_shouldReachEngine() {
     zeta.tag("k", Zeta.TagMode.DETECT_ONLY);
-    verify(hotKeyCache).recordAccess("k", Zeta.TagMode.DETECT_ONLY);
+    verify(hotKeyCache).recordAccess("k", 1L, Zeta.TagMode.DETECT_ONLY);
   }
 
   @Test
   void detector_localTopKeys_shouldReturnDetectorItems() {
     when(appDetector.listTopN(3)).thenReturn(List.of(new Item("k", 42)));
     assertThat(zeta.detector().localTopKeys(3)).containsExactly(new Item("k", 42));
+  }
+
+  @Test
+  void detector_localTopKeys_shouldRejectANegativeLimitInEveryMode() {
+    Zeta workerOnly = new DefaultZeta(null, null);
+
+    assertThatThrownBy(() -> workerOnly.detector().localTopKeys(-1)).isInstanceOf(IllegalArgumentException.class);
+    assertThatThrownBy(() -> zeta.detector().localTopKeys(-1)).isInstanceOf(IllegalArgumentException.class);
+    verify(appDetector, never()).listTopN(anyInt());
+  }
+
+  @Test
+  void detector_localTopKeys_zero_shouldAnswerEmptyInEveryMode() {
+    Zeta workerOnly = new DefaultZeta(null, null);
+
+    assertThat(zeta.detector().localTopKeys(0)).isEmpty();
+    assertThat(workerOnly.detector().localTopKeys(0)).isEmpty();
+    verify(appDetector, never()).listTopN(anyInt());
   }
 
   @Test

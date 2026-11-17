@@ -24,10 +24,11 @@ import io.github.hyshmily.zeta.cache.cachesupport.policy.PutPolicy;
 import io.github.hyshmily.zeta.cache.cachesupport.raw.CacheEntry;
 import io.github.hyshmily.zeta.exception.ZetaModeException;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.Item;
-import io.github.hyshmily.zeta.model.*;
+import io.github.hyshmily.zeta.model.ZetaCacheStats;
 import java.util.*;
 import java.util.function.Function;
 import java.util.function.Supplier;
+import org.jspecify.annotations.Nullable;
 
 /**
  * Public facade of the Zeta library — the sole API entry point, shaped as
@@ -35,40 +36,44 @@ import java.util.function.Supplier;
  * (<b>get / put / invalidate</b>), each with one closed options record
  * ({@link GetPolicy}, {@link PutPolicy},
  * {@link InvalidatePolicy}), their batch forms ({@code getAll}, {@code putAll},
- * the collection and clear invalidations), plus a peek probe and the low-frequency
+ * the collection and clear invalidations), plus the value-only renewal verbs
+ * ({@code refresh} / {@code refreshAll}), a peek probe and the low-frequency
  * administrative views.
  *
  * <ul>
  *   <li><b>Data plane</b> (this interface): reads return the generic value
  *       directly — {@code null} = miss ("no value this time"); a loader's
  *       {@code null} result is <b>never cached</b> (no entry is written, the
- *       next read re-invokes the loader). {@code null} options arguments are
- *       interpreted as that family's {@code defaults()}. Batch reads omit
- *       keys with no value (missing key = miss).</li>
+ *       next read re-invokes the loader). A {@code null} options argument
+ *       selects the same policy as the verb's no-options overload. Batch reads
+ *       omit keys with no value (missing key = miss). A refresh renews a value
+ *       without touching the entry's lifecycle policy; a TTL change is a
+ *       {@code put}.</li>
  *   <li><b>Raw escape hatch</b>: {@link #unsafe()} exposes the single L1
  *       table (Caffeine {@code Cache<String, CacheEntry>}) for callers whose
  *       needs do not fit the verbs — eviction introspection, bulk scans,
  *       diagnostic reads. One-off loaders and readers travel with the call;
  *       there is no second cache API to learn.</li>
- *   <li><b>Administrative plane</b> ({@link #refresh()}, {@link #stats()},
- *       {@link #detector()}, {@link #unsafe()}): timed refresh registration,
- *       L1 statistics, and local-TopK detection queries behind small views
- *       that can be replaced independently (Caffeine's
+ *   <li><b>Administrative plane</b> ({@link #stats()}, {@link #detector()},
+ *       {@link #unsafe()}): L1 statistics and local-TopK detection queries
+ *       behind small views that can be replaced independently (Caffeine's
  *       {@code Cache.policy()} pattern).</li>
  * </ul>
  *
  * <p>
  * <b>Sync semantics:</b> {@code sync} knobs ({@link PutPolicy#synced()},
  * {@link InvalidatePolicy#localOnly()}) control <b>cross-instance
- * synchronization</b> — fire-and-forget fan-out tolerated by TTL convergence,
- * never a blocking wait for peer acknowledgement (design decisions: sync messages).
+ * synchronization</b> — a fire-and-forget fan-out tolerated by TTL convergence,
+ * never a blocking wait for peer acknowledgement.
  *
  * <p>
  * <b>Argument validation:</b> blank or null keys, null required callbacks or collections,
- * and negative TTLs are rejected before any cache work — {@link IllegalArgumentException}
- * for a null or blank key, a non-positive tag count, a negative TTL or another invalid
+ * and negative TTLs or top-K limits are rejected before any cache work — {@link IllegalArgumentException}
+ * for a null or blank key, a non-positive tag count, a negative TTL, a negative top-K limit or another invalid
  * value; {@link NullPointerException} for a null required callback, value or collection
- * argument.
+ * argument. A read policy's TTL suppliers are lazy (see {@link GetPolicy}); a negative
+ * result is rejected when the read first needs that TTL, because a plain cache hit never
+ * evaluates the supplier at all.
  *
  * <p>
  * <b>Thread safety:</b> all methods are thread-safe. A read is linearized at its own
@@ -91,86 +96,114 @@ import java.util.function.Supplier;
 @SuppressWarnings("unused")
 public interface Zeta {
   /**
-   * How much of the access-recording pipeline a {@link #tag(String, TagMode)} call performs: the
-   * call site states its intent instead of passing positional flags.
+   * How much of the access-recording pipeline a tag call performs: the call site states its
+   * intent instead of passing positional flags.
    */
   enum TagMode {
-    /** Local HeavyKeeper add and Worker report (default). */
+    /** Shared counter: local add and Worker report (default). */
     RECORD,
-    /** Local add only; skip the Worker report. */
+    /** Direct local add only; skip the Worker report. */
     DETECT_ONLY,
-    /** Worker report only; skip the local add. */
+    /** Direct Worker report only; skip the local add. */
     REPORT_ONLY,
-    /** Neither (explicit no-op). */
-    SILENT;
-
-    /**
-     * Declaration order encodes the two skip flags as {@code (skipDetection << 1) | skipReport};
-     * {@link #of} and the two predicates rely on that layout.
-     */
-    private static final TagMode[] VALUES = values();
-
-    /** Whether this mode skips the local HeavyKeeper increment. */
-    public boolean skipDetection() {
-      return (ordinal() & 2) != 0;
-    }
-
-    /** Whether this mode skips the Worker report. */
-    public boolean skipReport() {
-      return (ordinal() & 1) != 0;
-    }
-
-    /**
-     * Map a {@code (skipDetection, skipReport)} pair to the equivalent mode.
-     *
-     * @param skipDetection whether to skip the local add
-     * @param skipReport    whether to skip the Worker report
-     * @return the corresponding mode
-     */
-    public static TagMode of(boolean skipDetection, boolean skipReport) {
-      return VALUES[(skipDetection ? 2 : 0) | (skipReport ? 1 : 0)];
-    }
+    /** Neither (validated no-op). */
+    SILENT,
   }
 
   /**
-   * Tag a cache key as potentially hot, reporting it to the Worker without
-   * performing a cache read.
+   * Tag a cache key with an explicit access count and recording mode — the canonical
+   * single-key tagging primitive.
    *
-   * <p>
-   * Updates the local HeavyKeeper sketch and enqueues the key for batch
-   * reporting to the Worker, exactly as {@link #get} would, but without
-   * touching the L1 cache or invoking any reader/loader. Fire-and-forget:
-   * a saturated or shedding detector drops the hint instead of throwing, so
-   * audit-style tagging never breaks the business method.
+   * <p>{@link TagMode#RECORD} feeds the shared {@code WaveCounter}, so the hint is merged
+   * with concurrent reads and reported on the normal tide; {@code DETECT_ONLY} updates the
+   * local sketch directly, {@code REPORT_ONLY} publishes directly and {@code SILENT} is a
+   * no-op. No mode touches the L1 cache or invokes a reader.
    *
-   * @param cacheKey the key to tag
+   * <p>Fire-and-forget: a saturated or shedding detector drops the hint instead of throwing.
+   *
+   * @param cacheKey the key to tag (must not be null or blank)
+   * @param count    the number of accesses to add (must be positive)
+   * @param mode     how much of the pipeline to run (never {@code null})
+   * @throws ZetaModeException        when no cache is available (Worker-only mode)
+   * @throws IllegalArgumentException when {@code cacheKey} is null/blank or {@code count} is not positive
+   * @throws NullPointerException     when {@code mode} is {@code null}
    */
-  void tag(String cacheKey);
+  void tag(String cacheKey, long count, TagMode mode);
 
   /**
-   * Tag a cache key with an explicit recording mode — the low-level form for
-   * callers that must suppress detection or reporting independently.
-   * Application code should prefer {@link #tag(String)}.
+   * Tag a cache key once on the full pipeline ({@link TagMode#RECORD}).
    *
-   * @param cacheKey the key to tag
+   * @param cacheKey the key to tag (must not be null or blank)
+   */
+  default void tag(String cacheKey) {
+    tag(cacheKey, 1L, TagMode.RECORD);
+  }
+
+  /**
+   * Tag a cache key once with an explicit recording mode.
+   *
+   * @param cacheKey the key to tag (must not be null or blank)
    * @param mode     how much of the pipeline to run (never {@code null})
    */
-  void tag(String cacheKey, TagMode mode);
+  default void tag(String cacheKey, TagMode mode) {
+    tag(cacheKey, 1L, mode);
+  }
 
   /**
-   * Tag a key {@code count} times in one call — the bulk form of
-   * {@link #tag(String)}, for a batch read or a paginated workload where one
-   * business call represents several hits.
+   * Tag a cache key {@code count} times on the full pipeline ({@link TagMode#RECORD}).
    *
-   * <p>The counts land in the shared access counter and feed both local
-   * detection and Worker reporting at tide time, so a batch replay behaves
-   * exactly like the equivalent number of {@link #tag(String)} calls.
-   *
-   * @param cacheKey the key to tag
+   * @param cacheKey the key to tag (must not be null or blank)
    * @param count    the number of accesses to add (must be positive)
-   * @throws IllegalArgumentException when count is not positive
    */
-  void tag(String cacheKey, long count);
+  default void tag(String cacheKey, long count) {
+    tag(cacheKey, count, TagMode.RECORD);
+  }
+
+  /**
+   * Batch form of {@link #tag(String, long, TagMode)}: record weighted access counts for
+   * multiple keys under one shared mode.
+   *
+   * <p>Validation is all-or-nothing: every key and count is checked before the snapshot
+   * reaches the counter. A null/blank key or a non-positive count rejects the whole call;
+   * an empty map is a no-op after the mode and deployment checks. The facade copies the
+   * map while validating, so a concurrent caller mutation cannot inject an unchecked row.
+   *
+   * @param keyCounts a map of cacheKey to a positive access count (never {@code null})
+   * @param mode      how much of the pipeline to run (never {@code null})
+   * @throws ZetaModeException        when no cache is available (Worker-only mode)
+   * @throws IllegalArgumentException when any key is null/blank or any count is not positive
+   * @throws NullPointerException     when {@code keyCounts}, {@code mode} or a count value is {@code null}
+   */
+  void tagAll(Map<String, Long> keyCounts, TagMode mode);
+
+  /**
+   * Batched weighted tagging on the full pipeline ({@link TagMode#RECORD}).
+   *
+   * @param keyCounts a map of cacheKey to a positive access count (never {@code null})
+   */
+  default void tagAll(Map<String, Long> keyCounts) {
+    tagAll(keyCounts, TagMode.RECORD);
+  }
+
+  /**
+   * Batch tag a collection of keys once each under one shared mode. Duplicate keys are
+   * summed into one count; the facade builds the snapshot once and delegates to
+   * {@link #tagAll(Map, TagMode)}, so the same all-or-nothing validation applies.
+   *
+   * @param cacheKeys the keys to tag; every element must be non-blank (never {@code null})
+   * @param mode      how much of the pipeline to run (never {@code null})
+   * @throws ZetaModeException        when no cache is available (Worker-only mode)
+   * @throws IllegalArgumentException when any element is null or blank
+   * @throws NullPointerException     when {@code cacheKeys} or {@code mode} is {@code null}
+   */
+  default void tagAll(Collection<String> cacheKeys, TagMode mode) {
+    Objects.requireNonNull(cacheKeys, "cacheKeys must not be null");
+    Map<String, Long> counts = new LinkedHashMap<>((int) (cacheKeys.size() / 0.75f) + 1);
+    for (String cacheKey : cacheKeys) {
+      counts.merge(cacheKey, 1L, Long::sum);
+    }
+    tagAll(counts, mode);
+  }
 
   /**
    * Look up a cached value without loading or triggering hot-key detection.
@@ -181,7 +214,7 @@ public interface Zeta {
    * @return the cached value, or {@code null} on a miss
    * @throws ZetaModeException    when no cache is available (Worker-only mode)
    */
-  <T> T peek(String cacheKey);
+  <T> @Nullable T peek(String cacheKey);
 
   /**
    * One-off get with a typed loader: the loader (including its
@@ -194,6 +227,10 @@ public interface Zeta {
    * <p>The engine calls {@link CacheLoader#reload} (not {@link CacheLoader#load})
    * for its background refresh.
    *
+   * <p>The options' TTL suppliers are lazy: a plain cache hit never evaluates
+   * them, and a negative result is rejected with
+   * {@link IllegalArgumentException} when the read first needs that TTL.
+   *
    * @param cacheKey the key to retrieve
    * @param loader   the value loader for cache misses / refreshes
    * @param options  the per-invocation read options ({@code null} =
@@ -202,7 +239,7 @@ public interface Zeta {
    * @return the cached or loaded value; {@code null} = miss
    * @throws ZetaModeException    when no cache is available (Worker-only mode)
    */
-  <V> V get(String cacheKey, CacheLoader<String, V> loader, GetPolicy options);
+  <V> @Nullable V get(String cacheKey, CacheLoader<String, V> loader, @Nullable GetPolicy options);
 
   /**
    * One-off get with a plain reader — the convenience form with
@@ -218,15 +255,41 @@ public interface Zeta {
    * @return the cached or loaded value; {@code null} = miss
    * @throws ZetaModeException    when no cache is available (Worker-only mode)
    */
-  <V> V get(String cacheKey, Supplier<V> reader, GetPolicy options);
+  <V> @Nullable V get(String cacheKey, Supplier<V> reader, @Nullable GetPolicy options);
+
+  /**
+   * Get with a typed loader and the default read options.
+   *
+   * @param cacheKey the key to retrieve
+   * @param loader   the value loader
+   * @param <V>      the value type
+   * @return the cached or loaded value; {@code null} = miss
+   * @throws ZetaModeException when no cache is available (Worker-only mode)
+   */
+  default <V> @Nullable V get(String cacheKey, CacheLoader<String, V> loader) {
+    return get(cacheKey, loader, GetPolicy.defaults());
+  }
+
+  /**
+   * Get with a plain reader and the default read options.
+   *
+   * @param cacheKey the key to retrieve
+   * @param reader   the value supplier for cache misses
+   * @param <V>      the value type
+   * @return the cached or loaded value; {@code null} = miss
+   * @throws ZetaModeException when no cache is available (Worker-only mode)
+   */
+  default <V> @Nullable V get(String cacheKey, Supplier<V> reader) {
+    return get(cacheKey, reader, GetPolicy.defaults());
+  }
 
   /**
    * Batch get with a reader — the full-control form. All keys share the same
-   * options; the options' TTLs are evaluated once for the whole batch (the
-   * batch pipeline has no per-key lazy-TTL path) and the positional reader
-   * governs loading. Null and blank keys are skipped and — like a miss —
-   * omitted from the result. No admission filter is applied — every
-   * non-{@code null} value is stored.
+   * options; the options' TTLs are evaluated and validated once for the whole
+   * batch — before any key is read, even when {@code cacheKeys} is empty — and
+   * the positional reader governs loading. Null and blank keys are skipped and —
+   * like a miss — omitted from the result. No admission filter is applied —
+   * every non-{@code null} value is stored.
    *
    * @param cacheKeys the keys to retrieve
    * @param reader    the value function for cache misses
@@ -235,15 +298,33 @@ public interface Zeta {
    * @param <V>       the value type
    * @return a map of key → loaded or cached value; keys with no value are
    *         omitted
-   * @throws ZetaModeException    when no cache is available (Worker-only mode)
-   * @throws RuntimeException     the first reader failure cause; the remaining keys
-   *                              are still processed and their failures suppressed
+   * @throws ZetaModeException        when no cache is available (Worker-only mode)
+   * @throws IllegalArgumentException when a TTL in {@code options} is negative
+   * @throws RuntimeException         the first reader failure cause; the remaining keys
+   *                                  are still processed and their failures suppressed
    */
   <V> Map<String, V> getAll(
     Collection<String> cacheKeys,
     Function<? super String, ? extends V> reader,
-    GetPolicy options
+    @Nullable GetPolicy options
   );
+
+  /**
+   * Batch get with the default read options — see
+   * {@link #getAll(Collection, Function, GetPolicy)}.
+   *
+   * @param cacheKeys the keys to retrieve
+   * @param reader    the value function for cache misses
+   * @param <V>       the value type
+   * @return a map of key → loaded or cached value; keys with no value are
+   *         omitted
+   * @throws ZetaModeException when no cache is available (Worker-only mode)
+   * @throws RuntimeException  the first reader failure cause; the remaining keys
+   *                           are still processed and their failures suppressed
+   */
+  default <V> Map<String, V> getAll(Collection<String> cacheKeys, Function<? super String, ? extends V> reader) {
+    return getAll(cacheKeys, reader, GetPolicy.defaults());
+  }
 
   /**
    * Pure cache write. There is no business writer and no load: "mutate the
@@ -251,8 +332,8 @@ public interface Zeta {
    * The default is local-only;
    * {@link PutPolicy#synced()} upgrades the call to a version-stamped
    * cluster write: the writer bumps a {@code dataVersion} and broadcasts the
-   * value in a fire-and-forget PUT (design decisions: sync messages), which peers apply
-   * version-guarded without reloading. Values that are not remotely
+   * value in a fire-and-forget PUT, which peers apply version-guarded without
+   * reloading. Values that are not remotely
    * serializable or exceed {@code zeta.sync.put-max-bytes} degrade to a
    * value-less REFRESH inside the same broadcast.
    * Transaction-aware: inside a Spring transaction the write waits for
@@ -274,7 +355,7 @@ public interface Zeta {
    *                                  permanent hard TTL ({@link Long#MAX_VALUE})
    *                                  is combined with sync
    */
-  void put(String cacheKey, Object value, PutPolicy options);
+  void put(String cacheKey, Object value, @Nullable PutPolicy options);
 
   /**
    * Pure cache write with default options (no TTL override, local-only).
@@ -298,7 +379,8 @@ public interface Zeta {
    * <p><b>Validation is all-or-nothing.</b> The map, every key and every value
    * are checked before any cache work; a null/blank key or null value rejects
    * the whole call, so a caller error never writes a prefix of the batch. An
-   * empty map is a no-op.
+   * empty map is a no-op after the shared options are validated: an invalid TTL
+   * or an unsyncable permanent write still fails.
    *
    * <p><b>Not atomic.</b> A failure after some keys were applied leaves those
    * keys written. The guarantee is version ordering, not all-or-nothing: a
@@ -308,8 +390,9 @@ public interface Zeta {
    *
    * <p>{@code sync} broadcasts each applied value independently. There is no
    * batch PUT wire message; a large batch therefore produces one PUT per key.
-   * The map must not be mutated while this call is in progress (a deferred batch
-   * is frozen, an inline one is iterated once).
+   * The entries are copied into an insertion-ordered snapshot while they are
+   * validated, so a concurrent mutation of the caller's map is not observed and
+   * cannot inject an unchecked row into the write.
    *
    * @param entries the keys and values to write; every key must be non-blank and
    *                every value non-null
@@ -321,7 +404,7 @@ public interface Zeta {
    *                                  permanent hard TTL
    * @throws NullPointerException     when the map or a value is null
    */
-  void putAll(Map<String, ?> entries, PutPolicy options);
+  void putAll(Map<String, ?> entries, @Nullable PutPolicy options);
 
   /**
    * Batch write with default options (no TTL override, local-only).
@@ -344,8 +427,8 @@ public interface Zeta {
    * the default {@code immediate=false} defers the removal to {@code afterCommit} (pass
    * {@link InvalidatePolicy#immediate(boolean)} to bypass the deferral). The deferral also
    * covers {@link InvalidatePolicy.Scope#REMOTE}: a rollback sends no peer invalidation at
-   * all. Peers are told through a fire-and-forget broadcast with no publisher confirms
-   * (design decisions: sync messages). A peer that misses the message stays stale until
+   * all. Peers are told through a fire-and-forget broadcast with no publisher confirms.
+   * A peer that misses the message stays stale until
    * the entry's remaining hard TTL expires — default 5min, 1h while a Worker holds the
    * key HOT. A read already in flight when the removal runs may still return the value it
    * loaded, but that value is not stored.
@@ -355,7 +438,17 @@ public interface Zeta {
    *                 {@link InvalidatePolicy#defaults()})
    * @throws ZetaModeException when no cache is available (Worker-only mode)
    */
-  void invalidate(String cacheKey, InvalidatePolicy options);
+  void invalidate(String cacheKey, @Nullable InvalidatePolicy options);
+
+  /**
+   * Invalidate one key with the default options (cluster sync on).
+   *
+   * @param cacheKey the key to invalidate
+   * @throws ZetaModeException when no cache is available (Worker-only mode)
+   */
+  default void invalidate(String cacheKey) {
+    invalidate(cacheKey, InvalidatePolicy.defaults());
+  }
 
   /**
    * Invalidate a collection of keys from L1 — see
@@ -368,15 +461,24 @@ public interface Zeta {
    *                  {@link InvalidatePolicy#defaults()})
    * @throws ZetaModeException when no cache is available (Worker-only mode)
    */
-  void invalidate(Collection<String> cacheKeys, InvalidatePolicy options);
+  void invalidate(Collection<String> cacheKeys, @Nullable InvalidatePolicy options);
+
+  /**
+   * Invalidate a collection of keys with the default options (cluster sync on).
+   *
+   * @param cacheKeys the keys to invalidate; null and blank elements are skipped
+   * @throws ZetaModeException when no cache is available (Worker-only mode)
+   */
+  default void invalidate(Collection<String> cacheKeys) {
+    invalidate(cacheKeys, InvalidatePolicy.defaults());
+  }
 
   /**
    * Clear the whole L1 cache across the cluster: remove every local entry and
    * send exactly one {@code INVALIDATE_ALL} message, independent of how many
    * keys this instance holds.
    *
-   * <p>This is the table-wide flush (design decisions: invalidation, design
-   * decisions: cache table). It is deliberately <b>not</b> a namespace clear:
+   * <p>This is the table-wide flush. It is deliberately <b>not</b> a namespace clear:
    * the annotation verbs keep every operation scoped to its cache namespace, and
    * {@link #clearPrefix(String, InvalidatePolicy)} /
    * {@link #clearNamespace(String, InvalidatePolicy)} sweep one namespace
@@ -398,7 +500,17 @@ public interface Zeta {
    * @param options the clear options ({@code null} = {@link InvalidatePolicy#defaults()})
    * @throws ZetaModeException when no cache is available (Worker-only mode)
    */
-  void clearAll(InvalidatePolicy options);
+  void clearAll(@Nullable InvalidatePolicy options);
+
+  /**
+   * Clear the whole L1 cache across the cluster with the default invalidation
+   * options — see {@link #clearAll(InvalidatePolicy)}.
+   *
+   * @throws ZetaModeException when no cache is available (Worker-only mode)
+   */
+  default void clearAll() {
+    clearAll(InvalidatePolicy.defaults());
+  }
 
   /**
    * Clear every local entry whose physical key starts with {@code prefix}, and
@@ -407,7 +519,8 @@ public interface Zeta {
    * <p>This is the scoped counterpart of {@link #clearAll(InvalidatePolicy)}:
    * it sweeps one key namespace without evicting unrelated namespaces. The
    * prefix is a <b>physical key prefix</b>; programmatic keys are stored exactly
-   * as passed, while annotation keys are {@code cache + NUL + logicalKey} (see
+   * as passed, while annotation keys are {@code cache + NUL + encodedKey}, where
+   * the encoding is the canonical default-key form (see
    * {@link #clearNamespace(String, InvalidatePolicy)} for the annotation form).
    *
    * <p>{@link InvalidatePolicy.Scope#LOCAL} sweeps locally without broadcasting;
@@ -428,7 +541,17 @@ public interface Zeta {
    * @throws IllegalArgumentException when {@code prefix} is null or blank
    * @throws ZetaModeException        when no cache is available (Worker-only mode)
    */
-  void clearPrefix(String prefix, InvalidatePolicy options);
+  void clearPrefix(String prefix, @Nullable InvalidatePolicy options);
+
+  /**
+   * Clear every local entry under {@code prefix}, including peers, with the
+   * default invalidation options.
+   *
+   * @param prefix the physical key prefix; must not be null or blank
+   */
+  default void clearPrefix(String prefix) {
+    clearPrefix(prefix, InvalidatePolicy.defaults());
+  }
 
   /**
    * Clear one annotation namespace: equivalent to
@@ -443,21 +566,11 @@ public interface Zeta {
    * @throws IllegalArgumentException when {@code cache} is null or blank
    * @throws ZetaModeException        when no cache is available (Worker-only mode)
    */
-  default void clearNamespace(String cache, InvalidatePolicy options) {
+  default void clearNamespace(String cache, @Nullable InvalidatePolicy options) {
     if (cache == null || cache.isBlank()) {
       throw new IllegalArgumentException("cache must not be blank");
     }
     clearPrefix(CacheKeysPolicy.namespacePrefix(cache), options);
-  }
-
-  /**
-   * Clear every local entry under {@code prefix}, including peers, with the
-   * default invalidation options.
-   *
-   * @param prefix the physical key prefix; must not be null or blank
-   */
-  default void clearPrefix(String prefix) {
-    clearPrefix(prefix, InvalidatePolicy.defaults());
   }
 
   /**
@@ -471,55 +584,127 @@ public interface Zeta {
   }
 
   /**
-   * Refresh the given key: allocate the version <i>before</i> the load, then
-   * apply the loaded value through the write-through guard (version bump +
-   * fire-and-forget broadcast when {@code options.sync()}).
+   * Reload the given key from the source and apply it through the write-through
+   * guard: the version is allocated <i>before</i> the load, then the loaded
+   * value is applied with a fire-and-forget broadcast when {@code sync} is set.
    *
-   * <p>
-   * <b>Ordering note:</b> the version is allocated before the load, so a
+   * <p><b>Value-only renewal.</b> A resident entry keeps its lifecycle policy:
+   * a {@code HOT}/{@code COOL} entry keeps its state, Worker decision lease and
+   * hard deadline (only the value, version and soft window move), and a
+   * {@code NORMAL} entry keeps its stored normal hard/soft TTL baseline. Only
+   * an absent or hard-expired key is rebuilt from the configured default TTLs.
+   * Changing a TTL is a {@code put} (or invalidate + get), never a refresh.
+   *
+   * <p><b>Ordering note:</b> the version is allocated before the load, so a
    * concurrent synced {@code put} landing during the load holds the newer
    * version and this refresh's stale apply is skipped instead of regressing
    * it; the skipped value is not broadcast either. A {@code null} loader result
-   * <b>skips the refresh</b> (DEBUG): the current entry stays — a
-   * refresh that learned nothing must not evict the value it was asked to renew.
+   * <b>skips the refresh</b>: the current entry stays — a refresh that learned
+   * nothing must not evict the value it was asked to renew.
    *
    * @param cacheKey the key to refresh
-   * @param loader   the value supplier
-   * @param options  the write options ({@code null} = {@link PutPolicy#defaults()})
+   * @param reader   the value supplier, run on the caller thread (or the
+   *                 after-commit thread inside a transaction)
+   * @param sync     whether to broadcast the applied value to peers
    * @param <V>      the value type
    * @throws ZetaModeException        when no cache is available (Worker-only mode)
-   * @throws IllegalArgumentException when a TTL in {@code options} is negative, or
-   *                                  a synced write resolves to a permanent hard TTL
+   * @throws IllegalArgumentException when the key is blank, or a synced refresh
+   *                                  resolves to a permanent hard TTL
+   * @throws NullPointerException     when the reader is null
    */
-  <V> void refresh(String cacheKey, Supplier<V> loader, PutPolicy options);
+  <V> void refresh(String cacheKey, Supplier<V> reader, boolean sync);
 
   /**
-   * Refresh the given key with default options (cluster sync on).
+   * Reload the given key through {@link CacheLoader#reload} and apply it under
+   * the same value-only contract as {@link #refresh(String, Supplier, boolean)}.
+   * The loader's {@link CacheLoader#isCacheable admission} is honored: a
+   * declined value (like a {@code null} reload) skips the apply and leaves the
+   * resident entry untouched.
+   *
+   * <p>{@code reload}, not {@code load}, is the refresh seam: a refresh can run
+   * on an after-commit or caller-owned scheduler thread where the original
+   * call's transaction, security context and MDC are gone. Pass a
+   * {@link Supplier} when the load needs the caller's context.
    *
    * @param cacheKey the key to refresh
-   * @param loader   the value supplier
+   * @param loader   the loader whose {@code reload} produces the value
+   * @param sync     whether to broadcast the applied value to peers
+   * @param <V>      the value type
+   * @throws ZetaModeException        when no cache is available (Worker-only mode)
+   * @throws IllegalArgumentException when the key is blank, or a synced refresh
+   *                                  resolves to a permanent hard TTL
+   * @throws NullPointerException     when the loader is null
+   */
+  <V> void refresh(String cacheKey, CacheLoader<String, V> loader, boolean sync);
+
+  /**
+   * Refresh the given key locally.
+   * Equivalent to {@code refresh(cacheKey, reader, false)}.
+   *
+   * @param cacheKey the key to refresh
+   * @param reader   the value supplier
    * @param <V>      the value type
    * @throws ZetaModeException when no cache is available (Worker-only mode)
    */
-  default <V> void refresh(String cacheKey, Supplier<V> loader) {
-    refresh(cacheKey, loader, PutPolicy.synced());
+  default <V> void refresh(String cacheKey, Supplier<V> reader) {
+    refresh(cacheKey, reader, false);
   }
 
   /**
-   * Batch variant of {@link #refresh(String, Supplier)}. Refreshes all entries
-   * by loading and applying via the provided suppliers. Per-key isolation:
-   * one failing loader does not abort the batch — a failed key is collected and
-   * the fan-out keeps submitting while the executor accepts. The first failure
-   * is rethrown after the fan-out settles, with the rest attached as suppressed.
-   * Argument validation (blank key, null loader) runs before any task is
-   * submitted, so a caller error never enters the fan-out.
+   * Refresh the given key locally through {@code CacheLoader#reload}.
+   * Equivalent to {@code refresh(cacheKey, loader, false)}.
+   *
+   * @param cacheKey the key to refresh
+   * @param loader   the loader whose {@code reload} produces the value
+   * @param <V>      the value type
+   * @throws ZetaModeException when no cache is available (Worker-only mode)
+   */
+  default <V> void refresh(String cacheKey, CacheLoader<String, V> loader) {
+    refresh(cacheKey, loader, false);
+  }
+
+  /**
+   * Batch variant of {@link #refresh(String, Supplier, boolean)}: refreshes
+   * all entries with the same sync flag. A {@code CacheLoader} batch form is not
+   * offered because two {@code Map}-shaped overloads erase to the same
+   * signature; call {@link #refresh(String, CacheLoader, boolean)} per key for
+   * loader-based renewal.
+   *
+   * <p>Per-key isolation: one failing loader does not abort the batch — a failed
+   * key is collected and the fan-out keeps submitting while the executor
+   * accepts. The first failure is rethrown after the fan-out settles, with the
+   * rest attached as suppressed. A submission failure stops further submission
+   * but still waits for every task already accepted before rethrowing.
+   *
+   * <p>Argument validation (blank key, null loader) runs before any task is
+   * submitted, so a caller error never enters the fan-out. The validated entries
+   * are snapshotted before submission: a concurrent map mutation cannot inject
+   * an unvalidated key or loader between validation and dispatch. The mode and
+   * sync checks run even for an empty map.
+   *
+   * <p>The fan-out runs on the injected refresh executor, whose admission
+   * policy owns back-pressure; a rejected submission stops the fan-out and is
+   * reported after every accepted task settles. A single-entry batch runs
+   * inline on the calling thread.
    *
    * @param loaders a map of key → value supplier
+   * @param sync    whether to broadcast each applied value to peers
    * @throws ZetaModeException        when no cache is available (Worker-only mode)
-   * @throws IllegalArgumentException when the effective default hard TTL is permanent
-   *                                  (every entry written by {@code refreshAll} is synced)
+   * @throws IllegalArgumentException when a key is null/blank, or a synced
+   *                                  refresh resolves to a permanent hard TTL
+   * @throws NullPointerException     when the map or a loader is null
    */
-  void refreshAll(Map<String, Supplier<?>> loaders);
+  void refreshAll(Map<String, Supplier<?>> loaders, boolean sync);
+
+  /**
+   * Batch refresh with the local-only default.
+   * Equivalent to {@code refreshAll(loaders, false)}.
+   *
+   * @param loaders a map of key → value supplier
+   */
+  default void refreshAll(Map<String, Supplier<?>> loaders) {
+    refreshAll(loaders, false);
+  }
 
   /**
    * Whether this instance has app-side cache available.
@@ -549,13 +734,6 @@ public interface Zeta {
   UnsafeAdmin unsafe();
 
   /**
-   * Timed-refresh administration view: per-key scheduled background refresh
-   * registration. In Worker-only mode registration throws
-   * {@link ZetaModeException}.
-   */
-  RefreshAdmin refresh();
-
-  /**
    * L1 statistics snapshot: request hit/miss counters, eviction count and
    * estimated size. In Worker-only mode throws {@link ZetaModeException}
    * (fail fast; a null return would manufacture NPEs at callers). Raw Caffeine
@@ -565,30 +743,11 @@ public interface Zeta {
 
   /**
    * Detection-observation view: local-TopK queries. Feeds do not go through
-   * this view — they go through {@link #tag(String, TagMode)}. In Worker-only
+   * this view — they go through {@link #tag(String, long, TagMode)}. In Worker-only
    * mode {@code isLocalHotKey} throws {@link ZetaModeException} while pure
    * queries answer with empty defaults.
    */
   DetectorAdmin detector();
-
-  /**
-   * Timed-refresh administration: schedule ticks at {@code softTtl × 1.1} so
-   * every cycle triggers an async refresh for the key. Re-registering a key
-   * replaces its schedule; the scheduler is created lazily on first
-   * registration.
-   */
-  interface RefreshAdmin {
-    /** Register (or atomically replace) the timed refresh for the key. */
-    <T> void registerRefresh(String key, Supplier<T> supplier, GetPolicy options);
-
-    /** Cancel the timed refresh for the key (no-op when not registered). */
-    void unregisterRefresh(String key);
-
-    /** Register a timed background refresh with the configured default TTLs. */
-    default <T> void registerRefresh(String key, Supplier<T> supplier) {
-      registerRefresh(key, supplier, GetPolicy.defaults());
-    }
-  }
 
   /**
    * Raw access to the single L1 Caffeine table. The raw handle protects
@@ -614,8 +773,8 @@ public interface Zeta {
     /**
      * Companion to a raw removal or overwrite: mark the given keys' in-flight
      * loads superseded so a leader that began before the raw mutation does not
-     * commit its pre-mutation value (design decisions: dedup lifecycle). Touches
-     * nothing else — no L1 effect, no broadcast; in-flight loads still complete.
+     * commit its pre-mutation value. Touches nothing else — no L1 effect, no
+     * broadcast; in-flight loads still complete.
      * The data verbs wire the same forget into every removal; a raw mutation is
      * the one path that cannot.
      *
@@ -628,11 +787,12 @@ public interface Zeta {
 
   /**
    * Detection-observation view: local-TopK queries. This is a pure query
-   * surface — feeds go through {@link #tag(String, TagMode)}, never through
+   * surface — feeds go through {@link #tag(String, long, TagMode)}, never through
    * this view.
    *
    * <p>In Worker-only mode {@code isLocalHotKey} throws
-   * {@link ZetaModeException}; the pure queries answer with empty defaults.
+   * {@link ZetaModeException}; a valid pure query answers with an empty
+   * default.
    */
   interface DetectorAdmin {
     /**
@@ -649,10 +809,12 @@ public interface Zeta {
 
     /**
      * Read-only snapshot of the top {@code limit} local hot keys, ordered by
-     * frequency.
+     * frequency. A negative limit is rejected in every deployment mode, before
+     * the detector lookup; {@code 0} returns an empty list.
      *
-     * @param limit the number of top keys to return
+     * @param limit the maximum number of top keys to return; must not be negative
      * @return the top N snapshot, or an empty list if no detector is available
+     * @throws IllegalArgumentException when {@code limit} is negative
      */
     List<Item> localTopKeys(int limit);
   }

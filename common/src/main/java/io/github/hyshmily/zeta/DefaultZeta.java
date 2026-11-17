@@ -23,58 +23,45 @@ import io.github.hyshmily.zeta.cache.cachesupport.loader.CacheLoader;
 import io.github.hyshmily.zeta.cache.cachesupport.policy.GetPolicy;
 import io.github.hyshmily.zeta.cache.cachesupport.policy.InvalidatePolicy;
 import io.github.hyshmily.zeta.cache.cachesupport.policy.PutPolicy;
-import io.github.hyshmily.zeta.cache.cachesupport.policy.StalePolicy;
 import io.github.hyshmily.zeta.cache.cachesupport.raw.CacheEntry;
 import io.github.hyshmily.zeta.exception.ZetaModeException;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.Item;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.TopK;
 import io.github.hyshmily.zeta.model.ZetaCacheStats;
-import io.github.hyshmily.zeta.scheduler.TimedRefreshCoordinator;
 import io.github.hyshmily.zeta.util.Internal;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.function.Function;
 import java.util.function.Supplier;
-import lombok.Setter;
 import org.jspecify.annotations.Nullable;
-import org.springframework.beans.factory.DisposableBean;
 import org.springframework.util.Assert;
 
 /**
  * Default implementation of the {@link Zeta} facade — the sole public API
- * entry point. Reads/writes/invalidations go to {@link HotKeyCache}, timed
- * refresh scheduling to {@code TimedRefreshCoordinator}, and the
- * administrative views ({@link Zeta.DetectorAdmin detector()},
- * {@link Zeta.RefreshAdmin refresh()}, {@link Zeta.UnsafeAdmin unsafe()}) are
- * projected from the same components. The facade adds only orchestration that
- * has no better home: argument validation, option normalization,
+ * entry point. Reads/writes/invalidations and value-only refreshes go to
+ * {@link HotKeyCache}, and the administrative views
+ * ({@link Zeta.DetectorAdmin detector()}, {@link Zeta.UnsafeAdmin unsafe()})
+ * are projected from the same components. The facade adds only orchestration
+ * that has no better home: argument validation, option normalization,
  * deployment-mode gating, the bulk-refresh fan-out, and the projections
  * themselves.
  *
  * <p>
- * All cache read/write/invalidation operations are dispatched through this
- * class, which delegates to {@link HotKeyCache} for L1 orchestration, version
- * stamping, SingleFlight dedup, and cluster sync. {@code null} options
- * arguments are normalized to their family's {@code defaults()}; a loader's
- * {@code isCacheable} decision travels as an explicit admission predicate, so
- * a caller can never override it per call.
+ * A {@code null} options argument selects the same policy as the verb's
+ * no-options overload; a loader's {@code isCacheable} decision travels as an
+ * explicit admission predicate, so a caller can never override it per call.
  *
  * <p>
  * <b>Thread safety:</b> All public methods are thread-safe. The underlying
  * collaborators are thread-safe by contract; the facade keeps no per-call
- * mutable state, only the shared stateless views and the injected refresh
+ * mutable state, only the shared stateless views and the injected bulk-refresh
  * executor.
  */
-public class DefaultZeta implements Zeta, DisposableBean {
+public class DefaultZeta implements Zeta {
 
-  /**
-   * Label used when the facade runs without an app-side cache. Kept as one
-   * constant so the mode report cannot drift from the exception text.
-   */
+  /** Label used when the facade runs without an app-side cache. */
   private static final String WORKER_ONLY_MODE = "Worker-only mode (no app-side cache)";
 
-  /** Timed background refresh scheduler, or {@code null} in Worker-only deployments. */
-  private final @Nullable TimedRefreshCoordinator refreshCoordinator;
   /** Core cache engine. {@code null} in Worker-only deployments. */
   private final @Nullable HotKeyCache hotKeyCache;
   /** App-side TopK sketch (read side). {@code null} when the detector is not wired. */
@@ -82,7 +69,6 @@ public class DefaultZeta implements Zeta, DisposableBean {
 
   /** Shared administrative views; all are stateless projections. */
   private final Zeta.DetectorAdmin detectorAdmin = new DetectorView();
-  private final Zeta.RefreshAdmin refreshAdmin = new RefreshView();
   private final Zeta.UnsafeAdmin unsafeAdmin = new UnsafeView();
 
   /**
@@ -91,43 +77,76 @@ public class DefaultZeta implements Zeta, DisposableBean {
    * when absent (direct construction, mostly tests) the bulk path falls back to
    * the common pool. The pool is shared and never shut down here.
    */
-  @Setter
-  private volatile Executor refreshExecutor;
+  private final @Nullable Executor refreshExecutor;
+
+  /**
+   * Creates the facade without a bulk-refresh executor; a multi-key
+   * {@link #refreshAll} falls back to the common pool.
+   *
+   * @param hotKeyCache the cache engine, or {@code null} in Worker-only mode
+   * @param appTopK     the app-side detector, or {@code null} when not wired
+   */
+  @Internal
+  public DefaultZeta(@Nullable HotKeyCache hotKeyCache, @Nullable TopK appTopK) {
+    this(hotKeyCache, appTopK, null);
+  }
 
   /**
    * Creates the facade. Container wiring, not an extension point: the
    * auto-configuration wires it ({@code ZetaFacadeAutoConfiguration});
    * subclassing is not supported.
+   *
+   * @param hotKeyCache     the cache engine, or {@code null} in Worker-only mode
+   * @param appTopK         the app-side detector, or {@code null} when not wired
+   * @param refreshExecutor the dedicated bulk-refresh pool, or {@code null} to
+   *                        fall back to the common pool
    */
   @Internal
-  public DefaultZeta(@Nullable HotKeyCache hotKeyCache, @Nullable TopK appTopK) {
+  public DefaultZeta(@Nullable HotKeyCache hotKeyCache, @Nullable TopK appTopK, @Nullable Executor refreshExecutor) {
     this.appTopK = appTopK;
     this.hotKeyCache = hotKeyCache;
-    this.refreshCoordinator = hotKeyCache != null ? new TimedRefreshCoordinator() : null;
+    this.refreshExecutor = refreshExecutor;
   }
 
   @Override
-  public void tag(String cacheKey) {
-    requireKey(cacheKey);
-    requireAppCache("tag").recordAccess(cacheKey);
-  }
-
-  @Override
-  public void tag(String cacheKey, TagMode mode) {
-    requireKey(cacheKey);
-    Objects.requireNonNull(mode, "mode must not be null");
-    requireAppCache("tag").recordAccess(cacheKey, mode);
-  }
-
-  @Override
-  public void tag(String cacheKey, long count) {
+  public void tag(String cacheKey, long count, TagMode mode) {
     requireKey(cacheKey);
     Assert.isTrue(count > 0, () -> "count must be positive, but got: " + count);
-    requireAppCache("tag").recordAccess(cacheKey, count);
+    Objects.requireNonNull(mode, "mode must not be null");
+    HotKeyCache cache = requireAppCache("tag");
+    if (mode == TagMode.SILENT) {
+      return;
+    }
+    cache.recordAccess(cacheKey, count, mode);
   }
 
   @Override
-  public <V> V get(String cacheKey, CacheLoader<String, V> loader, GetPolicy options) {
+  public void tagAll(Map<String, Long> keyCounts, TagMode mode) {
+    Objects.requireNonNull(keyCounts, "keyCounts must not be null");
+    Objects.requireNonNull(mode, "mode must not be null");
+    HotKeyCache cache = requireAppCache("tagAll");
+    if (keyCounts.isEmpty()) {
+      return;
+    }
+    // Snapshot while validating: prevents concurrent caller mutation from
+    // injecting unchecked keys or non-positive counts into the engine.
+    Map<String, Long> snapshot = new LinkedHashMap<>((int) (keyCounts.size() / 0.75f) + 1);
+    for (Map.Entry<String, Long> entry : keyCounts.entrySet()) {
+      String key = entry.getKey();
+      Long count = entry.getValue();
+      requireKey(key);
+      Objects.requireNonNull(count, "count must not be null");
+      Assert.isTrue(count > 0, () -> "count must be positive for key '" + key + "', but got: " + count);
+      snapshot.put(key, count);
+    }
+    if (mode == TagMode.SILENT) {
+      return;
+    }
+    cache.recordAccess(snapshot, mode);
+  }
+
+  @Override
+  public <V> @Nullable V get(String cacheKey, CacheLoader<String, V> loader, @Nullable GetPolicy options) {
     requireKey(cacheKey);
     Objects.requireNonNull(loader, "loader must not be null");
     GetPolicy opts = orDefault(options, GetPolicy.defaults());
@@ -135,7 +154,7 @@ public class DefaultZeta implements Zeta, DisposableBean {
   }
 
   @Override
-  public <V> V get(String cacheKey, Supplier<V> reader, GetPolicy options) {
+  public <V> @Nullable V get(String cacheKey, Supplier<V> reader, @Nullable GetPolicy options) {
     requireKey(cacheKey);
     Objects.requireNonNull(reader, "reader must not be null");
     GetPolicy opts = orDefault(options, GetPolicy.defaults());
@@ -143,13 +162,13 @@ public class DefaultZeta implements Zeta, DisposableBean {
   }
 
   @Override
-  public <T> T peek(String cacheKey) {
+  public <T> @Nullable T peek(String cacheKey) {
     requireKey(cacheKey);
     return requireAppCache("peek").peek(cacheKey);
   }
 
   @Override
-  public void put(String cacheKey, Object value, PutPolicy options) {
+  public void put(String cacheKey, Object value, @Nullable PutPolicy options) {
     requireKey(cacheKey);
     // Null is never cached: a null put is a caller error.
     Objects.requireNonNull(value, "value must not be null: put(key, null) is rejected (null is never cached)");
@@ -164,41 +183,44 @@ public class DefaultZeta implements Zeta, DisposableBean {
   }
 
   @Override
-  public void putAll(Map<String, ?> entries, PutPolicy options) {
+  public void putAll(Map<String, ?> entries, @Nullable PutPolicy options) {
     Objects.requireNonNull(entries, "entries must not be null");
-    // The mode check precedes the empty short-circuit: Worker-only deployments
-    // throw for every data-plane call, including one with nothing to write.
-    HotKeyCache cache = requireAppCache("putAll");
+    PutPolicy opts = orDefault(options, PutPolicy.defaults());
+    ResolvedTtls ttls = ResolvedTtls.of(opts);
+    // Mode, TTL and syncability validation precedes the empty short-circuit: invalid options are
+    // caller errors even when the batch carries no entries, and Worker-only deployments throw for
+    // every data-plane call.
+    HotKeyCache cache = requireWritableCache("putAll", opts.sync(), ttls.hardMs());
     if (entries.isEmpty()) {
       return;
     }
-    PutPolicy opts = orDefault(options, PutPolicy.defaults());
-    ResolvedTtls ttls = ResolvedTtls.of(opts);
     // Writes are caller intent: reject the whole batch before any key lands.
     // Unlike the read/invalidate collection methods, dropping an invalid element
-    // would silently leave a batch half-applied.
+    // would silently leave a batch half-applied. Copy while validating: the
+    // engine must receive exactly the checked rows, even if the caller mutates
+    // a concurrent map after this call starts.
+    // Capacity for size entries at the default 0.75 load factor: `size` alone
+    // would resize mid-put.
+    Map<String, Object> batch = new LinkedHashMap<>((int) (entries.size() / 0.75f) + 1);
     for (Map.Entry<String, ?> entry : entries.entrySet()) {
-      requireKey(entry.getKey());
-      Objects.requireNonNull(
-        entry.getValue(),
-        "value must not be null: putAll rejects a null value (null is never cached)"
-      );
+      String key = entry.getKey();
+      Object value = entry.getValue();
+      requireKey(key);
+      Objects.requireNonNull(value, "value must not be null: putAll rejects a null value (null is never cached)");
+      batch.put(key, value);
     }
-    if (opts.sync()) {
-      PutPolicy.requireSyncable(cache.resolveSyncableHardTtl(ttls.hardMs()), true);
-    }
-    cache.putAll(entries, ttls.hardMs(), ttls.softMs(), opts.sync());
+    cache.putAll(batch, ttls.hardMs(), ttls.softMs(), opts.sync());
   }
 
   @Override
-  public void invalidate(String cacheKey, InvalidatePolicy options) {
+  public void invalidate(String cacheKey, @Nullable InvalidatePolicy options) {
     requireKey(cacheKey);
     InvalidatePolicy opts = orDefault(options, InvalidatePolicy.defaults());
     requireAppCache("invalidate").invalidate(cacheKey, opts);
   }
 
   @Override
-  public void invalidate(Collection<String> cacheKeys, InvalidatePolicy options) {
+  public void invalidate(Collection<String> cacheKeys, @Nullable InvalidatePolicy options) {
     Objects.requireNonNull(cacheKeys, "cacheKeys must not be null");
     InvalidatePolicy opts = orDefault(options, InvalidatePolicy.defaults());
     HotKeyCache cache = requireAppCache("invalidate");
@@ -211,13 +233,13 @@ public class DefaultZeta implements Zeta, DisposableBean {
   }
 
   @Override
-  public void clearAll(InvalidatePolicy options) {
+  public void clearAll(@Nullable InvalidatePolicy options) {
     InvalidatePolicy opts = orDefault(options, InvalidatePolicy.defaults());
     requireAppCache("clearAll").clear(opts);
   }
 
   @Override
-  public void clearPrefix(String prefix, InvalidatePolicy options) {
+  public void clearPrefix(String prefix, @Nullable InvalidatePolicy options) {
     Assert.hasText(prefix, "prefix must not be blank");
     InvalidatePolicy opts = orDefault(options, InvalidatePolicy.defaults());
     requireAppCache("clearPrefix").clearPrefix(prefix, opts);
@@ -227,94 +249,127 @@ public class DefaultZeta implements Zeta, DisposableBean {
   public <V> Map<String, V> getAll(
     Collection<String> cacheKeys,
     Function<? super String, ? extends V> reader,
-    GetPolicy options
+    @Nullable GetPolicy options
   ) {
     Objects.requireNonNull(cacheKeys, "cacheKeys must not be null");
     Objects.requireNonNull(reader, "reader must not be null");
     GetPolicy opts = orDefault(options, GetPolicy.defaults());
+    // The batch contract resolves the TTL overrides once for the whole batch;
+    // doing it here validates them even for an empty collection and keeps the
+    // engine from evaluating the caller's suppliers a second time.
+    ResolvedTtls ttls = ResolvedTtls.of(opts);
+    GetPolicy batch =
+      opts == GetPolicy.defaults()
+        ? opts
+        : GetPolicy.of(ttls.hardMs(), ttls.softMs(), opts.report(), opts.stalePolicy());
     HotKeyCache cache = requireAppCache("getAll");
     // An invalid key cannot be a map key and is a miss by definition: dropped
     // here, so the engine's batch read assumes valid keys.
-    return cache.get(validKeys(cacheKeys), reader, opts);
+    return cache.get(validKeys(cacheKeys), reader, batch);
   }
 
   @Override
-  public <V> void refresh(String cacheKey, Supplier<V> loader, PutPolicy options) {
+  public <V> void refresh(String cacheKey, Supplier<V> reader, boolean sync) {
     requireKey(cacheKey);
-    Objects.requireNonNull(loader, "loader must not be null");
-    PutPolicy opts = orDefault(options, PutPolicy.defaults());
-    ResolvedTtls ttls = ResolvedTtls.of(opts);
-    HotKeyCache cache = requireWritableCache("refresh", opts.sync(), ttls.hardMs());
+    Objects.requireNonNull(reader, "reader must not be null");
+    HotKeyCache cache = requireWritableCache("refresh", sync, 0L);
     // Bump-before-load ordering lives in HotKeyCache#refresh: a concurrent
     // synced put during the load holds the newer version and the stale apply
     // is skipped instead of regressing it.
-    cache.refresh(cacheKey, loader, ttls.hardMs(), ttls.softMs(), opts.sync());
+    cache.refresh(cacheKey, reader, sync);
   }
 
   @Override
-  public void refreshAll(Map<String, Supplier<?>> loaders) {
+  public <V> void refresh(String cacheKey, CacheLoader<String, V> loader, boolean sync) {
+    requireKey(cacheKey);
+    Objects.requireNonNull(loader, "loader must not be null");
+    HotKeyCache cache = requireWritableCache("refresh", sync, 0L);
+    cache.refresh(cacheKey, loader, sync);
+  }
+
+  @Override
+  @SuppressWarnings("all")
+  public void refreshAll(Map<String, Supplier<?>> loaders, boolean sync) {
     Objects.requireNonNull(loaders, "loaders must not be null");
-    // The mode check precedes the empty short-circuit: Worker-only deployments
-    // throw for every data-plane call, including one with nothing to refresh.
-    HotKeyCache cache = requireAppCache("refreshAll");
+    // Mode and sync-configuration validation precedes the empty short-circuit: an invalid
+    // configuration is a caller error even when there is nothing to refresh, and Worker-only
+    // deployments throw for every data-plane call.
+    HotKeyCache cache = requireWritableCache("refreshAll", sync, 0L);
     if (loaders.isEmpty()) {
       return;
     }
-    // refreshAll is always a cluster write; validate the effective default hard
-    // TTL once before any task is submitted.
-    PutPolicy.requireSyncable(cache.resolveSyncableHardTtl(0L), true);
-    // Validate every entry before submitting anything: argument errors are caller
-    // errors, not per-key loader failures.
+    // Validate and snapshot every entry before submitting anything: argument errors are caller
+    // errors, not per-key loader failures. The snapshot also closes the race where a concurrent
+    // map insertion between validation and submission could bypass the checks.
+    List<Map.Entry<String, Supplier<?>>> validated = new ArrayList<>(loaders.size());
     for (Map.Entry<String, Supplier<?>> entry : loaders.entrySet()) {
-      requireKey(entry.getKey());
-      Objects.requireNonNull(entry.getValue(), "loader must not be null");
+      String key = entry.getKey();
+      Supplier<?> loader = entry.getValue();
+      requireKey(key);
+      Objects.requireNonNull(loader, "loader must not be null");
+      validated.add(Map.entry(key, loader));
     }
-    // Independent per key: fan out so one slow loader cannot head-block the
-    // rest, and rethrow the first failure after the fan-out settles.
-    // The injected refresh pool keeps this off the JVM-global common pool
-    // (directly constructed facades, mostly tests, fall back to it).
-    Executor executor = refreshExecutor != null ? refreshExecutor : ForkJoinPool.commonPool();
-    // Lock-free collector: the fan-out tasks add concurrently, and the list is only
-    // materialized when something failed — the normal path allocates no synchronized
-    // wrapper and no backing array.
-    Queue<Throwable> failures = new ConcurrentLinkedQueue<>();
-    List<CompletableFuture<Void>> futures = new ArrayList<>(loaders.size());
-    for (Map.Entry<String, Supplier<?>> entry : loaders.entrySet()) {
+    // One entry: run on the calling thread. A fan-out task would add a queue
+    // allocation, a thread switch and a future to wait on for no parallelism.
+    if (validated.size() == 1) {
+      Map.Entry<String, Supplier<?>> single = validated.get(0);
       try {
-        futures.add(
-          CompletableFuture.runAsync(
-            () -> {
-              try {
-                // Same defaults as refresh(key, loader): no TTL override, synced.
-                cache.refresh(entry.getKey(), entry.getValue(), 0L, 0L, true);
-              } catch (Throwable ex) {
-                // Throwable, not RuntimeException: an Error escaping the task
-                // would complete the future exceptionally and every other key's
-                // failure would be lost.
-                failures.add(ex);
-              }
-            },
-            executor
-          )
-        );
-      } catch (RejectedExecutionException rejection) {
-        // The pool is saturated or shut down: every further submission would
-        // allocate another full-stack rejection for a key that cannot run.
-        // Record the admission failure and stop submitting — continuing the
-        // loop only turns one saturation event into a rejection storm.
-        failures.add(rejection);
-        break;
-      } catch (RuntimeException submission) {
-        // Any other submission failure is an admission failure for THIS key
-        // only; the remaining keys are still attempted.
-        failures.add(submission);
+        cache.refresh(single.getKey(), single.getValue(), sync);
+      } catch (Throwable failure) {
+        rethrow(failure);
       }
+      return;
     }
-    // Every task catches Throwable, so no future can complete exceptionally: a
-    // plain join loop waits exactly as long as allOf (the slowest task) without
-    // the array copy and the BiCompletion tree allOf builds.
-    for (CompletableFuture<Void> future : futures) {
-      future.join();
+    // Independent per key: fan out so one slow loader cannot head-block the rest, and rethrow
+    // the first failure after the fan-out settles. The injected refresh pool keeps this off the
+    // JVM-global common pool; its admission policy owns back-pressure.
+    Executor executor = refreshExecutor != null ? refreshExecutor : ForkJoinPool.commonPool();
+    Queue<Throwable> failures = new ConcurrentLinkedQueue<>();
+    List<CompletableFuture<Void>> futures = new ArrayList<>(validated.size());
+    try {
+      for (Map.Entry<String, Supplier<?>> entry : validated) {
+        try {
+          futures.add(
+            CompletableFuture.runAsync(
+              () -> {
+                try {
+                  cache.refresh(entry.getKey(), entry.getValue(), sync);
+                } catch (Throwable ex) {
+                  // Throwable, not RuntimeException: an Error escaping the task
+                  // would complete the future exceptionally and every other key's
+                  // failure would be lost. Restore an interrupt a sneaky-throwing
+                  // supplier consumed so the pool thread keeps its signal.
+                  if (ex instanceof InterruptedException) {
+                    Thread.currentThread().interrupt();
+                  }
+                  failures.add(ex);
+                }
+              },
+              executor
+            )
+          );
+        } catch (RejectedExecutionException rejection) {
+          // The pool is saturated or shut down: record the admission failure and stop
+          // submitting, or one saturation event becomes a rejection storm.
+          failures.add(rejection);
+          break;
+        } catch (RuntimeException submission) {
+          // Any other submission failure is an admission failure for THIS key only.
+          failures.add(submission);
+        } catch (Throwable fatalSubmission) {
+          // An Error can leave the executor unusable: record it, stop submitting, and let the
+          // finally join the tasks this call already accepted.
+          failures.add(fatalSubmission);
+          break;
+        }
+      }
+    } finally {
+      // The finally keeps a submission failure from abandoning the tasks already handed to the
+      // pool. Every task catches Throwable, so no future can complete exceptionally and a plain
+      // join loop waits exactly as long as allOf without the array copy.
+      for (CompletableFuture<Void> future : futures) {
+        future.join();
+      }
     }
     // All tasks have settled, so the queue is quiescent: poll the first and build
     // the identity set only when a second failure actually needs it.
@@ -325,19 +380,41 @@ public class DefaultZeta implements Zeta, DisposableBean {
         attached.add(first);
         for (Throwable next : failures) {
           if (attached.add(next)) {
-            first.addSuppressed(next);
+            attachSuppressed(first, next);
           }
         }
       }
-      if (first instanceof RuntimeException runtime) {
-        throw runtime;
-      }
-      if (first instanceof Error error) {
-        throw error;
-      }
-      // A checked Throwable from a sneaky-throwing supplier: wrap instead of
-      // casting, or the cast itself would mask the real failure.
-      throw new CompletionException(first);
+      rethrow(first);
+    }
+  }
+
+  /**
+   * Rethrows a collected failure: unchecked throwables keep their identity, a
+   * checked throwable from a sneaky-throwing supplier is wrapped rather than
+   * cast, or the cast itself would mask the real failure.
+   *
+   * @param failure the failure to rethrow
+   */
+  private static void rethrow(Throwable failure) {
+    if (failure instanceof RuntimeException runtime) {
+      throw runtime;
+    }
+    if (failure instanceof Error error) {
+      throw error;
+    }
+    throw new CompletionException(failure);
+  }
+
+  /**
+   * Attaches a secondary failure without letting the diagnostic replace the
+   * primary one. {@link Throwable#addSuppressed} allocates, so an exhausted heap
+   * can fail the attachment after the real failure has already been collected.
+   */
+  private static void attachSuppressed(Throwable primary, Throwable secondary) {
+    try {
+      primary.addSuppressed(secondary);
+    } catch (RuntimeException | Error ignored) {
+      // Best-effort diagnostics: the primary failure is what the caller must see.
     }
   }
 
@@ -355,11 +432,6 @@ public class DefaultZeta implements Zeta, DisposableBean {
   }
 
   @Override
-  public Zeta.RefreshAdmin refresh() {
-    return refreshAdmin;
-  }
-
-  @Override
   public Zeta.UnsafeAdmin unsafe() {
     return unsafeAdmin;
   }
@@ -369,45 +441,9 @@ public class DefaultZeta implements Zeta, DisposableBean {
     return requireAppCache("stats").stats();
   }
 
-  /**
-   * Cancel all timed refreshes and shut down the refresh scheduler. Called
-   * automatically by Spring when this bean is destroyed.
-   *
-   * <p>The {@link io.github.hyshmily.zeta.util.TimeSource} ticker is NOT
-   * stopped here: it is a JVM-global singleton, and this bean is not its owner.
-   * The owning auto-configuration holds a reference-counted lifecycle claim
-   * ({@code registerLifecycleUser}/{@code releaseLifecycleUser}), so tearing
-   * down one context in a JVM that runs several (parallel integration tests,
-   * modular multi-context deployments) does not degrade every other context to
-   * a JNI clock read per call.
-   */
-  @Override
-  public void destroy() {
-    TimedRefreshCoordinator coordinator = refreshCoordinator;
-    if (coordinator != null) {
-      coordinator.destroy();
-    }
-  }
-
-  /**
-   * Returns a human-readable label of the current deployment mode.
-   */
-  private String currentModeLabel() {
-    if (hotKeyCache != null && appTopK != null) {
-      return "App-only mode";
-    }
-    if (hotKeyCache == null) {
-      // The facade is only ever created with a null cache in Worker-only
-      // deployments (ZetaFacadeAutoConfiguration wires it via ObjectProvider);
-      // a cache-less facade in an app deployment would be a wiring error.
-      return WORKER_ONLY_MODE;
-    }
-    return "App-mode with missing TopK detector (partial wiring)";
-  }
-
   private HotKeyCache requireAppCache(String operation) {
     if (hotKeyCache == null) {
-      throw new ZetaModeException(operation, currentModeLabel(), "App-mode cache");
+      throw new ZetaModeException(operation, WORKER_ONLY_MODE, "App-mode cache");
     }
     return hotKeyCache;
   }
@@ -432,10 +468,10 @@ public class DefaultZeta implements Zeta, DisposableBean {
   /**
    * The facade's single-key contract: every public data-plane method rejects a
    * null/blank key here, and the engine below assumes validity instead of
-   * re-checking it. Collection arguments take the sibling policy
-   * ({@link io.github.hyshmily.zeta.cache.CacheKeysPolicy#validKeys validKeys}):
-   * invalid elements are dropped rather than rejected, because a batch built
-   * from a query result legitimately contains no-key rows.
+   * re-checking it. The batch read and invalidate paths filter elements through
+   * {@link io.github.hyshmily.zeta.cache.CacheKeysPolicy#validKeys validKeys}
+   * instead, because a batch built from a query result legitimately contains
+   * no-key rows; a raw dedup mutation validates every element with this method.
    *
    * @param key the key to validate
    */
@@ -476,56 +512,6 @@ public class DefaultZeta implements Zeta, DisposableBean {
   }
 
   /**
-   * Timed-refresh administration view. A dedicated projection (not the
-   * facade) so callers cannot cast through to the full facade — the same
-   * pattern as {@link DetectorView}. In Worker-only deployments the coordinator
-   * is absent and registration throws the mode error.
-   */
-  private final class RefreshView implements Zeta.RefreshAdmin {
-
-    @Override
-    public <T> void registerRefresh(String key, Supplier<T> supplier, GetPolicy options) {
-      requireKey(key);
-      Objects.requireNonNull(supplier, "supplier must not be null");
-      HotKeyCache cache = requireAppCache("registerRefresh");
-      GetPolicy opts = orDefault(options, GetPolicy.defaults());
-      ResolvedTtls ttls = ResolvedTtls.of(opts);
-      long effectiveSoft = cache.resolveEffectiveSoftTtl(ttls.softMs());
-      Assert.isTrue(
-        effectiveSoft > 0,
-        "registerRefresh requires a positive effective soft TTL (stale-while-revalidate cadence); " +
-          "got " +
-          effectiveSoft +
-          " — enable zeta.local.soft-ttl-ms or pass a positive softTtlMs"
-      );
-
-      long intervalMs = TimedRefreshCoordinator.intervalFor(effectiveSoft);
-      // The constructor creates the coordinator together with the cache; a null here is a
-      // wiring bug, not a deployment mode.
-      TimedRefreshCoordinator coordinator = Objects.requireNonNull(
-        refreshCoordinator,
-        "refresh coordinator must exist with an app cache"
-      );
-      // Freeze the per-tick options outside the coordinator's map lock. The tick calls the
-      // cache directly: key, supplier and options were validated at registration, so the
-      // facade's argument/normalization path does not run again on every firing.
-      final GetPolicy tick = GetPolicy.of(ttls.hardMs(), ttls.softMs(), opts.report(), StalePolicy.SOFT_REFRESH);
-      coordinator.register(key, intervalMs, () -> cache.get(key, supplier, tick));
-    }
-
-    @Override
-    public void unregisterRefresh(String key) {
-      TimedRefreshCoordinator coordinator = refreshCoordinator;
-      if (coordinator == null) {
-        // Worker-only mode has no scheduler to unregister from.
-        return;
-      }
-      requireKey(key);
-      coordinator.unregister(key);
-    }
-  }
-
-  /**
    * Raw-table escape-hatch view. A dedicated projection (not the facade) so
    * callers cannot cast through to the full facade — the same pattern as
    * {@link DetectorView}.
@@ -540,12 +526,18 @@ public class DefaultZeta implements Zeta, DisposableBean {
     @Override
     public void forgetDedup(String... cacheKeys) {
       Objects.requireNonNull(cacheKeys, "cacheKeys must not be null");
+      // Snapshot the caller's varargs array so an element cannot be swapped
+      // between validation and the engine's loop.
+      String[] keys = cacheKeys.clone();
       // Fail-fast per element, as on every single-key verb: the engine's dedup
       // loop assumes valid keys.
-      for (String cacheKey : cacheKeys) {
+      for (String cacheKey : keys) {
         requireKey(cacheKey);
       }
-      requireAppCache("forgetDedup").forgetDedup(cacheKeys);
+      HotKeyCache cache = requireAppCache("forgetDedup");
+      if (keys.length > 0) {
+        cache.forgetDedup(keys);
+      }
     }
   }
 
@@ -564,7 +556,10 @@ public class DefaultZeta implements Zeta, DisposableBean {
 
     @Override
     public List<Item> localTopKeys(int limit) {
-      return appTopK == null ? List.of() : appTopK.listTopN(limit);
+      // Validate before the detector check: App and Worker-only modes must
+      // reject the same arguments.
+      Assert.isTrue(limit >= 0, () -> "limit must be non-negative, but got: " + limit);
+      return limit == 0 || appTopK == null ? List.of() : appTopK.listTopN(limit);
     }
   }
 }

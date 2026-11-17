@@ -25,7 +25,8 @@ import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.Mockito.atLeastOnce;
+import static org.mockito.ArgumentMatchers.same;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -41,17 +42,14 @@ import io.github.hyshmily.zeta.exception.ZetaModeException;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.Item;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.TopK;
 import io.github.hyshmily.zeta.model.ZetaCacheStats;
-import io.github.hyshmily.zeta.scheduler.TimedRefreshCoordinator;
+import java.util.AbstractMap;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
-import java.util.concurrent.TimeUnit;
+import java.util.Set;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
 import java.util.function.Supplier;
@@ -69,10 +67,6 @@ class ZetaTest {
   void setUp() {
     hotKeyCache = mock(HotKeyCache.class);
     appDetector = mock(TopK.class);
-    // Mirror the real TtlPolicy behaviour (softTtlMs > 0 is used as-is). Without this stub the
-    // mock default 0 would collapse every refresh interval to 1ms, turning destroy_shouldNotThrow
-    // into a race between the scheduled refresh and the cancellation.
-    when(hotKeyCache.resolveEffectiveSoftTtl(anyLong())).thenAnswer(invocation -> invocation.getArgument(0));
     // Mirror the real TTL resolution so a lazily supplied Long.MAX_VALUE, and a
     // configuration that resolves to permanent, both reach requireSyncable.
     when(hotKeyCache.resolveSyncableHardTtl(anyLong())).thenAnswer(invocation -> invocation.getArgument(0));
@@ -226,6 +220,41 @@ class ZetaTest {
   }
 
   @Test
+  @SuppressWarnings("unchecked")
+  void getAll_negativeTtl_shouldFailFastEvenForAnEmptyCollection() {
+    GetPolicy negative = new GetPolicy(() -> 0L, () -> -1L, StalePolicy.SOFT_REFRESH, true, false);
+
+    assertThatThrownBy(() -> zeta.getAll(List.of(), k -> "v", negative))
+      .isInstanceOf(IllegalArgumentException.class)
+      .hasMessageContaining("softTtlMs");
+    verify(hotKeyCache, never()).get(anyList(), any(Function.class), any(GetPolicy.class));
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  void getAll_shouldResolveTheLazyTtlsExactlyOnce() {
+    when(hotKeyCache.get(anyList(), any(Function.class), any(GetPolicy.class))).thenReturn(Map.of());
+    AtomicInteger evaluations = new AtomicInteger();
+    GetPolicy lazy = new GetPolicy(
+      () -> {
+        evaluations.incrementAndGet();
+        return 1_000L;
+      },
+      () -> {
+        evaluations.incrementAndGet();
+        return 100L;
+      },
+      StalePolicy.SOFT_REFRESH,
+      true,
+      false
+    );
+
+    zeta.getAll(List.of("k1", "k2"), k -> "v", lazy);
+
+    assertThat(evaluations).hasValue(2);
+  }
+
+  @Test
   void invalidate_localOnly_shouldSuppressSync() {
     zeta.invalidate("key1", InvalidatePolicy.localOnly());
     verify(hotKeyCache).invalidate("key1", InvalidatePolicy.localOnly());
@@ -291,17 +320,17 @@ class ZetaTest {
   void refresh_syncWithConfiguredPermanentTtl_shouldBeRejectedBeforeTheLoad() {
     when(hotKeyCache.resolveSyncableHardTtl(anyLong())).thenReturn(Long.MAX_VALUE);
 
-    assertThatThrownBy(() -> zeta.refresh("k", () -> "v", PutPolicy.synced()))
+    assertThatThrownBy(() -> zeta.refresh("k", () -> "v", true))
       .isInstanceOf(IllegalArgumentException.class)
       .hasMessageContaining("permanent entry cannot be synced");
-    verify(hotKeyCache, never()).refresh(anyString(), any(Supplier.class), anyLong(), anyLong(), anyBoolean());
+    verify(hotKeyCache, never()).refresh(anyString(), any(Supplier.class), anyBoolean());
   }
 
   @Test
   void refreshAll_shouldRejectAConfiguredPermanentDefault() {
     when(hotKeyCache.resolveSyncableHardTtl(anyLong())).thenReturn(Long.MAX_VALUE);
 
-    assertThatThrownBy(() -> zeta.refreshAll(Map.of("k", (Supplier<?>) () -> "v")))
+    assertThatThrownBy(() -> zeta.refreshAll(Map.of("k", (Supplier<?>) () -> "v"), true))
       .isInstanceOf(IllegalArgumentException.class)
       .hasMessageContaining("permanent entry cannot be synced");
   }
@@ -344,6 +373,32 @@ class ZetaTest {
   }
 
   @Test
+  void putAll_validatesAndSubmitsOneSnapshot() {
+    Map<String, Object> entries = new AbstractMap<>() {
+      private int entrySetCalls;
+
+      @Override
+      public Set<Map.Entry<String, Object>> entrySet() {
+        entrySetCalls++;
+        return entrySetCalls == 1
+          ? Map.<String, Object>of("good", "v").entrySet()
+          : Map.<String, Object>of(" ", "v").entrySet();
+      }
+
+      @Override
+      public int size() {
+        return 1;
+      }
+    };
+
+    zeta.putAll(entries, PutPolicy.defaults());
+
+    // The engine receives the validated copy, not the caller's map: a second
+    // traversal of the live map would expose the blank key injected above.
+    verify(hotKeyCache).putAll(Map.of("good", "v"), 0L, 0L, false);
+  }
+
+  @Test
   void putAll_shouldRejectTheWholeBatchBeforeWriting() {
     Map<String, Object> entries = new LinkedHashMap<>();
     entries.put("k1", "v1");
@@ -381,6 +436,61 @@ class ZetaTest {
   }
 
   @Test
+  void putAll_emptyWithANegativeDynamicTtl_shouldStillReject() {
+    PutPolicy negative = new PutPolicy(() -> -1L, () -> 0L, false);
+
+    assertThatThrownBy(() -> zeta.putAll(Map.of(), negative)).isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void putAll_emptyWithAnUnsyncablePermanentDefault_shouldStillReject() {
+    when(hotKeyCache.resolveSyncableHardTtl(anyLong())).thenReturn(Long.MAX_VALUE);
+
+    assertThatThrownBy(() -> zeta.putAll(Map.of(), PutPolicy.synced()))
+      .isInstanceOf(IllegalArgumentException.class)
+      .hasMessageContaining("permanent entry cannot be synced");
+  }
+
+  @Test
+  void refreshAll_emptyWithAnUnsyncablePermanentDefault_shouldStillReject() {
+    when(hotKeyCache.resolveSyncableHardTtl(anyLong())).thenReturn(Long.MAX_VALUE);
+
+    assertThatThrownBy(() -> zeta.refreshAll(Map.<String, Supplier<?>>of(), true))
+      .isInstanceOf(IllegalArgumentException.class)
+      .hasMessageContaining("permanent entry cannot be synced");
+  }
+
+  @Test
+  void refreshAll_validatesAndSubmitsOneSnapshot() {
+    SingleSnapshotMap loaders = new SingleSnapshotMap();
+
+    zeta.refreshAll(loaders);
+
+    assertThat(loaders.entrySetCalls).as("one validation pass, one submission source").isEqualTo(1);
+    verify(hotKeyCache).refresh(eq("good"), any(Supplier.class), eq(false));
+  }
+
+  /** A map whose second traversal would expose an entry absent from the validated snapshot. */
+  private static final class SingleSnapshotMap extends AbstractMap<String, Supplier<?>> {
+
+    private int entrySetCalls;
+
+    @Override
+    public Set<Map.Entry<String, Supplier<?>>> entrySet() {
+      entrySetCalls++;
+      if (entrySetCalls == 1) {
+        return Map.<String, Supplier<?>>of("good", () -> "v").entrySet();
+      }
+      return Map.<String, Supplier<?>>of(" ", () -> "v").entrySet();
+    }
+
+    @Override
+    public int size() {
+      return 1;
+    }
+  }
+
+  @Test
   void unsafe_raw_shouldDelegateToEngineTable() {
     @SuppressWarnings("unchecked")
     Cache<String, CacheEntry> table = mock(Cache.class);
@@ -400,28 +510,96 @@ class ZetaTest {
   // ── detector feeds (tag family) ──
 
   @Test
-  void tag_shouldDelegateToCache() {
-    zeta.tag("my-key");
-    verify(hotKeyCache).recordAccess("my-key");
-  }
+  void tag_shouldRouteEveryOverloadThroughTheCanonicalPrimitive() {
+    zeta.tag("a");
+    zeta.tag("b", Zeta.TagMode.DETECT_ONLY);
+    zeta.tag("c", 5L);
+    zeta.tag("d", 7L, Zeta.TagMode.REPORT_ONLY);
 
-  @Test
-  void tag_withMode_shouldDelegateToCache() {
-    zeta.tag("my-key", Zeta.TagMode.DETECT_ONLY);
-    verify(hotKeyCache).recordAccess("my-key", Zeta.TagMode.DETECT_ONLY);
+    verify(hotKeyCache).recordAccess("a", 1L, Zeta.TagMode.RECORD);
+    verify(hotKeyCache).recordAccess("b", 1L, Zeta.TagMode.DETECT_ONLY);
+    verify(hotKeyCache).recordAccess("c", 5L, Zeta.TagMode.RECORD);
+    verify(hotKeyCache).recordAccess("d", 7L, Zeta.TagMode.REPORT_ONLY);
   }
 
   @Test
   void tag_nullKey_shouldReject() {
-    assertThatThrownBy(() -> zeta.tag(null)).isInstanceOf(IllegalArgumentException.class);
-    verify(hotKeyCache, never()).recordAccess(anyString());
+    assertThatThrownBy(() -> zeta.tag(null, 1L, Zeta.TagMode.RECORD)).isInstanceOf(IllegalArgumentException.class);
+    verify(hotKeyCache, never()).recordAccess(anyString(), anyLong(), any());
   }
 
   @Test
   void tag_nonPositiveCount_shouldReject() {
-    assertThatThrownBy(() -> zeta.tag("k", 0)).isInstanceOf(IllegalArgumentException.class);
-    assertThatThrownBy(() -> zeta.tag("k", -1)).isInstanceOf(IllegalArgumentException.class);
-    verify(hotKeyCache, never()).recordAccess(anyString(), anyLong());
+    assertThatThrownBy(() -> zeta.tag("k", 0, Zeta.TagMode.RECORD)).isInstanceOf(IllegalArgumentException.class);
+    assertThatThrownBy(() -> zeta.tag("k", -1, Zeta.TagMode.RECORD)).isInstanceOf(IllegalArgumentException.class);
+    verify(hotKeyCache, never()).recordAccess(anyString(), anyLong(), any());
+  }
+
+  @Test
+  void tag_nullMode_shouldReject() {
+    assertThatThrownBy(() -> zeta.tag("k", 1L, null)).isInstanceOf(NullPointerException.class);
+    verify(hotKeyCache, never()).recordAccess(anyString(), anyLong(), any());
+  }
+
+  @Test
+  void tag_silent_shouldValidateBeforeNoOp() {
+    assertThatThrownBy(() -> zeta.tag(" ", 1L, Zeta.TagMode.SILENT)).isInstanceOf(IllegalArgumentException.class);
+    verify(hotKeyCache, never()).recordAccess(anyString(), anyLong(), any());
+  }
+
+  @Test
+  void tagAll_shouldDelegateTheValidatedSnapshot() {
+    Map<String, Long> counts = new LinkedHashMap<>();
+    counts.put("a", 2L);
+    counts.put("b", 3L);
+
+    zeta.tagAll(counts, Zeta.TagMode.DETECT_ONLY);
+
+    verify(hotKeyCache).recordAccess(eq(Map.of("a", 2L, "b", 3L)), eq(Zeta.TagMode.DETECT_ONLY));
+  }
+
+  @Test
+  void tagAll_empty_shouldStillCheckModeAndDeployment() {
+    assertThatThrownBy(() -> zeta.tagAll(Map.of(), null)).isInstanceOf(NullPointerException.class);
+    Zeta workerOnly = new DefaultZeta(null, null);
+    assertThatThrownBy(() -> workerOnly.tagAll(Map.of(), Zeta.TagMode.RECORD)).isInstanceOf(ZetaModeException.class);
+  }
+
+  @Test
+  void tagAll_invalidEntry_shouldRejectTheWholeBatch() {
+    assertThatThrownBy(() -> zeta.tagAll(Map.of("ok", 1L, " ", 2L), Zeta.TagMode.RECORD)).isInstanceOf(
+      IllegalArgumentException.class
+    );
+    assertThatThrownBy(() -> zeta.tagAll(Map.of("ok", 1L, "bad", 0L), Zeta.TagMode.RECORD)).isInstanceOf(
+      IllegalArgumentException.class
+    );
+
+    Map<String, Long> nullCount = new LinkedHashMap<>();
+    nullCount.put("k", null);
+    assertThatThrownBy(() -> zeta.tagAll(nullCount, Zeta.TagMode.RECORD)).isInstanceOf(NullPointerException.class);
+    verify(hotKeyCache, never()).recordAccess(anyMap(), any());
+  }
+
+  @Test
+  void tagAll_collection_shouldSumDuplicateKeys() {
+    zeta.tagAll(List.of("a", "a", "b"), Zeta.TagMode.DETECT_ONLY);
+    verify(hotKeyCache).recordAccess(eq(Map.of("a", 2L, "b", 1L)), eq(Zeta.TagMode.DETECT_ONLY));
+  }
+
+  @Test
+  void tagAll_collection_invalidElement_shouldReject() {
+    assertThatThrownBy(() -> zeta.tagAll(Arrays.asList("a", null), Zeta.TagMode.RECORD)).isInstanceOf(
+      IllegalArgumentException.class
+    );
+    verify(hotKeyCache, never()).recordAccess(anyMap(), any());
+  }
+
+  @Test
+  void tagAll_silent_shouldValidateBeforeNoOp() {
+    assertThatThrownBy(() -> zeta.tagAll(Map.of("k", 0L), Zeta.TagMode.SILENT)).isInstanceOf(
+      IllegalArgumentException.class
+    );
+    verify(hotKeyCache, never()).recordAccess(anyMap(), any());
   }
 
   @Test
@@ -451,6 +629,18 @@ class ZetaTest {
   void forgetDedup_shouldDelegateToCache() {
     zeta.unsafe().forgetDedup("k");
     verify(hotKeyCache).forgetDedup("k");
+  }
+
+  @Test
+  void forgetDedup_emptyArray_shouldNotReachTheEngine() {
+    zeta.unsafe().forgetDedup();
+    verify(hotKeyCache, never()).forgetDedup(any(String[].class));
+  }
+
+  @Test
+  void forgetDedup_emptyArray_shouldStillThrowInWorkerMode() {
+    Zeta workerOnly = new DefaultZeta(null, null);
+    assertThatThrownBy(() -> workerOnly.unsafe().forgetDedup()).isInstanceOf(ZetaModeException.class);
   }
 
   @Test
@@ -493,21 +683,33 @@ class ZetaTest {
   // ── refresh ──
 
   @Test
-  void refresh_shouldDelegateToGuardedRefreshWithSyncOn() {
+  void refresh_shouldDefaultToLocalWithoutBroadcast() {
     zeta.refresh("k1", () -> "v");
-    verify(hotKeyCache).refresh(eq("k1"), any(), eq(0L), eq(0L), eq(true));
+    verify(hotKeyCache).refresh(eq("k1"), any(Supplier.class), eq(false));
   }
 
   @Test
-  void refresh_localOnly_shouldDelegateWithoutBroadcast() {
-    zeta.refresh("k1", () -> "v", PutPolicy.defaults());
-    verify(hotKeyCache).refresh(eq("k1"), any(), eq(0L), eq(0L), eq(false));
+  void refresh_synced_shouldBroadcast() {
+    zeta.refresh("k1", () -> "v", true);
+    verify(hotKeyCache).refresh(eq("k1"), any(Supplier.class), eq(true));
   }
 
   @Test
-  void refresh_withTtl_shouldDelegateWithTtl() {
-    zeta.refresh("k1", () -> "v", PutPolicy.of(5000L, 500L, false));
-    verify(hotKeyCache).refresh(eq("k1"), any(), eq(5000L), eq(500L), eq(false));
+  void refresh_withCacheLoader_shouldDefaultToLocalWithoutBroadcast() {
+    CacheLoader<String, String> loader = key -> "v";
+
+    zeta.refresh("k1", loader);
+
+    verify(hotKeyCache).refresh(eq("k1"), same(loader), eq(false));
+  }
+
+  @Test
+  void refresh_withCacheLoaderAndSync_shouldBroadcast() {
+    CacheLoader<String, String> loader = key -> "v";
+
+    zeta.refresh("k1", loader, true);
+
+    verify(hotKeyCache).refresh(eq("k1"), same(loader), eq(true));
   }
 
   @Test
@@ -531,118 +733,53 @@ class ZetaTest {
   @Test
   void refreshAll_shouldRefreshEachKey() {
     zeta.refreshAll(Map.of("k1", (Supplier<?>) () -> "v1", "k2", (Supplier<?>) () -> "v2"));
-    verify(hotKeyCache, times(2)).refresh(anyString(), any(), anyLong(), anyLong(), anyBoolean());
+    verify(hotKeyCache, times(2)).refresh(anyString(), any(Supplier.class), eq(false));
   }
 
-  // ── registerRefresh / unregisterRefresh ────────────────────────
+  @Test
+  void refreshAll_sync_shouldBroadcastEachKey() {
+    zeta.refreshAll(Map.of("k1", (Supplier<?>) () -> "v1", "k2", (Supplier<?>) () -> "v2"), true);
+
+    verify(hotKeyCache).refresh(eq("k1"), any(Supplier.class), eq(true));
+    verify(hotKeyCache).refresh(eq("k2"), any(Supplier.class), eq(true));
+  }
 
   @Test
-  void unregisterRefresh_shouldNotThrow() throws InterruptedException {
-    CountDownLatch firstCallLatch = new CountDownLatch(1);
-    when(hotKeyCache.get(eq("cancel-key"), any(Supplier.class), any(GetPolicy.class))).thenAnswer(invocation -> {
-      firstCallLatch.countDown();
-      return "v";
+  void refreshAll_singleEntry_shouldRunInlineWithoutTheExecutor() {
+    DefaultZeta facade = new DefaultZeta(hotKeyCache, appDetector, task -> {
+      throw new AssertionError("a single-entry refresh must not enter the fan-out");
     });
 
-    zeta
-      .refresh()
-      .registerRefresh("cancel-key", () -> "v", GetPolicy.of(300_000L, 10L, true, StalePolicy.SOFT_REFRESH));
-    assertThat(firstCallLatch.await(5, TimeUnit.SECONDS)).as("first scheduled refresh occurred").isTrue();
+    facade.refreshAll(Map.of("only", (Supplier<?>) () -> "v"));
 
-    zeta.refresh().unregisterRefresh("cancel-key");
-
-    verify(hotKeyCache, atLeastOnce()).get(eq("cancel-key"), any(Supplier.class), any(GetPolicy.class));
+    verify(hotKeyCache).refresh(eq("only"), any(Supplier.class), eq(false));
   }
 
   @Test
-  void registerRefresh_replacesExistingRegistration() throws InterruptedException {
-    AtomicInteger callCount = new AtomicInteger(0);
-    when(hotKeyCache.get(anyString(), any(Supplier.class), any(GetPolicy.class))).thenAnswer(invocation -> {
-      callCount.incrementAndGet();
-      return "v";
+  void refreshAll_submissionError_shouldJoinAcceptedTasksBeforeRethrowing() {
+    AtomicBoolean refreshed = new AtomicBoolean();
+    doAnswer(invocation -> {
+      Thread.sleep(150L);
+      refreshed.set(true);
+      return null;
+    })
+      .when(hotKeyCache)
+      .refresh(anyString(), any(Supplier.class), anyBoolean());
+    AtomicInteger submissions = new AtomicInteger();
+    DefaultZeta facade = new DefaultZeta(hotKeyCache, appDetector, task -> {
+      if (submissions.getAndIncrement() == 0) {
+        Thread worker = new Thread(task, "refresh-all-submission-error");
+        worker.setDaemon(true);
+        worker.start();
+      } else {
+        throw new AssertionError("submission failed");
+      }
     });
 
-    zeta.refresh().registerRefresh("dup-key", () -> "v1", GetPolicy.of(300_000L, 5L, true, StalePolicy.SOFT_REFRESH));
-    Thread.sleep(20);
-    zeta.refresh().registerRefresh("dup-key", () -> "v2", GetPolicy.of(300_000L, 5L, true, StalePolicy.SOFT_REFRESH));
-
-    int countBefore = callCount.get();
-    Thread.sleep(30);
-    int countAfter = callCount.get();
-
-    assertThat(countAfter).isGreaterThan(countBefore);
-  }
-
-  @Test
-  void registerRefresh_invokesFacadeGet() throws InterruptedException {
-    CountDownLatch latch = new CountDownLatch(1);
-    when(hotKeyCache.get(eq("k1"), any(Supplier.class), any(GetPolicy.class))).thenAnswer(invocation -> {
-      latch.countDown();
-      return "v";
-    });
-
-    zeta.refresh().registerRefresh("k1", () -> "v", GetPolicy.of(300_000L, 5L, true, StalePolicy.SOFT_REFRESH));
-    assertThat(latch.await(5, TimeUnit.SECONDS)).as("facade get was invoked by scheduled refresh").isTrue();
-
-    zeta.refresh().unregisterRefresh("k1");
-  }
-
-  /**
-   * The replace-and-cancel race: two concurrent registrations for the same key
-   * must leave exactly one ALIVE future registered. A put-then-cancel sequence
-   * lets T1 and T2 cancel each other's new future (T1's prev read is F2, T2's
-   * is F1), silently killing the timed refresh.
-   */
-  @Test
-  void registerRefresh_concurrentRegistrations_leaveExactlyOneAliveFuture() throws Exception {
-    int threads = 8;
-    int iterations = 25;
-    ExecutorService pool = Executors.newFixedThreadPool(threads);
-    CountDownLatch start = new CountDownLatch(1);
-    List<Future<?>> jobs = new java.util.ArrayList<>();
-    for (int t = 0; t < threads; t++) {
-      jobs.add(
-        pool.submit(() -> {
-          start.await();
-          for (int i = 0; i < iterations; i++) {
-            zeta
-              .refresh()
-              .registerRefresh("race-key", () -> "v", GetPolicy.of(300_000L, 5_000L, true, StalePolicy.SOFT_REFRESH));
-          }
-          return null;
-        })
-      );
-    }
-    start.countDown();
-    for (Future<?> job : jobs) {
-      job.get(30, TimeUnit.SECONDS);
-    }
-    pool.shutdown();
-
-    // The per-key future map moved into the TimedRefreshCoordinator when the
-    // scheduling infrastructure was extracted from the facade; reach it through
-    // the facade's coordinator field.
-    java.lang.reflect.Field coordinatorField = DefaultZeta.class.getDeclaredField("refreshCoordinator");
-    coordinatorField.setAccessible(true);
-    Object coordinator = coordinatorField.get(zeta);
-    java.lang.reflect.Field field = coordinator.getClass().getDeclaredField("refreshFutures");
-    field.setAccessible(true);
-    @SuppressWarnings("unchecked")
-    java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.ScheduledFuture<?>> futures =
-      (java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.ScheduledFuture<?>>) field.get(coordinator);
-
-    Object surviving = futures.get("race-key");
-    assertThat(surviving).as("a registration must survive the race").isNotNull();
-    assertThat(futures.get("race-key").isCancelled()).as("the surviving future must not be cancelled").isFalse();
-
-    zeta.refresh().unregisterRefresh("race-key");
-  }
-
-  @Test
-  void destroy_shouldNotThrow() {
-    zeta.refresh().registerRefresh("k1", () -> "v", GetPolicy.of(300_000L, 10_000L, true, StalePolicy.SOFT_REFRESH));
-    ((DefaultZeta) zeta).destroy();
-    verify(hotKeyCache, never()).get(eq("k1"), any(Supplier.class), any(GetPolicy.class));
+    assertThatThrownBy(() -> facade.refreshAll(Map.of("k1", (Supplier<?>) () -> "v1", "k2", (Supplier<?>) () -> "v2")))
+      .isInstanceOf(AssertionError.class)
+      .hasMessage("submission failed");
+    assertThat(refreshed).as("the accepted task completed before refreshAll returned").isTrue();
   }
 
   // ── Parameter validation ──
@@ -692,46 +829,20 @@ class ZetaTest {
   }
 
   @Test
-  void registerRefresh_shouldRejectNullKey() {
-    assertThatThrownBy(() ->
-      zeta.refresh().registerRefresh(null, () -> "v", GetPolicy.of(1000L, 100L, true, StalePolicy.SOFT_REFRESH))
-    ).isInstanceOf(IllegalArgumentException.class);
-  }
-
-  @Test
-  void registerRefresh_shouldRejectNullSupplier() {
-    assertThatThrownBy(() ->
-      zeta.refresh().registerRefresh("k", null, GetPolicy.of(1000L, 100L, true, StalePolicy.SOFT_REFRESH))
-    ).isInstanceOf(NullPointerException.class);
-  }
-
-  @Test
-  void registerRefresh_intervalIsSoftTtlTimesOnePointOne() {
-    // The documented cadence contract: interval = resolved soft TTL × 1.1 so
-    // the entry is stale at every tick even under the ±5% TTL jitter.
-    assertThat(TimedRefreshCoordinator.intervalFor(100L)).isEqualTo(110L);
-    assertThat(TimedRefreshCoordinator.intervalFor(1_000L)).isEqualTo(1_100L);
-    assertThat(TimedRefreshCoordinator.intervalFor(5_000L)).isEqualTo(5_500L);
-    // Rounding: 7ms × 1.1 = 7.7 → ceil to 8 so the interval never undershoots.
-    assertThat(TimedRefreshCoordinator.intervalFor(7L)).isEqualTo(8L);
-    // Non-positive TTLs fail fast instead of degrading to a 1ms hot loop.
-    assertThatThrownBy(() -> TimedRefreshCoordinator.intervalFor(0L)).isInstanceOf(IllegalArgumentException.class);
-    assertThat(TimedRefreshCoordinator.intervalFor(1L)).isEqualTo(2L);
-  }
-
-  @Test
-  void unregisterRefresh_shouldRejectNullKey() {
-    assertThatThrownBy(() -> zeta.refresh().unregisterRefresh(null)).isInstanceOf(IllegalArgumentException.class);
-  }
-
-  @Test
   void refresh_shouldRejectNullKey() {
     assertThatThrownBy(() -> zeta.refresh(null, () -> "v")).isInstanceOf(IllegalArgumentException.class);
   }
 
   @Test
+  void refresh_shouldRejectNullReader() {
+    assertThatThrownBy(() -> zeta.refresh("k", (Supplier<String>) null)).isInstanceOf(NullPointerException.class);
+  }
+
+  @Test
   void refresh_shouldRejectNullLoader() {
-    assertThatThrownBy(() -> zeta.refresh("k", null)).isInstanceOf(NullPointerException.class);
+    assertThatThrownBy(() -> zeta.refresh("k", (CacheLoader<String, String>) null)).isInstanceOf(
+      NullPointerException.class
+    );
   }
 
   @Test
