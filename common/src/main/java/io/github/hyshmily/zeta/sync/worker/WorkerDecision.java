@@ -63,10 +63,11 @@ public record WorkerDecision(long id, String cacheKey, WorkerType type, Decision
    *
    * @param msg the incoming AMQP message; must not be null
    * @return a parsed decision, or {@code null} if the body is empty, the cache key is
-   *         invalid or the type header is unknown
+   *         invalid, the type header is unknown or the message has no properties
    */
   public static @Nullable WorkerDecision from(Message msg) {
-    return from(msg, WorkerType.parse(msg.getMessageProperties().getHeader(HEADER_TYPE)));
+    MessageProperties props = msg.getMessageProperties();
+    return props == null ? null : from(msg, WorkerType.parse(props.getHeader(HEADER_TYPE)));
   }
 
   /**

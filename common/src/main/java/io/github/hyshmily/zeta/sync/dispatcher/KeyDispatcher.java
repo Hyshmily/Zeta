@@ -22,6 +22,7 @@ import lombok.extern.slf4j.Slf4j;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.function.Consumer;
@@ -29,37 +30,19 @@ import java.util.function.Consumer;
 /**
  * Per-key FIFO dispatcher that hands each granted batch to one consumer.
  *
- * <p>Tasks of the same key run strictly in submission order and never concurrently; tasks
- * of different keys run in parallel. A key yields the pool after
- * {@code maxTasksPerCycle} tasks, so a busy key cannot monopolise it.
+ * <p>Tasks of the same key run strictly in submission order and never concurrently; tasks of
+ * different keys run in parallel. A key yields the pool after {@code maxTasksPerCycle} tasks,
+ * so a busy key cannot monopolise it. The consumer receives the whole granted batch, so work
+ * a later task would repeat — a loader call, a table sweep, an overwritten value — is done
+ * once; the boundary is best effort, and a submission racing a batch starts a follow-up cycle.
  *
- * <p><b>The batch is the unit of work.</b> The consumer receives the whole granted list,
- * so work a later task of the same batch would repeat — a loader call per queued REFRESH,
- * a table sweep per queued clear, an overwritten value applied per queued PUT — is done
- * once, and there is no cross-task state to smuggle through a context object. The batch
- * boundary is best effort: a task granted alone is a batch of one, and a submission racing
- * the batch simply starts a follow-up cycle.
+ * <p>Each key has at most one {@link KeyWorker} in the map, created with its first task already
+ * granted; later batches are drained and resubmitted inside the retire compute. The executor
+ * must not run a submitted command inline: no {@link ThreadPoolExecutor.CallerRunsPolicy} and
+ * no direct executor, because both submission points hold the key's bin lock and an inline run
+ * would re-enter that key's {@code compute}.
  *
- * <p><b>Pre-granted first batch.</b> A worker is created with its first task already
- * granted, and every later batch is drained at the end of the previous cycle. The cycle
- * therefore executes a batch without taking the bin lock first: a single-task burst costs
- * one submit compute plus one retire compute, and a sustained key costs one compute per
- * cycle instead of two.
- *
- * <p><b>Atomic per-key queue.</b> Each key is at most one {@link KeyWorker} in the map.
- * Submitting and draining both run through one atomic {@code compute}: the worker is
- * created together with its first task (deciding atomically whether it must be started),
- * and an idle worker removes itself. No worker can be left orphaned.
- *
- * <p><b>Backpressure.</b> Each key's queue is bounded by {@code maxQueuePerKey}; the total
- * weight pending across all keys is bounded by {@code maxGlobalPendingUnits} (one unit ≈
- * 1 KB of payload). Control-plane submissions — a COOL decision, a clear — are O(1) and
- * skip the global budget: a value storm must not lock out the message that repairs the
- * state it created.
- *
- * <p><b>Start jitter.</b> A new worker's first cycle is parked on the executor's scheduler
- * for a random delay instead of sleeping inside a pool thread, spreading same-instant
- * loads (a broadcast fan-out) without shrinking throughput.
+ * <p>See design decisions: buffering and ordering.
  *
  * <p>Thread-safe.
  */
@@ -120,10 +103,13 @@ public class KeyDispatcher<T> implements AutoCloseable {
    * @param executor              executor for the per-key cycles and the start-jitter park
    * @param name                  dispatcher name used in log lines
    * @param consumer              runs one granted batch to completion
-   * @param maxQueuePerKey        per-key pending-queue bound
-   * @param maxTasksPerCycle      tasks consumed per executor submission
-   * @param maxGlobalPendingUnits aggregate weighted-unit budget across all keys
+   * @param maxQueuePerKey        per-key pending-queue bound; must be {@code >= 1}
+   * @param maxTasksPerCycle      tasks consumed per executor submission; must be {@code >= 1}
+   * @param maxGlobalPendingUnits aggregate weighted-unit budget across all keys; must be {@code >= 1}
    * @param jitterMs              upper bound of the random first-cycle park; {@code <= 0} disables it
+   * @throws IllegalArgumentException when a per-key queue bound, per-cycle task cap or
+   *                                  global pending budget is below one
+   * @throws NullPointerException     when {@code executor}, {@code name} or {@code consumer} is null
    */
   public KeyDispatcher(
     ScheduledExecutorService executor,
@@ -134,9 +120,22 @@ public class KeyDispatcher<T> implements AutoCloseable {
     long maxGlobalPendingUnits,
     long jitterMs
   ) {
-    this.name = name;
-    this.executor = executor;
-    this.consumer = consumer;
+    this.name = Objects.requireNonNull(name, "name must not be null");
+    this.executor = Objects.requireNonNull(executor, "executor must not be null");
+    this.consumer = Objects.requireNonNull(consumer, "consumer must not be null");
+    if (maxQueuePerKey < 1) {
+      throw new IllegalArgumentException("maxQueuePerKey must be >= 1, got " + maxQueuePerKey);
+    }
+    if (maxTasksPerCycle < 1) {
+      throw new IllegalArgumentException("maxTasksPerCycle must be >= 1, got " + maxTasksPerCycle);
+    }
+    if (maxGlobalPendingUnits < 1) {
+      throw new IllegalArgumentException("maxGlobalPendingUnits must be >= 1, got " + maxGlobalPendingUnits);
+    }
+    // A cancelled park must leave the delay queue at once so it cannot pin its payload.
+    if (executor instanceof ScheduledThreadPoolExecutor scheduled) {
+      scheduled.setRemoveOnCancelPolicy(true);
+    }
     this.maxQueuePerKey = maxQueuePerKey;
     this.jitterMs = Math.max(0, jitterMs);
     this.maxTasksPerCycle = maxTasksPerCycle;
@@ -151,7 +150,10 @@ public class KeyDispatcher<T> implements AutoCloseable {
    * @param weight its weight in global pending units (clamped to ≥ 1)
    * @param jitter {@code true} draws the start-jitter park when the key has no worker yet;
    *               pass {@code false} for tasks that perform no I/O
-   * @return {@code true} when the task was enqueued
+   * @return {@code true} when the task was accepted; {@code false} when the dispatcher is
+   *         closed, a bound refused it, or the executor refused the first cycle, so the caller
+   *         may apply its local fallback
+   * @throws NullPointerException when {@code key} or {@code task} is null
    */
   public boolean submit(Object key, T task, int weight, boolean jitter) {
     return submit(key, task, weight, jitter, false);
@@ -163,152 +165,149 @@ public class KeyDispatcher<T> implements AutoCloseable {
    *
    * @param key  the routing key
    * @param task the control task
-   * @return {@code true} when the task was enqueued
+   * @return {@code true} when the task was accepted; {@code false} when the dispatcher is
+   *         closed, the per-key bound refused it, or the executor refused the first cycle
+   * @throws NullPointerException when {@code key} or {@code task} is null
    */
   public boolean submitControl(Object key, T task) {
     return submit(key, task, 1, false, true);
   }
 
+  @SuppressWarnings("all")
   private boolean submit(Object key, T task, int weight, boolean jitter, boolean control) {
+    Objects.requireNonNull(key, "key must not be null");
+    Objects.requireNonNull(task, "task must not be null");
     if (closed) {
       return false;
     }
 
-    // Weight floors at 1: a zero/negative caller must not create a task that occupies a
-    // queue slot but consumes no global budget, which would let a misbehaving caller grow
-    // the queue without ever tripping the global backpressure check.
     int effectiveWeight = Math.max(1, weight);
-    if (!control && globalPendingUnits.sum() + effectiveWeight > maxGlobalPendingUnits) {
+    // Subtraction form: sum() + weight could overflow near Long.MAX_VALUE.
+    if (!control && globalPendingUnits.sum() > maxGlobalPendingUnits - effectiveWeight) {
       log.debug("[{}] Global pending units exceeded ({}), dropping task for key={}", name, maxGlobalPendingUnits, key);
       return false;
     }
 
-    // One atomic compute decides both "does this key already have a worker" and "is the
-    // task accepted", so a worker can never end up in the map without a task to grant.
-    // The bin lock also serializes firstTask/queue mutation: KeyWorker is not thread-safe
-    // and relies on this lock for every enqueue. The outcome travels in a one-element
-    // array because compute has no second return value: 0 = refused, 1 = created the
-    // worker, 2 = enqueued behind an existing one.
     int[] outcome = new int[1];
-    KeyWorker worker = queues.compute(key, (k, existing) -> {
-      // A close() that raced the entry check must not leave a worker created after
-      // queues.clear(): re-read the flag under the bin lock.
+    boolean[] queueFull = new boolean[1];
+    Object[] createdWorker = new Object[1];
+    queues.compute(key, (k, existing) -> {
+      // close() may have cleared the map after the entry check above.
       if (closed) {
         return existing;
       }
 
       if (existing == null) {
+        KeyWorker created = new KeyWorker(key, task, effectiveWeight);
+        globalPendingUnits.add(effectiveWeight);
+        boolean started;
+        try {
+          started = startWorker(created, jitter);
+        } catch (RuntimeException | Error failure) {
+          globalPendingUnits.add(-effectiveWeight);
+          throw failure;
+        }
+        if (!started) {
+          globalPendingUnits.add(-effectiveWeight);
+          return null;
+        }
+        createdWorker[0] = created;
         outcome[0] = 1;
-        // The first task is pre-granted: the common single-task burst needs no deque and
-        // no grant compute before its first consumer call.
-        return new KeyWorker(key, task, effectiveWeight);
+        return created;
       }
 
       if (!existing.enqueue(task, effectiveWeight)) {
+        queueFull[0] = true;
         return existing;
       }
+
+      globalPendingUnits.add(effectiveWeight);
       outcome[0] = 2;
       return existing;
     });
 
+    if (outcome[0] == 1 && closed) {
+      KeyWorker created = (KeyWorker) createdWorker[0];
+      queues.remove(key, created);
+      created.cancelJitter();
+      outcome[0] = 0;
+    }
+
     if (outcome[0] == 0) {
-      // A close() during the compute is shutdown, not backpressure; only a live dispatcher
-      // reports the per-key bound.
-      if (!closed) {
+      if (!closed && queueFull[0]) {
         log.debug("[{}] Task queue full for key {}. Task rejected.", name, key);
       }
       return false;
-    }
-
-    // close() may have cleared the map after admission. A worker this call created never
-    // started, so refusing it is accurate and the caller may take its local fallback. A task
-    // appended to an existing worker may already have been granted and executed, so the false
-    // return would make the caller replay it as an INVALIDATE and erase the value it just
-    // applied; shutdown is lossy, and this call reports acceptance.
-    if (closed) {
-      if (outcome[0] == 1) {
-        queues.remove(key, worker);
-        return false;
-      }
-      return true;
-    }
-
-    // LongAdder mutation is not transactional: adjust the budget only after the compute
-    // has committed the decision.
-    globalPendingUnits.add(effectiveWeight);
-
-    // The creator of the worker grants the first cycle; every later cycle is re-driven by
-    // runCycle after it settles.
-    if (outcome[0] == 1) {
-      startWorker(worker, jitter);
     }
     return true;
   }
 
   /**
-   * Schedule a new worker's first cycle, applying the optional start-jitter park. The random
-   * delay is drawn here, outside the map's bin lock, so a submission never holds the bucket
-   * lock across the generator. A rejected park falls through to an immediate submission,
-   * whose own rejection path retires the worker.
+   * Schedules a new worker's first cycle, applying the optional start-jitter park. Runs under
+   * the key's bin lock, so the worker is published only after the executor accepted the cycle;
+   * the lock is held across a thread-local delay draw and a scheduler offer, neither of which
+   * performs I/O.
    *
    * @param worker the newly created worker
    * @param jitter whether this submission opted into the start-jitter park
+   * @return {@code true} when the cycle was accepted; {@code false} when the dispatcher is
+   *         closed (including a close that landed while the executor accepted the cycle) or
+   *         the executor refused both the park and the immediate submission
    */
-  private void startWorker(KeyWorker worker, boolean jitter) {
+  private boolean startWorker(KeyWorker worker, boolean jitter) {
+    if (closed) {
+      return false;
+    }
     if (jitter && jitterMs > 0L) {
       long delayMs = ThreadLocalRandom.current().nextLong(jitterMs);
       if (delayMs > 0L) {
         try {
-          executor.schedule(worker, delayMs, TimeUnit.MILLISECONDS);
-          return;
-        } catch (RejectedExecutionException ignored) {
-          // Fall through to immediate execution, whose rejection path retires the worker.
-        }
+          ScheduledFuture<?> future = executor.schedule(worker, delayMs, TimeUnit.MILLISECONDS);
+          worker.jitterFuture = future;
+          if (closed) {
+            future.cancel(false);
+            return false;
+          }
+          return true;
+        } catch (RejectedExecutionException ignored) {}
       }
     }
-    scheduleWorker(worker);
-  }
-
-  /** Submit the worker's next cycle; a rejection retires it and releases its budget. */
-  private void scheduleWorker(KeyWorker worker) {
+    if (closed) {
+      return false;
+    }
     try {
       executor.execute(worker);
-    } catch (RejectedExecutionException e) {
-      abandon(worker);
+      return !closed;
+    } catch (RejectedExecutionException ignored) {
+      return false;
     }
   }
 
   /**
-   * Remove a worker the executor will not run and discharge the weight its dropped tasks
-   * held — the last-resort cleanup when a shut-down executor rejects the re-drive.
+   * Submits a worker's next cycle from inside its retire compute, under the same bin lock that
+   * publishes the drained grant.
+   *
+   * @param worker the worker to drive
+   * @return {@code true} when the executor accepted the cycle; {@code false} when rejected
    */
-  private void abandon(KeyWorker worker) {
-    long[] released = { 0L };
-    queues.compute(worker.key, (k, current) -> {
-      if (current != worker) {
-        return current;
-      }
-      released[0] = worker.discard();
-      return null;
-    });
-    if (released[0] > 0L && !closed) {
-      globalPendingUnits.add(-released[0]);
+  private boolean submitCycle(KeyWorker worker) {
+    try {
+      executor.execute(worker);
+      return true;
+    } catch (RejectedExecutionException ignored) {
+      return false;
     }
-    log.warn(
-      "[{}] Executor refused every submission for key={}; dropped {} pending unit(s) so the key can be rescheduled",
-      name,
-      worker.key,
-      released[0]
-    );
   }
 
   /**
-   * Execute one pre-granted batch, then either drain and resubmit the worker for the next
-   * batch or retire it. A consumer failure is reported through the exception-handler chain
-   * and never kills the worker thread.
+   * Executes one pre-granted batch, then either drains and resubmits the worker for the next
+   * batch or retires it. A consumer failure is reported through the exception-handler chain;
+   * a {@link RuntimeException} never kills the worker thread, while a fatal {@link Error}
+   * retires the key and then propagates.
    */
-  @SuppressWarnings("all")
+  @SuppressWarnings({ "unchecked", "java:S1181", "java:S3776" })
   private void run(KeyWorker worker) {
+    worker.jitterFuture = null;
     Grant<T> grant = worker.grant;
     if (closed || grant == null) {
       worker.grant = null;
@@ -319,10 +318,13 @@ public class KeyDispatcher<T> implements AutoCloseable {
     // A burst that arrived while the start-jitter park held the first task is folded into
     // that first batch under the bin lock. A lone first task pays no compute; a burst
     // coalesces into one consumer call, one sweep, one loader read.
-    if (worker.first && worker.hasQueued()) {
+    if (worker.first && worker.hasQueued) {
       Grant<T>[] merged = new Grant[1];
       KeyWorker kept = queues.compute(worker.key, (k, current) -> {
-        if (closed || current != worker) {
+        if (current != worker) {
+          return current;
+        }
+        if (closed) {
           return null;
         }
         merged[0] = worker.mergeFirst(maxTasksPerCycle);
@@ -339,49 +341,116 @@ public class KeyDispatcher<T> implements AutoCloseable {
     worker.first = false;
 
     try {
-      // close() may have run between the schedule and here. The granted tasks were taken
-      // out of the queue and must NOT run after close.
       if (closed) {
         queues.remove(worker.key, worker);
         return;
       }
       consumer.accept(grant.tasks());
     } catch (Throwable t) {
+      restoreInterrupt(t);
       ZetaExceptionHandler.handleException("[" + name + "] Batch execution failed for key " + worker.key, t);
+      if (t instanceof Error error) {
+        retire(worker);
+        throw error;
+      }
     } finally {
-      // close() already reset the counter together with the map that held the weight;
-      // subtracting after that reset would drive it negative.
       if (!closed) {
         globalPendingUnits.add(-grant.units());
       }
     }
 
     // One compute at the end: empty queue retires the worker; a non-empty queue drains the
-    // next batch under the same bin lock and resubmits.
-    KeyWorker kept = queues.compute(worker.key, (k, current) -> {
-      if (closed || current != worker) {
+    // next batch under the same bin lock and resubmits. Submitting inside the compute keeps
+    // a concurrent submit from appending to a worker whose re-drive the executor refused.
+    long[] dropped = { 0L };
+    boolean[] refused = { false };
+    queues.compute(worker.key, (k, current) -> {
+      if (current != worker) {
+        return current;
+      }
+      if (closed) {
         return null;
       }
-      return worker.drainNext(maxTasksPerCycle) ? worker : null;
+      if (!worker.drainNext(maxTasksPerCycle)) {
+        return null;
+      }
+      if (submitCycle(worker)) {
+        return worker;
+      }
+      refused[0] = true;
+      dropped[0] = worker.discard();
+      return null;
     });
-    if (kept == worker) {
-      scheduleWorker(worker);
+    if (refused[0]) {
+      if (!closed && dropped[0] > 0L) {
+        globalPendingUnits.add(-dropped[0]);
+      }
+      log.warn(
+        "[{}] Executor refused the next cycle for key={}; dropped {} pending unit(s) so the key can be rescheduled",
+        name,
+        worker.key,
+        dropped[0]
+      );
     }
   }
 
   /**
-   * Stop accepting submissions and drop every queued task. In-flight batches finish on
-   * their own thread; the loss is bounded by the next periodic broadcast or write.
+   * Removes a worker that will not be driven again and discharges the weight of the tasks it
+   * still holds. The grant already taken by the current cycle is settled by its own finally.
+   *
+   * @param worker the worker to retire
+   */
+  private void retire(KeyWorker worker) {
+    long[] released = { 0L };
+    queues.compute(worker.key, (k, current) -> {
+      if (current != worker) {
+        return current;
+      }
+      released[0] = worker.discard();
+      return null;
+    });
+    if (released[0] > 0L && !closed) {
+      globalPendingUnits.add(-released[0]);
+    }
+  }
+
+  /**
+   * Restores the interrupt flag when the failure chain carries an interrupt. A
+   * {@link Consumer} cannot declare a checked exception, so the interrupt normally arrives
+   * wrapped; the bounded walk covers both shapes without looping on a cyclic cause chain.
+   *
+   * @param failure the consumer failure
+   */
+  private static void restoreInterrupt(Throwable failure) {
+    Throwable cause = failure;
+    for (int depth = 0; cause != null && depth < 8; depth++, cause = cause.getCause()) {
+      if (cause instanceof InterruptedException) {
+        Thread.currentThread().interrupt();
+        return;
+      }
+    }
+  }
+
+  /**
+   * Stops accepting submissions and drops every queued task. In-flight batches finish on
+   * their own thread; a parked first cycle is cancelled so its payload is not pinned in the
+   * scheduler's delay queue. The loss is bounded by the next periodic broadcast or write.
+   *
+   * <p>The pending counter is reset with the map that held the queued weight. Only
+   * {@link #submit} reads it, and no submit can be admitted after the dispatcher is closed,
+   * so a settlement racing the reset cannot affect behaviour.
    */
   @Override
   public void close() {
     closed = true;
-    // Clearing the map drops every queued task: no new worker can be created (closed is
-    // true) and any in-flight run that reaches the end compute finds current != worker
-    // (the map entry is gone) and returns null. globalPendingUnits is reset because the
-    // tasks that held the weight are gone with the map.
+    for (KeyWorker worker : queues.values()) {
+      worker.cancelJitter();
+    }
     queues.clear();
     globalPendingUnits.reset();
+    if (executor instanceof ThreadPoolExecutor pool) {
+      pool.purge();
+    }
   }
 
   /**
@@ -389,8 +458,6 @@ public class KeyDispatcher<T> implements AutoCloseable {
    * previous cycle; {@code queue} holds only tasks that have not been granted yet.
    * {@code grant}/{@code queue} are mutated under the map's bin lock, while {@code grant} is
    * read and cleared by the cycle on its own thread (volatile for that hand-off).
-   *
-   * <p>Runs its own cycle so a submission never allocates a {@code Runnable} wrapper.
    */
   private final class KeyWorker implements Runnable {
 
@@ -401,16 +468,26 @@ public class KeyDispatcher<T> implements AutoCloseable {
     ArrayDeque<PendingTask<T>> queue;
     /**
      * The batch this worker will execute next, or {@code null} while it is executing one.
-     * Written under the bin lock by construction or {@link #drainNext(int)}, read and
-     * cleared by {@link #run(KeyWorker)} on the worker thread.
+     * Written under the bin lock by construction or {@link #drainNext(int)}, read and cleared
+     * by {@link #run(KeyWorker)} on the worker thread.
      */
     volatile Grant<T> grant;
     /**
-     * Whether the pre-granted first batch has not started yet. The first task counts
-     * against the per-key bound while the start-jitter park holds it; a later drained batch
-     * is already granted and does not.
+     * Whether the pre-granted first batch has not started yet. The first task counts against
+     * the per-key bound while the start-jitter park holds it.
      */
     volatile boolean first;
+    /**
+     * Whether {@link #queue} holds at least one task. Written under the bin lock, read by
+     * {@link #run(KeyWorker)} outside the lock as a merge hint; the deque itself is never
+     * accessed outside the lock.
+     */
+    volatile boolean hasQueued;
+    /**
+     * The parked first cycle when start jitter deferred it, or {@code null} when the first
+     * cycle ran or was submitted immediately. {@link #close()} cancels it.
+     */
+    volatile ScheduledFuture<?> jitterFuture;
 
     KeyWorker(Object key, T firstTask, int firstWeight) {
       this.key = key;
@@ -423,40 +500,55 @@ public class KeyDispatcher<T> implements AutoCloseable {
       KeyDispatcher.this.run(this);
     }
 
+    /** Cancel the parked first cycle, if this worker still has one. */
+    void cancelJitter() {
+      ScheduledFuture<?> future = jitterFuture;
+      if (future != null) {
+        future.cancel(false);
+      }
+    }
+
     boolean enqueue(T task, int weight) {
       if (queue == null) {
         queue = new ArrayDeque<>(INITIAL_QUEUE_SIZE);
       }
 
-      // The first task is pending until its cycle starts; counting only the deque would
-      // admit maxQueuePerKey + 1 tasks while the start-jitter park holds that first task
-      // back. A later pre-granted batch is already admitted and must not be counted twice.
-      int pendingCount = queue.size() + (first ? 1 : 0);
-      if (pendingCount >= maxQueuePerKey) {
+      // The pre-granted first task is pending until its cycle starts; counting only the deque
+      // would admit maxQueuePerKey + 1 tasks while the start-jitter park holds it back.
+      if (pendingCount() >= maxQueuePerKey) {
         return false;
       }
       queue.addLast(new PendingTask<>(task, weight));
+      hasQueued = true;
       return true;
     }
 
-    /** Whether a task is waiting behind the pre-granted first batch. */
-    boolean hasQueued() {
-      return queue != null && !queue.isEmpty();
+    /**
+     * Pending tasks for this key: the pre-granted first batch counts until its cycle starts,
+     * the deque counts after it.
+     *
+     * @return the number of admitted tasks not yet granted
+     */
+    int pendingCount() {
+      return (queue == null ? 0 : queue.size()) + (first ? 1 : 0);
     }
 
     /**
-     * Fold the queued tail into the pre-granted first batch, up to {@code maxTasks} total.
+     * Folds the queued tail into the pre-granted first batch, up to {@code maxTasks} total.
      * Runs under the bin lock before the first cycle starts.
      *
      * @return the merged grant, or {@code null} when there is nothing to fold
      */
     Grant<T> mergeFirst(int maxTasks) {
+      first = false;
       Grant<T> current = grant;
       if (current == null || queue == null || queue.isEmpty()) {
+        updateHasQueued();
         return null;
       }
       int room = maxTasks - current.tasks().size();
       if (room <= 0) {
+        hasQueued = true;
         return null;
       }
 
@@ -466,23 +558,26 @@ public class KeyDispatcher<T> implements AutoCloseable {
       long units = drainInto(limit, tasks, current.units());
 
       grant = new Grant<>(tasks, units);
+      updateHasQueued();
       return grant;
     }
 
     /**
-     * Take up to {@code maxTasks} queued tasks into the next pre-granted batch. Runs under
-     * the bin lock; the next cycle reads the grant through its volatile hand-off.
+     * Takes up to {@code maxTasks} queued tasks into the next pre-granted batch, under the bin
+     * lock. The next cycle reads the grant through its volatile hand-off.
      *
      * @return {@code false} when the worker has nothing to grant
      */
     boolean drainNext(int maxTasks) {
       if (queue == null || queue.isEmpty()) {
+        hasQueued = false;
         return false;
       }
       // Fast path: construct directly for a single element to avoid ArrayList overhead
       if (queue.size() == 1) {
         PendingTask<T> single = queue.poll();
         grant = new Grant<>(List.of(single.task()), single.weight());
+        hasQueued = false;
         return true;
       }
 
@@ -491,18 +586,17 @@ public class KeyDispatcher<T> implements AutoCloseable {
       long units = drainInto(limit, tasks, 0L);
 
       grant = new Grant<>(tasks, units);
+      updateHasQueued();
       return true;
     }
 
     /**
-     * Drains up to {@code limit} tasks from the queue, appends them to the target
-     * list, and accumulates their weights.
+     * Drains up to {@code limit} tasks from the queue, appends them to the target list and
+     * accumulates their weights.
      *
-     * @param limit        the maximum number of tasks to drain
-     * @param tasks        the target list to append tasks to (may already contain
-     *                     initial tasks, as in the merge scenario of {@code mergeFirst})
-     * @param initialUnits the initial accumulated weight (e.g., from the existing
-     *                     grant in {@code mergeFirst})
+     * @param limit        the number of tasks to drain; must not exceed {@code queue.size()}
+     * @param tasks        the target list, which may already hold the first batch's tasks
+     * @param initialUnits the weight already accumulated by those tasks
      * @return the total accumulated weight after draining
      */
     private long drainInto(int limit, List<T> tasks, long initialUnits) {
@@ -517,10 +611,14 @@ public class KeyDispatcher<T> implements AutoCloseable {
       return units;
     }
 
+    /** Re-derives the lock-free merge hint after the deque was drained or partially read. */
+    private void updateHasQueued() {
+      hasQueued = queue != null && !queue.isEmpty();
+    }
+
     /**
-     * Drop every queued task and the pre-granted batch, returning the weight they held.
-     * Runs under the bin lock when the worker retires; a batch already executing is owned by
-     * {@link #run(KeyWorker)}, which settles its weight in its own {@code finally}.
+     * Drops every queued task and the pre-granted batch, returning the weight they held. Runs
+     * under the bin lock; a batch already executing is settled by {@link #run(KeyWorker)}.
      *
      * @return the released pending units
      */
@@ -534,6 +632,7 @@ public class KeyDispatcher<T> implements AutoCloseable {
         }
         queue.clear();
       }
+      hasQueued = false;
       return units;
     }
   }

@@ -23,7 +23,8 @@ import org.jspecify.annotations.Nullable;
  * <p>Every downstream decision reads a flag instead of re-comparing the header string:
  * <ul>
  *   <li>{@link #ignoresSelf()} — the fanout copy of this instance's own broadcast carries
- *       no information (the sender already applied it); only INVALIDATE is re-applied.</li>
+ *       no information (the sender already applied it); only the single-key and batched
+ *       INVALIDATE operations are re-applied.</li>
  *   <li>{@link #isClear()} — an O(n) table/namespace sweep, the control-plane family that
  *       shares one dispatcher channel and bypasses the global payload budget.</li>
  *   <li>{@link #needsJitter()} — the operation runs a cluster-loader read and must be
@@ -39,7 +40,7 @@ public enum SyncType {
   PUT(SyncType.IGNORES_SELF),
   INVALIDATE_ALL(SyncType.IGNORES_SELF | SyncType.CLEAR),
   INVALIDATE_PREFIX(SyncType.IGNORES_SELF | SyncType.CLEAR),
-  INVALIDATE_BATCH(SyncType.IGNORES_SELF);
+  INVALIDATE_BATCH(0);
 
   // Compile-time constants: the enum-constant arguments above are evaluated before these
   // fields are initialized, so they must stay constant expressions.
@@ -76,12 +77,12 @@ public enum SyncType {
   /**
    * Parses the AMQP type header.
    *
-   * @param header the header value; may be {@code null} or a non-String type
+   * @param header the header value; may be {@code null} or any non-text type
    * @return the matching operation, or {@code null} for an unknown value
    */
   public static @Nullable SyncType parse(@Nullable Object header) {
-    return header instanceof String value
-      ? switch (value) {
+    return header instanceof CharSequence value
+      ? switch (value.toString()) {
           case "INVALIDATE" -> INVALIDATE;
           case "REFRESH" -> REFRESH;
           case "PUT" -> PUT;

@@ -15,6 +15,9 @@
  */
 package io.github.hyshmily.zeta.sync.worker;
 
+import io.github.hyshmily.zeta.cache.EntryView;
+import org.jspecify.annotations.Nullable;
+
 /**
  * The framework-owned guarded write path behind {@link WorkerPolicy}: version comparison,
  * invalidation tombstones, ghost-COOL ownership, TTL arithmetic and terminal hook dispatch.
@@ -42,17 +45,19 @@ interface WorkerContext {
   void settleHot(WorkerDecision decision, HotAction action);
 
   /**
-   * Apply a COOL decision: version guard, ghost-COOL ownership check, COOL TTL rewrite and
-   * terminal hook.
+   * Snapshot the resident for a policy decision.
    *
-   * @param decision the COOL decision to apply; must not be null and must be COOL
+   * @param cacheKey the key to inspect; must not be null
+   * @return the read-only snapshot, or {@code null} when the key is absent
    */
-  void cool(WorkerDecision decision);
+  @Nullable
+  EntryView view(String cacheKey);
 
   /**
-   * Refuse a COOL decision and report {@link WorkerDecisionHook#onCoolSkipped}.
+   * Apply a COOL action atomically and report its terminal hook.
    *
-   * @param decision the COOL decision to skip; must not be null and must be COOL
+   * @param decision the COOL decision being settled; must not be null and must be COOL
+   * @param action   the action to settle; must not be null
    */
-  void skip(WorkerDecision decision);
+  void settleCool(WorkerDecision decision, CoolAction action);
 }

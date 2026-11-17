@@ -31,12 +31,14 @@ import java.util.Objects;
  * superseded INVALIDATE never takes the bin lock. A clear batch keeps every message:
  * each table-wide or prefix watermark affects a different key set.
  *
- * <p>{@link Value#covered()} lists the PUT/REFRESH messages a newer message superseded;
- * the framework reports each through {@link SyncContext#skip(SyncMessage)} so every value
- * message still receives one terminal {@code onRefreshSkipped} callback.
+ * <p>{@link Value#covered()} lists every single-key message the winner superseded — PUT,
+ * REFRESH and INVALIDATE; the framework reports each through {@link SyncHook#onSkipped} with
+ * {@link SyncSkipReason#COVERED_BY_NEWER_EVENT}, so every message still receives one terminal
+ * callback.
  * {@link Value#coveredInvalidate()} is the highest-version INVALIDATE the winner covered:
- * a value fallback that has to evict still hard-removes a Worker-managed entry, because
- * the covered removal already condemned that value.
+ * a value fallback that has to evict still hard-removes a Worker-managed entry, because the
+ * covered removal already condemned that value, and a winning value message the policy refuses
+ * still leaves the covered removal to apply.
  */
 public sealed interface Batch permits Batch.Value, Batch.Clear {
   /** The granted messages, in submission order; never empty. */
@@ -47,7 +49,7 @@ public sealed interface Batch permits Batch.Value, Batch.Clear {
    *
    * @param messages          the granted batch, in submission order; never empty
    * @param winner            the highest-version message; never null and never a clear
-   * @param covered           the superseded PUT/REFRESH messages; never null
+   * @param covered           the superseded single-key messages; never null
    * @param coveredInvalidate the highest superseded INVALIDATE, or {@code null}
    */
   record Value(
@@ -67,8 +69,8 @@ public sealed interface Batch permits Batch.Value, Batch.Clear {
         throw new IllegalArgumentException("a value batch cannot carry a clear winner");
       }
       for (SyncMessage message : covered) {
-        if (message.type() != SyncType.PUT && message.type() != SyncType.REFRESH) {
-          throw new IllegalArgumentException("only value messages can be covered: " + message.type());
+        if (message.type().isClear()) {
+          throw new IllegalArgumentException("only single-key messages can be covered: " + message.type());
         }
       }
     }
@@ -108,10 +110,10 @@ public sealed interface Batch permits Batch.Value, Batch.Clear {
   /**
    * Reduces a granted batch to its effective shape.
    *
-   * <p>A higher version always wins; at the same version an INVALIDATE outranks a
-   * REFRESH/PUT, matching the publisher's {@code BroadcastClaim} dedup rule. A clear
-   * batch keeps every message: each table-wide or prefix watermark affects a different
-   * key set, and the context applies them in one sweep.
+   * <p>A higher version always wins. At the same version INVALIDATE outranks PUT/REFRESH,
+   * and PUT outranks REFRESH: the value-carrying PUT avoids the loader read a REFRESH would
+   * trigger at the same data stamp. A clear batch keeps every message: each table-wide or
+   * prefix watermark affects a different key set, and the context applies them in one sweep.
    *
    * @param messages the granted batch, in submission order; never empty
    * @return the reduced batch
@@ -144,6 +146,9 @@ public sealed interface Batch permits Batch.Value, Batch.Clear {
         loser = candidate;
       }
       if (loser.type() == SyncType.INVALIDATE) {
+        // Every covered INVALIDATE keeps its own terminal callback; the highest one also
+        // supplies the value-path fallback removal and forbids soft expiry.
+        covered.add(loser);
         if (coveredInvalidate == null || loser.version() > coveredInvalidate.version()) {
           coveredInvalidate = loser;
         }
@@ -159,6 +164,9 @@ public sealed interface Batch permits Batch.Value, Batch.Clear {
     if (candidate.version() != current.version()) {
       return candidate.version() > current.version();
     }
-    return candidate.type() == SyncType.INVALIDATE && current.type() != SyncType.INVALIDATE;
+    if (candidate.type() == SyncType.INVALIDATE) {
+      return current.type() != SyncType.INVALIDATE;
+    }
+    return candidate.type() == SyncType.PUT && current.type() == SyncType.REFRESH;
   }
 }

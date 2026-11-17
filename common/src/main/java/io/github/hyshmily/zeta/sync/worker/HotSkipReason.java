@@ -27,8 +27,11 @@ public enum HotSkipReason {
    * No usable value to promote: the loader returned nothing and no L1 entry is usable, or
    * a tombstone refused the create.
    */
-  VALUE_NOT_FOUND,
+  NO_PROMOTABLE_VALUE,
 
-  /** A custom handler refused the promotion by policy. */
+  /** A custom policy refused the promotion. */
   POLICY_REJECTED,
+
+  /** A custom policy returned null or threw; the framework settled the decision as a skip. */
+  POLICY_FAILED,
 }

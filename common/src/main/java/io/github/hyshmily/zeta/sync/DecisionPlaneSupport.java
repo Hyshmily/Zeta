@@ -15,8 +15,13 @@
  */
 package io.github.hyshmily.zeta.sync;
 
+import com.github.benmanes.caffeine.cache.Cache;
+import io.github.hyshmily.zeta.cache.EntryView;
+import io.github.hyshmily.zeta.cache.cachesupport.lifecycle.TtlPolicy;
 import io.github.hyshmily.zeta.cache.cachesupport.loader.CacheLoader;
+import io.github.hyshmily.zeta.cache.cachesupport.raw.CacheEntry;
 import io.github.hyshmily.zeta.util.Internal;
+import io.github.hyshmily.zeta.util.TimeSource;
 import java.util.List;
 import java.util.function.Consumer;
 import org.jspecify.annotations.Nullable;
@@ -37,35 +42,62 @@ public final class DecisionPlaneSupport {
   private DecisionPlaneSupport() {}
 
   /**
-   * Loads a value through the optional cluster loader. A clean miss, a value the
-   * loader declines to cache, and a loader failure all answer {@code null} — every
-   * caller is about to write L1, and the plane's fallback is the same for all three.
+   * One loader read: the value, or the reason none is usable. {@code declined} distinguishes
+   * a loader-admission refusal from a clean miss or a failure for callers that report a
+   * typed skip reason.
+   *
+   * @param value    the usable value, or {@code null}
+   * @param declined whether the loader returned a value its own {@code isCacheable} refused
+   */
+  public record LoadResult(@Nullable Object value, boolean declined) {
+    static final LoadResult EMPTY = new LoadResult(null, false);
+  }
+
+  /**
+   * The read-only entry snapshot both planes hand to their policy, or {@code null} when the
+   * key is absent; {@link EntryView#logicallyExpired()} on the snapshot reports expiry.
+   *
+   * @param cache      the L1 table
+   * @param key        the key to snapshot
+   * @param ttlPolicy  the expiry arithmetic
+   * @return the snapshot, or {@code null} when the key is absent
+   */
+  public static @Nullable EntryView view(Cache<String, CacheEntry> cache, String key, TtlPolicy ttlPolicy) {
+    return EntryView.of(cache.asMap().get(key), ttlPolicy, TimeSource.currentTimeMillis());
+  }
+
+  /**
+   * Loads a value through the optional cluster loader, keeping the declined-vs-missing
+   * distinction.
    *
    * @param loader        the authoritative loader; may be {@code null}
    * @param key           the key to load; never {@code null}
    * @param log           the plane's logger
    * @param failureFormat the SLF4J format for a loader failure (one {@code {}} argument: the key)
-   * @return the loaded value, or {@code null}
+   * @return the load result; never {@code null}
    */
-  public static @Nullable Object loadAuthoritative(
+  public static LoadResult load(
     @Nullable CacheLoader<String, Object> loader,
     String key,
     Logger log,
     String failureFormat
   ) {
     if (loader == null) {
-      return null;
+      return LoadResult.EMPTY;
     }
     try {
       Object value = loader.load(key);
-      if (value != null && !loader.isCacheable(value)) {
-        log.debug("Cluster load declined by loader admission: key={}", key);
-        return null;
+      if (value == null) {
+        return LoadResult.EMPTY;
       }
-      return value;
+      if (!loader.isCacheable(value)) {
+        log.debug("Cluster load declined by loader admission: key={}", key);
+        return new LoadResult(null, true);
+      }
+      return new LoadResult(value, false);
     } catch (Exception e) {
       log.warn(failureFormat, key, e);
-      return null;
+      return LoadResult.EMPTY;
     }
   }
 

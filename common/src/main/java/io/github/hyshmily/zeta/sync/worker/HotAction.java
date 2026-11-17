@@ -21,9 +21,9 @@ import java.util.Objects;
  * What a HOT decision should do after its prepass: promote one value or skip with a reason.
  *
  * <p>The framework resolves a HOT decision into this type, then hands it to
- * {@link WorkerPolicy#hot(WorkerDecision, HotValue)}. A policy may replace the resolved
- * value and must return the final action; the framework settles it through the guarded
- * write path, so the terminal hook is reported exactly once.
+ * {@link WorkerPolicy#hot(WorkerDecision, HotValue, io.github.hyshmily.zeta.cache.EntryView)}. A policy may replace the resolved
+ * value with {@link HotValue#supplied} and must return the final action; the framework
+ * settles it through the guarded write path, so the terminal hook is reported exactly once.
  */
 public sealed interface HotAction permits HotAction.Promote, HotAction.Skip {
   /**

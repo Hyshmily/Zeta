@@ -28,6 +28,7 @@ import io.github.hyshmily.zeta.cache.cachesupport.raw.CacheEntry;
  * policy and the guarded context, or through the COOL-run reduction:
  * {@code afterHotPromotion}/{@code onHotSkipped} for HOT and
  * {@code afterCoolDowngrade}/{@code onCoolSkipped} for COOL. A policy must not fire them.
+ * A policy that refuses the action or throws is settled as a skip with the matching reason.
  * The framework-only inline COOL fallback reports none: the AMQP consumer thread must not
  * wait on user code.
  *
@@ -63,11 +64,10 @@ public interface WorkerDecisionHook {
   default void onHotSkipped(WorkerDecision decision, HotSkipReason reason) {}
 
   /**
-   * Called when a COOL decision was skipped — no entry exists in L1, a newer/equal decision
-   * is already stamped, the COOL is a stale cross-Worker ghost, or the entry is hard-expired
-   * and must not be resurrected.
+   * Called when a COOL decision was skipped for the given reason.
    *
    * @param decision the COOL decision that would have triggered the downgrade
+   * @param reason   why the downgrade was skipped
    */
-  default void onCoolSkipped(WorkerDecision decision) {}
+  default void onCoolSkipped(WorkerDecision decision, CoolSkipReason reason) {}
 }

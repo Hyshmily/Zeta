@@ -18,6 +18,7 @@ package io.github.hyshmily.zeta.sync.worker;
 import static io.github.hyshmily.zeta.constants.ZetaConstants.Amqp.HEADER_TYPE;
 
 import com.rabbitmq.client.Channel;
+import io.github.hyshmily.zeta.cache.EntryView;
 import io.github.hyshmily.zeta.sync.dispatcher.KeyDispatcher;
 import io.github.hyshmily.zeta.sync.local.CacheSyncListener;
 import io.github.hyshmily.zeta.util.Internal;
@@ -31,6 +32,7 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.atomic.LongAdder;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.amqp.core.Message;
+import org.springframework.amqp.core.MessageProperties;
 
 /**
  * Listens for Worker hot/cool decisions via the {@code zeta.send.exchange} direct
@@ -118,15 +120,12 @@ public class WorkerListener {
   }
 
   /**
-   * Gracefully shuts down the ordered dispatcher.
+   * Closes the ordered dispatcher at context shutdown: queued decisions are dropped and a
+   * start-jitter park is cancelled, so a parked first cycle does not pin its payload.
    *
-   * <p>Cancels any pending tasks and releases the dispatcher's internal resources. Called
-   * automatically by the Spring container during application shutdown.
-   *
-   * <p>Queued Worker decisions (and jitter-delayed submissions still pending on the shared
-   * scheduler) are dropped without execution: a queued COOL is never replayed and a dropped
-   * HOT leaves the entry at its normal TTL until the key changes phase again. Refusals
-   * caused by this close() reach {@link #onDispatchRejected} like any other submit refusal.
+   * <p>A queued COOL is never replayed and a dropped HOT leaves the entry at its normal TTL
+   * until the key changes phase again. Refusals caused by this close reach
+   * {@link #onDispatchRejected} like any other submit refusal.
    */
   @PreDestroy
   public void destroy() {
@@ -138,7 +137,7 @@ public class WorkerListener {
    * this instance is discarding another application's decisions — or, when paired with
    * missing prewarming, that the local {@code app-name} is misconfigured.
    *
-   * @return the total foreign-app drop add since startup
+   * @return the total foreign-app drops since startup
    */
   public long foreignAppDrops() {
     return isolation.drops();
@@ -182,34 +181,20 @@ public class WorkerListener {
    *            is dropped without scheduling a task
    */
   private void process(Message msg) {
-    // design decisions: sync messages shared-broker isolation (see AppIsolationFilter): the
-    // binding key already keeps a foreign app's decisions out of this queue, so this is the
-    // receiver-side boundary for a mis-bound queue rather than the delivery mechanism. Drop
-    // when the sender declared its appName and it differs from ours; a message without the
-    // header (older Worker, rolling upgrade) or a listener without a configured
-    // appName (unconfigured wiring) is always processed.
-    //
-    // Checked from the raw header BEFORE decoding: WorkerDecision.from allocates
-    // the body String and reads every decision header, and all of that is wasted
-    // work for a message we are about to throw away. On a shared broker with a
-    // misconfigured app-name that is 100% of the traffic.
+    MessageProperties props = msg.getMessageProperties();
     if (isolation.dropIfForeign(msg, log, "worker decision")) {
       return;
     }
 
-    Object typeHeader = msg.getMessageProperties().getHeader(HEADER_TYPE);
+    Object typeHeader = props.getHeader(HEADER_TYPE);
     WorkerType type = WorkerType.parse(typeHeader);
     if (type == null) {
-      // Validate before the dispatcher: an unknown type must not occupy a queue slot and
-      // a worker-thread grant only to be discarded.
       AmqpMessageReader.logUnknownType(log, "worker decision", typeHeader, msg);
       return;
     }
 
     WorkerDecision decision = WorkerDecision.from(msg, type);
     if (decision == null) {
-      // Includes the unorderable (non-positive decision version) case, rejected at the
-      // parse boundary before any dispatcher admission.
       log.debug("Received worker message with an empty body, an invalid key or a non-positive decision version");
       return;
     }
@@ -244,7 +229,6 @@ public class WorkerListener {
         end++;
       }
       if (end == index + 1) {
-        // The common case is one COOL decision: skip the subList and the reduction.
         invokeCool(decision);
       } else {
         try {
@@ -252,7 +236,6 @@ public class WorkerListener {
             invokeCool(effective);
           }
         } catch (Exception e) {
-          // A failing reduction must not strand the decisions queued after the COOL run.
           logDispatchFailure(decision, e);
         }
       }
@@ -263,8 +246,22 @@ public class WorkerListener {
   private void invokeHot(WorkerDecision decision) {
     try {
       HotAction prepared = context.resolveHot(decision);
-      HotAction action =
-        prepared instanceof HotAction.Skip ? prepared : policy.hot(decision, ((HotAction.Promote) prepared).value());
+      HotAction action;
+      if (prepared instanceof HotAction.Skip) {
+        action = prepared;
+      } else {
+        HotValue candidate = ((HotAction.Promote) prepared).value();
+        try {
+          action = policy.hot(decision, candidate, context.view(decision.cacheKey()));
+        } catch (Exception e) {
+          logDispatchFailure(decision, e);
+          action = new HotAction.Skip(HotSkipReason.POLICY_FAILED);
+        }
+        if (action == null) {
+          warnNullAction(decision, "hot");
+          action = new HotAction.Skip(HotSkipReason.POLICY_FAILED);
+        }
+      }
       context.settleHot(decision, action);
     } catch (Exception e) {
       logDispatchFailure(decision, e);
@@ -273,14 +270,26 @@ public class WorkerListener {
 
   private void invokeCool(WorkerDecision decision) {
     try {
-      if (policy.cool(decision)) {
-        context.cool(decision);
-      } else {
-        context.skip(decision);
+      EntryView current = context.view(decision.cacheKey());
+      CoolAction action;
+      try {
+        action = policy.cool(decision, current);
+      } catch (Exception e) {
+        logDispatchFailure(decision, e);
+        action = new CoolAction.Skip(CoolSkipReason.POLICY_FAILED);
       }
+      if (action == null) {
+        warnNullAction(decision, "cool");
+        action = new CoolAction.Skip(CoolSkipReason.POLICY_FAILED);
+      }
+      context.settleCool(decision, action);
     } catch (Exception e) {
       logDispatchFailure(decision, e);
     }
+  }
+
+  private void warnNullAction(WorkerDecision decision, String method) {
+    log.warn("WorkerPolicy.{} returned null; settling as POLICY_FAILED: key={}", method, decision.cacheKey());
   }
 
   private void logDispatchFailure(WorkerDecision decision, Exception e) {
@@ -299,7 +308,7 @@ public class WorkerListener {
    * Cumulative COOL decisions the per-key ordered dispatcher refused; each was re-applied
    * inline on the consumer thread. Monotonic; safe to read from any thread.
    *
-   * @return the total dispatcher-refused COOL add since startup
+   * @return the total dispatcher-refused COOL decisions since startup
    */
   public long coolDispatchRejections() {
     return coolDispatchRejections.sum();
@@ -327,8 +336,6 @@ public class WorkerListener {
 
     coolDispatchRejections.increment();
     log.debug("Worker decision dispatcher refused a COOL for key={}; applying inline", decision.cacheKey());
-    // Applying a COOL is a local, bounded mutation; it is safe even while the listener is
-    // closing, and dropping it would pin the entry at its HOT TTL.
     context.coolNow(decision);
   }
 }

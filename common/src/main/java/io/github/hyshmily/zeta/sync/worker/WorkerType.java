@@ -50,12 +50,12 @@ public enum WorkerType {
   /**
    * Parses the AMQP type header.
    *
-   * @param header the header value; may be {@code null} or a non-String type
+   * @param header the header value; may be {@code null} or any non-text type
    * @return the matching operation, or {@code null} for an unknown value
    */
   public static @Nullable WorkerType parse(@Nullable Object header) {
-    return header instanceof String value
-      ? switch (value) {
+    return header instanceof CharSequence value
+      ? switch (value.toString()) {
           case "HOT" -> HOT;
           case "COOL" -> COOL;
           default -> null;

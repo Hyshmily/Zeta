@@ -26,6 +26,7 @@ import io.github.hyshmily.zeta.util.NodeIdentity;
 import io.github.hyshmily.zeta.util.TimeSource;
 import io.github.hyshmily.zeta.util.clock.StampClock;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.LongAdder;
@@ -57,9 +58,9 @@ import org.springframework.amqp.rabbit.core.RabbitTemplate;
  *
  * <p>
  * <b>Deduplication:</b> a {@link Caffeine} cache holds the last claimed version
- * and type per {@code cacheKey}. INVALIDATE and REFRESH share one slot because
+ * and type per {@code cacheKey}. INVALIDATE, REFRESH and PUT share one slot because
  * they draw from the same monotonic {@code dataVersion} space; an equal-version
- * INVALIDATE still replaces a REFRESH claim.
+ * INVALIDATE still replaces a REFRESH or PUT claim.
  *
  * @see CacheSyncListener
  * @see SyncMessage
@@ -75,16 +76,17 @@ public class CacheSyncPublisher {
 
   /**
    * Dedup cache keyed by {@code cacheKey} → the last claimed version and type. All
-   * sync value/removal messages for one key share the monotonic {@code dataVersion}
-   * space, so one slot suppresses a stale REFRESH that a concurrent INVALIDATE at a
-   * higher version already outranks. Keeping the type lets an equal-version INVALIDATE
-   * replace a REFRESH claim (a removal is the safer final state) while an equal-version
-   * REFRESH stays suppressed. Built once by the constructor.
+   * sync value/removal messages for one key share the monotonic {@code dataVersion} space;
+   * an equal-version INVALIDATE replaces a REFRESH or PUT claim (a removal is the safer final
+   * state), while an equal-version REFRESH stays suppressed. Built once by the constructor.
    */
   private final Cache<String, BroadcastClaim> recentBroadcasts;
 
   private final CacheSyncProperties properties;
   private final RabbitTemplate rabbitTemplate;
+
+  /** This instance's identity: message origin and node-id headers. */
+  private final NodeIdentity identity;
 
   /** Serializes the value-carrying {@code PUT} body; the receive side decodes with the same codec. */
   private final PutPayloadCodec putPayloadCodec;
@@ -111,7 +113,7 @@ public class CacheSyncPublisher {
     /**
      * Whether this claim blocks an incoming send: a strictly newer claim always
      * wins, and an equal-version claim wins unless the incoming message is an
-     * INVALIDATE upgrading a REFRESH.
+     * INVALIDATE upgrading a REFRESH or PUT claim.
      *
      * @param incomingVersion the incoming version
      * @param incomingType    the incoming type
@@ -135,16 +137,19 @@ public class CacheSyncPublisher {
    * @param properties     sync configuration (dedup window/size)
    * @param putPayloadCodec the PUT payload serializer shared with the receive side
    * @param appName        this application's name, or {@code null}/blank for none
+   * @param identity       this instance's identity; never {@code null}
    */
   public CacheSyncPublisher(
     RabbitTemplate rabbitTemplate,
     CacheSyncProperties properties,
     PutPayloadCodec putPayloadCodec,
-    String appName
+    String appName,
+    NodeIdentity identity
   ) {
     this.properties = properties;
     this.putPayloadCodec = putPayloadCodec;
     this.rabbitTemplate = rabbitTemplate;
+    this.identity = identity;
     this.appName = (appName != null && !appName.isBlank()) ? appName : null;
     this.recentBroadcasts = Caffeine.newBuilder()
       .expireAfterWrite(properties.getDedupWindowSeconds(), TimeUnit.SECONDS)
@@ -153,28 +158,22 @@ public class CacheSyncPublisher {
   }
 
   /**
-   * Cumulative add of sync messages that failed to publish since startup.
+   * Cumulative count of sync messages that failed to publish since startup.
    *
-   * @return the total send-failure add
+   * @return the total send-failure count
    */
   public long sendFailures() {
     return sendFailureCounter.sum();
   }
 
   /**
-   * Builds the {@link MessageProperties} assignment common to every sync-plane
-   * message: the type header, the application-name stamp (design decisions: sync messages),
-   * the time-sortable message ID, the origin-instance stamp
-   * (design decisions: dedup lifecycle) and the origin node id used for collision
-   * detection
-   * (design decisions: version stamps). Callers add their type-specific headers
-   * (version, cache key, ...)
-   * afterwards.
+   * Builds the {@link MessageProperties} common to every sync-plane message: the type header,
+   * the application-name stamp (design decisions: sync messages), the time-sortable message
+   * ID, the origin-instance stamp (design decisions: sync messages) and the origin node id
+   * (design decisions: version stamps). Callers add their type-specific headers afterwards.
    *
-   * <p>The application name is what lets a receiver identify the sender: the sync exchange is a
-   * {@code FanoutExchange} whose name is a global constant, so RabbitMQ fans every
-   * INVALIDATE / REFRESH / PUT out to <em>every</em> instance on the broker — including instances
-   * of other applications (see the receiver-side filter in {@link CacheSyncListener}).
+   * <p>The app-name header lets a receiver on a shared broker tell applications apart: the
+   * sync exchange is a fanout whose name is a global constant.
    *
    * @param type the sync message type
    * @return the prepared message properties
@@ -182,18 +181,13 @@ public class CacheSyncPublisher {
   private MessageProperties newSyncMessageProperties(SyncType type) {
     MessageProperties props = new MessageProperties();
     props.setHeader(HEADER_TYPE, type.code());
-    // No-op when this instance declares no application name, so the header is absent and
-    // receivers process the message (rolling-upgrade compatibility).
     if (appName != null) {
       props.setHeader(HEADER_APP_NAME, appName);
     }
-    // Trace-only ID (no plane compares it for ordering), so it must not contend
-    // with the data-version clock: a stamp-clock allocation would pay one CAS
-    // and one sequence number of the shared 4096/ms window. The cached
-    // TimeSource read keeps the ID time-sortable at zero contention.
+
     props.setHeader(HEADER_MESSAGE_ID, TimeSource.currentTimeMillis());
-    props.setHeader(HEADER_ORIGIN_INSTANCE, NodeIdentity.getInstanceId());
-    props.setHeader(HEADER_ORIGIN_NODE_ID, NodeIdentity.getBoxedNodeId());
+    props.setHeader(HEADER_ORIGIN_INSTANCE, identity.instanceId());
+    props.setHeader(HEADER_ORIGIN_NODE_ID, identity.nodeId());
     return props;
   }
 
@@ -255,64 +249,86 @@ public class CacheSyncPublisher {
    * @param clearStamp the data stamp the clear was allocated at (positive)
    */
   public void broadcastInvalidatePrefix(String prefix, long clearStamp) {
-    if (prefix == null || prefix.isEmpty() || clearStamp <= 0L) {
+    if (invalidCacheKey(prefix) || clearStamp <= 0L) {
       return;
     }
     publishSync(SyncType.INVALIDATE_PREFIX, prefix.getBytes(StandardCharsets.UTF_8), clearStamp);
   }
 
   /**
-   * Broadcasts one batched INVALIDATE message (design decisions: invalidation):
-   * the body is a JSON
-   * array of {@code [key, version]} pairs (see
-   * {@link SyncMessage#encodeBatchBody}). Receivers apply each entry under the
-   * same per-key version guard as a single-key INVALIDATE — the wire cost of
-   * an explicit multi-key invalidate drops from one message per key to one per
-   * {@link SyncMessage#MAX_BATCH_ENTRIES}-entry chunk.
+   * Broadcasts batched INVALIDATE messages (design decisions: invalidation): the body is a
+   * JSON array of {@code [key, version]} pairs (see {@link SyncMessage#encodeBatchBody}).
+   * Receivers apply each entry under the same per-key version guard as a single-key
+   * INVALIDATE — the wire cost of an explicit multi-key invalidate drops from one message
+   * per key to one per {@link SyncMessage#MAX_BATCH_ENTRIES}-entry chunk.
    *
-   * <p>
-   * Not deduplicated (each entry carries its own stamp and the per-key
-   * receiver guard subsumes dedup); a publish failure is counted and logged
-   * through the plane's send-failure log.
+   * <p>Entries are filtered at this wire boundary and split into chunks; when one chunk
+   * cannot be encoded it degrades to per-key INVALIDATE sends, so no accepted entry is
+   * silently lost. Not deduplicated (each entry carries its own stamp and the per-key
+   * receiver guard subsumes dedup); a publish failure is counted and logged through the
+   * plane's send-failure log.
    *
-   * @param entries the key/version pairs; must not be null or empty, at most
-   *                {@link SyncMessage#MAX_BATCH_ENTRIES} entries
+   * @param entries the key/version pairs; {@code null}/empty is a no-op, invalid entries
+   *                (null, blank key, non-positive version) are dropped
    */
   public void broadcastInvalidateBatch(List<SyncMessage.Entry> entries) {
-    if (entries == null || entries.isEmpty() || entries.size() > SyncMessage.MAX_BATCH_ENTRIES) {
+    if (entries == null || entries.isEmpty()) {
       return;
     }
-    byte[] body = SyncMessage.encodeBatchBody(entries);
-    if (body != null) {
-      publishSync(SyncType.INVALIDATE_BATCH, body, 0L);
+    List<SyncMessage.Entry> chunk = new ArrayList<>(Math.min(entries.size(), SyncMessage.MAX_BATCH_ENTRIES));
+    for (SyncMessage.Entry entry : entries) {
+      if (entry == null || invalidCacheKey(entry.key()) || entry.version() <= 0L) {
+        continue;
+      }
+      chunk.add(entry);
+      if (chunk.size() == SyncMessage.MAX_BATCH_ENTRIES) {
+        publishBatchChunk(chunk);
+        // publishBatchChunk encodes and publishes synchronously and keeps no reference.
+        chunk.clear();
+      }
+    }
+    if (!chunk.isEmpty()) {
+      publishBatchChunk(chunk);
     }
   }
 
   /**
-   * Broadcasts a value-carrying PUT sync message to all peer instances: the
-   * body is the serialized value payload, the real cache key rides in the
-   * {@code cacheKey} header so receivers keep per-key ordering on the shared
-   * ordered dispatcher and filter their own PUTs like self-REFRESH.
+   * Publishes one bounded batch chunk, degrading to per-key sends when the frame cannot be
+   * encoded. The fallback preserves the {@link SyncMessage#encodeBatchBody} contract.
    *
-   * <p>
-   * Not deduplicated via the version-claim window: a PUT is sent once per
-   * write by the {@code BroadcastBuffer} flush (which merges same-key writes
-   * to the newest version+value), so there is no duplicate source for the
-   * claim to suppress. A publish failure is counted, logged through the plane's
-   * send-failure log and does not propagate — the receiving peers
-   * keep their current value until the next write, the same self-healing
+   * @param chunk the non-empty chunk, at most {@link SyncMessage#MAX_BATCH_ENTRIES} entries
+   */
+  private void publishBatchChunk(List<SyncMessage.Entry> chunk) {
+    byte[] body = SyncMessage.encodeBatchBody(chunk);
+    if (body != null) {
+      publishSync(SyncType.INVALIDATE_BATCH, body, 0L);
+      return;
+    }
+    for (SyncMessage.Entry entry : chunk) {
+      broadcastInvalidate(entry.key(), entry.version());
+    }
+  }
+
+  /**
+   * Broadcasts a value-carrying PUT sync message: the body is the serialized value payload, the
+   * real cache key rides in the {@code cacheKey} header so receivers keep per-key ordering on
+   * the shared ordered dispatcher and filter their own PUTs like self-REFRESH.
+   *
+   * <p>The PUT claims its key at {@code version}, so a same- or lower-version REFRESH is
+   * suppressed (the value is already on the wire) while an equal-version INVALIDATE still
+   * replaces the claim. A publish failure releases the claim, so a later REFRESH within the
+   * window is not lost; it is counted and logged and does not propagate — the same self-healing
    * contract as a lost REFRESH.
    *
    * @param cacheKey the affected cache key; must not be null or empty
-   * @param version  the {@code dataVersion} at which the value was written
-   * @param payload  the serialized value payload from
-   *                 {@link #serializePutPayload}
+   * @param version  the positive {@code dataVersion} at which the value was written
+   * @param payload  the serialized value payload from {@link #serializePutPayload}
    */
   public void broadcastPut(String cacheKey, long version, byte[] payload) {
-    if (invalidCacheKey(cacheKey) || payload == null || payload.length == 0) {
+    if (payload == null || payload.length == 0) {
       return;
     }
-    publishSync(SyncType.PUT, payload, version, cacheKey);
+    publishDeduped(cacheKey, SyncType.PUT, version, payload, cacheKey);
   }
 
   /**
@@ -339,7 +355,7 @@ public class CacheSyncPublisher {
    * <p>
    * Deduplicated: if a sync message for the same key with a higher version — or an
    * equal-version INVALIDATE — was recorded within the dedup window, this call is
-   * silently skipped. An equal-version INVALIDATE replaces a REFRESH claim.
+   * silently skipped. An equal-version INVALIDATE replaces a REFRESH or PUT claim.
    *
    * @param cacheKey the affected cache key; must not be null or empty
    * @param version  the {@code dataVersion} at which the invalidation occurred
@@ -397,73 +413,89 @@ public class CacheSyncPublisher {
   }
 
   /**
-   * Core deduplicated send implementation: only publishes if no recent send for
-   * the key with a greater version — or an equal version that cannot be
-   * outranked by this message — exists in the dedup window.
+   * The single-key body/header wrapper: a null/blank key cannot be applied by any peer, so it
+   * is dropped before the UTF-8 body is built; a valid key delegates to {@link #publishDeduped}.
    *
-   * <p>
-   * <b>Dedup algorithm:</b>
-   * <ol>
-   * <li>Atomically claim the key's slot: a strictly newer claim skips this send;
-   * an equal-version claim skips a REFRESH but is replaced by an INVALIDATE.</li>
-   * <li>Otherwise the message is published <em>outside</em> the cache lock and,
-   * on success, the claimed version stays recorded. A publish failure removes the
-   * claim, so a retry within the same window is still possible.</li>
-   * </ol>
-   *
-   * <p>
-   * Concurrent callers with the same key may briefly race past the check and
-   * produce duplicate broadcasts. This is acceptable: the system uses
-   * at-most-once delivery and self-healing via periodic cycles.
-   *
-   * <p>
-   * The dedup cache entry expires after
-   * {@link CacheSyncProperties#getDedupWindowSeconds}
-   * seconds, after which a subsequent call with any version will be accepted.
-   *
-   * @param cacheKey the affected cache key; must not be null or empty
-   * @param type     the sync message type (e.g. {@link SyncType#INVALIDATE},
-   *                 {@link SyncType#REFRESH})
+   * @param cacheKey the affected cache key
+   * @param type     the sync message type
    * @param version  the {@code dataVersion} of the operation
    */
   private void sendDeduped(String cacheKey, SyncType type, long version) {
-    // The sync plane is the wire boundary: a null/blank key cannot be applied by any
-    // peer, so it is dropped here even though the internal callers already validated it.
     if (invalidCacheKey(cacheKey)) {
       log.debug("Invalid cache key, skip sync: cacheKey={}, type={}", cacheKey, type);
       return;
     }
+    publishDeduped(cacheKey, type, version, cacheKey.getBytes(StandardCharsets.UTF_8), null);
+  }
 
-    // Atomic claim: check-and-store in one compute so two concurrent senders
-    // with versions 5 and 3 cannot both pass the check and let the stale 3
-    // land last (which would have allowed a later duplicate send of 4). Returning
-    // the exact candidate identifies the winner without a side-channel flag.
-    BroadcastClaim candidate = new BroadcastClaim(version, type);
-    BroadcastClaim claimed = recentBroadcasts
-      .asMap()
-      .compute(cacheKey, (k, current) -> current != null && current.outranks(version, type) ? current : candidate);
-
-    if (claimed != candidate) {
+  /**
+   * The shared deduplicated send: only publishes if no recent send for the key with a greater
+   * version — or an equal version that cannot be outranked — exists in the dedup window.
+   * An equal-version INVALIDATE replaces a REFRESH/PUT claim; a failed publish releases the
+   * claim so a retry inside the window is still possible.
+   *
+   * <p>Concurrent callers may briefly race past the check and duplicate one broadcast; the
+   * plane is at-most-once and self-heals. The claim expires after
+   * {@link CacheSyncProperties#getDedupWindowSeconds} seconds.
+   *
+   * @param cacheKey       the affected key
+   * @param type           the sync operation
+   * @param version        the positive data stamp
+   * @param body           the pre-serialized body
+   * @param headerCacheKey the PUT cache-key header, or {@code null}
+   */
+  private void publishDeduped(
+    String cacheKey,
+    SyncType type,
+    long version,
+    byte[] body,
+    @Nullable String headerCacheKey
+  ) {
+    if (invalidCacheKey(cacheKey) || version <= 0L) {
+      return;
+    }
+    BroadcastClaim claim = claim(cacheKey, version, type);
+    if (claim == null) {
       log.debug(
-        "Skip sync due to recent send with same or newer version: cacheKey={}, newVersion={}",
+        "Skip {} due to recent send with same or newer version: cacheKey={}, version={}",
+        type,
         cacheKey,
         version
       );
       return;
     }
-
-    if (publishSync(type, cacheKey.getBytes(StandardCharsets.UTF_8), version)) {
-      // Success — the compute already stored the claim.
-      log.debug("Sync sent: cacheKey={}, version={}", cacheKey, version);
+    if (publishSync(type, body, version, headerCacheKey)) {
+      log.debug("Sync sent: type={}, cacheKey={}, version={}", type, cacheKey, version);
     } else {
-      // Publish failed — drop this claim outright. Rolling it back to the
-      // displaced version was wrong: that version's own send may equally have
-      // failed (or still be in flight), and restoring it left an unsent version
-      // recorded as sent for the whole dedup window — a retry of it was then
-      // silently skipped. Removing the claim at worst re-sends one idempotent
-      // broadcast (at-most-once sync contract); keeping a phantom claim can
-      // lose the mutation for the window.
-      recentBroadcasts.asMap().remove(cacheKey, candidate);
+      release(cacheKey, claim);
     }
+  }
+
+  /**
+   * Atomically checks and stores one key's claim. A strictly newer claim, or an equal
+   * version the incoming type cannot outrank, wins and returns {@code null}.
+   *
+   * @param cacheKey the affected cache key
+   * @param version  the incoming data version
+   * @param type     the incoming sync type
+   * @return the stored claim, or {@code null} when a recent claim outranks this send
+   */
+  private @Nullable BroadcastClaim claim(String cacheKey, long version, SyncType type) {
+    BroadcastClaim candidate = new BroadcastClaim(version, type);
+    BroadcastClaim claimed = recentBroadcasts
+      .asMap()
+      .compute(cacheKey, (k, current) -> current != null && current.outranks(version, type) ? current : candidate);
+    return claimed == candidate ? candidate : null;
+  }
+
+  /**
+   * Releases a claim only if it is still the current one, so a newer claim from a
+   * concurrent sender is never removed by an older failed publish.
+   *
+   * @param cacheKey the affected cache key
+   * @param claim    the claim to release
+   */
+  private void release(String cacheKey, BroadcastClaim claim) {
+    recentBroadcasts.asMap().remove(cacheKey, claim);
   }
 }

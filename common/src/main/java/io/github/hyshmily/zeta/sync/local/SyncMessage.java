@@ -197,12 +197,13 @@ public record SyncMessage(long id, String cacheKey, SyncType type, long version,
    * @param msg the incoming AMQP message; must not be null
    * @return a parsed {@link SyncMessage}, or {@code null} if the body is empty,
    *         the data version is non-positive, the key/prefix is invalid, a PUT
-   *         carries no cache-key header, or the type is a batch frame —
-   *         callers must skip such messages rather than treat them as errors
+   *         carries no cache-key header, the message has no properties, or the
+   *         type is a batch frame — callers must skip such messages rather than
+   *         treat them as errors
    */
-  public static SyncMessage from(Message msg) {
+  public static @Nullable SyncMessage from(Message msg) {
     MessageProperties props = msg.getMessageProperties();
-    return from(msg, SyncType.parse(props.getHeader(HEADER_TYPE)));
+    return props == null ? null : from(msg, SyncType.parse(props.getHeader(HEADER_TYPE)));
   }
 
   /**
@@ -215,7 +216,8 @@ public record SyncMessage(long id, String cacheKey, SyncType type, long version,
    *         owns the unknown-type warning and the batch-frame branch, so this method stays
    *         a pure single-message decoder.
    */
-  public static SyncMessage from(Message msg, @Nullable SyncType type) {
+  @SuppressWarnings("all")
+  public static @Nullable SyncMessage from(Message msg, @Nullable SyncType type) {
     if (type == null || type == SyncType.INVALIDATE_BATCH) {
       return null;
     }
@@ -387,8 +389,10 @@ public record SyncMessage(long id, String cacheKey, SyncType type, long version,
    * @return the JSON body bytes, or {@code null} when serialization failed
    *         (callers degrade to per-key sends)
    */
-  public static byte[] encodeBatchBody(List<Entry> entries) {
-    ByteArrayOutputStream out = new ByteArrayOutputStream(Math.max(32, entries.size() * 16));
+  public static byte@Nullable [] encodeBatchBody(List<Entry> entries) {
+    // A typical ["key",version] entry is roughly key length plus 24 bytes; 48 per entry
+    // keeps a full chunk to at most one growth step.
+    ByteArrayOutputStream out = new ByteArrayOutputStream(Math.max(32, entries.size() * 48));
     try (JsonGenerator generator = BATCH_MAPPER.createGenerator(out, JsonEncoding.UTF8)) {
       generator.writeStartArray();
       for (Entry entry : entries) {

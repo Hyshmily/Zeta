@@ -16,6 +16,7 @@
 package io.github.hyshmily.zeta.sync.worker;
 
 import com.github.benmanes.caffeine.cache.Cache;
+import io.github.hyshmily.zeta.cache.EntryView;
 import io.github.hyshmily.zeta.cache.cachesupport.lifecycle.EntryLifecycle;
 import io.github.hyshmily.zeta.cache.cachesupport.lifecycle.TtlPolicy;
 import io.github.hyshmily.zeta.cache.cachesupport.loader.CacheLoader;
@@ -139,8 +140,6 @@ public class DefaultWorkerContext implements WorkerContext, WorkerControl {
     requireType(decision, WorkerType.HOT);
     String key = decision.cacheKey();
 
-    // Lock-free pre-check: a decision the resident already outranks must not pay the
-    // cluster-loader read. The authoritative guard runs again inside settleHot's compute.
     CacheEntry snapshot = cache.asMap().get(key);
     if (snapshot != null && VersionGuard.shouldSkipForHot(snapshot, decision.stamp())) {
       log.debug("resolveHot: HotKey already up-to-date in L1: {}", key);
@@ -150,26 +149,30 @@ public class DefaultWorkerContext implements WorkerContext, WorkerControl {
     HotValue candidate = resolveHotCandidate(key, snapshot);
     if (candidate == null) {
       log.debug("resolveHot: HotKey value not found and no usable L1 entry: {}", key);
-      return new HotAction.Skip(HotSkipReason.VALUE_NOT_FOUND);
+      return new HotAction.Skip(HotSkipReason.NO_PROMOTABLE_VALUE);
     }
     return new HotAction.Promote(candidate);
+  }
+
+  @Override
+  public @Nullable EntryView view(String cacheKey) {
+    return DecisionPlaneSupport.view(cache, cacheKey, ttlPolicy);
   }
 
   /**
    * Resolves the value a HOT decision promotes: the authoritative load when a loader is
    * configured, otherwise (or after a clean miss) the resident L1 entry's value.
    *
-   * <p>design decisions: version stamps: the create stamp is allocated BEFORE the
-   * authoritative load. A pre-read stamp is a lower bound, so a write that lands during the
-   * load carries a strictly greater stamp and is not outranked by this create. Its
-   * independence from the DCL snapshot is the anti-resurrection guard: the snapshot's entry
-   * can be removed by a concurrent INVALIDATE while the load is in flight, and a stamp
-   * allocated after that invalidation would outrank the tombstone and resurrect the
-   * pre-invalidation value.
+   * <p>The create stamp is allocated before the authoritative load (design decisions: version
+   * stamps). A pre-read stamp is a lower bound, so a write that lands during the load carries a
+   * strictly greater stamp and is not outranked by this create; a stamp allocated after a
+   * concurrent invalidation would outrank the tombstone and resurrect the pre-invalidation
+   * value.
    *
-   * <p>A fallback reuses the resident value's own data version (0 = unknown): it is an
-   * existing value, never a new one, so it must not be re-signed with a fresher stamp after
-   * a concurrent invalidation removed it.
+   * <p>A fallback reuses the resident value's own data version (0 = unknown): it is an existing
+   * value, never a new one, so it must not be re-signed with a fresher stamp. Only a source
+   * outage or a clean miss reaches the fallback; a loader that answered and then refused the
+   * value through {@code isCacheable} has decided definitively.
    *
    * @param key      the key being promoted
    * @param snapshot the DCL snapshot, reused when no loader I/O separates the read
@@ -179,18 +182,20 @@ public class DefaultWorkerContext implements WorkerContext, WorkerControl {
   private HotValue resolveHotCandidate(String key, @Nullable CacheEntry snapshot) {
     if (clusterLoader != null) {
       long preReadStamp = stampClock.nextStamp();
-      Object loaded = loadAuthoritative(key);
-      if (loaded != null) {
-        return HotValue.loaded(loaded, preReadStamp);
+      DecisionPlaneSupport.LoadResult result = DecisionPlaneSupport.load(
+        clusterLoader,
+        key,
+        log,
+        "resolveHot: load failed for key={}, trying L1 entry fallback"
+      );
+      if (result.value() != null) {
+        return HotValue.loaded(result.value(), preReadStamp);
+      }
+      if (result.declined()) {
+        return null;
       }
     }
-    // Source outage fallback: any existing L1 entry value is promotable — get() serves
-    // these values regardless of how they were stamped, so the HOT promotion must not be
-    // stricter than the read path. With no loader there is no I/O between the DCL snapshot
-    // and here, so the snapshot is reused as-is; with a loader the fallback is re-read
-    // because that I/O can let a concurrent INVALIDATE remove the resident. A logically
-    // expired resident is not served by the read path either (it is a miss there), so
-    // promoting it would pin a dead value for the whole HOT TTL.
+
     CacheEntry fallback = clusterLoader != null ? cache.asMap().get(key) : snapshot;
     if (fallback != null && fallback.getValue() != null && !ttlPolicy.isLogicallyExpired(fallback)) {
       return HotValue.resident(fallback.getValue(), fallback.getDataVersion());
@@ -218,13 +223,8 @@ public class DefaultWorkerContext implements WorkerContext, WorkerControl {
         return existing;
       }
 
-      // A missing, value-less or logically expired resident is not a live entry: the
-      // read path does not serve it, so it must never veto the freshly loaded value or
-      // lend its stale TTL baseline to a new HOT entry. Only a value loaded during this
-      // call may create one; a fallback value that selected the dead resident is not
-      // re-signed with a fresh stamp after a concurrent invalidation.
       if (existing == null || existing.getValue() == null || ttlPolicy.isLogicallyExpired(existing)) {
-        if (!candidate.loadedByThisCall()) {
+        if (!candidate.canWriteValue()) {
           return existing;
         }
         CacheEntry created = createHot(key, stamp, candidate, hotHardTtl, hotSoftTtl);
@@ -233,15 +233,13 @@ public class DefaultWorkerContext implements WorkerContext, WorkerControl {
 
       return promoteExisting(key, existing, stamp, candidate, hotHardTtl, hotSoftTtl);
     });
-    // A refused promotion still owes the hook contract one terminal callback. The inner DCL
-    // guard, the tombstone-refused create and the unusable-resident refusal all land here;
-    // EntryMutations reports the rewrite by reference identity inside the compute.
+
     if (!applied.changed()) {
       CacheEntry current = applied.current();
       HotSkipReason reason =
         current != null && VersionGuard.shouldSkipForHot(current, stamp)
           ? HotSkipReason.VERSION_STALE
-          : HotSkipReason.VALUE_NOT_FOUND;
+          : HotSkipReason.NO_PROMOTABLE_VALUE;
       fireOnHotSkipped(decision, reason);
       return;
     }
@@ -252,14 +250,14 @@ public class DefaultWorkerContext implements WorkerContext, WorkerControl {
   /**
    * In-place promotion of a live resident (design decisions: hot state), guarded on the
    * <b>data</b> plane as well as the decision plane. The caller has already excluded a
-   * missing, value-less or logically expired entry, so this method always has a value the
-   * read path would serve and a valid TTL baseline to keep.
+   * missing, value-less or logically expired entry.
    *
-   * <p>The loaded value is written only when it is provably fresh: a positive load stamp,
-   * no newer resident and no invalidation tombstone at that stamp. Otherwise only the
-   * decision metadata (state, decision stamp, hot TTLs) is promoted and the resident value
-   * and version survive. The tombstone probe belongs to the value-rewrite guard only, so a
-   * no-loader or L1-fallback promotion still promotes a live resident.
+   * <p>The writable value (loaded or policy-supplied) is written only when it is provably fresh:
+   * a positive data stamp, no newer resident and no invalidation tombstone at that stamp.
+   * Otherwise the decision metadata is promoted; the hot TTLs apply only when the soft window
+   * is still open and the candidate can write a value or no loader is configured. A resident
+   * whose soft window is already closed keeps that closed window: reopening it would hide the
+   * pending reload for a whole hot TTL.
    *
    * @return the promoted entry
    */
@@ -273,7 +271,7 @@ public class DefaultWorkerContext implements WorkerContext, WorkerControl {
   ) {
     EntryDraft promoted = entryLifecycle.editEntry(entry).decision(stamp).keyState(KeyState.HOT);
     if (
-      candidate.loadedByThisCall() &&
+      candidate.canWriteValue() &&
       entry.getDataVersion() <= candidate.dataVersion() &&
       !entryLifecycle.staleAgainstInvalidation(key, candidate.dataVersion())
     ) {
@@ -285,24 +283,20 @@ public class DefaultWorkerContext implements WorkerContext, WorkerControl {
         .build();
     }
 
-    // The load is not provably fresher than the live resident: promote the decision only.
-    // A loaded value, or a deployment with no loader (the resident is authoritative),
-    // adopts the Worker's HOT TTLs. A loader failure fallback keeps its existing deadlines:
-    // extending them would make stale data look freshly loaded and suppress its next soft
-    // refresh for a whole hot window.
-    if (candidate.loadedByThisCall() || clusterLoader == null) {
+    // Not provably fresher: promote the decision only. A writable candidate (or a no-loader
+    // deployment) adopts the HOT TTLs; a loader-failure fallback keeps its deadlines so stale
+    // data is not made to look freshly loaded, and a closed soft window stays closed.
+    if ((candidate.canWriteValue() || clusterLoader == null) && !ttlPolicy.isSoftExpired(entry)) {
       promoted.ttl(hotHardTtl, hotSoftTtl);
     }
     return promoted.build();
   }
 
   /**
-   * Creates the HOT entry when the key has no resident and this call loaded a fresh value
-   * (design decisions: hot state). The create stamp is the value's age lower bound, never a
-   * fresh commit-time version: a freshly loaded value uses the pre-read stamp (allocated
-   * before the load, hence at or below any write or invalidation that raced it). The
-   * tombstone check refuses the pre-invalidation value when an INVALIDATE landed during the
-   * load.
+   * Creates the HOT entry when the key has no resident and the candidate is writable (design
+   * decisions: hot state). The create stamp is the value's age lower bound, never a fresh
+   * commit-time version; the tombstone check refuses the pre-invalidation value when an
+   * INVALIDATE landed during the load.
    *
    * @return the created entry, or {@code null} when the promotion was refused
    */
@@ -311,10 +305,6 @@ public class DefaultWorkerContext implements WorkerContext, WorkerControl {
       log.debug("settleHot: promotion refused, key was invalidated during the load: {}", key);
       return null;
     }
-    // Preserve the decision identity on the create path: without nodeId/epoch,
-    // VersionGuard.shouldSkipForWorker treats every subsequent decision as
-    // cross-Worker (unconditional accept), so out-of-order replayed messages
-    // could overwrite this entry.
     return entryLifecycle
       .newEntry()
       .value(candidate.value())
@@ -342,11 +332,13 @@ public class DefaultWorkerContext implements WorkerContext, WorkerControl {
     }
 
     String nodeId = first.stamp().decisionNodeId();
-    boolean sameNode = true;
+    boolean sameNode = nodeId != null && !nodeId.isBlank();
     for (int i = 1; i < batch.size(); i++) {
       WorkerDecision decision = batch.get(i);
       requireType(decision, WorkerType.COOL);
-      sameNode &= Objects.equals(nodeId, decision.stamp().decisionNodeId());
+      if (sameNode) {
+        sameNode = nodeId.equals(decision.stamp().decisionNodeId());
+      }
     }
     if (!sameNode) {
       return List.copyOf(batch);
@@ -357,12 +349,11 @@ public class DefaultWorkerContext implements WorkerContext, WorkerControl {
     WorkerDecision winner = null;
     for (WorkerDecision candidate : batch) {
       if (VersionGuard.shouldSkipForWorker(effective, candidate.stamp())) {
-        fireOnCoolSkipped(candidate);
+        fireOnCoolSkipped(candidate, CoolSkipReason.VERSION_STALE);
         continue;
       }
       if (winner != null) {
-        // A later decision supersedes the not-yet-applied winner; it is covered, not lost.
-        fireOnCoolSkipped(winner);
+        fireOnCoolSkipped(winner, CoolSkipReason.COVERED_BY_NEWER_DECISION);
       }
       winner = candidate;
       effective = candidate.stamp();
@@ -371,24 +362,20 @@ public class DefaultWorkerContext implements WorkerContext, WorkerControl {
   }
 
   @Override
-  public void cool(WorkerDecision decision) {
+  public void settleCool(WorkerDecision decision, CoolAction action) {
     requireType(decision, WorkerType.COOL);
-    Applied applied = coolApply(decision);
-    // EntryMutations reports the rewrite by reference identity against the compute's
-    // own result, so a concurrent INVALIDATE/eviction cannot deliver a stale entry.
-    // COOL never removes, so a changed report always carries the rewritten entry.
-    if (!applied.changed()) {
-      fireOnCoolSkipped(decision);
+    if (action instanceof CoolAction.Skip skip) {
+      fireOnCoolSkipped(decision, skip.reason());
+      return;
+    }
+
+    CoolOutcome outcome = coolApply(decision);
+    if (!outcome.applied().changed()) {
+      fireOnCoolSkipped(decision, outcome.reason());
       return;
     }
     log.debug("HotKey cooled by Worker: {}", decision.cacheKey());
-    fireAfterCoolDowngrade(decision, applied.current());
-  }
-
-  @Override
-  public void skip(WorkerDecision decision) {
-    requireType(decision, WorkerType.COOL);
-    fireOnCoolSkipped(decision);
+    fireAfterCoolDowngrade(decision, outcome.applied().current());
   }
 
   @Override
@@ -398,84 +385,85 @@ public class DefaultWorkerContext implements WorkerContext, WorkerControl {
   }
 
   /**
-   * The COOL downgrade compute shared by {@link #cool} (dispatcher task, with hooks) and
+   * The COOL downgrade compute shared by {@link #settleCool} (dispatcher task, with hooks) and
    * {@link #coolNow} (rejection fallback, no hooks).
    *
-   * <p>The shard-owner inputs of the ghost-COOL guard are resolved <b>outside</b> the bin
-   * lock when possible: the ring lookup probes the health view through a method reference
-   * ({@link ConsistentHashRing#locateNode(String, HealthView)} passes
-   * {@code healthView::isAlive}, so no alive set is materialised), but a slow-path probe walk
-   * can still touch several health records; doing that inside the compute would serialise
-   * same-bin reads behind it. For the exact entry reference the outer verdict is reused; the
-   * compute re-judges only logical expiry. Any other observed entry is immutable but was not
-   * the input the verdict was derived from, so the full guard runs again. Liveness and ring
-   * routing are point-in-time inputs, not fields of the immutable entry; they are not
-   * re-probed under the bin lock.
+   * <p>The ghost-COOL guard's owner inputs are resolved outside the bin lock for the common
+   * path; only that pre-check may reconcile the ring from the health view. For the exact entry
+   * reference the outer verdict is reused and the compute re-judges only logical expiry; any
+   * other observed entry runs the full guard again without a rebuild, so an owner absent from
+   * the published ring fails open instead of stalling the bin behind a health-view walk.
    *
    * @param decision the incoming COOL decision; must not be {@code null}
-   * @return the images the bin lock observed; {@link Applied#changed()} is
-   *         {@code false} when the message was settled without a downgrade
+   * @return the images the bin lock observed plus the skip reason when no downgrade applied
    */
-  private Applied coolApply(WorkerDecision decision) {
+  private CoolOutcome coolApply(WorkerDecision decision) {
     String key = decision.cacheKey();
-    // DCL fast check, outside the bin lock: same-key Worker decisions are
-    // serialized by the ordered dispatcher, so a snapshot that is absent,
-    // decision-stale, or logically expired settles the message without the
-    // compute — the compute's own guards would return the entry unchanged.
-    // asMap().get keeps this decision-plane probe out of the caller hit/miss stats.
     CacheEntry snapshot = cache.asMap().get(key);
-    if (snapshot == null || ttlPolicy.isLogicallyExpired(snapshot) || shouldSkipCool(snapshot, decision)) {
-      return EntryMutations.unchanged(snapshot);
+    CoolSkipReason preCheck =
+      snapshot == null ? CoolSkipReason.NOT_FOUND_OR_EXPIRED : coolSkipReason(snapshot, decision, true);
+    if (preCheck != null) {
+      return new CoolOutcome(EntryMutations.unchanged(snapshot), preCheck);
     }
 
     DecisionStamp stamp = decision.stamp();
-    return EntryMutations.apply(cache, key, existing -> {
+    CoolSkipReason[] skipReason = new CoolSkipReason[1];
+    Applied applied = EntryMutations.apply(cache, key, existing -> {
       if (existing == null) {
+        skipReason[0] = CoolSkipReason.NOT_FOUND_OR_EXPIRED;
         return null;
       }
 
-      // The outer pre-check settled `snapshot`; both guards below depend on the
-      // exact entry they were evaluated against. CacheEntry values are immutable
-      // and replaced, never mutated, so any other reference needs a fresh
-      // comparison under the bin lock. Expiry is re-judged for the same reason:
-      // it is a function of the clock, not of the entry alone.
-      if (ttlPolicy.isLogicallyExpired(existing) || (existing != snapshot && shouldSkipCool(existing, decision))) {
+      CoolSkipReason reason =
+        existing == snapshot
+          ? (ttlPolicy.isLogicallyExpired(existing) ? CoolSkipReason.NOT_FOUND_OR_EXPIRED : null)
+          : coolSkipReason(existing, decision, false);
+      if (reason != null) {
+        skipReason[0] = reason;
         return existing;
       }
-
-      // Decision re-stamp + normal-lifecycle TTLs + COOL state, with the COOL
-      // protection window owned by TtlPolicy.
       return entryLifecycle.cool(existing, stamp);
     });
+    if (applied.changed()) {
+      return new CoolOutcome(applied, null);
+    }
+
+    CoolSkipReason reason = skipReason[0];
+    return new CoolOutcome(applied, reason != null ? reason : CoolSkipReason.NOT_FOUND_OR_EXPIRED);
   }
 
   /**
-   * The COOL admission guard, shared by the lock-free pre-check and the in-compute re-check:
-   * a decision-stale entry or a stale cross-Worker kill is settled without a rewrite. The
-   * ghost-COOL log lives here so both checks report the same line.
+   * The skip reason for one COOL against one entry, or {@code null} when the downgrade may
+   * apply. Shared by the lock-free pre-check, the in-compute re-check and the post-compute
+   * attribution, so every path reports the same reason and the same ghost-COOL line.
    *
-   * @param entry    the entry the COOL would rewrite
-   * @param decision the incoming COOL decision
-   * @return {@code true} when the COOL must be skipped
+   * @param entry            the entry the COOL would rewrite
+   * @param decision         the incoming COOL decision
+   * @param allowRingRebuild whether the ghost-COOL guard may reconcile the ring from the
+   *                         health view; only the lock-free pre-check passes {@code true}
+   * @return the skip reason, or {@code null} when the downgrade is allowed
    */
-  private boolean shouldSkipCool(CacheEntry entry, WorkerDecision decision) {
+  private @Nullable CoolSkipReason coolSkipReason(CacheEntry entry, WorkerDecision decision, boolean allowRingRebuild) {
+    if (ttlPolicy.isLogicallyExpired(entry)) {
+      return CoolSkipReason.NOT_FOUND_OR_EXPIRED;
+    }
     if (VersionGuard.shouldSkipForWorker(entry, decision.stamp())) {
-      return true;
+      return CoolSkipReason.VERSION_STALE;
     }
-    // Scale re-balance ghost-COOL kill: a delayed EvictStale COOL from the previous
-    // owner must not downgrade the new owner's in-force HOT while the ring still
-    // routes the key to that owner and the owner is alive.
-    if (isStaleCrossNodeCool(entry, decision)) {
-      log.debug(
-        "cool: rejecting stale cross-Worker COOL for key={} from nodeId={} (owner={} still owns the shard)",
-        decision.cacheKey(),
-        decision.stamp().decisionNodeId(),
-        entry.getDecisionNodeId()
-      );
-      return true;
+    if (!isStaleCrossNodeCool(entry, decision, allowRingRebuild)) {
+      return null;
     }
-    return false;
+    log.debug(
+      "cool: rejecting stale cross-Worker COOL for key={} from nodeId={} (owner={} still owns the shard)",
+      decision.cacheKey(),
+      decision.stamp().decisionNodeId(),
+      entry.getDecisionNodeId()
+    );
+    return CoolSkipReason.GHOST_COOL;
   }
+
+  /** One COOL apply outcome: the mutation images plus the skip reason when nothing changed. */
+  private record CoolOutcome(Applied applied, @Nullable CoolSkipReason reason) {}
 
   /**
    * Ownership check behind the ghost-COOL guard: a cross-Worker COOL is a stale kill when the
@@ -483,53 +471,38 @@ public class DefaultWorkerContext implements WorkerContext, WorkerControl {
    * incarnation that issued the HOT</b>, and the consistent-hash ring still routes the key to
    * that owner.
    *
-   * <p>Any missing signal fails open — the COOL applies exactly as the plain version guard
-   * would allow it: a {@code null} ring or health view, a non-HOT entry, an empty owner, the
-   * sender itself, a dead or restarted owner, or a ring that no longer points at the owner.
-   * Liveness and incarnation are checked before the ring probe: it is an O(1) record lookup,
-   * while the probe walks health records, and a dead owner's HOT is legitimately coolable
-   * (design decisions: version comparison).
+   * <p>Any missing signal fails open: a {@code null} ring or health view, a non-HOT entry, an
+   * empty owner or sender, the sender itself, a dead or restarted owner, a ring that no longer
+   * points at the owner, or an owner absent from the published ring when a rebuild is not
+   * allowed. Liveness and incarnation are checked before the ring probe because the probe walks
+   * health records, and a dead owner's HOT is legitimately coolable (design decisions: version
+   * comparison).
    *
-   * @param entry    the entry currently in L1; must not be {@code null}
-   * @param decision the incoming COOL decision; must not be {@code null}
+   * @param entry            the entry currently in L1; must not be {@code null}
+   * @param decision         the incoming COOL decision; must not be {@code null}
+   * @param allowRingRebuild whether a missing owner may be reconciled before routing; only
+   *                         the lock-free pre-check passes {@code true}
    * @return {@code true} when the COOL is a stale cross-Worker kill and must be skipped
    */
-  private boolean isStaleCrossNodeCool(CacheEntry entry, WorkerDecision decision) {
+  private boolean isStaleCrossNodeCool(CacheEntry entry, WorkerDecision decision, boolean allowRingRebuild) {
     if (ring == null || healthView == null || entry.getKeyState() != KeyState.HOT) {
       return false;
     }
 
     String owner = entry.getDecisionNodeId();
     String sender = decision.stamp().decisionNodeId();
-    if (owner == null || owner.isEmpty() || Objects.equals(owner, sender)) {
+    if (owner == null || owner.isEmpty() || sender == null || sender.isEmpty() || Objects.equals(owner, sender)) {
       return false;
     }
     if (!healthView.isCurrentIncarnation(owner, entry.getDecisionEpoch())) {
       return false;
     }
-    // The published ring may predate the heartbeat that made the owner live: reconcile it
-    // first, or a newly joined owner looks like a dead shard and its ghost-COOL guard is
-    // bypassed.
-    ring.rebuildIfPossible(healthView);
+    // Reconcile only in the lock-free pre-check; under the bin lock the published ring is
+    // used as-is, and a missing owner fails open because locateNode cannot return it.
+    if (allowRingRebuild && !ring.getNodes().contains(owner)) {
+      ring.rebuildIfPossible(healthView);
+    }
     return owner.equals(ring.locateNode(decision.cacheKey(), healthView));
-  }
-
-  /**
-   * Loads the authoritative value through the optional cluster loader. A clean miss, a
-   * declined value and a loader failure all answer {@code null}, so the caller falls back to
-   * the existing L1 entry value.
-   *
-   * @param key the cache key to load
-   * @return the loaded value, or {@code null} on a clean miss or a loader failure
-   */
-  @Nullable
-  private Object loadAuthoritative(String key) {
-    return DecisionPlaneSupport.loadAuthoritative(
-      clusterLoader,
-      key,
-      log,
-      "resolveHot: load failed for key={}, trying L1 entry fallback"
-    );
   }
 
   private static void requireType(WorkerDecision decision, WorkerType expected) {
@@ -563,12 +536,12 @@ public class DefaultWorkerContext implements WorkerContext, WorkerControl {
     fireHooks("onHotSkipped", decision.cacheKey(), hook -> hook.onHotSkipped(decision, reason));
   }
 
-  /** Reports a skipped COOL decision to every registered hook. */
-  private void fireOnCoolSkipped(WorkerDecision decision) {
+  /** Reports a skipped COOL decision to every registered hook, with the skip reason. */
+  private void fireOnCoolSkipped(WorkerDecision decision, CoolSkipReason reason) {
     if (hooks.isEmpty()) {
       return;
     }
-    fireHooks("onCoolSkipped", decision.cacheKey(), hook -> hook.onCoolSkipped(decision));
+    fireHooks("onCoolSkipped", decision.cacheKey(), hook -> hook.onCoolSkipped(decision, reason));
   }
 
   /**

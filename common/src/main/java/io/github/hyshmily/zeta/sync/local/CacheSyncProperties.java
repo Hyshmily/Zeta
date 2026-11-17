@@ -16,16 +16,14 @@
 package io.github.hyshmily.zeta.sync.local;
 
 import io.github.hyshmily.zeta.constants.ZetaConstants;
-import io.github.hyshmily.zeta.sync.AmqpConsumerProperties;
-import io.github.hyshmily.zeta.sync.dispatcher.KeyDispatcher;
+import io.github.hyshmily.zeta.sync.AbstractAmqpConsumerProperties;
 import io.github.hyshmily.zeta.util.Internal;
-import io.github.hyshmily.zeta.util.NodeIdentity;
-import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Positive;
 import jakarta.validation.constraints.PositiveOrZero;
 import java.util.ArrayList;
 import java.util.List;
-import lombok.Data;
+import lombok.Getter;
+import lombok.Setter;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.validation.annotation.Validated;
 
@@ -43,16 +41,12 @@ import org.springframework.validation.annotation.Validated;
  * @see CacheSyncPublisher
  * @see CacheSyncListener
  */
-@Data
+@Getter
+@Setter
 @Validated
 @ConfigurationProperties(prefix = "zeta.sync")
 @Internal
-public class CacheSyncProperties implements AmqpConsumerProperties {
-
-  /** Whether instance-to-instance cache synchronization is enabled.
-   * Set to {@code true} when multiple application instances share the same data
-   * source and should be notified of each other's data mutations. */
-  private boolean enabled = false;
+public class CacheSyncProperties extends AbstractAmqpConsumerProperties {
 
   /**
    * Delay (ms) before pending sync records are flushed to the sync publisher.
@@ -83,29 +77,18 @@ public class CacheSyncProperties implements AmqpConsumerProperties {
 
   /**
    * Extra package prefixes allowed in the deserialization whitelist of the
-   * value-carrying {@code PUT} broadcast (design decisions: invalidation). The built-in whitelist
-   * ({@code java.util}, {@code java.time}, {@code java.math} value types plus
-   * {@code io.github.hyshmily.zeta.*}) never
+   * value-carrying {@code PUT} broadcast (design decisions: sync messages). The built-in whitelist
+   * (JDK value types, {@code java.util} Collection/Map implementations, {@code java.time},
+   * {@code java.math} plus {@code io.github.hyshmily.zeta.model.*}) never
    * admits business DTOs — a business value outside these prefixes fails
    * closed on the receiver and degrades to a versioned INVALIDATE (safe but
    * value-less). Configure your application's own DTO packages here, e.g.
-   * {@code zeta.sync.put-allowed-packages: com.example.dto} — trust the list:
+   * {@code zeta.sync.put-allowed-packages: com.example.dto} (a trailing {@code .}
+   * is added when absent, so a sibling package is not admitted) — trust the list:
    * any class under a listed prefix becomes instantiable from a broker-writable
    * sender, so keep it as narrow as the values you actually put.
    */
   private List<String> putAllowedPackages = new ArrayList<>();
-
-  /** FanoutExchange name for broadcasting the single-key, batch and clear messages. */
-  @NotBlank
-  private String exchangeName = ZetaConstants.Exchange.SYNC;
-
-  /** Prefix for the per-instance queue name, suffixed with the instance ID
-   * from {@link NodeIdentity}. Final queue: {@code {queuePrefix}:{instanceId}}. */
-  @NotBlank
-  private String queuePrefix = "zeta.sync";
-
-  /** Whether the RabbitMQ listener container starts automatically with the application context. */
-  private boolean autoStartup = true;
 
   /** Time window (seconds) for deduplicating repeated broadcasts of one cache key.
    * Within this window, a send that does not outrank the recorded claim is silently
@@ -118,39 +101,11 @@ public class CacheSyncProperties implements AmqpConsumerProperties {
   @Positive
   private int dedupMaxSize = 10_000;
 
-  /** Maximum random start-jitter (milliseconds) parked before a key's first sync cache
-   * update cycle. The draw happens once per key-dispatch burst, not per message: it
-   * spreads the cluster-loader reads of peers processing the same REFRESH instead of
-   * letting them all hit the data source at once. */
-  @PositiveOrZero
-  private int jitterMs = 50;
-
-  /** Number of concurrent RabbitMQ consumers for the sync queue.
-   * Higher values increase throughput under load at the cost of more broker connections. */
-  @Positive
-  private int concurrentConsumers = 3;
-
-  /** Minimum pool size for the scheduled executor that runs jittered sync tasks.
-   * The effective pool is {@code max(this, concurrentConsumers × 2)}, so every
-   * consumer thread can run a delayed follow-up task without starving the others. */
-  @Positive
-  private int schedulerPoolSize = 4;
-
-  /** AMQP prefetch count per consumer. Controls how many unacknowledged messages
-   * each consumer can hold at once. */
-  @Positive
-  private int prefetchCount = 5;
-
-  /**
-   * Global cap (in weighted units) on tasks pending in the per-key sync dispatcher
-   * ({@link KeyDispatcher}). One unit approximates 1 KB of AMQP payload:
-   * single-key messages charge 1 unit, payload messages (PUT) charge by body
-   * size ({@code 1 + bodyBytes/1024}). When the budget is exhausted, new per-key
-   * tasks are dropped — the message was already acked (at-most-once, design
-   * decisions: sync messages), so a dropped invalidation is re-sent by the next
-   * application-level write or bounded by hard TTL. The clear family is a
-   * control-plane submission and bypasses this budget.
-   */
-  @Positive
-  private int maxPendingUnits = 50_000;
+  public CacheSyncProperties() {
+    setExchangeName(ZetaConstants.Exchange.SYNC);
+    setQueuePrefix("zeta.sync");
+    setJitterMs(50);
+    setConcurrentConsumers(3);
+    setMaxPendingUnits(50_000);
+  }
 }

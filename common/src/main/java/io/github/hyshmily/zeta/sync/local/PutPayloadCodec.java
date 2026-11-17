@@ -16,14 +16,37 @@
 package io.github.hyshmily.zeta.sync.local;
 
 import com.fasterxml.jackson.annotation.JsonTypeInfo;
+import com.fasterxml.jackson.databind.DatabindContext;
+import com.fasterxml.jackson.databind.JavaType;
+import com.fasterxml.jackson.databind.JsonMappingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.cfg.MapperConfig;
 import com.fasterxml.jackson.databind.json.JsonMapper;
 import com.fasterxml.jackson.databind.jsontype.BasicPolymorphicTypeValidator;
+import com.fasterxml.jackson.databind.jsontype.NamedType;
+import com.fasterxml.jackson.databind.jsontype.PolymorphicTypeValidator;
+import com.fasterxml.jackson.databind.jsontype.PolymorphicTypeValidator.Validity;
+import com.fasterxml.jackson.databind.jsontype.TypeIdResolver;
 import io.github.hyshmily.zeta.util.Internal;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.Serial;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.EnumMap;
+import java.util.EnumSet;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Hashtable;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.LinkedList;
 import java.util.List;
+import java.util.Map;
+import java.util.Properties;
+import java.util.Set;
+import java.util.TreeMap;
+import java.util.TreeSet;
 import lombok.extern.slf4j.Slf4j;
 import org.jspecify.annotations.NonNull;
 import org.jspecify.annotations.Nullable;
@@ -37,10 +60,17 @@ import org.jspecify.annotations.Nullable;
  * <p>Default typing is on for <b>every</b> type ({@code EVERYTHING} +
  * {@code WRAPPER_ARRAY}), so a final type such as {@code Long}, {@code BigDecimal} or
  * {@code byte[]} carries its type marker and round-trips as the exact runtime class the
- * writer stored. Deserialization enforces a polymorphic whitelist — JDK value types plus
- * {@code io.github.hyshmily.zeta.*} plus the configured
+ * writer stored. Deserialization enforces a polymorphic whitelist — JDK value types, JDK
+ * {@link Collection}/{@link Map} implementations in {@code java.util} (other packages and the
+ * legacy {@link Properties} and {@link Hashtable} containers are denied),
+ * {@code io.github.hyshmily.zeta.model.*} plus the configured
  * {@code zeta.sync.put-allowed-packages}; a business DTO outside it fails closed and the
  * receiver degrades to a versioned INVALIDATE.
+ *
+ * <p>A JDK collection implementation that the receiver cannot instantiate (an immutable
+ * {@code List.of} family, a {@code Collections} view, {@code Arrays.asList}) is written under
+ * the type id of a standard {@code ArrayList}/{@code HashSet}/{@code HashMap}, so it
+ * round-trips without widening the receiver's allowlist.
  */
 @Slf4j
 @Internal
@@ -62,7 +92,8 @@ public final class PutPayloadCodec {
    * Creates the codec from explicit settings.
    *
    * @param maxBytes       maximum serialized payload size; non-positive disables PUT payloads
-   * @param allowedPackages extra class prefixes admitted by the polymorphic validator
+   * @param allowedPackages extra package prefixes admitted by the polymorphic validator; a
+   *                        trailing {@code .} is added when absent
    */
   public PutPayloadCodec(int maxBytes, @Nullable List<String> allowedPackages) {
     this.maxBytes = maxBytes;
@@ -100,7 +131,7 @@ public final class PutPayloadCodec {
       if (buffer.exceeded) {
         log.debug("Put payload exceeds put-max-bytes {}, degrading to REFRESH", maxBytes);
       } else {
-        log.debug("Put payload serialization failed, degrading to REFRESH");
+        log.debug("Put payload serialization failed, degrading to REFRESH: {}", e.toString());
       }
       return null;
     }
@@ -124,28 +155,202 @@ public final class PutPayloadCodec {
     }
   }
 
+  @SuppressWarnings("java:S5135")
   private static ObjectMapper buildMapper(@Nullable List<String> allowedPackages) {
     BasicPolymorphicTypeValidator.Builder ptv = BasicPolymorphicTypeValidator.builder()
       .allowIfSubType(String.class)
-      .allowIfSubType(Number.class)
+      .allowIfSubType(StringBuilder.class)
+      .allowIfSubType(StringBuffer.class)
+      .allowIfSubType(Byte.class)
+      .allowIfSubType(Short.class)
+      .allowIfSubType(Integer.class)
+      .allowIfSubType(Long.class)
+      .allowIfSubType(Float.class)
+      .allowIfSubType(Double.class)
       .allowIfSubType(Boolean.class)
       .allowIfSubType(Character.class)
-      .allowIfSubType(CharSequence.class)
-      .allowIfSubType("java.util.")
+      .allowIfSubType(java.util.Optional.class)
+      .allowIfSubType(java.util.UUID.class)
+      .allowIfSubType(java.util.Date.class)
+      .allowIfSubType(Collection.class)
+      .allowIfSubType(Map.class)
       .allowIfSubType("java.time.")
       .allowIfSubType("java.math.")
-      .allowIfSubType("io.github.hyshmily.zeta.")
+      .allowIfSubType("io.github.hyshmily.zeta.model.")
       .allowIfSubTypeIsArray();
     if (allowedPackages != null) {
       for (String pkg : allowedPackages) {
         if (pkg != null && !pkg.isBlank()) {
-          ptv.allowIfSubType(pkg.trim());
+          String prefix = pkg.trim();
+          ptv.allowIfSubType(prefix.endsWith(".") ? prefix : prefix + ".");
         }
       }
     }
-    return JsonMapper.builder()
-      .activateDefaultTyping(ptv.build(), ObjectMapper.DefaultTyping.EVERYTHING, JsonTypeInfo.As.WRAPPER_ARRAY)
-      .build();
+    ObjectMapper.DefaultTypeResolverBuilder typing = new NormalizingTypeResolverBuilder(
+      ObjectMapper.DefaultTyping.EVERYTHING,
+      new PayloadTypeValidator(ptv.build())
+    );
+    typing.init(JsonTypeInfo.Id.CLASS, null);
+    typing.inclusion(JsonTypeInfo.As.WRAPPER_ARRAY);
+
+    return JsonMapper.builder().findAndAddModules().setDefaultTyping(typing).build();
+  }
+
+  /**
+   * Maps a {@code java.util} collection implementation the receiver cannot instantiate to a
+   * standard mutable container. Other packages and the denied {@link Properties}/{@link Hashtable}
+   * keep their own id so the existing type rules still apply.
+   */
+  private static @Nullable String normalizedContainerName(Object value) {
+    Class<?> type = value.getClass();
+    if (!"java.util".equals(type.getPackageName()) || value instanceof Properties || value instanceof Hashtable) {
+      return null;
+    }
+    if (value instanceof List<?> && !(value instanceof ArrayList || value instanceof LinkedList)) {
+      return ArrayList.class.getName();
+    }
+    if (
+      value instanceof Set<?> &&
+      !(value instanceof HashSet ||
+        value instanceof LinkedHashSet ||
+        value instanceof TreeSet ||
+        value instanceof EnumSet)
+    ) {
+      return HashSet.class.getName();
+    }
+    if (
+      value instanceof Map<?, ?> &&
+      !(value instanceof HashMap ||
+        value instanceof LinkedHashMap ||
+        value instanceof TreeMap ||
+        value instanceof EnumMap)
+    ) {
+      return HashMap.class.getName();
+    }
+    return null;
+  }
+
+  /**
+   * Installs the normalizing resolver on the serialization side only; deserialization keeps
+   * the standard class-name resolver, so a wire id is gated by the same polymorphic validator
+   * as before.
+   */
+  private static final class NormalizingTypeResolverBuilder extends ObjectMapper.DefaultTypeResolverBuilder {
+
+    private NormalizingTypeResolverBuilder(
+      ObjectMapper.DefaultTyping applicability,
+      PolymorphicTypeValidator subtypeValidator
+    ) {
+      super(applicability, subtypeValidator);
+    }
+
+    @Override
+    protected TypeIdResolver idResolver(
+      MapperConfig<?> config,
+      JavaType baseType,
+      PolymorphicTypeValidator subtypeValidator,
+      Collection<NamedType> subtypes,
+      boolean forSer,
+      boolean forDeser
+    ) {
+      TypeIdResolver delegate = super.idResolver(config, baseType, subtypeValidator, subtypes, forSer, forDeser);
+      return forSer ? new NormalizingIdResolver(delegate) : delegate;
+    }
+  }
+
+  /** Delegates every resolver operation; only the two outbound id methods are normalized. */
+  private static final class NormalizingIdResolver implements TypeIdResolver {
+
+    private final TypeIdResolver delegate;
+
+    private NormalizingIdResolver(TypeIdResolver delegate) {
+      this.delegate = delegate;
+    }
+
+    @Override
+    public void init(JavaType baseType) {
+      delegate.init(baseType);
+    }
+
+    @Override
+    public String idFromValue(Object value) {
+      String normalized = value == null ? null : normalizedContainerName(value);
+      return normalized != null ? normalized : delegate.idFromValue(value);
+    }
+
+    @Override
+    public String idFromValueAndType(Object value, Class<?> suggestedType) {
+      String normalized = value == null ? null : normalizedContainerName(value);
+      return normalized != null ? normalized : delegate.idFromValueAndType(value, suggestedType);
+    }
+
+    @Override
+    public String idFromBaseType() {
+      return delegate.idFromBaseType();
+    }
+
+    @Override
+    public JavaType typeFromId(DatabindContext context, String id) throws IOException {
+      return delegate.typeFromId(context, id);
+    }
+
+    @Override
+    public String getDescForKnownTypeIds() {
+      return delegate.getDescForKnownTypeIds();
+    }
+
+    @Override
+    public JsonTypeInfo.Id getMechanism() {
+      return delegate.getMechanism();
+    }
+  }
+
+  /**
+   * Denies the legacy {@link Properties} and {@link Hashtable} containers by name, and keeps
+   * every allowlisted name {@link Validity#INDETERMINATE} so the resolved class is always
+   * checked. {@link #validateSubType} then denies those containers, any
+   * {@link Collection}/{@link Map} implementation outside {@code java.util}, and every class
+   * the allowlist does not admit; a plain {@code Map}/{@code Collection} rule would otherwise
+   * admit every implementation on the classpath.
+   */
+  private static final class PayloadTypeValidator extends PolymorphicTypeValidator.Base {
+
+    private final PolymorphicTypeValidator delegate;
+
+    private PayloadTypeValidator(PolymorphicTypeValidator delegate) {
+      this.delegate = delegate;
+    }
+
+    @Override
+    public Validity validateSubClassName(MapperConfig<?> config, JavaType baseType, String subClassName)
+      throws JsonMappingException {
+      if (Properties.class.getName().equals(subClassName) || Hashtable.class.getName().equals(subClassName)) {
+        return Validity.DENIED;
+      }
+      return delegate.validateSubClassName(config, baseType, subClassName) == Validity.DENIED
+        ? Validity.DENIED
+        : Validity.INDETERMINATE;
+    }
+
+    @Override
+    public Validity validateSubType(MapperConfig<?> config, JavaType baseType, JavaType subType)
+      throws JsonMappingException {
+      Class<?> raw = subType.getRawClass();
+      if (raw == Properties.class || raw == Hashtable.class || isNonJdkContainer(raw)) {
+        return Validity.DENIED;
+      }
+      return delegate.validateSubClassName(config, baseType, raw.getName()) == Validity.ALLOWED
+        ? Validity.ALLOWED
+        : delegate.validateSubType(config, baseType, subType);
+    }
+
+    /** A Collection/Map implementation outside {@code java.util} is not a payload value type. */
+    private static boolean isNonJdkContainer(Class<?> type) {
+      return (
+        (Collection.class.isAssignableFrom(type) || Map.class.isAssignableFrom(type)) &&
+        !"java.util".equals(type.getPackageName())
+      );
+    }
   }
 
   /** Stackless control-flow exception: the caller discards it and degrades to REFRESH. */
@@ -173,7 +378,7 @@ public final class PutPayloadCodec {
     private boolean exceeded;
 
     BoundedByteArrayOutputStream(int limit) {
-      super(Math.min(limit, 256));
+      super(Math.min(limit, 1024));
       this.limit = limit;
     }
 

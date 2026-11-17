@@ -15,54 +15,66 @@
  */
 package io.github.hyshmily.zeta.sync.local;
 
+import io.github.hyshmily.zeta.cache.EntryView;
+import org.jspecify.annotations.Nullable;
+
 /**
- * Strategy interface for processing cache-sync batches received from peer application
- * instances.
+ * Strategy interface for inbound cache-sync events.
  *
- * <p>All methods are defaults that run the framework's standard pipeline through
- * {@link SyncContext}. Override only the operation whose policy you need to change; the
- * others keep the default. The framework owns per-key ordering, batch reduction, version
- * comparison, invalidation tombstones, clear watermarks and hook dispatch — a policy
- * never sees an AMQP message or a cache entry.
+ * <p>A policy is a pure decision layer: it never receives a write context, a batch or a
+ * cache entry it can mutate. The framework owns per-key ordering, batch reduction, the
+ * version guard, invalidation tombstones, clear watermarks, dedup-flight kills, value
+ * decoding/loading and exactly one terminal {@link SyncHook} callback per event.
  *
- * <p>A value batch carries PUT/REFRESH messages and is already reduced to its winner; an
- * invalidate batch is a value batch whose winner is an INVALIDATE; a clear batch carries
- * every table-wide and prefix clear of the granted window. The context applies all three
- * under the same guards.
+ * <p><b>Call order.</b> The framework reduces the granted batch first and calls the policy
+ * only for the effective winner; a covered PUT/REFRESH/INVALIDATE is reported to the hook as
+ * {@link SyncSkipReason#COVERED_BY_NEWER_EVENT} without reaching the policy. The winner is
+ * then admitted by {@link #admit}; an admitted value is resolved (PUT decode or REFRESH
+ * load) and passed to {@link #onValueResolved}. A value that cannot be resolved never
+ * reaches the policy; the framework reports the matching skip and applies its versioned
+ * local invalidation fallback. A resolution that raced a newer resident or an invalidation
+ * is settled as a skip before {@code onValueResolved} is called.
+ *
+ * <p>A policy runs on the cache-sync ordered dispatcher, never on the AMQP consumer
+ * thread. The {@link EntryView} is a read-only snapshot; the framework re-checks every
+ * version and tombstone when it applies the action.
  *
  * <p>Implement this interface and expose it as a Spring {@code @Bean} to replace the
  * default behaviour; {@code @ConditionalOnMissingBean} wires it.
  */
 public interface SyncPolicy {
   /**
-   * Handle a value batch: a PUT payload decode or a REFRESH authoritative load.
+   * Decide whether the effective event should continue.
    *
-   * @param batch   the reduced batch whose winner is a PUT or REFRESH
-   * @param context the framework's guarded write path
+   * <p>Called after the framework's cheap version/tombstone pre-check, so an event that is
+   * already stale never reaches the policy. {@link SyncAdmission#INVALIDATE_LOCAL} is meaningful
+   * only for a PUT/REFRESH; for an INVALIDATE it is settled as
+   * {@link SyncSkipReason#POLICY_FAILED}, and for a clear it is treated as
+   * {@link SyncAdmission#PROCEED} because the clear already sweeps locally.
+   *
+   * @param event   the effective event; never {@code null}
+   * @param current the resident snapshot for a key event, or {@code null} for an absent key
+   *                or a clear
+   * @return the admission decision; never {@code null}
    */
-  default void value(Batch.Value batch, SyncContext context) {
-    context.value(batch);
+  default SyncAdmission admit(SyncEvent event, @Nullable EntryView current) {
+    return SyncAdmission.PROCEED;
   }
 
   /**
-   * Handle a single-key INVALIDATE.
+   * Decide what to do after a PUT payload decoded or a REFRESH loader resolved a value.
    *
-   * @param batch   the reduced batch whose winner is an INVALIDATE
-   * @param context the framework's guarded write path
-   */
-  default void invalidate(Batch.Value batch, SyncContext context) {
-    context.invalidate(batch.winner());
-  }
-
-  /**
-   * Handle a clear batch. A table-wide clear and one or more prefix clears share the
-   * batch and are applied in one sweep; a prefix clear already covered by the table-wide
-   * stamp is dropped by the context.
+   * <p>The framework re-checks the loader's {@code isCacheable} on an {@link
+   * SyncValueAction.Apply} value, so a policy cannot bypass admission. The event's version
+   * is the only version used for the write; a policy cannot mint a new stamp.
    *
-   * @param batch   the clear batch
-   * @param context the framework's guarded write path
+   * @param event         the effective key event; never {@code null}
+   * @param resolvedValue the decoded PUT value or loaded REFRESH value; never {@code null}
+   * @param current       the resident snapshot observed after the value was resolved, or
+   *                      {@code null}
+   * @return the value action; never {@code null}
    */
-  default void clear(Batch.Clear batch, SyncContext context) {
-    context.clear(batch);
+  default SyncValueAction onValueResolved(SyncEvent event, Object resolvedValue, @Nullable EntryView current) {
+    return new SyncValueAction.Apply(resolvedValue);
   }
 }

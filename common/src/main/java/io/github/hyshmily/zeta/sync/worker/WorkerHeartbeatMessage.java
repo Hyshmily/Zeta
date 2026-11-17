@@ -20,6 +20,7 @@ import static io.github.hyshmily.zeta.constants.ZetaConstants.Amqp.*;
 import io.github.hyshmily.zeta.util.Internal;
 import io.github.hyshmily.zeta.util.amqp.AmqpMessageReader;
 import java.nio.charset.StandardCharsets;
+import java.util.Objects;
 import org.jspecify.annotations.Nullable;
 import org.springframework.amqp.core.Message;
 import org.springframework.amqp.core.MessageProperties;
@@ -43,7 +44,7 @@ import org.springframework.amqp.core.MessageProperties;
  *
  * @param id           time-sortable message trace ID; {@code 0} when the header was
  *                     missing or non-numeric
- * @param workerId     unique identifier of the originating Worker node
+ * @param workerId     unique identifier of the originating Worker node; must not be {@code null}
  * @param epoch        Worker restart counter
  * @param readyToServe {@code false} during cold start
  * @param appName      the sending application name, or {@code null} when the sender
@@ -59,6 +60,10 @@ public record WorkerHeartbeatMessage(
 ) {
   /** Message type discriminator for heartbeat messages ({@value}). */
   public static final String TYPE = "WORKER_HB";
+
+  public WorkerHeartbeatMessage {
+    workerId = Objects.requireNonNull(workerId, "workerId must not be null").trim();
+  }
 
   /**
    * Converts this heartbeat to an AMQP {@link Message}.
@@ -86,25 +91,26 @@ public record WorkerHeartbeatMessage(
    * <p>Missing or malformed headers are defaulted rather than failing the parse: a heartbeat is a
    * liveness signal, and dropping one because a field is absent would make a healthy Worker look
    * dead. The one exception is the Worker identity: a heartbeat without one cannot be recorded
-   * (an empty id would enter the health table and the hash ring), so the node-id header falls
-   * back to the body and a blank result drops the message.
+   * (an empty id would enter the health table and the hash ring), so the node-id header — read
+   * through the shared string-header reader, which accepts a {@code LongString}/other
+   * {@code CharSequence} — falls back to the body, and a blank result drops the message.
    *
    * @param msg the incoming message
    * @return the heartbeat, or {@code null} when the type header does not match or the
    *         Worker identity is missing
    * @throws NullPointerException if {@code msg} is {@code null}
    */
-  public static WorkerHeartbeatMessage from(Message msg) {
+  public static @Nullable WorkerHeartbeatMessage from(Message msg) {
     var props = msg.getMessageProperties();
     if (props == null) {
       return null;
     }
-    if (!TYPE.equals(props.getHeader(HEADER_TYPE))) {
+    if (!TYPE.equals(AmqpMessageReader.readStringHeader(props, HEADER_TYPE))) {
       return null;
     }
 
-    String workerId =
-      props.getHeader(HEADER_NODE_ID) instanceof String s && !s.isBlank() ? s : bodyWorkerId(msg.getBody());
+    String headerNodeId = AmqpMessageReader.readStringHeader(props, HEADER_NODE_ID);
+    String workerId = headerNodeId != null && !headerNodeId.isBlank() ? headerNodeId : bodyWorkerId(msg.getBody());
     if (workerId == null || workerId.isBlank()) {
       return null;
     }
@@ -119,7 +125,7 @@ public record WorkerHeartbeatMessage(
     );
   }
 
-  private static String bodyWorkerId(byte[] body) {
-    return body == null || body.length == 0 ? null : new String(body, StandardCharsets.UTF_8);
+  private static @Nullable String bodyWorkerId(byte@Nullable [] body) {
+    return body == null || body.length == 0 ? null : new String(body, StandardCharsets.UTF_8).trim();
   }
 }
