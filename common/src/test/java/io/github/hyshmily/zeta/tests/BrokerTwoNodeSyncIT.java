@@ -31,6 +31,7 @@ import io.github.hyshmily.zeta.sync.local.DefaultSyncContext;
 import io.github.hyshmily.zeta.sync.local.PutPayloadCodec;
 import io.github.hyshmily.zeta.sync.local.SyncPolicy;
 import io.github.hyshmily.zeta.sync.local.SyncMessage;
+import io.github.hyshmily.zeta.util.NodeIdentity;
 import java.io.IOException;
 import java.util.List;
 import java.util.concurrent.Executors;
@@ -90,7 +91,8 @@ class BrokerTwoNodeSyncIT {
     Node(String appName) {
       RabbitTemplate template = new RabbitTemplate(connectionFactory);
       PutPayloadCodec codec = new PutPayloadCodec(PROPS);
-      publisher = new CacheSyncPublisher(template, PROPS, codec, appName);
+      NodeIdentity identity = new NodeIdentity(appName, Math.floorMod(appName.hashCode(), 1024));
+      publisher = new CacheSyncPublisher(template, PROPS, codec, appName, identity);
       var context = new DefaultSyncContext(
         l1,
         null,
@@ -100,7 +102,15 @@ class BrokerTwoNodeSyncIT {
         codec
       );
       var handler = new SyncPolicy() {};
-      var listener = new CacheSyncListener(PROPS, Executors.newScheduledThreadPool(2), handler, context, appName, null);
+      var listener = new CacheSyncListener(
+        PROPS,
+        Executors.newScheduledThreadPool(2),
+        handler,
+        context,
+        appName,
+        null,
+        identity
+      );
       // The listener acks through the AMQP channel; the container auto-acks,
       // so the channel calls only need to be safe no-ops under test.
       com.rabbitmq.client.Channel noopChannel = (com.rabbitmq.client.Channel) java.lang.reflect.Proxy.newProxyInstance(

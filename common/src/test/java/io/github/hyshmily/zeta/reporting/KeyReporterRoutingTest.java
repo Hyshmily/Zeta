@@ -18,12 +18,13 @@ package io.github.hyshmily.zeta.reporting;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
 
+import io.github.hyshmily.zeta.Zeta;
 import io.github.hyshmily.zeta.cache.AccessCounter;
 import io.github.hyshmily.zeta.reporting.impl.KeyReporterImpl;
+import io.github.hyshmily.zeta.sharding.ClusterHealth;
 import io.github.hyshmily.zeta.sharding.ConsistentHashRing;
 import io.github.hyshmily.zeta.sharding.HashRing;
 import io.github.hyshmily.zeta.sharding.HealthView;
-import io.github.hyshmily.zeta.sharding.ClusterHealth;
 import io.github.hyshmily.zeta.sync.worker.WorkerHeartbeatMessage;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -94,6 +95,10 @@ class KeyReporterRoutingTest {
     scheduler.shutdownNow();
   }
 
+  private static void record(AccessCounter counter, String key) {
+    counter.record(key, 1L, Zeta.TagMode.RECORD);
+  }
+
   private static void registerWorker(HealthView hv, String workerId) {
     hv.onHeartbeat(new WorkerHeartbeatMessage(0L, workerId, 1L, true, null));
   }
@@ -126,8 +131,8 @@ class KeyReporterRoutingTest {
     }
     assertThat(keyPerTarget).as("one key pinned per worker").hasSize(2);
     List<String> pinned = new ArrayList<>(keyPerTarget.values());
-    reporterCounter.add(pinned.get(0));
-    reporterCounter.add(pinned.get(1));
+    record(reporterCounter, pinned.get(0));
+    record(reporterCounter, pinned.get(1));
 
     awaitPublish(2);
 

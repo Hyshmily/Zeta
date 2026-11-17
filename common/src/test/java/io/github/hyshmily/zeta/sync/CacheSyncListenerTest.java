@@ -37,7 +37,7 @@ import io.github.hyshmily.zeta.sync.local.Batch;
 import io.github.hyshmily.zeta.sync.local.CacheSyncListener;
 import io.github.hyshmily.zeta.sync.local.CacheSyncProperties;
 import io.github.hyshmily.zeta.sync.local.DefaultSyncContext;
-import io.github.hyshmily.zeta.sync.local.SyncContext;
+import io.github.hyshmily.zeta.sync.local.SyncHook;
 import io.github.hyshmily.zeta.sync.local.SyncMessage;
 import io.github.hyshmily.zeta.sync.local.SyncPolicy;
 import io.github.hyshmily.zeta.sync.local.SyncType;
@@ -52,8 +52,10 @@ import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.amqp.core.Message;
@@ -70,7 +72,8 @@ class CacheSyncListenerTest {
   private Channel channel;
   private ScheduledExecutorService scheduler;
   private EntryLifecycleImpl entryLifecycle;
-  private SyncContext syncContext;
+  private DefaultSyncContext syncContext;
+  private final NodeIdentity identity = new NodeIdentity("self-instance", 1L);
 
   @BeforeEach
   void setUp() throws IOException {
@@ -82,16 +85,29 @@ class CacheSyncListenerTest {
     entryLifecycle = new EntryLifecycleImpl(cache, ttlConfig, null);
 
     SyncPolicy policy = newPolicy(k -> "refreshed");
-    listener = new CacheSyncListener(properties, scheduler, policy, syncContext, null, null);
+    listener = new CacheSyncListener(properties, scheduler, policy, syncContext, null, null, identity);
     channel = mock(Channel.class);
   }
 
   private SyncPolicy newPolicy(CacheLoader loader) {
+    return newPolicy(loader, null);
+  }
+
+  private SyncPolicy newPolicy(CacheLoader loader, @Nullable StampClock stampClock) {
     io.github.hyshmily.zeta.sync.local.PutPayloadCodec parser = mock(
       io.github.hyshmily.zeta.sync.local.PutPayloadCodec.class
     );
     when(parser.decode(any())).thenReturn("carried");
-    syncContext = new DefaultSyncContext(cache, loader, entryLifecycle, Collections.emptyList(), null, parser);
+    syncContext = new DefaultSyncContext(
+      cache,
+      loader,
+      entryLifecycle,
+      Collections.emptyList(),
+      null,
+      parser,
+      Runnable::run,
+      stampClock
+    );
     return new SyncPolicy() {};
   }
 
@@ -172,7 +188,8 @@ class CacheSyncListenerTest {
       newPolicy(blockingLoader),
       syncContext,
       null,
-      null
+      null,
+      identity
     );
 
     try {
@@ -272,7 +289,8 @@ class CacheSyncListenerTest {
       newPolicy(k -> "v"),
       syncContext,
       null,
-      clock
+      clock,
+      identity
     );
     try {
       cache.put("key1", entry(5, 0));
@@ -287,8 +305,9 @@ class CacheSyncListenerTest {
 
   /**
    * A batch whose stamps are beyond the forward-drift bound is not dropped: every
-   * entry applies at one fresh local stamp, because persisting the peer's future
-   * version would blind later local writes to those keys.
+   * entry applies at a fresh local stamp, because persisting the peer's future
+   * version would blind later local writes to those keys. The replacement stamp is
+   * allocated by the per-key apply, not by the listener.
    */
   @Test
   void invalidateBatch_beyondClockDrift_shouldApplyAtALocalStamp() throws IOException, InterruptedException {
@@ -298,10 +317,11 @@ class CacheSyncListenerTest {
     CacheSyncListener observing = new CacheSyncListener(
       props,
       scheduler,
-      newPolicy(k -> "v"),
+      newPolicy(k -> "v", clock),
       syncContext,
       null,
-      clock
+      clock,
+      identity
     );
     try {
       cache.put("k1", entry(1, 0));
@@ -320,13 +340,122 @@ class CacheSyncListenerTest {
       awaitRemoved(cache, "k2");
       assertThat(cache.getIfPresent("k1")).isNull();
       assertThat(cache.getIfPresent("k2")).isNull();
+      // The tombstone is a local stamp, not the peer's future version: the next local
+      // allocation outranks it, while a version below it is refused.
+      assertThat(entryLifecycle.staleAgainstInvalidation("k1", clock.nextStamp())).isFalse();
+      assertThat(entryLifecycle.staleAgainstInvalidation("k1", 1L)).isTrue();
     } finally {
       observing.destroy();
     }
   }
 
   /**
-   * A REFRESH dropped by a saturated dispatcher must not leave the stale entry
+   * Only the entry whose own stamp breaches the forward-drift bound may be restamped. A framed
+   * maximum that is refused must not raise an older, accepted entry past a newer resident: doing
+   * so turns an already-ordered invalidation into a fresh local stamp and evicts live data.
+   */
+  @Test
+  void invalidateBatch_refusedFrameMaximum_doesNotRestampAnAcceptedEntry() throws IOException, InterruptedException {
+    CacheSyncProperties props = new CacheSyncProperties();
+    props.setJitterMs(0);
+    MonotonicStampClock clock = new MonotonicStampClock(11L, MonotonicStampClock.DEFAULT_MAX_FORWARD_DRIFT_MS);
+    CacheSyncListener observing = new CacheSyncListener(
+      props,
+      scheduler,
+      newPolicy(k -> "v", clock),
+      syncContext,
+      null,
+      clock,
+      identity
+    );
+    try {
+      long accepted = clock.nextStamp();
+      long residentVersion = clock.nextStamp();
+      cache.put("older", entry(residentVersion, 0));
+      cache.put("future", entry(1, 0));
+      long future = (System.currentTimeMillis() - StampClock.EPOCH + 120_000L) << StampClock.TIMESTAMP_SHIFT;
+      byte[] body = SyncMessage.encodeBatchBody(
+        List.of(new SyncMessage.Entry("older", accepted), new SyncMessage.Entry("future", future))
+      );
+      MessageProperties messageProperties = new MessageProperties();
+      messageProperties.setHeader(HEADER_TYPE, SyncType.INVALIDATE_BATCH.code());
+
+      observing.onMessage(channel, new Message(body, messageProperties));
+
+      verify(channel).basicAck(anyLong(), eq(false));
+      awaitRemoved(cache, "future");
+      assertThat(cache.getIfPresent("older"))
+        .as("the accepted older stamp must stay below the newer resident")
+        .isNotNull();
+    } finally {
+      observing.destroy();
+    }
+  }
+
+  /**
+   * A refused frame merges the peer clock but allocates no replacement stamp on the AMQP
+   * consumer thread: the per-key applier owns that allocation, after the batch reduction and
+   * in apply order. A consumer-thread allocation here would let two same-key entries reach
+   * the dispatcher with inverted stamps.
+   */
+  @Test
+  void invalidateBatch_refusedFrameAllocatesNothingOnTheConsumerThread() throws Exception {
+    StampClock clock = mock(StampClock.class);
+    when(clock.observe(anyLong())).thenReturn(false);
+    when(clock.nextStamp()).thenReturn(42L);
+    CacheSyncProperties props = new CacheSyncProperties();
+    props.setJitterMs(0);
+    // Capture the dispatcher cycles instead of running them, so no per-key apply can
+    // allocate a stamp before the assertion.
+    ScheduledExecutorService capturing = new ScheduledThreadPoolExecutor(1) {
+      @Override
+      public void execute(Runnable command) {}
+    };
+    CacheSyncListener refusing = new CacheSyncListener(
+      props,
+      capturing,
+      newPolicy(k -> "v", clock),
+      syncContext,
+      null,
+      clock,
+      identity
+    );
+    try {
+      byte[] body = SyncMessage.encodeBatchBody(
+        List.of(new SyncMessage.Entry("k1", 5L), new SyncMessage.Entry("k2", 6L))
+      );
+      MessageProperties messageProperties = new MessageProperties();
+      messageProperties.setHeader(HEADER_TYPE, SyncType.INVALIDATE_BATCH.code());
+
+      refusing.onMessage(channel, new Message(body, messageProperties));
+
+      verify(channel).basicAck(anyLong(), eq(false));
+      // One probe for the frame plus one per entry; no replacement stamp yet.
+      verify(clock, times(3)).observe(anyLong());
+      verify(clock, never()).nextStamp();
+    } finally {
+      refusing.destroy();
+      capturing.shutdownNow();
+    }
+  }
+
+  @Test
+  void selfInvalidateBatch_isAppliedLikeASingleInvalidate() throws Exception {
+    cache.put("k1", entry(1, 0));
+    byte[] body = SyncMessage.encodeBatchBody(List.of(new SyncMessage.Entry("k1", 2L)));
+    MessageProperties messageProperties = new MessageProperties();
+    messageProperties.setHeader(HEADER_TYPE, SyncType.INVALIDATE_BATCH.code());
+    messageProperties.setHeader(HEADER_ORIGIN_INSTANCE, identity.instanceId());
+
+    listener.onMessage(channel, new Message(body, messageProperties));
+
+    verify(channel).basicAck(anyLong(), eq(false));
+    awaitWorkerTasks();
+    assertThat(cache.getIfPresent("k1")).isNull();
+  }
+
+  /**
+   * A REFRESH dropped by a closed dispatcher must not leave the stale entry
    * behind: the synchronous invalidate fallback removes it on the consumer
    * thread so the next read reloads instead of serving v1 for its full TTL.
    */
@@ -334,16 +463,18 @@ class CacheSyncListenerTest {
   void onMessage_dispatcherDrop_refresh_shouldFallbackInvalidate() throws IOException {
     CacheSyncProperties saturated = new CacheSyncProperties();
     saturated.setJitterMs(0);
-    saturated.setMaxPendingUnits(0);
+    saturated.setMaxPendingUnits(1);
     CacheSyncListener dropListener = new CacheSyncListener(
       saturated,
       scheduler,
       newPolicy(k -> "refreshed"),
       syncContext,
       null,
-      null
+      null,
+      identity
     );
     try {
+      dropListener.destroy();
       cache.put("key1", entry(1, 0));
       dropListener.onMessage(channel, syncMessage("key1", SyncType.REFRESH.code(), 2L));
       verify(channel).basicAck(anyLong(), eq(false));
@@ -354,23 +485,63 @@ class CacheSyncListenerTest {
   }
 
   /**
-   * Same fallback for INVALIDATE: a saturated dispatcher still removes the key
+   * The rejection fallback must not run user code on the AMQP consumer thread: a slow
+   * {@link SyncHook} would delay the ack and can trip the broker heartbeat. The entry is
+   * still removed by the no-hook path.
+   */
+  @Test
+  void onMessage_dispatcherDrop_shouldApplyWithoutFiringHooks() throws IOException {
+    SyncHook hook = mock(SyncHook.class);
+    DefaultSyncContext noHookContext = new DefaultSyncContext(
+      cache,
+      k -> "refreshed",
+      entryLifecycle,
+      List.of(hook),
+      null,
+      null
+    );
+    CacheSyncProperties props = new CacheSyncProperties();
+    props.setJitterMs(0);
+    CacheSyncListener dropListener = new CacheSyncListener(
+      props,
+      scheduler,
+      new SyncPolicy() {},
+      noHookContext,
+      null,
+      null,
+      identity
+    );
+    dropListener.destroy();
+    cache.put("key1", entry(1, 0));
+
+    dropListener.onMessage(channel, syncMessage("key1", SyncType.INVALIDATE.code(), 2L));
+
+    verify(channel).basicAck(anyLong(), eq(false));
+    assertThat(cache.getIfPresent("key1")).isNull();
+    verifyNoInteractions(hook);
+    assertThat(dropListener.syncDispatchRejections()).isEqualTo(1L);
+  }
+
+  /**
+   * Same fallback for INVALIDATE: a closed dispatcher still removes the key
    * synchronously instead of leaving v1 resident.
    */
   @Test
   void onMessage_dispatcherDrop_invalidate_shouldFallbackInvalidate() throws IOException {
     CacheSyncProperties saturated = new CacheSyncProperties();
     saturated.setJitterMs(0);
-    saturated.setMaxPendingUnits(0);
+    saturated.setMaxPendingUnits(1);
     CacheSyncListener dropListener = new CacheSyncListener(
       saturated,
       scheduler,
       newPolicy(k -> "refreshed"),
       syncContext,
       null,
-      null
+      null,
+      identity
     );
     try {
+      dropListener.destroy();
       cache.put("key1", entry(1, 0));
       dropListener.onMessage(channel, syncMessage("key1", SyncType.INVALIDATE.code(), 2L));
       verify(channel).basicAck(anyLong(), eq(false));
@@ -397,7 +568,8 @@ class CacheSyncListenerTest {
       newPolicy(k -> "v"),
       syncContext,
       null,
-      clock
+      clock,
+      identity
     );
     try {
       long peerTs = TimeSource.currentTimeMillis() - StampClock.EPOCH + 60_000L;
@@ -411,28 +583,28 @@ class CacheSyncListenerTest {
   }
 
   /**
-   * A clear dropped by a saturated dispatcher must still sweep the cache — but not on the
-   * consumer thread. The refusal re-enters the clear channel and sweeps inline only when the
-   * retry ladder is exhausted, so the ack path never pays an O(table) scan.
-   *
-   * <p>The generic fallback rewrites messages to a single-key INVALIDATE; doing that to a
-   * clear would delete the literal marker key (which never exists) and leave every entry
-   * resident for its full TTL.
+   * A clear refused by a closed dispatcher must still sweep the cache. The fallback applies
+   * the clear inline on the consumer thread, and the version watermark keeps an entry newer
+   * than the clear stamp. The generic fallback rewrites messages to a single-key INVALIDATE;
+   * doing that to a clear would delete the literal marker key (which never exists) and leave
+   * every entry resident for its full TTL.
    */
   @Test
   void onMessage_dispatcherDrop_invalidateAll_shouldSweepCache() throws Exception {
     CacheSyncProperties saturated = new CacheSyncProperties();
     saturated.setJitterMs(0);
-    saturated.setMaxPendingUnits(0);
+    saturated.setMaxPendingUnits(1);
     CacheSyncListener dropListener = new CacheSyncListener(
       saturated,
       scheduler,
       newPolicy(k -> "v"),
       syncContext,
       null,
-      null
+      null,
+      identity
     );
     try {
+      dropListener.destroy();
       cache.put("a", entry(1, 1));
       cache.put("b", entry(2, 2));
       cache.put("fresh", entry(9, 3));
@@ -440,10 +612,7 @@ class CacheSyncListenerTest {
       dropListener.onMessage(channel, syncMessage(SyncMessage.CLEAR_ALL_BODY, SyncType.INVALIDATE_ALL.code(), 5L));
 
       verify(channel).basicAck(anyLong(), eq(false));
-      assertThat(cache.getIfPresent("a")).as("the refusal must not sweep the table on the consumer thread").isNotNull();
-
-      // The retry ladder ends in the inline sweep: the clear is delayed, never lost.
-      awaitRemoved(cache, "a");
+      assertThat(cache.getIfPresent("a")).isNull();
       assertThat(cache.getIfPresent("b")).isNull();
       assertThat(cache.getIfPresent("fresh")).isNotNull();
     } finally {
@@ -452,23 +621,32 @@ class CacheSyncListenerTest {
   }
 
   /**
-   * A clear batch that mixes INVALIDATE_ALL and INVALIDATE_PREFIX must reach one
-   * {@code clear} call: the context applies both kinds in the same sweep. Routing the mixed
-   * batch through a per-kind split would leave every non-prefix key resident.
+   * A clear batch that mixes INVALIDATE_ALL and INVALIDATE_PREFIX must reach one sweep and
+   * one terminal {@code afterClear} callback carrying both events. Routing the mixed batch
+   * through a per-kind split would leave every non-prefix key resident.
    */
   @Test
-  void onMessage_mixedClearBatch_reachesClearAndAppliesBoth() throws Exception {
+  void onMessage_mixedClearBatch_reachesOneSweepAndOneTerminalHook() throws Exception {
     CacheSyncProperties props = new CacheSyncProperties();
     props.setJitterMs(0);
-    CountDownLatch swept = new CountDownLatch(1);
-    SyncPolicy routing = new SyncPolicy() {
-      @Override
-      public void clear(Batch.Clear batch, SyncContext context) {
-        SyncPolicy.super.clear(batch, context);
-        swept.countDown();
-      }
-    };
-    CacheSyncListener mixed = new CacheSyncListener(props, scheduler, routing, syncContext, null, null);
+    SyncHook hook = mock(SyncHook.class);
+    DefaultSyncContext clearContext = new DefaultSyncContext(
+      cache,
+      k -> null,
+      entryLifecycle,
+      List.of(hook),
+      null,
+      null
+    );
+    CacheSyncListener mixed = new CacheSyncListener(
+      props,
+      scheduler,
+      new SyncPolicy() {},
+      clearContext,
+      null,
+      null,
+      identity
+    );
     try {
       cache.put("low", entry(3, 0));
       cache.put("users\u0000a", entry(7, 0));
@@ -487,7 +665,7 @@ class CacheSyncListenerTest {
       mixed.onMessage(channel, syncMessage("users\u0000", SyncType.INVALIDATE_PREFIX.code(), 9L));
       release.countDown();
 
-      assertThat(swept.await(5, TimeUnit.SECONDS)).isTrue();
+      verify(hook, timeout(5000)).afterClear(any(), eq(2));
       // The table-wide clear (v5) removes "low"; the higher prefix clear (v9) removes
       // the users-prefixed key; "fresh" (v12) outranks both.
       assertThat(cache.getIfPresent("low")).isNull();
@@ -567,7 +745,7 @@ class CacheSyncListenerTest {
     SyncPolicy h = newPolicy(k -> {
       throw new RuntimeException("source down");
     });
-    CacheSyncListener failingListener = new CacheSyncListener(props, scheduler, h, syncContext, null, null);
+    CacheSyncListener failingListener = new CacheSyncListener(props, scheduler, h, syncContext, null, null, identity);
 
     cache.put("key1", entry(1, 0));
     failingListener.onMessage(channel, syncMessage("key1", SyncType.REFRESH.code(), 2L));
@@ -598,7 +776,7 @@ class CacheSyncListenerTest {
     CacheSyncProperties props = new CacheSyncProperties();
     props.setJitterMs(0);
     SyncPolicy h = newPolicy(k -> null);
-    CacheSyncListener nullListener = new CacheSyncListener(props, scheduler, h, syncContext, null, null);
+    CacheSyncListener nullListener = new CacheSyncListener(props, scheduler, h, syncContext, null, null, identity);
 
     cache.put("key1", entry(5, 0));
     nullListener.onMessage(channel, syncMessage("key1", SyncType.REFRESH.code(), 6L));
@@ -626,18 +804,13 @@ class CacheSyncListenerTest {
    */
   @Test
   void onMessage_ownRefresh_shouldDropAndKeepOwnEntry() throws IOException, InterruptedException {
-    NodeIdentity.setInstanceOverride("self-instance");
-    try {
-      cache.put("key1", entry(4, 0));
-      listener.onMessage(channel, syncMessageWithOrigin("key1", SyncType.REFRESH.code(), 4L, "self-instance"));
-      verify(channel).basicAck(anyLong(), eq(false));
-      awaitWorkerTasks();
-      // Untouched: the value is still the sender's own putThrough payload, not
-      // the loader's — the message never reached the sync context.
-      assertThat(((CacheEntry) cache.getIfPresent("key1")).getValue()).isEqualTo("v");
-    } finally {
-      NodeIdentity.setInstanceOverride(null);
-    }
+    cache.put("key1", entry(4, 0));
+    listener.onMessage(channel, syncMessageWithOrigin("key1", SyncType.REFRESH.code(), 4L, "self-instance"));
+    verify(channel).basicAck(anyLong(), eq(false));
+    awaitWorkerTasks();
+    // Untouched: the value is still the sender's own putThrough payload, not
+    // the loader's — the message never reached the sync context.
+    assertThat(((CacheEntry) cache.getIfPresent("key1")).getValue()).isEqualTo("v");
   }
 
   /**
@@ -659,16 +832,11 @@ class CacheSyncListenerTest {
    */
   @Test
   void onMessage_ownInvalidate_shouldStillProcess() throws IOException, InterruptedException {
-    NodeIdentity.setInstanceOverride("self-instance");
-    try {
-      cache.put("key1", entry(2, 0));
-      listener.onMessage(channel, syncMessageWithOrigin("key1", SyncType.INVALIDATE.code(), 5L, "self-instance"));
-      verify(channel).basicAck(anyLong(), eq(false));
-      awaitWorkerTasks();
-      assertThat(cache.getIfPresent("key1")).isNull();
-    } finally {
-      NodeIdentity.setInstanceOverride(null);
-    }
+    cache.put("key1", entry(2, 0));
+    listener.onMessage(channel, syncMessageWithOrigin("key1", SyncType.INVALIDATE.code(), 5L, "self-instance"));
+    verify(channel).basicAck(anyLong(), eq(false));
+    awaitWorkerTasks();
+    assertThat(cache.getIfPresent("key1")).isNull();
   }
 
   /**
@@ -707,7 +875,7 @@ class CacheSyncListenerTest {
 
   /**
    * Builds a sync message that declares the sender's application name, the way
-   * {@code CacheSyncPublisher} now stamps every sync message. The sync exchange is a
+   * {@code CacheSyncPublisher} stamps every sync message. The sync exchange is a
    * fanout with a global name, so on a shared broker these headers are the only thing
    * telling one application's traffic apart from another's.
    */
@@ -729,7 +897,8 @@ class CacheSyncListenerTest {
       newPolicy(k -> "v"),
       syncContext,
       appName,
-      null
+      null,
+      identity
     );
     return isolated;
   }

@@ -21,6 +21,7 @@ import static org.mockito.Mockito.*;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
+import io.github.hyshmily.zeta.Zeta;
 import io.github.hyshmily.zeta.cache.BroadcastBuffer;
 import io.github.hyshmily.zeta.cache.cachesupport.loader.singleflight.SingleFlight;
 import io.github.hyshmily.zeta.cache.cachesupport.raw.CacheEntry;
@@ -141,8 +142,8 @@ class ZetaMicrometerAutoConfigurationTest {
       50L,
       500L
     );
-    accessCounter.add("pending-1");
-    accessCounter.add("pending-2");
+    accessCounter.record("pending-1", 1L, Zeta.TagMode.RECORD);
+    accessCounter.record("pending-2", 1L, Zeta.TagMode.RECORD);
     BackgroundRefresher backgroundRefresher = mock(BackgroundRefresher.class);
     when(backgroundRefresher.getRefreshLimiter()).thenReturn(new Semaphore(8));
     StampClock clock = mock(StampClock.class);

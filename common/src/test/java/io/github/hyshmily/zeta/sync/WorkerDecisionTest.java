@@ -201,6 +201,7 @@ class WorkerDecisionTest {
       assertThat(WorkerType.parse(type.code())).isSameAs(type);
     }
     assertThat(WorkerType.parse("UNKNOWN")).isNull();
+    assertThat(WorkerType.parse(new StringBuilder("HOT"))).isSameAs(WorkerType.HOT);
     assertThat(WorkerType.parse(3)).isNull();
     assertThat(WorkerType.parse(null)).isNull();
   }

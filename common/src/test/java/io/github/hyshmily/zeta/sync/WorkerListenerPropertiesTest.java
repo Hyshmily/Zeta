@@ -21,10 +21,7 @@ import io.github.hyshmily.zeta.constants.ZetaConstants;
 import io.github.hyshmily.zeta.sync.worker.WorkerListenerProperties;
 import org.junit.jupiter.api.Test;
 
-/**
- * Tests for {@link WorkerListenerProperties} verifying default configuration values and queue name
- * prefix behavior.
- */
+/** Tests for {@link WorkerListenerProperties} verifying its default configuration values. */
 class WorkerListenerPropertiesTest {
 
   /**
@@ -37,15 +34,6 @@ class WorkerListenerPropertiesTest {
     assertThat(props.getExchangeName()).isEqualTo(ZetaConstants.Exchange.BROADCAST);
     assertThat(props.getQueuePrefix()).isEqualTo("zeta.worker");
     assertThat(props.getJitterMs()).isZero();
-  }
-
-  /**
-   * Verifies that getQueueName returns a name starting with the configured worker queue prefix.
-   */
-  @Test
-  void getQueueName_shouldReturnPrefixedName() {
-    WorkerListenerProperties props = new WorkerListenerProperties();
-    assertThat(props.getQueueName()).startsWith("zeta.worker:");
   }
 
   /**

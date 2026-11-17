@@ -17,9 +17,11 @@ package io.github.hyshmily.zeta.sync;
 
 import static io.github.hyshmily.zeta.constants.ZetaConstants.Amqp.*;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+import com.rabbitmq.client.impl.LongStringHelper;
 import io.github.hyshmily.zeta.sync.worker.WorkerHeartbeatMessage;
 import java.nio.charset.StandardCharsets;
 import org.junit.jupiter.api.Test;
@@ -98,6 +100,17 @@ class WorkerHeartbeatMessageTest {
     assertThat(hb.readyToServe()).isFalse();
   }
 
+  /** A padded id is one Worker on the wire, whether it came from the header or the body. */
+  @Test
+  void from_workerIdWithSurroundingSpaces_isNormalized() {
+    MessageProperties props = new MessageProperties();
+    props.setHeader(HEADER_TYPE, WorkerHeartbeatMessage.TYPE);
+    props.setHeader(HEADER_NODE_ID, "  w-42  ");
+    Message msg = new Message("  w-42  ".getBytes(StandardCharsets.UTF_8), props);
+
+    assertThat(WorkerHeartbeatMessage.from(msg).workerId()).isEqualTo("w-42");
+  }
+
   @Test
   void from_blankWorkerIdAndBlankBody_shouldReturnNull() {
     MessageProperties props = new MessageProperties();
@@ -116,9 +129,43 @@ class WorkerHeartbeatMessageTest {
     props.setHeader(HEADER_HEARTBEAT_READY, "not-boolean");
     Message msg = new Message("body".getBytes(StandardCharsets.UTF_8), props);
     WorkerHeartbeatMessage hb = WorkerHeartbeatMessage.from(msg);
-    assertThat(hb.workerId()).as("a non-String header falls back to the body").isEqualTo("body");
+    assertThat(hb.workerId()).as("the shared string reader converts a non-String header").isEqualTo("123");
     assertThat(hb.epoch()).isZero();
     assertThat(hb.readyToServe()).isFalse();
+  }
+
+  /** The type discriminator must accept the same LongString form as every other text header. */
+  @Test
+  void from_longStringTypeHeader_isAccepted() {
+    MessageProperties props = new MessageProperties();
+    props.setHeader(HEADER_TYPE, LongStringHelper.asLongString(WorkerHeartbeatMessage.TYPE));
+    Message msg = new Message("worker".getBytes(StandardCharsets.UTF_8), props);
+
+    assertThat(WorkerHeartbeatMessage.from(msg)).isNotNull();
+  }
+
+  /**
+   * RabbitMQ may deliver a string header as a {@code LongString}; the shared reader converts it
+   * to text instead of falling back to the body (which may be empty).
+   */
+  @Test
+  void from_longStringNodeIdHeader_isConvertedToText() {
+    MessageProperties props = new MessageProperties();
+    props.setHeader(HEADER_TYPE, WorkerHeartbeatMessage.TYPE);
+    props.setHeader(HEADER_NODE_ID, LongStringHelper.asLongString("worker-from-header"));
+    Message msg = new Message(new byte[0], props);
+
+    WorkerHeartbeatMessage hb = WorkerHeartbeatMessage.from(msg);
+
+    assertThat(hb).isNotNull();
+    assertThat(hb.workerId()).isEqualTo("worker-from-header");
+  }
+
+  @Test
+  void constructor_rejectsANullWorkerId() {
+    assertThatThrownBy(() -> new WorkerHeartbeatMessage(0L, null, 0L, false, null))
+      .isInstanceOf(NullPointerException.class)
+      .hasMessageContaining("workerId");
   }
 
   @Test

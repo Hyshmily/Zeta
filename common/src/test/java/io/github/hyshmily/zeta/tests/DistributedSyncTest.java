@@ -24,7 +24,6 @@ import io.github.hyshmily.zeta.sync.local.CacheSyncProperties;
 import io.github.hyshmily.zeta.sync.local.CacheSyncPublisher;
 import io.github.hyshmily.zeta.sync.local.DefaultSyncContext;
 import io.github.hyshmily.zeta.sync.local.PutPayloadCodec;
-import io.github.hyshmily.zeta.sync.local.SyncContext;
 import io.github.hyshmily.zeta.sync.local.SyncPolicy;
 import io.github.hyshmily.zeta.sync.local.SyncMessage;
 import io.github.hyshmily.zeta.sync.local.SyncType;
@@ -35,6 +34,7 @@ import io.github.hyshmily.zeta.sync.worker.WorkerHeartbeatMessage;
 import io.github.hyshmily.zeta.sync.worker.WorkerListener;
 import io.github.hyshmily.zeta.sync.worker.WorkerListenerProperties;
 import io.github.hyshmily.zeta.sync.worker.WorkerType;
+import io.github.hyshmily.zeta.util.NodeIdentity;
 import io.github.hyshmily.zeta.util.clock.StampClock;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
@@ -149,7 +149,7 @@ class DistributedSyncTest {
     );
   }
 
-  private SyncContext syncContext(CacheLoader loader) {
+  private DefaultSyncContext syncContext(CacheLoader loader) {
     ZetaProperties ttlConfig = new ZetaProperties();
     EntryLifecycle expire = new EntryLifecycleImpl(cache, ttlConfig, null);
     return new DefaultSyncContext(cache, loader, expire, List.of(), null, null);
@@ -158,7 +158,15 @@ class DistributedSyncTest {
   private CacheSyncListener createListener(CacheLoader loader) {
     CacheSyncProperties props = new CacheSyncProperties();
     props.setJitterMs(0);
-    return new CacheSyncListener(props, scheduler, new SyncPolicy() {}, syncContext(loader), null, null);
+    return new CacheSyncListener(
+      props,
+      scheduler,
+      new SyncPolicy() {},
+      syncContext(loader),
+      null,
+      null,
+      new NodeIdentity("test", 1L)
+    );
   }
 
   private WorkerListener createWorkerListener(CacheLoader loader) {
@@ -183,7 +191,7 @@ class DistributedSyncTest {
     void broadcastRefresh_setsCorrectHeaders() {
       RabbitTemplate rt = mock(RabbitTemplate.class);
       CacheSyncProperties props = new CacheSyncProperties();
-      CacheSyncPublisher pub = new CacheSyncPublisher(rt, props, new PutPayloadCodec(props), null);
+      CacheSyncPublisher pub = new CacheSyncPublisher(rt, props, new PutPayloadCodec(props), null, new NodeIdentity("test", 1L));
 
       pub.broadcastRefresh("myKey", 42L);
 
@@ -200,7 +208,7 @@ class DistributedSyncTest {
     void broadcastInvalidate_setsCorrectHeaders() {
       RabbitTemplate rt = mock(RabbitTemplate.class);
       CacheSyncProperties props = new CacheSyncProperties();
-      CacheSyncPublisher pub = new CacheSyncPublisher(rt, props, new PutPayloadCodec(props), null);
+      CacheSyncPublisher pub = new CacheSyncPublisher(rt, props, new PutPayloadCodec(props), null, new NodeIdentity("test", 1L));
 
       pub.broadcastInvalidate("del-key", 7L);
 
@@ -217,7 +225,7 @@ class DistributedSyncTest {
       RabbitTemplate rt = mock(RabbitTemplate.class);
       doThrow(new AmqpException("Broker down")).when(rt).send(anyString(), anyString(), any());
       CacheSyncProperties props = new CacheSyncProperties();
-      CacheSyncPublisher pub = new CacheSyncPublisher(rt, props, new PutPayloadCodec(props), null);
+      CacheSyncPublisher pub = new CacheSyncPublisher(rt, props, new PutPayloadCodec(props), null, new NodeIdentity("test", 1L));
 
       pub.broadcastRefresh("k", 1L);
 

@@ -65,6 +65,49 @@ class BatchTest {
   }
 
   @Test
+  @DisplayName("every covered INVALIDATE is retained and the highest one is the fallback")
+  void everyCoveredInvalidateIsRetained() {
+    SyncMessage invalidate8 = new SyncMessage(1L, "key", SyncType.INVALIDATE, 8L);
+    SyncMessage invalidate9 = new SyncMessage(2L, "key", SyncType.INVALIDATE, 9L);
+    SyncMessage put = new SyncMessage(3L, "key", SyncType.PUT, 12L);
+
+    Batch.Value batch = (Batch.Value) Batch.reduce(List.of(invalidate8, invalidate9, put));
+
+    assertThat(batch.winner()).isSameAs(put);
+    assertThat(batch.covered()).containsExactly(invalidate8, invalidate9);
+    assertThat(batch.coveredInvalidate()).isSameAs(invalidate9);
+    assertThat(batch.allowSoftExpire()).isFalse();
+  }
+
+  @Test
+  @DisplayName("at the same version an INVALIDATE outranks a PUT in either arrival order")
+  void sameVersionInvalidateOutranksPut() {
+    SyncMessage invalidate = new SyncMessage(1L, "key", SyncType.INVALIDATE, 5L);
+    SyncMessage put = new SyncMessage(2L, "key", SyncType.PUT, 5L);
+
+    for (List<SyncMessage> messages : List.of(List.of(put, invalidate), List.of(invalidate, put))) {
+      Batch.Value batch = (Batch.Value) Batch.reduce(messages);
+
+      assertThat(batch.winner().type()).isEqualTo(SyncType.INVALIDATE);
+      assertThat(batch.covered()).extracting(SyncMessage::type).containsOnly(SyncType.PUT);
+    }
+  }
+
+  @Test
+  @DisplayName("at the same version a PUT outranks a REFRESH in either arrival order")
+  void sameVersionPutOutranksRefresh() {
+    SyncMessage put = new SyncMessage(1L, "key", SyncType.PUT, 5L);
+    SyncMessage refresh = new SyncMessage(2L, "key", SyncType.REFRESH, 5L);
+
+    for (List<SyncMessage> messages : List.of(List.of(refresh, put), List.of(put, refresh))) {
+      Batch.Value batch = (Batch.Value) Batch.reduce(messages);
+
+      assertThat(batch.winner().type()).isEqualTo(SyncType.PUT);
+      assertThat(batch.covered()).extracting(SyncMessage::type).containsOnly(SyncType.REFRESH);
+    }
+  }
+
+  @Test
   @DisplayName("a single-message batch carries no covered work")
   void singleMessageBatch() {
     SyncMessage message = new SyncMessage(1L, "key", SyncType.PUT, 3L);

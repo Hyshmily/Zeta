@@ -21,10 +21,7 @@ import io.github.hyshmily.zeta.constants.ZetaConstants;
 import io.github.hyshmily.zeta.sync.local.CacheSyncProperties;
 import org.junit.jupiter.api.Test;
 
-/**
- * Tests for {@link CacheSyncProperties} verifying default configuration values and queue name
- * prefix behavior.
- */
+/** Tests for {@link CacheSyncProperties} verifying its default configuration values. */
 class CacheSyncPropertiesTest {
 
   /**
@@ -39,15 +36,6 @@ class CacheSyncPropertiesTest {
     assertThat(props.getDedupWindowSeconds()).isEqualTo(10);
     assertThat(props.getDedupMaxSize()).isEqualTo(10_000);
     assertThat(props.getJitterMs()).isEqualTo(50);
-  }
-
-  /**
-   * Verifies that getQueueName returns a name starting with the configured queue prefix followed by colon.
-   */
-  @Test
-  void getQueueName_shouldReturnPrefixedName() {
-    CacheSyncProperties props = new CacheSyncProperties();
-    assertThat(props.getQueueName()).startsWith("zeta.sync:");
   }
 
   /**

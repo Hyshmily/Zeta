@@ -16,6 +16,7 @@
 package io.github.hyshmily.zeta.sync;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
@@ -178,6 +179,22 @@ class VersionGuardTest {
   }
 
   /**
+   * Two decisions without a node id are not provably from the same Worker. Their epoch and
+   * version counters are node-local, so arrival order is the only sound tie-break; comparing
+   * them would let one anonymous Worker overwrite or suppress another's decision.
+   */
+  @Test
+  void shouldSkipForWorker_twoAnonymousDecisions_shouldNotCompareVersions() {
+    CacheEntry existing = EntryDraft.of(entry(-5, 100)).decision(DecisionStamp.hot(100, null, 1)).build();
+    assertThat(VersionGuard.shouldSkipForWorker(existing, stamp(99, null, 1))).isFalse();
+
+    CacheEntry blank = EntryDraft.of(entry(-5, 100)).decision(DecisionStamp.hot(100, "   ", 1)).build();
+    assertThat(VersionGuard.shouldSkipForWorker(blank, stamp(99, "   ", 1)))
+      .as("a blank node id is as anonymous as a missing one")
+      .isFalse();
+  }
+
+  /**
    * Verifies that a existing entry with no Worker history (epoch=0, nodeId=null, dv=0)
    * accepts the first Worker message — the different-nodeId branch handles this.
    */
@@ -328,6 +345,17 @@ class VersionGuardTest {
   void shouldSkipForHot_olderDecisionOnNormalResident_shouldSkip() {
     CacheEntry existing = entryWithDecision(KeyState.NORMAL);
     assertThat(VersionGuard.shouldSkipForHot(existing, stamp(99, "W1", 2))).isTrue();
+  }
+
+  /** The public guards reject a null incoming stamp even when the resident is absent. */
+  @Test
+  void nullIncomingStamp_isRejectedRegardlessOfTheResident() {
+    assertThatThrownBy(() -> VersionGuard.shouldSkipForWorker((CacheEntry) null, (DecisionStamp) null))
+      .isInstanceOf(NullPointerException.class)
+      .hasMessageContaining("incoming");
+    assertThatThrownBy(() -> VersionGuard.shouldSkipForHot(entryWithDecision(KeyState.NORMAL), null))
+      .isInstanceOf(NullPointerException.class)
+      .hasMessageContaining("incoming");
   }
 
   private static DecisionStamp stamp(long version, String nodeId, long epoch) {

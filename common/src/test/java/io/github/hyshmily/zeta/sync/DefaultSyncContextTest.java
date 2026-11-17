@@ -18,12 +18,14 @@ package io.github.hyshmily.zeta.sync;
 import static io.github.hyshmily.zeta.constants.ZetaConstants.Amqp.*;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.*;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import io.github.hyshmily.zeta.autoconfigure.ZetaProperties;
+import io.github.hyshmily.zeta.cache.EntryView;
 import io.github.hyshmily.zeta.cache.cachesupport.lifecycle.EntryLifecycleImpl;
 import io.github.hyshmily.zeta.cache.cachesupport.loader.CacheLoader;
 import io.github.hyshmily.zeta.cache.cachesupport.loader.singleflight.SingleFlight;
@@ -35,10 +37,16 @@ import io.github.hyshmily.zeta.sync.local.Batch;
 import io.github.hyshmily.zeta.sync.local.CacheSyncProperties;
 import io.github.hyshmily.zeta.sync.local.DefaultSyncContext;
 import io.github.hyshmily.zeta.sync.local.PutPayloadCodec;
+import io.github.hyshmily.zeta.sync.local.SyncAdmission;
+import io.github.hyshmily.zeta.sync.local.SyncEvent;
 import io.github.hyshmily.zeta.sync.local.SyncHook;
 import io.github.hyshmily.zeta.sync.local.SyncMessage;
 import io.github.hyshmily.zeta.sync.local.SyncPolicy;
+import io.github.hyshmily.zeta.sync.local.SyncSkipReason;
 import io.github.hyshmily.zeta.sync.local.SyncType;
+import io.github.hyshmily.zeta.sync.local.SyncValueAction;
+import io.github.hyshmily.zeta.util.TimeSource;
+import io.github.hyshmily.zeta.util.clock.StampClock;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -68,25 +76,21 @@ class DefaultSyncContextTest {
   }
 
   private DefaultSyncContext newContext(CacheLoader<String, Object> loader, List<SyncHook> hooks) {
-    return new DefaultSyncContext(cache, loader, entryLifecycle, hooks, null, codec);
+    return newContext(loader, hooks, null);
+  }
+
+  private DefaultSyncContext newContext(
+    CacheLoader<String, Object> loader,
+    List<SyncHook> hooks,
+    StampClock stampClock
+  ) {
+    return new DefaultSyncContext(cache, loader, entryLifecycle, hooks, null, codec, Runnable::run, stampClock);
   }
 
   private final SyncPolicy policy = new SyncPolicy() {};
 
   private void handleBatch(List<SyncMessage> messages) {
-    Batch batch = Batch.reduce(messages);
-    if (batch instanceof Batch.Value value) {
-      for (SyncMessage covered : value.covered()) {
-        context.skip(covered);
-      }
-      if (value.winner().type() == SyncType.INVALIDATE) {
-        policy.invalidate(value, context);
-      } else {
-        policy.value(value, context);
-      }
-      return;
-    }
-    policy.clear((Batch.Clear) batch, context);
+    context.apply(Batch.reduce(messages), policy);
   }
 
   private static SyncMessage msg(String key, String type, long version) {
@@ -130,7 +134,57 @@ class DefaultSyncContextTest {
     assertThat(applied).isNotNull();
     assertThat(applied.getValue()).isEqualTo("refreshed");
     assertThat(applied.getDataVersion()).isEqualTo(2L);
-    verify(hook).afterRefresh(any(), any());
+    verify(hook).afterValueApplied(any(), any());
+  }
+
+  /** An accepted peer stamp is already orderable locally and must not spend an allocation. */
+  @Test
+  void acceptedPeerVersion_isNotRestamped() {
+    StampClock clock = mock(StampClock.class);
+    when(clock.observe(anyLong())).thenReturn(true);
+    context = newContext(k -> "refreshed", List.of(), clock);
+
+    handleBatch(List.of(msg("key1", SyncType.REFRESH.code(), 2L)));
+
+    assertThat(cache.getIfPresent("key1").getDataVersion()).isEqualTo(2L);
+    verify(clock, never()).nextStamp();
+  }
+
+  /**
+   * The batch reduction compares the peer versions before any replacement stamp exists. The
+   * refused winner is re-stamped once, on the per-key apply; the covered message never
+   * allocates, so an older covered mutation cannot outrank the winner.
+   */
+  @Test
+  void overDriftBatch_isReducedOnPeerVersionsBeforeOneRestamp() {
+    StampClock clock = mock(StampClock.class);
+    when(clock.observe(anyLong())).thenReturn(false);
+    when(clock.nextStamp()).thenReturn(42L);
+    context = newContext(k -> null, List.of(), clock);
+    cache.put("key1", entry(1, KeyState.NORMAL));
+
+    handleBatch(List.of(msg("key1", SyncType.INVALIDATE.code(), 900L), msg("key1", SyncType.INVALIDATE.code(), 800L)));
+
+    assertThat(cache.getIfPresent("key1")).isNull();
+    assertThat(entryLifecycle.staleAgainstInvalidation("key1", 42L)).isTrue();
+    assertThat(entryLifecycle.staleAgainstInvalidation("key1", 43L)).isFalse();
+    verify(clock, times(1)).nextStamp();
+  }
+
+  /** A clear hook reports the stamp the sweep applied, not the refused peer stamp. */
+  @Test
+  void overDriftClear_reportsTheAppliedVersionToTheHook() {
+    StampClock clock = mock(StampClock.class);
+    when(clock.observe(anyLong())).thenReturn(false);
+    when(clock.nextStamp()).thenReturn(42L);
+    SyncHook hook = mock(SyncHook.class);
+    context = newContext(k -> null, List.of(hook), clock);
+    cache.put("low", entry(3, KeyState.NORMAL));
+
+    handleBatch(List.of(msg("clear", SyncType.INVALIDATE_ALL.code(), 900L)));
+
+    assertThat(cache.getIfPresent("low")).isNull();
+    verify(hook).afterClear(argThat(events -> events.size() == 1 && events.get(0).version() == 42L), eq(1));
   }
 
   @Test
@@ -142,7 +196,7 @@ class DefaultSyncContextTest {
     handleBatch(List.of(msg("key1", SyncType.REFRESH.code(), 3L)));
 
     assertThat(cache.getIfPresent("key1").getValue()).isEqualTo("v");
-    verify(hook).onRefreshSkipped(any());
+    verify(hook).onSkipped(any(), any());
   }
 
   @Test
@@ -154,7 +208,8 @@ class DefaultSyncContextTest {
     handleBatch(List.of(msg("key1", SyncType.REFRESH.code(), 2L)));
 
     assertThat(cache.getIfPresent("key1")).isNull();
-    verify(hook).onRefreshSkipped(any());
+    verify(hook).afterValueDegraded(any(), eq(SyncSkipReason.VALUE_NOT_FOUND));
+    verify(hook, never()).afterInvalidate(any());
   }
 
   @Test
@@ -181,6 +236,45 @@ class DefaultSyncContextTest {
     assertThat(entry.getSoftExpireAtMs()).isLessThan(System.currentTimeMillis());
   }
 
+  /**
+   * The closed soft window must stay on the wall-clock axis the read path uses. A backward wall
+   * step makes the monotonic axis run ahead; writing the deadline from `monotonicMillis()` would
+   * put it in the future of `isSoftExpired` and keep the stale entry servable.
+   */
+  @Test
+  void refreshFailureSoftExpiryUsesTheWallClockAxis() {
+    try {
+      TimeSource.setTimeOffsetForTest(-60_000L, 0L);
+      cache.put("key1", entry(1, KeyState.HOT));
+      context = newContext(k -> null, List.of());
+
+      handleBatch(List.of(msg("key1", SyncType.REFRESH.code(), 2L)));
+
+      CacheEntry entry = cache.getIfPresent("key1");
+      assertThat(entry).isNotNull();
+      assertThat(entry.getSoftExpireAtMs()).isLessThan(TimeSource.currentTimeMillis());
+      assertThat(entryLifecycle.ttlPolicy().isSoftExpired(entry)).isTrue();
+    } finally {
+      TimeSource.setTimeOffsetForTest(0L, 0L);
+    }
+  }
+
+  @Test
+  void refreshFailureOnHardExpiredWorkerManagedEntry_removesItInsteadOfRewriting() {
+    CacheEntry expired = EntryDraft.of(entry(7, KeyState.HOT))
+      .hardExpiryAt(TimeSource.currentTimeMillis() - 1L)
+      .build();
+    cache.put("key1", expired);
+    SingleFlight flight = mock(SingleFlight.class);
+    context = new DefaultSyncContext(cache, k -> null, entryLifecycle, List.of(), flight, codec);
+
+    handleBatch(List.of(msg("key1", SyncType.REFRESH.code(), 6L)));
+
+    assertThat(cache.getIfPresent("key1")).isNull();
+    assertThat(entryLifecycle.staleAgainstInvalidation("key1", 6L)).isTrue();
+    verify(flight).invalidate("key1");
+  }
+
   @Test
   void refresh_declinedByLoaderAdmission_invalidatesLocally() {
     cache.put("key1", entry(1, KeyState.NORMAL));
@@ -190,7 +284,39 @@ class DefaultSyncContextTest {
     handleBatch(List.of(msg("key1", SyncType.REFRESH.code(), 2L)));
 
     assertThat(cache.getIfPresent("key1")).isNull();
-    verify(hook).onRefreshSkipped(any());
+    verify(hook).afterValueDegraded(any(), eq(SyncSkipReason.VALUE_DECLINED_BY_LOADER));
+  }
+
+  /**
+   * The loader admission SPI is fallible: an exception on a decoded PUT value is a refusal, not
+   * an applier escape. The event still gets its one terminal hook and the versioned invalidation
+   * fallback.
+   */
+  @Test
+  void put_admissionThrows_invalidatesLocallyAndFiresTheDegradedHook() {
+    cache.put("key1", entry(1, KeyState.NORMAL));
+    SyncHook hook = mock(SyncHook.class);
+    context = newContext(
+      new CacheLoader<>() {
+        @Override
+        public Object load(String key) {
+          return "loaded";
+        }
+
+        @Override
+        public boolean isCacheable(Object candidate) {
+          throw new IllegalStateException("admission down");
+        }
+      },
+      List.of(hook)
+    );
+
+    handleBatch(List.of(put("key1", "carried", 2L)));
+
+    assertThat(cache.getIfPresent("key1")).isNull();
+    verify(hook).afterValueDegraded(any(), eq(SyncSkipReason.VALUE_DECLINED_BY_LOADER));
+    verify(hook, never()).afterValueApplied(any(), any());
+    verify(hook, never()).onSkipped(any(), any());
   }
 
   @Test
@@ -271,10 +397,11 @@ class DefaultSyncContextTest {
 
   /**
    * An unreadable PUT degrades to a versioned eviction, but the message still has exactly
-   * one terminal hook: {@code onRefreshSkipped}, never {@code afterInvalidate}.
+   * one terminal hook: {@code afterValueDegraded}, never {@code afterInvalidate} or
+   * {@code onSkipped}.
    */
   @Test
-  void put_unreadablePayload_firesOnlyTheSkippedHook() {
+  void put_unreadablePayload_firesOnlyTheDegradedHook() {
     cache.put("key1", entry(1, KeyState.NORMAL));
     SyncHook hook = mock(SyncHook.class);
     PutPayloadCodec unreadable = mock(PutPayloadCodec.class);
@@ -284,18 +411,19 @@ class DefaultSyncContextTest {
     handleBatch(List.of(put("key1", "carried", 2L)));
 
     assertThat(cache.getIfPresent("key1")).isNull();
-    verify(hook).onRefreshSkipped(any());
+    verify(hook).afterValueDegraded(any(), eq(SyncSkipReason.PAYLOAD_UNREADABLE));
     verify(hook, never()).afterInvalidate(any());
-    verify(hook, never()).afterRefresh(any(), any());
+    verify(hook, never()).afterValueApplied(any(), any());
+    verify(hook, never()).onSkipped(any(), any());
   }
 
   /**
    * A REFRESH whose load yields nothing removes the resident through the internal
    * fallback, but the fallback is not a peer INVALIDATE: the message reports one terminal
-   * {@code onRefreshSkipped} and no {@code afterInvalidate}.
+   * {@code afterValueDegraded} and no {@code afterInvalidate}.
    */
   @Test
-  void refresh_emptyLoad_withResident_firesOnlyTheSkippedHook() {
+  void refresh_emptyLoad_withResident_firesOnlyTheDegradedHook() {
     cache.put("key1", entry(1, KeyState.NORMAL));
     SyncHook hook = mock(SyncHook.class);
     context = newContext(k -> null, List.of(hook));
@@ -303,7 +431,7 @@ class DefaultSyncContextTest {
     handleBatch(List.of(msg("key1", SyncType.REFRESH.code(), 2L)));
 
     assertThat(cache.getIfPresent("key1")).isNull();
-    verify(hook).onRefreshSkipped(any());
+    verify(hook).afterValueDegraded(any(), eq(SyncSkipReason.VALUE_NOT_FOUND));
     verify(hook, never()).afterInvalidate(any());
   }
 
@@ -329,28 +457,70 @@ class DefaultSyncContextTest {
   }
 
   /**
-   * At the same version the INVALIDATE outranks the REFRESH, matching the codec's
+   * A logically expired resident is absent for the per-key guard: the invalidation must still
+   * record its tombstone, or an older in-flight fill could land after the dead entry is
+   * treated as absent by the write guard.
+   */
+  @Test
+  void invalidate_removesAnExpiredResidentAndRecordsTheTombstone() {
+    CacheEntry expired = EntryDraft.of(entry(7, KeyState.NORMAL))
+      .hardExpiryAt(TimeSource.currentTimeMillis() - 1L)
+      .build();
+    cache.put("key1", expired);
+    SyncHook hook = mock(SyncHook.class);
+    SingleFlight flight = mock(SingleFlight.class);
+    context = new DefaultSyncContext(cache, k -> "refreshed", entryLifecycle, List.of(hook), flight, codec);
+
+    handleBatch(List.of(msg("key1", SyncType.INVALIDATE.code(), 6L)));
+
+    assertThat(cache.getIfPresent("key1")).isNull();
+    assertThat(entryLifecycle.staleAgainstInvalidation("key1", 6L)).isTrue();
+    verify(hook).afterInvalidate(any());
+    verify(flight).invalidate("key1");
+  }
+
+  /** The clear watermark already protects fills; the sweep also removes a dead resident. */
+  @Test
+  void clearAll_removesAnExpiredResidentAboveTheClearStamp() {
+    CacheEntry expired = EntryDraft.of(entry(7, KeyState.NORMAL))
+      .hardExpiryAt(TimeSource.currentTimeMillis() - 1L)
+      .build();
+    cache.put("key1", expired);
+
+    handleBatch(List.of(msg("clear", SyncType.INVALIDATE_ALL.code(), 6L)));
+
+    assertThat(cache.getIfPresent("key1")).isNull();
+  }
+
+  /**
+   * At the same version the INVALIDATE outranks the REFRESH, matching the publisher's
    * {@code BroadcastClaim} rule; arrival order inside the batch must not flip the winner.
    */
   @Test
   void sameVersionInvalidateOutranksRefreshInEitherOrder() {
-    cache.put("key1", entry(1, KeyState.NORMAL));
     SyncHook hook = mock(SyncHook.class);
     context = newContext(k -> "refreshed", List.of(hook));
+    SyncMessage invalidate = msg("key1", SyncType.INVALIDATE.code(), 5L);
+    SyncMessage refresh = msg("key1", SyncType.REFRESH.code(), 5L);
 
-    handleBatch(List.of(msg("key1", SyncType.INVALIDATE.code(), 5L), msg("key1", SyncType.REFRESH.code(), 5L)));
+    for (List<SyncMessage> messages : List.of(List.of(invalidate, refresh), List.of(refresh, invalidate))) {
+      cache.put("key1", entry(1, KeyState.NORMAL));
+      handleBatch(messages);
 
-    assertThat(cache.getIfPresent("key1")).isNull();
-    verify(hook).afterInvalidate(any());
-    verify(hook, never()).afterRefresh(any(), any());
+      assertThat(cache.getIfPresent("key1")).isNull();
+    }
+
+    verify(hook, times(2)).afterInvalidate(any());
+    verify(hook, never()).afterValueApplied(any(), any());
   }
 
   /**
-   * A covered INVALIDATE whose value fallback evicts still owns an invalidation outcome: the
-   * removal must fire {@code afterInvalidate}, not only {@code onRefreshSkipped}.
+   * A covered INVALIDATE of a fallback eviction stays superseded: the value event reports
+   * {@code afterValueDegraded} and the covered removal only {@code onSkipped}, because the
+   * covered instruction never won the batch.
    */
   @Test
-  void coveredInvalidateFiresAfterAFallbackEviction() {
+  void coveredInvalidateOfAFallbackEvictionIsReportedSuperseded() {
     cache.put("key1", entry(1, KeyState.NORMAL));
     SyncHook hook = mock(SyncHook.class);
     context = newContext(k -> null, List.of(hook));
@@ -358,8 +528,143 @@ class DefaultSyncContextTest {
     handleBatch(List.of(msg("key1", SyncType.INVALIDATE.code(), 2L), msg("key1", SyncType.REFRESH.code(), 3L)));
 
     assertThat(cache.getIfPresent("key1")).isNull();
+    verify(hook).afterValueDegraded(any(), eq(SyncSkipReason.VALUE_NOT_FOUND));
+    verify(hook).onSkipped(any(), eq(SyncSkipReason.COVERED_BY_NEWER_EVENT));
+    verify(hook, never()).afterInvalidate(any());
+  }
+
+  /**
+   * A batch of two INVALIDATEs settles both messages: the winner removes the entry and the
+   * covered one is reported superseded, so neither is left without a terminal callback.
+   */
+  @Test
+  void coveredInvalidateOfAnInvalidateWinnerIsReportedSkipped() {
+    cache.put("key1", entry(1, KeyState.NORMAL));
+    SyncHook hook = mock(SyncHook.class);
+    context = newContext(k -> "refreshed", List.of(hook));
+
+    handleBatch(List.of(msg("key1", SyncType.INVALIDATE.code(), 5L), msg("key1", SyncType.INVALIDATE.code(), 6L)));
+
+    assertThat(cache.getIfPresent("key1")).isNull();
     verify(hook).afterInvalidate(any());
-    verify(hook).onRefreshSkipped(any());
+    verify(hook).onSkipped(any(), eq(SyncSkipReason.COVERED_BY_NEWER_EVENT));
+  }
+
+  /** Every covered INVALIDATE owns a terminal callback, not just the highest one. */
+  @Test
+  void everyCoveredInvalidateGetsATerminalCallback() {
+    cache.put("key1", entry(1, KeyState.NORMAL));
+    SyncHook hook = mock(SyncHook.class);
+    context = newContext(k -> "refreshed", List.of(hook));
+
+    handleBatch(
+      List.of(
+        msg("key1", SyncType.INVALIDATE.code(), 8L),
+        msg("key1", SyncType.INVALIDATE.code(), 9L),
+        put("key1", "carried", 10L)
+      )
+    );
+
+    assertThat(cache.getIfPresent("key1").getValue()).isEqualTo("carried");
+    verify(hook, times(2)).onSkipped(any(), eq(SyncSkipReason.COVERED_BY_NEWER_EVENT));
+    verify(hook).afterValueApplied(any(), any());
+  }
+
+  /**
+   * A winning REFRESH the policy refuses must not swallow the INVALIDATE the batch already
+   * carried: the covered removal still evicts the resident, while the winner reports its own
+   * policy rejection.
+   */
+  @Test
+  void rejectedValueAdmissionStillAppliesTheCoveredInvalidate() {
+    cache.put("key1", entry(1, KeyState.NORMAL));
+    SyncHook hook = mock(SyncHook.class);
+    context = newContext(k -> "refreshed", List.of(hook));
+    SyncPolicy rejecting = new SyncPolicy() {
+      @Override
+      public SyncAdmission admit(SyncEvent event, EntryView current) {
+        return SyncAdmission.SKIP;
+      }
+    };
+
+    context.apply(
+      Batch.reduce(List.of(msg("key1", SyncType.INVALIDATE.code(), 2L), msg("key1", SyncType.REFRESH.code(), 3L))),
+      rejecting
+    );
+
+    assertThat(cache.getIfPresent("key1")).isNull();
+    verify(hook).onSkipped(any(), eq(SyncSkipReason.COVERED_BY_NEWER_EVENT));
+    verify(hook).onSkipped(any(), eq(SyncSkipReason.POLICY_REJECTED));
+    verify(hook, never()).afterValueApplied(any(), any());
+    verify(hook, never()).afterInvalidate(any());
+  }
+
+  /** The same fallback applies when the policy refuses the resolved value. */
+  @Test
+  void rejectedResolvedValueStillAppliesTheCoveredInvalidate() {
+    cache.put("key1", entry(1, KeyState.NORMAL));
+    SyncHook hook = mock(SyncHook.class);
+    context = newContext(k -> "refreshed", List.of(hook));
+    SyncPolicy rejecting = new SyncPolicy() {
+      @Override
+      public SyncValueAction onValueResolved(SyncEvent event, Object resolvedValue, EntryView current) {
+        return SyncValueAction.SKIP;
+      }
+    };
+
+    context.apply(
+      Batch.reduce(List.of(msg("key1", SyncType.INVALIDATE.code(), 2L), put("key1", "carried", 3L))),
+      rejecting
+    );
+
+    assertThat(cache.getIfPresent("key1")).isNull();
+    verify(hook).onSkipped(any(), eq(SyncSkipReason.COVERED_BY_NEWER_EVENT));
+    verify(hook).onSkipped(any(), eq(SyncSkipReason.POLICY_REJECTED));
+    verify(hook, never()).afterValueApplied(any(), any());
+  }
+
+  /** A null policy result is a broken policy, not an approval: it settles as POLICY_FAILED. */
+  @Test
+  void nullPolicyAdmissionSettlesAsPolicyFailed() {
+    cache.put("key1", entry(1, KeyState.NORMAL));
+    SyncHook hook = mock(SyncHook.class);
+    context = newContext(k -> "refreshed", List.of(hook));
+    SyncPolicy broken = new SyncPolicy() {
+      @Override
+      public SyncAdmission admit(SyncEvent event, EntryView current) {
+        return null;
+      }
+    };
+
+    context.apply(Batch.reduce(List.of(put("key1", "carried", 2L))), broken);
+
+    assertThat(cache.getIfPresent("key1").getValue()).isEqualTo("v");
+    verify(hook).onSkipped(any(), eq(SyncSkipReason.POLICY_FAILED));
+    verify(hook, never()).afterValueApplied(any(), any());
+  }
+
+  /** A thrown policy failure still runs the covered-invalidate fallback exactly once. */
+  @Test
+  void onValueResolvedFailureSettlesAsPolicyFailedAndAppliesTheCoveredInvalidate() {
+    cache.put("key1", entry(1, KeyState.NORMAL));
+    SyncHook hook = mock(SyncHook.class);
+    context = newContext(k -> "refreshed", List.of(hook));
+    SyncPolicy broken = new SyncPolicy() {
+      @Override
+      public SyncValueAction onValueResolved(SyncEvent event, Object resolvedValue, EntryView current) {
+        throw new IllegalStateException("policy down");
+      }
+    };
+
+    context.apply(
+      Batch.reduce(List.of(msg("key1", SyncType.INVALIDATE.code(), 2L), put("key1", "carried", 3L))),
+      broken
+    );
+
+    assertThat(cache.getIfPresent("key1")).isNull();
+    verify(hook).onSkipped(any(), eq(SyncSkipReason.COVERED_BY_NEWER_EVENT));
+    verify(hook).onSkipped(any(), eq(SyncSkipReason.POLICY_FAILED));
+    verify(hook, never()).afterValueApplied(any(), any());
   }
 
   @Test
@@ -434,6 +739,41 @@ class DefaultSyncContextTest {
 
     verify(flight).invalidatePrefix("users\u0000");
     verify(flight, never()).invalidateAll();
+  }
+
+  /** The consumer-thread fallback applies the removal without invoking user code. */
+  @Test
+  void invalidateNowRemovesWithoutFiringHooks() {
+    cache.put("key1", entry(1, KeyState.NORMAL));
+    SyncHook hook = mock(SyncHook.class);
+    context = newContext(k -> "refreshed", List.of(hook));
+
+    context.invalidateNow(msg("key1", SyncType.INVALIDATE.code(), 2L));
+
+    assertThat(cache.getIfPresent("key1")).isNull();
+    verifyNoInteractions(hook);
+  }
+
+  /** The consumer thread records the watermark and hands the sweep to the executor. */
+  @Test
+  void clearNowDefersTheSweepAndSkipsHooks() {
+    cache.put("low", entry(3, KeyState.NORMAL));
+    cache.put("high", entry(12, KeyState.NORMAL));
+    SyncHook hook = mock(SyncHook.class);
+    List<Runnable> pending = new java.util.ArrayList<>();
+    context = new DefaultSyncContext(cache, k -> "refreshed", entryLifecycle, List.of(hook), null, codec, pending::add);
+
+    context.clearNow(new Batch.Clear(List.of(msg("clear", SyncType.INVALIDATE_ALL.code(), 9L))));
+
+    assertThat(cache.getIfPresent("low")).isNotNull();
+    assertThat(cache.getIfPresent("high")).isNotNull();
+    assertThat(pending).hasSize(1);
+
+    pending.forEach(Runnable::run);
+
+    assertThat(cache.getIfPresent("low")).isNull();
+    assertThat(cache.getIfPresent("high")).isNotNull();
+    verifyNoInteractions(hook);
   }
 
   private static CacheLoader<String, Object> decliningLoader() {

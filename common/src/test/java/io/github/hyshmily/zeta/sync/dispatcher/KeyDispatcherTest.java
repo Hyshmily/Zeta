@@ -16,11 +16,13 @@
 package io.github.hyshmily.zeta.sync.dispatcher;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.lang.reflect.Field;
 import java.util.List;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Tag;
@@ -82,6 +84,56 @@ class KeyDispatcherTest {
     CountDownLatch latch = new CountDownLatch(1);
     dispatcher.submit("key", latch::countDown, 1, true);
     assertThat(latch.await(5, TimeUnit.SECONDS)).isTrue();
+  }
+
+  /**
+   * A zero per-cycle cap would grant an empty batch forever and spin the executor; a zero
+   * per-key bound would refuse every task behind the pre-granted first one; a zero global
+   * budget would silently refuse every non-control task. All three are rejected at
+   * construction instead of becoming a runtime loop or a silent drop.
+   */
+  @Test
+  void constructorRejectsNonPositiveBounds() {
+    assertThatThrownBy(() -> newDispatcher(executor, "bad", 0, 1, 100, 0))
+      .isInstanceOf(IllegalArgumentException.class)
+      .hasMessageContaining("maxQueuePerKey");
+    assertThatThrownBy(() -> newDispatcher(executor, "bad", 1, 0, 100, 0))
+      .isInstanceOf(IllegalArgumentException.class)
+      .hasMessageContaining("maxTasksPerCycle");
+    assertThatThrownBy(() -> newDispatcher(executor, "bad", 1, 1, 0, 0))
+      .isInstanceOf(IllegalArgumentException.class)
+      .hasMessageContaining("maxGlobalPendingUnits");
+  }
+
+  @Test
+  void constructorRejectsANullConsumer() {
+    assertThatThrownBy(() -> new KeyDispatcher<Runnable>(executor, "bad", null, 1, 1, 100, 0))
+      .isInstanceOf(NullPointerException.class)
+      .hasMessageContaining("consumer");
+  }
+
+  @Test
+  void submit_nullKeyOrTask_shouldRejectBeforeAdmission() {
+    assertThatThrownBy(() -> dispatcher.submit(null, () -> {}, 1, false))
+      .isInstanceOf(NullPointerException.class)
+      .hasMessageContaining("key");
+    assertThatThrownBy(() -> dispatcher.submit("key", null, 1, false))
+      .isInstanceOf(NullPointerException.class)
+      .hasMessageContaining("task");
+  }
+
+  /**
+   * A submission near {@link Long#MAX_VALUE} must not overflow the budget comparison into a
+   * negative number, which would turn a full dispatcher into an accepting one for the next
+   * submission.
+   */
+  @Test
+  void submit_budgetAtTheLongCeiling_shouldRejectInsteadOfOverflowing() throws Exception {
+    Field units = KeyDispatcher.class.getDeclaredField("globalPendingUnits");
+    units.setAccessible(true);
+    ((java.util.concurrent.atomic.LongAdder) units.get(dispatcher)).add(Long.MAX_VALUE);
+
+    assertThat(dispatcher.submit("key", () -> {}, 1, false)).isFalse();
   }
 
   /**
@@ -214,8 +266,8 @@ class KeyDispatcherTest {
   }
 
   /**
-   * While the start-jitter park holds the first task in {@code firstTask}, that task
-   * already counts against the per-key bound: a second submission must be rejected at
+   * While the start-jitter park holds the pre-granted first batch, that task already counts
+   * against the per-key bound: a second submission must be rejected at
    * {@code maxQueuePerKey = 1} instead of becoming the bound + 1.
    */
   @Test
@@ -278,6 +330,40 @@ class KeyDispatcherTest {
   }
 
   /**
+   * close() must win the publication race: a submit blocked inside the executor's first
+   * admission when close() runs must report a refusal and publish no worker, so the caller
+   * applies its local fallback and no parked future keeps the payload alive.
+   */
+  @Test
+  void close_racingTheFirstExecutorAdmission_shouldRefuseAndPublishNoWorker() throws Exception {
+    BlockingFirstAcceptingExecutor blocking = new BlockingFirstAcceptingExecutor();
+    KeyDispatcher<Runnable> d = newDispatcher(
+      blocking,
+      "close-race",
+      KeyDispatcher.DEFAULT_MAX_QUEUE_PER_KEY,
+      KeyDispatcher.DEFAULT_MAX_TASKS_PER_CYCLE,
+      KeyDispatcher.DEFAULT_MAX_GLOBAL_PENDING_UNITS,
+      0
+    );
+    ExecutorService callers = Executors.newSingleThreadExecutor();
+    try {
+      Future<Boolean> accepted = callers.submit(() -> d.submit("key", () -> {}, 1, false));
+      assertThat(blocking.awaitEntered()).isTrue();
+
+      d.close();
+      blocking.release();
+
+      assertThat(accepted.get(5, TimeUnit.SECONDS)).isFalse();
+      assertThat(queuesOf(d)).as("close() must not leave a worker published after its sweep").isEmpty();
+    } finally {
+      blocking.release();
+      callers.shutdownNow();
+      d.close();
+      blocking.shutdownNow();
+    }
+  }
+
+  /**
    * Verifies that after a single task completes and the queue is empty, the key is removed from the internal map.
    */
   @Test
@@ -296,6 +382,46 @@ class KeyDispatcherTest {
     ConcurrentHashMap<Object, ?> queues = (ConcurrentHashMap<Object, ?>) queuesField.get(dispatcher);
 
     assertThat(queues).doesNotContainKey("key1");
+  }
+
+  /**
+   * The first-cycle merge must return a successor worker unchanged. Returning {@code null}
+   * when {@code current != worker} deletes a live successor and lets two workers run the
+   * same key concurrently.
+   */
+  @Test
+  void firstMerge_shouldPreserveASuccessorWorker() throws Exception {
+    CapturingExecutor capturing = new CapturingExecutor();
+    KeyDispatcher<Runnable> d = newDispatcher(
+      capturing,
+      "successor",
+      KeyDispatcher.DEFAULT_MAX_QUEUE_PER_KEY,
+      KeyDispatcher.DEFAULT_MAX_TASKS_PER_CYCLE,
+      KeyDispatcher.DEFAULT_MAX_GLOBAL_PENDING_UNITS,
+      0
+    );
+    try {
+      assertThat(d.submit("key", () -> {}, 1, false)).isTrue();
+      assertThat(d.submit("key", () -> {}, 1, false)).isTrue();
+      Runnable oldWorker = capturing.take();
+
+      ConcurrentHashMap<Object, ?> queues = queuesOf(d);
+      assertThat(queues.remove("key")).isSameAs(oldWorker);
+
+      // A successor takes the key while the old worker is still parked outside the map.
+      assertThat(d.submit("key", () -> {}, 1, false)).isTrue();
+      Runnable successor = capturing.take();
+      assertThat(queues.get("key")).isSameAs(successor);
+
+      oldWorker.run();
+
+      assertThat(queues).as("the old first cycle must not delete its successor").containsKey("key");
+      assertThat(queues.get("key")).isSameAs(successor);
+      successor.run();
+    } finally {
+      d.close();
+      capturing.shutdownNow();
+    }
   }
 
   /**
@@ -347,7 +473,7 @@ class KeyDispatcherTest {
    */
   @Test
   void submit_maxTasksPerCycle_shouldSplitBatches() throws InterruptedException {
-    CountingExecutor countingExecutor = new CountingExecutor(4);
+    GatedCountingExecutor countingExecutor = new GatedCountingExecutor(4);
     KeyDispatcher<Runnable> batchingDispatcher = newDispatcher(
       countingExecutor,
       "test",
@@ -363,10 +489,16 @@ class KeyDispatcherTest {
       for (int i = 0; i < taskCount; i++) {
         batchingDispatcher.submit("key", done::countDown, 1, true);
       }
+      // Queue the whole burst before the first cycle, then release it: the exact split
+      // (8 + 8 + 4) is deterministic instead of depending on how the submitter races the
+      // worker's cycles.
+      countingExecutor.release();
+
       assertThat(done.await(5, TimeUnit.SECONDS)).isTrue();
       // 20 tasks at 8 per cycle → 3 batches (8 + 8 + 4): initial submission + 2 continuations.
-      assertThat(countingExecutor.getSubmissionCount()).isBetween(3, 5);
+      assertThat(countingExecutor.getSubmissionCount()).isEqualTo(3);
     } finally {
+      countingExecutor.release();
       batchingDispatcher.close();
       countingExecutor.shutdownNow();
     }
@@ -432,24 +564,32 @@ class KeyDispatcherTest {
     CountDownLatch done = new CountDownLatch(1);
     var executionOrder = new java.util.concurrent.CopyOnWriteArrayList<Integer>();
     try {
-      rejectingDispatcher.submit(
-        "key",
-        () -> {
-          executionOrder.add(1);
-          done.countDown();
-        },
-        1,
-        true
-      );
-      rejectingDispatcher.submit(
-        "key",
-        () -> {
-          executionOrder.add(2);
-          done.countDown();
-        },
-        1,
-        true
-      );
+      assertThat(
+        rejectingDispatcher.submit(
+          "key",
+          () -> {
+            executionOrder.add(1);
+            done.countDown();
+          },
+          1,
+          true
+        )
+      )
+        .as("a refused first drive must be reported to the caller")
+        .isFalse();
+      assertThat(
+        rejectingDispatcher.submit(
+          "key",
+          () -> {
+            executionOrder.add(2);
+            done.countDown();
+          },
+          1,
+          true
+        )
+      )
+        .as("a fresh worker after the retired one is accepted")
+        .isTrue();
 
       assertThat(done.await(5, TimeUnit.SECONDS)).isTrue();
       // The first cycle was rejected and its task retired with the worker;
@@ -458,6 +598,51 @@ class KeyDispatcherTest {
     } finally {
       rejectingDispatcher.close();
       rejectingExec.shutdownNow();
+    }
+  }
+
+  /**
+   * Pins the admission/publication coupling: a submit that arrives while the creator is still
+   * inside the executor submission must not enqueue behind a worker the executor will refuse;
+   * it waits on the bin lock and starts a fresh worker after the refusal.
+   */
+  @Test
+  void submit_concurrentWithRefusedFirstCycle_shouldNotLoseTheSecondTask() throws Exception {
+    BlockingFirstRejectingExecutor blockingExecutor = new BlockingFirstRejectingExecutor();
+    KeyDispatcher<Runnable> d = newDispatcher(
+      blockingExecutor,
+      "blocking-reject",
+      KeyDispatcher.DEFAULT_MAX_QUEUE_PER_KEY,
+      KeyDispatcher.DEFAULT_MAX_TASKS_PER_CYCLE,
+      KeyDispatcher.DEFAULT_MAX_GLOBAL_PENDING_UNITS,
+      0
+    );
+    ExecutorService callers = Executors.newFixedThreadPool(2);
+    try {
+      Future<Boolean> rejected = callers.submit(() -> d.submit("key", () -> {}, 1, false));
+      assertThat(blockingExecutor.awaitFirstEntered()).isTrue();
+
+      CountDownLatch secondRan = new CountDownLatch(1);
+      CountDownLatch secondStarted = new CountDownLatch(1);
+      Future<Boolean> accepted = callers.submit(() -> {
+        secondStarted.countDown();
+        return d.submit("key", secondRan::countDown, 1, false);
+      });
+      assertThat(secondStarted.await(5, TimeUnit.SECONDS)).isTrue();
+      // Give the second submit time to reach the bin lock, which the first holder keeps
+      // until the executor admission returns.
+      Thread.sleep(100L);
+
+      blockingExecutor.releaseFirst();
+
+      assertThat(rejected.get(5, TimeUnit.SECONDS)).isFalse();
+      assertThat(accepted.get(5, TimeUnit.SECONDS)).isTrue();
+      assertThat(secondRan.await(5, TimeUnit.SECONDS)).isTrue();
+    } finally {
+      blockingExecutor.releaseFirst();
+      callers.shutdownNow();
+      d.close();
+      blockingExecutor.shutdownNow();
     }
   }
 
@@ -639,6 +824,51 @@ class KeyDispatcherTest {
       assertThat(nextRan.await(200, TimeUnit.MILLISECONDS)).isTrue();
     } finally {
       capped.close();
+    }
+  }
+
+  /**
+   * A fatal Error must be reported and then propagate; swallowing it would hide a broken
+   * JVM state, and leaving the worker mapped would wedge every later submission for the key.
+   */
+  @Test
+  void runTask_fatalError_shouldRetireTheWorkerAndPropagate() throws Exception {
+    CapturingErrorExecutor capturing = new CapturingErrorExecutor();
+    KeyDispatcher<Runnable> d = newDispatcher(
+      capturing,
+      "fatal",
+      KeyDispatcher.DEFAULT_MAX_QUEUE_PER_KEY,
+      KeyDispatcher.DEFAULT_MAX_TASKS_PER_CYCLE,
+      KeyDispatcher.DEFAULT_MAX_GLOBAL_PENDING_UNITS,
+      0
+    );
+    try {
+      CountDownLatch attempted = new CountDownLatch(1);
+      assertThat(
+        d.submit(
+          "key",
+          () -> {
+            attempted.countDown();
+            throw new Error("fatal");
+          },
+          1,
+          false
+        )
+      ).isTrue();
+      assertThat(attempted.await(5, TimeUnit.SECONDS)).isTrue();
+
+      long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+      while (capturing.failure() == null && System.nanoTime() < deadline) {
+        Thread.sleep(2L);
+      }
+      assertThat(capturing.failure()).isInstanceOf(Error.class).hasMessage("fatal");
+
+      CountDownLatch recovered = new CountDownLatch(1);
+      assertThat(d.submit("key", recovered::countDown, 1, false)).isTrue();
+      assertThat(recovered.await(5, TimeUnit.SECONDS)).isTrue();
+    } finally {
+      d.close();
+      capturing.shutdownNow();
     }
   }
 
@@ -871,9 +1101,8 @@ class KeyDispatcherTest {
     );
     try {
       CountDownLatch dropped = new CountDownLatch(1);
-      twiceRejectingDispatcher.submit("key", dropped::countDown, 1, false);
-      // Both the submission and its re-drive were refused: the task leaves with the
-      // retired worker and never runs.
+      assertThat(twiceRejectingDispatcher.submit("key", dropped::countDown, 1, false)).isFalse();
+      // The immediate drive was refused: the task leaves with the retired worker and never runs.
       assertThat(dropped.await(300, TimeUnit.MILLISECONDS)).isFalse();
 
       CountDownLatch fresh = new CountDownLatch(1);
@@ -900,7 +1129,141 @@ class KeyDispatcherTest {
     assertThat(executor.getSubmissionCount()).isEqualTo(expected);
   }
 
+  @SuppressWarnings("unchecked")
+  private static ConcurrentHashMap<Object, ?> queuesOf(KeyDispatcher<?> dispatcher) throws Exception {
+    Field field = KeyDispatcher.class.getDeclaredField("queues");
+    field.setAccessible(true);
+    return (ConcurrentHashMap<Object, ?>) field.get(dispatcher);
+  }
+
   // ── Helper classes ──────────────────────────────────────────
+
+  /**
+   * A scheduler whose first {@link #execute(Runnable)} blocks until the test releases it,
+   * then accepts it; later submissions run normally. Reproduces a close() racing the
+   * creator's executor admission.
+   */
+  private static class BlockingFirstAcceptingExecutor extends ScheduledThreadPoolExecutor {
+
+    private final CountDownLatch entered = new CountDownLatch(1);
+    private final CountDownLatch release = new CountDownLatch(1);
+    private final AtomicInteger submissions = new AtomicInteger();
+
+    BlockingFirstAcceptingExecutor() {
+      super(1);
+    }
+
+    @Override
+    public void execute(Runnable command) {
+      if (submissions.getAndIncrement() == 0) {
+        entered.countDown();
+        try {
+          release.await(5, TimeUnit.SECONDS);
+        } catch (InterruptedException e) {
+          Thread.currentThread().interrupt();
+        }
+      }
+      super.execute(command);
+    }
+
+    boolean awaitEntered() throws InterruptedException {
+      return entered.await(5, TimeUnit.SECONDS);
+    }
+
+    void release() {
+      release.countDown();
+    }
+  }
+
+  /**
+   * A scheduler that parks its first {@link #execute(Runnable)} until the test releases it,
+   * then rejects that call; later submissions run normally. Reproduces a submit racing the
+   * creator's executor admission.
+   */
+  private static class BlockingFirstRejectingExecutor extends ScheduledThreadPoolExecutor {
+
+    private final CountDownLatch firstEntered = new CountDownLatch(1);
+    private final CountDownLatch releaseFirst = new CountDownLatch(1);
+    private final AtomicInteger submissions = new AtomicInteger();
+
+    BlockingFirstRejectingExecutor() {
+      super(2);
+    }
+
+    @Override
+    public void execute(Runnable command) {
+      if (submissions.getAndIncrement() == 0) {
+        firstEntered.countDown();
+        try {
+          releaseFirst.await(5, TimeUnit.SECONDS);
+        } catch (InterruptedException e) {
+          Thread.currentThread().interrupt();
+        }
+        throw new RejectedExecutionException("first admission refused");
+      }
+      super.execute(command);
+    }
+
+    boolean awaitFirstEntered() throws InterruptedException {
+      return firstEntered.await(5, TimeUnit.SECONDS);
+    }
+
+    void releaseFirst() {
+      releaseFirst.countDown();
+    }
+  }
+
+  /**
+   * Captures submitted cycles instead of running them, so a test can detach the worker and
+   * drive its first merge deterministically.
+   */
+  private static class CapturingExecutor extends ScheduledThreadPoolExecutor {
+
+    private final BlockingQueue<Runnable> commands = new LinkedBlockingQueue<>();
+
+    CapturingExecutor() {
+      super(1);
+    }
+
+    @Override
+    public void execute(Runnable command) {
+      commands.add(command);
+    }
+
+    Runnable take() throws InterruptedException {
+      return commands.poll(5, TimeUnit.SECONDS);
+    }
+  }
+
+  /**
+   * Runs submitted cycles on the pool and records a Throwable that escaped the cycle, which
+   * the executor's {@code FutureTask} would otherwise capture silently.
+   */
+  private static class CapturingErrorExecutor extends ScheduledThreadPoolExecutor {
+
+    private final AtomicReference<Throwable> failure = new AtomicReference<>();
+
+    CapturingErrorExecutor() {
+      super(2);
+    }
+
+    @Override
+    public void execute(Runnable command) {
+      super.execute(() -> {
+        try {
+          command.run();
+        } catch (Throwable t) {
+          failure.set(t);
+        }
+      });
+    }
+
+    Throwable failure() {
+      return failure.get();
+    }
+  }
+
+  // ── Existing helper classes ──────────────────────────────────
 
   /**
    * A {@link ScheduledThreadPoolExecutor} that counts every {@link #execute(Runnable)} call,

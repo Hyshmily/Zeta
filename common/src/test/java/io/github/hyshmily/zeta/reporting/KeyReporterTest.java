@@ -25,6 +25,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.when;
 
+import io.github.hyshmily.zeta.Zeta;
 import io.github.hyshmily.zeta.cache.AccessCounter;
 import io.github.hyshmily.zeta.reporting.impl.KeyReporterImpl;
 import io.github.hyshmily.zeta.sharding.ClusterHealth;
@@ -104,6 +105,10 @@ class KeyReporterTest {
     hv.onHeartbeat(new WorkerHeartbeatMessage(0L, workerId, 1L, true, null));
   }
 
+  private static void record(AccessCounter counter, String key) {
+    counter.record(key, 1L, Zeta.TagMode.RECORD);
+  }
+
   private void awaitPublish(int minCount) throws InterruptedException {
     long deadline = System.currentTimeMillis() + AWAIT_TIMEOUT_MS;
     while (System.currentTimeMillis() < deadline) {
@@ -127,9 +132,9 @@ class KeyReporterTest {
 
   @Test
   void record_Report_shouldIncrementPendingCount() {
-    reporterCounter.add("key1");
-    reporterCounter.add("key1");
-    reporterCounter.add("key2");
+    record(reporterCounter, "key1");
+    record(reporterCounter, "key1");
+    record(reporterCounter, "key2");
     assertThat(reporterCounter.pendingKeyCount()).isPositive();
   }
 
@@ -137,7 +142,7 @@ class KeyReporterTest {
   void record_Report_withNullKey_shouldBeIgnored() {
     // The underlying WaveCounter silently ignores null/empty keys (see
     // WaveCounter.add), so the reporter must not throw either.
-    reporterCounter.add(null);
+    record(reporterCounter, null);
     assertThat(reporterCounter.pendingKeyCount()).isZero();
   }
 
@@ -197,11 +202,11 @@ class KeyReporterTest {
   void stop_shouldPreventFurtherPublishing() throws Exception {
     registerWorker(healthView, "worker-1");
     reporter.start();
-    reporterCounter.add("key-b");
+    record(reporterCounter, "key-b");
     awaitPublish(1);
     int beforeStop = testPublisher.publishCount;
     reporter.stop();
-    reporterCounter.add("key-c");
+    record(reporterCounter, "key-c");
     Thread.sleep(REPORT_INTERVAL_MS * 3 + 200);
     assertThat(testPublisher.publishCount).isEqualTo(beforeStop);
   }
@@ -221,7 +226,7 @@ class KeyReporterTest {
   void record_Report_shouldPublishAfterFlush() throws Exception {
     registerWorker(healthView, "worker-1");
     reporter.start();
-    reporterCounter.add("key-a");
+    record(reporterCounter, "key-a");
     awaitPublish(1);
     assertThat(testPublisher.publishCount).isPositive();
   }
@@ -230,9 +235,9 @@ class KeyReporterTest {
   void multipleRecordsForSameKey_shouldPublishAggregatedCount() throws Exception {
     registerWorker(healthView, "worker-1");
     reporter.start();
-    reporterCounter.add("agg-key");
-    reporterCounter.add("agg-key");
-    reporterCounter.add("agg-key");
+    record(reporterCounter, "agg-key");
+    record(reporterCounter, "agg-key");
+    record(reporterCounter, "agg-key");
     awaitPublish(1);
     long total = testPublisher.messages
       .stream()
@@ -247,8 +252,8 @@ class KeyReporterTest {
   void recordsForDifferentKeys_shouldPublishAsBatch() throws Exception {
     registerWorker(healthView, "worker-1");
     reporter.start();
-    reporterCounter.add("key-x");
-    reporterCounter.add("key-y");
+    record(reporterCounter, "key-x");
+    record(reporterCounter, "key-y");
     // Wait until both keys appear across all messages (eager swap may
     // split keys across multiple batches).
     long deadline = System.currentTimeMillis() + AWAIT_TIMEOUT_MS;
@@ -270,7 +275,7 @@ class KeyReporterTest {
   @Test
   void gracefulDegradation_shouldDropRecordsWhenClusterUnhealthy() throws Exception {
     reporter.start();
-    reporterCounter.add("ghost-key");
+    record(reporterCounter, "ghost-key");
     Thread.sleep(REPORT_INTERVAL_MS * 3 + 500);
     assertThat(testPublisher.publishCount).isZero();
   }
@@ -300,7 +305,7 @@ class KeyReporterTest {
   void record_Report_withEmptyKey_shouldBeIgnored() throws Exception {
     registerWorker(healthView, "worker-1");
     reporter.start();
-    reporterCounter.add("");
+    record(reporterCounter, "");
     // The WaveCounter drops blank keys at add() (documented: "blank keys
     // are silently ignored"), so an empty report must never publish.
     Thread.sleep(REPORT_INTERVAL_MS * 3 + 200);
@@ -311,7 +316,7 @@ class KeyReporterTest {
   void record_Report_withVeryLongKey_shouldWork() throws Exception {
     registerWorker(healthView, "worker-1");
     reporter.start();
-    reporterCounter.add("k".repeat(10_000));
+    record(reporterCounter, "k".repeat(10_000));
     awaitPublish(1);
     assertThat(testPublisher.publishCount).isPositive();
   }
@@ -334,7 +339,7 @@ class KeyReporterTest {
     registerWorker(healthView, "worker-1");
     reporter.start();
     for (int i = 0; i < 100; i++) {
-      reporterCounter.add("bulk-key-" + i);
+      record(reporterCounter, "bulk-key-" + i);
     }
     // Wait until all 100 distinct keys appear across all messages (periodic flush may
     // eager swap may split keys across multiple batches).
@@ -429,7 +434,7 @@ class KeyReporterTest {
     failing.start();
     try {
       // First flush: locateNode throws inside the detached routing task.
-      failingCounter.add("boom-key");
+      record(failingCounter, "boom-key");
 
       AtomicLong unroutable = new AtomicLong(-1);
       long deadline = System.currentTimeMillis() + AWAIT_TIMEOUT_MS;
@@ -445,7 +450,7 @@ class KeyReporterTest {
       assertThat(testPublisher.publishCount).isZero();
 
       // A later batch routes normally — the flush loop survived the failure.
-      failingCounter.add("good-key");
+      record(failingCounter, "good-key");
       awaitPublish(1);
       assertThat(testPublisher.publishCount).isPositive();
     } finally {

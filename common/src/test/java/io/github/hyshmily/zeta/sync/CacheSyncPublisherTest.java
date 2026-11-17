@@ -43,12 +43,13 @@ class CacheSyncPublisherTest {
   private RabbitTemplate rabbitTemplate;
   private CacheSyncProperties properties;
   private CacheSyncPublisher publisher;
+  private final NodeIdentity identity = new NodeIdentity("test", 1L);
 
   @BeforeEach
   void setUp() {
     rabbitTemplate = mock(RabbitTemplate.class);
     properties = new CacheSyncProperties();
-    publisher = new CacheSyncPublisher(rabbitTemplate, properties, new PutPayloadCodec(properties), null);
+    publisher = new CacheSyncPublisher(rabbitTemplate, properties, new PutPayloadCodec(properties), null, identity);
   }
 
   /**
@@ -79,7 +80,7 @@ class CacheSyncPublisherTest {
     publisher.broadcastRefresh("key1", 1L);
 
     assertThat((Long) captureSentMessage().getMessageProperties().getHeader(HEADER_ORIGIN_NODE_ID)).isEqualTo(
-      NodeIdentity.getNodeId()
+      identity.nodeId()
     );
   }
 
@@ -195,7 +196,8 @@ class CacheSyncPublisherTest {
       rabbitTemplate,
       properties,
       new PutPayloadCodec(properties),
-      null
+      null,
+      identity
     );
     assertThat(smallCap.serializePutPayload(new byte[65])).isNull();
     assertThat(smallCap.serializePutPayload("a".repeat(65))).isNull();
@@ -207,7 +209,7 @@ class CacheSyncPublisherTest {
   }
 
   private CacheSyncPublisher stampedPublisher(String appName) {
-    return new CacheSyncPublisher(rabbitTemplate, properties, new PutPayloadCodec(properties), appName);
+    return new CacheSyncPublisher(rabbitTemplate, properties, new PutPayloadCodec(properties), appName, identity);
   }
 
   private Message captureSentMessage() {

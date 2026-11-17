@@ -130,14 +130,10 @@ class ClearAllInvalidationTest {
   }
 
   private void receive(io.github.hyshmily.zeta.sync.local.SyncMessage message) {
-    SyncPolicy dispatcher = new SyncPolicy() {};
-    if (message.type().isClear()) {
-      dispatcher.clear(new Batch.Clear(List.of(message)), receiver);
-    } else if (message.type() == SyncType.INVALIDATE) {
-      dispatcher.invalidate(new Batch.Value(List.of(message), message, List.of(), null), receiver);
-    } else {
-      dispatcher.value(new Batch.Value(List.of(message), message, List.of(), null), receiver);
-    }
+    Batch batch = message.type().isClear()
+      ? new Batch.Clear(List.of(message))
+      : new Batch.Value(List.of(message), message, List.of(), null);
+    receiver.apply(batch, new SyncPolicy() {});
   }
 
   @AfterEach

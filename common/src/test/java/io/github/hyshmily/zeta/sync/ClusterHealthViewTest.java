@@ -16,9 +16,10 @@
 package io.github.hyshmily.zeta.sync;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import io.github.hyshmily.zeta.sharding.ClusterHealth;
 import io.github.hyshmily.zeta.sharding.HealthView;
-import io.github.hyshmily.zeta.sharding.HealthViewImpl;
 import io.github.hyshmily.zeta.sync.worker.WorkerHeartbeatMessage;
 import io.github.hyshmily.zeta.util.TimeSource;
 import java.util.concurrent.CountDownLatch;
@@ -34,7 +35,17 @@ class ClusterHealthViewTest {
 
   @BeforeEach
   void setUp() {
-    view = new HealthViewImpl(5000);
+    view = new ClusterHealth(5000);
+  }
+
+  @Test
+  void constructorRejectsANonPositiveTimeoutOrNegativeHealthCacheTtl() {
+    assertThatThrownBy(() -> new ClusterHealth(0L))
+      .isInstanceOf(IllegalArgumentException.class)
+      .hasMessageContaining("heartbeatTimeoutMs");
+    assertThatThrownBy(() -> new ClusterHealth(5_000L, -1L, false, 0L))
+      .isInstanceOf(IllegalArgumentException.class)
+      .hasMessageContaining("healthCacheTtlMs");
   }
 
   private static WorkerHeartbeatMessage hb(String workerId, long epoch, boolean ready) {
@@ -173,7 +184,7 @@ class ClusterHealthViewTest {
    */
   @Test
   void isClusterHealthy_withAliveWorkersObserved_shouldReturnTrue() {
-    HealthView empty = new HealthViewImpl(5000);
+    HealthView empty = new ClusterHealth(5000);
     empty.onHeartbeat(hb("w1", 1, true));
     empty.onHeartbeat(hb("w2", 1, true));
     assertThat(empty.isClusterHealthy()).isTrue();
@@ -184,7 +195,7 @@ class ClusterHealthViewTest {
    */
   @Test
   void isClusterHealthy_withNoObservedAliveWorkers_shouldReturnFalse() {
-    HealthView empty = new HealthViewImpl(5000);
+    HealthView empty = new ClusterHealth(5000);
     assertThat(empty.isClusterHealthy()).isFalse();
   }
 
@@ -196,7 +207,7 @@ class ClusterHealthViewTest {
    */
   @Test
   void isClusterHealthy_shouldRefreshCacheAfterTtl() throws InterruptedException {
-    HealthView fast = new HealthViewImpl(300, 100, false, 0);
+    HealthView fast = new ClusterHealth(300, 100, false, 0);
     fast.onHeartbeat(hb("w1", 1, true));
     assertThat(fast.isClusterHealthy()).isTrue();
 
@@ -212,7 +223,7 @@ class ClusterHealthViewTest {
    */
   @Test
   void isClusterHealthy_mutationHook_shouldReflectChangeImmediately() {
-    HealthView fast = new HealthViewImpl(300_000, 100_000, false, 0);
+    HealthView fast = new ClusterHealth(300_000, 100_000, false, 0);
     fast.onHeartbeat(hb("w1", 1, true));
     assertThat(fast.isClusterHealthy()).isTrue();
     // Same TTL window, but the removal hook invalidates the cache.
@@ -227,7 +238,7 @@ class ClusterHealthViewTest {
    */
   @Test
   void isClusterHealthy_heartbeatLivenessTransition_shouldInvalidateImmediately() {
-    HealthView fast = new HealthViewImpl(300_000, 100_000, false, 0);
+    HealthView fast = new ClusterHealth(300_000, 100_000, false, 0);
     fast.onHeartbeat(hb("w1", 1, true));
     assertThat(fast.isClusterHealthy()).isTrue();
 
@@ -304,7 +315,7 @@ class ClusterHealthViewTest {
 
   @Test
   void isAliveShouldReturnTrueWhenReadyAndWithinTimeout() {
-    HealthViewImpl.WorkerHealthRecord r = new HealthViewImpl.WorkerHealthRecord(
+    ClusterHealth.WorkerHealthRecord r = new ClusterHealth.WorkerHealthRecord(
       "w1",
       1L,
       TimeSource.monotonicMillis(),
@@ -315,7 +326,7 @@ class ClusterHealthViewTest {
 
   @Test
   void isAliveShouldReturnFalseWhenNotReady() {
-    HealthViewImpl.WorkerHealthRecord r = new HealthViewImpl.WorkerHealthRecord(
+    ClusterHealth.WorkerHealthRecord r = new ClusterHealth.WorkerHealthRecord(
       "w1",
       1L,
       TimeSource.monotonicMillis(),
@@ -326,7 +337,7 @@ class ClusterHealthViewTest {
 
   @Test
   void isAliveShouldReturnFalseWhenTimedOut() {
-    HealthViewImpl.WorkerHealthRecord r = new HealthViewImpl.WorkerHealthRecord(
+    ClusterHealth.WorkerHealthRecord r = new ClusterHealth.WorkerHealthRecord(
       "w1",
       1L,
       TimeSource.monotonicMillis() - 100,
@@ -385,7 +396,7 @@ class ClusterHealthViewTest {
    */
   @Test
   void isAlive_exactTimeoutBoundary_shouldReturnFalse() {
-    HealthViewImpl.WorkerHealthRecord r = new HealthViewImpl.WorkerHealthRecord(
+    ClusterHealth.WorkerHealthRecord r = new ClusterHealth.WorkerHealthRecord(
       "w1",
       1L,
       TimeSource.monotonicMillis() - 5000,

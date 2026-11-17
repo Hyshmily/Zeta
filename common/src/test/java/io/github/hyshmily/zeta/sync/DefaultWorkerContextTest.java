@@ -23,6 +23,7 @@ import static org.mockito.Mockito.*;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import io.github.hyshmily.zeta.autoconfigure.ZetaProperties;
+import io.github.hyshmily.zeta.cache.EntryView;
 import io.github.hyshmily.zeta.cache.cachesupport.lifecycle.EntryLifecycleImpl;
 import io.github.hyshmily.zeta.cache.cachesupport.loader.CacheLoader;
 import io.github.hyshmily.zeta.cache.cachesupport.raw.CacheEntry;
@@ -31,6 +32,8 @@ import io.github.hyshmily.zeta.model.DecisionStamp;
 import io.github.hyshmily.zeta.model.KeyState;
 import io.github.hyshmily.zeta.sharding.ConsistentHashRing;
 import io.github.hyshmily.zeta.sharding.HealthView;
+import io.github.hyshmily.zeta.sync.worker.CoolAction;
+import io.github.hyshmily.zeta.sync.worker.CoolSkipReason;
 import io.github.hyshmily.zeta.sync.worker.DefaultWorkerContext;
 import io.github.hyshmily.zeta.sync.worker.HotAction;
 import io.github.hyshmily.zeta.sync.worker.HotSkipReason;
@@ -44,6 +47,7 @@ import io.github.hyshmily.zeta.util.clock.StampClock;
 import java.nio.charset.StandardCharsets;
 import java.util.Collections;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BiFunction;
@@ -80,7 +84,7 @@ class DefaultWorkerContextTest {
   }
 
   private void handleCool(WorkerDecision decision) {
-    context.cool(decision);
+    context.settleCool(decision, CoolAction.DOWNGRADE);
   }
 
   private void handleCoolBatch(List<WorkerDecision> batch) {
@@ -160,7 +164,10 @@ class DefaultWorkerContextTest {
    */
   @Test
   void handleHot_withoutLoaderPromotesALiveResidentEvenAfterAPerKeyTombstone() {
-    cache.put("key1", entry(1, KeyState.NORMAL));
+    CacheEntry live = EntryDraft.of(entry(1, KeyState.NORMAL))
+      .softExpiryAt(TimeSource.currentTimeMillis() + 30_000L)
+      .build();
+    cache.put("key1", live);
     entryLifecycle.recordInvalidation("key1", 10L);
     context = new DefaultWorkerContext(cache, null, entryLifecycle, stampClock, List.of());
 
@@ -172,6 +179,58 @@ class DefaultWorkerContextTest {
     assertThat(promoted.getValue()).isEqualTo("v");
     assertThat(promoted.getHardTtlMs()).isEqualTo(3_600_000L);
     assertThat(promoted.getSoftTtlMs()).isEqualTo(300_000L);
+  }
+
+  /**
+   * A resident whose soft window a peer REFRESH/INVALIDATE already closed must not have it
+   * reopened by a metadata-only HOT promotion: the next read has to reload.
+   */
+  @Test
+  void handleHot_withoutLoaderKeepsAClosedSoftWindowClosed() {
+    long now = TimeSource.currentTimeMillis();
+    CacheEntry resident = EntryDraft.blank(null)
+      .value("v")
+      .version(1)
+      .decision(DecisionStamp.hot(1, "node", 1L))
+      .ttl(300_000, 30_000, 300_000, 30_000)
+      .expiryAt(now + 60_000L, now - 1_000L)
+      .keyState(KeyState.NORMAL)
+      .build();
+    cache.put("key1", resident);
+    context = new DefaultWorkerContext(cache, null, entryLifecycle, stampClock, List.of());
+
+    handleHot(wireMessage("key1", WorkerType.HOT.code(), 2L));
+
+    CacheEntry promoted = cache.asMap().get("key1");
+    assertThat(promoted).isNotNull();
+    assertThat(promoted.getKeyState()).isEqualTo(KeyState.HOT);
+    assertThat(promoted.getValue()).isEqualTo("v");
+    assertThat(promoted.getHardExpireAtMs()).isEqualTo(resident.getHardExpireAtMs());
+    assertThat(promoted.getSoftExpireAtMs()).isEqualTo(resident.getSoftExpireAtMs());
+  }
+
+  /** A fresh loaded value reopens a closed soft window; only the metadata-only fallback keeps it. */
+  @Test
+  void handleHot_loadedValueReopensAClosedSoftWindow() {
+    long softExpireAt = TimeSource.currentTimeMillis() - 1_000L;
+    CacheEntry resident = EntryDraft.blank(null)
+      .value("v")
+      .version(1)
+      .decision(DecisionStamp.hot(1, "node", 1L))
+      .ttl(300_000, 30_000, 300_000, 30_000)
+      .expiryAt(TimeSource.currentTimeMillis() + 60_000L, softExpireAt)
+      .keyState(KeyState.NORMAL)
+      .build();
+    cache.put("key1", resident);
+    context = new DefaultWorkerContext(cache, k -> "fresh", entryLifecycle, stampClock, List.of());
+
+    handleHot(wireMessage("key1", WorkerType.HOT.code(), 2L));
+
+    CacheEntry promoted = cache.asMap().get("key1");
+    assertThat(promoted).isNotNull();
+    assertThat(promoted.getValue()).isEqualTo("fresh");
+    assertThat(promoted.getKeyState()).isEqualTo(KeyState.HOT);
+    assertThat(promoted.getSoftExpireAtMs()).isGreaterThan(softExpireAt);
   }
 
   /**
@@ -193,7 +252,7 @@ class DefaultWorkerContextTest {
     assertThat(cooled.getKeyState()).isEqualTo(KeyState.COOL);
     assertThat(cooled.getDecisionVersion()).isEqualTo(10L);
     verify(hook).afterCoolDowngrade(eq(cool10), any());
-    verify(hook).onCoolSkipped(eq(cool7));
+    verify(hook).onCoolSkipped(eq(cool7), eq(CoolSkipReason.VERSION_STALE));
   }
 
   /** A later, higher decision supersedes the earlier winner before either touches L1. */
@@ -210,7 +269,7 @@ class DefaultWorkerContextTest {
     CacheEntry cooled = cache.asMap().get("key1");
     assertThat(cooled).isNotNull();
     assertThat(cooled.getDecisionVersion()).isEqualTo(12L);
-    verify(hook).onCoolSkipped(eq(cool10));
+    verify(hook).onCoolSkipped(eq(cool10), eq(CoolSkipReason.COVERED_BY_NEWER_DECISION));
     verify(hook).afterCoolDowngrade(eq(cool12), any());
   }
 
@@ -229,8 +288,8 @@ class DefaultWorkerContextTest {
     assertThat(resident).isNotNull();
     assertThat(resident.getKeyState()).isEqualTo(KeyState.HOT);
     assertThat(resident.getDecisionVersion()).isEqualTo(100L);
-    verify(hook).onCoolSkipped(eq(cool10));
-    verify(hook).onCoolSkipped(eq(cool7));
+    verify(hook).onCoolSkipped(eq(cool10), eq(CoolSkipReason.VERSION_STALE));
+    verify(hook).onCoolSkipped(eq(cool7), eq(CoolSkipReason.VERSION_STALE));
     verify(hook, never()).afterCoolDowngrade(any(), any());
   }
 
@@ -244,6 +303,7 @@ class DefaultWorkerContextTest {
     cache.put("key1", hotEntryOwnedBy("worker-B", 10L));
     ConsistentHashRing ring = mock(ConsistentHashRing.class);
     HealthView healthView = mock(HealthView.class);
+    when(ring.getNodes()).thenReturn(Set.of("worker-B"));
     when(ring.locateNode(eq("key1"), any(HealthView.class))).thenReturn("worker-B");
     when(healthView.isCurrentIncarnation("worker-B", 1L)).thenReturn(true);
     WorkerDecisionHook hook = mock(WorkerDecisionHook.class);
@@ -258,8 +318,8 @@ class DefaultWorkerContextTest {
     assertThat(after.getKeyState()).isEqualTo(KeyState.HOT);
     assertThat(after.getDecisionVersion()).isEqualTo(10L);
     assertThat(after.getDecisionNodeId()).isEqualTo("worker-B");
-    verify(hook).onCoolSkipped(eq(cool20));
-    verify(hook).onCoolSkipped(eq(cool30));
+    verify(hook).onCoolSkipped(eq(cool20), eq(CoolSkipReason.COVERED_BY_NEWER_DECISION));
+    verify(hook).onCoolSkipped(eq(cool30), eq(CoolSkipReason.GHOST_COOL));
     verify(hook, never()).afterCoolDowngrade(any(), any());
   }
 
@@ -284,7 +344,7 @@ class DefaultWorkerContextTest {
     assertThat(cooled.getDecisionVersion()).isEqualTo(9L);
     verify(hook).afterCoolDowngrade(eq(fromA), any());
     verify(hook).afterCoolDowngrade(eq(fromB), any());
-    verify(hook, never()).onCoolSkipped(any());
+    verify(hook, never()).onCoolSkipped(any(), any());
   }
 
   /**
@@ -340,7 +400,7 @@ class DefaultWorkerContextTest {
 
     handleHot(wireMessage("missing", WorkerType.HOT.code(), 1L));
 
-    verify(hook).onHotSkipped(any(), eq(HotSkipReason.VALUE_NOT_FOUND));
+    verify(hook).onHotSkipped(any(), eq(HotSkipReason.NO_PROMOTABLE_VALUE));
   }
 
   /**
@@ -368,7 +428,7 @@ class DefaultWorkerContextTest {
 
     handleHot(wireMessage("key1", WorkerType.HOT.code(), 2L));
 
-    verify(hook).onHotSkipped(any(), eq(HotSkipReason.VALUE_NOT_FOUND));
+    verify(hook).onHotSkipped(any(), eq(HotSkipReason.NO_PROMOTABLE_VALUE));
     verify(hook, never()).afterHotPromotion(any(), any());
   }
 
@@ -385,30 +445,25 @@ class DefaultWorkerContextTest {
     handleHot(wireMessage("declined", WorkerType.HOT.code(), 1L));
 
     assertThat(cache.getIfPresent("declined")).as("a declined value must not enter L1").isNull();
-    verify(hook).onHotSkipped(any(), eq(HotSkipReason.VALUE_NOT_FOUND));
+    verify(hook).onHotSkipped(any(), eq(HotSkipReason.NO_PROMOTABLE_VALUE));
   }
 
   /**
-   * The declined admission takes the existing source-outage fallback: the resident L1 value is
-   * promoted to HOT, never replaced by the value the application refused to cache.
+   * A declined admission is a definitive answer from a healthy source, not a source outage:
+   * the resident L1 value is neither replaced by the refused value nor promoted in its place.
    */
   @Test
-  void handleHot_admissionDeclined_shouldPromoteExistingEntryInsteadOfRejectedValue() {
-    cache.put("key1", entry(1, KeyState.NORMAL));
-    context = new DefaultWorkerContext(
-      cache,
-      decliningLoader("rejected"),
-      entryLifecycle,
-      stampClock,
-      Collections.emptyList()
-    );
+  void handleHot_admissionDeclined_shouldNotFallBackToTheResident() {
+    CacheEntry resident = entry(1, KeyState.NORMAL);
+    cache.put("key1", resident);
+    WorkerDecisionHook hook = mock(WorkerDecisionHook.class);
+    context = new DefaultWorkerContext(cache, decliningLoader("rejected"), entryLifecycle, stampClock, List.of(hook));
 
     handleHot(wireMessage("key1", WorkerType.HOT.code(), 2L));
 
-    CacheEntry promoted = cache.getIfPresent("key1");
-    assertThat(promoted).isNotNull();
-    assertThat(promoted.getValue()).as("the declined value must not replace the resident").isEqualTo("v");
-    assertThat(promoted.getKeyState()).isEqualTo(KeyState.HOT);
+    assertThat(cache.getIfPresent("key1")).isSameAs(resident);
+    verify(hook).onHotSkipped(any(), eq(HotSkipReason.NO_PROMOTABLE_VALUE));
+    verify(hook, never()).afterHotPromotion(any(), any());
   }
 
   /** A cluster loader whose value is always declined by the admission predicate. */
@@ -550,7 +605,7 @@ class DefaultWorkerContextTest {
 
     handleHot(wireMessage("key1", WorkerType.HOT.code(), 2L));
 
-    verify(hook).onHotSkipped(any(), eq(HotSkipReason.VALUE_NOT_FOUND));
+    verify(hook).onHotSkipped(any(), eq(HotSkipReason.NO_PROMOTABLE_VALUE));
     assertThat(cache.getIfPresent("key1")).isNull();
   }
 
@@ -584,7 +639,7 @@ class DefaultWorkerContextTest {
 
     handleCool(wireMessage("missing", WorkerType.COOL.code(), 1L));
 
-    verify(hook).onCoolSkipped(any());
+    verify(hook).onCoolSkipped(any(), any());
   }
 
   /**
@@ -612,13 +667,13 @@ class DefaultWorkerContextTest {
     CacheEntry after = (CacheEntry) cache.getIfPresent("key1");
     assertThat(after).isSameAs(expired);
     assertThat(after.getKeyState()).isEqualTo(KeyState.HOT);
-    verify(hook).onCoolSkipped(any());
+    verify(hook).onCoolSkipped(any(), any());
     verify(hook, never()).afterCoolDowngrade(any(), any());
   }
 
   /**
    * The expiry guard must not block a live entry: a valid HOT entry still cools
-   * normally (regression guard for the guard placement (design decisions: version comparison)).
+   * normally (design decisions: version comparison).
    */
   @Test
   void handleCool_liveEntry_shouldStillCool() {
@@ -657,7 +712,7 @@ class DefaultWorkerContextTest {
     CacheEntry after = (CacheEntry) cache.getIfPresent("key1");
     assertThat(after).isSameAs(dead);
     assertThat(after.getKeyState()).isEqualTo(KeyState.NORMAL);
-    verify(hook).onCoolSkipped(any());
+    verify(hook).onCoolSkipped(any(), any());
     verify(hook, never()).afterCoolDowngrade(any(), any());
   }
 
@@ -701,24 +756,92 @@ class DefaultWorkerContextTest {
   void customPolicy_shouldReplaceThePromotedValueAndRefuseCool() {
     WorkerPolicy custom = new WorkerPolicy() {
       @Override
-      public HotAction hot(WorkerDecision decision, HotValue value) {
+      public HotAction hot(WorkerDecision decision, HotValue value, EntryView current) {
         return new HotAction.Promote(HotValue.loaded("custom-hot", value.dataVersion()));
       }
 
       @Override
-      public boolean cool(WorkerDecision decision) {
-        return false;
+      public CoolAction cool(WorkerDecision decision, EntryView current) {
+        return CoolAction.REJECT;
       }
     };
 
     WorkerDecision hot = wireMessage("k", WorkerType.HOT.code(), 1L);
     HotAction prepared = context.resolveHot(hot);
     HotAction action =
-      prepared instanceof HotAction.Skip ? prepared : custom.hot(hot, ((HotAction.Promote) prepared).value());
+      prepared instanceof HotAction.Skip ? prepared : custom.hot(hot, ((HotAction.Promote) prepared).value(), null);
     context.settleHot(hot, action);
 
     assertThat(cache.getIfPresent("k").getValue()).isEqualTo("custom-hot");
-    assertThat(custom.cool(wireMessage("k", WorkerType.COOL.code(), 2L))).isFalse();
+    assertThat(custom.cool(wireMessage("k", WorkerType.COOL.code(), 2L), null)).isInstanceOf(CoolAction.Skip.class);
+  }
+
+  /** A policy-supplied value is writable even when no resident exists to promote. */
+  @Test
+  void aPolicySuppliedValueCreatesAHotEntry() {
+    WorkerDecision hot = wireMessage("k", WorkerType.HOT.code(), 1L);
+
+    context.settleHot(hot, new HotAction.Promote(HotValue.supplied("policy-value", 5L)));
+
+    CacheEntry created = cache.getIfPresent("k");
+    assertThat(created).isNotNull();
+    assertThat(created.getValue()).isEqualTo("policy-value");
+    assertThat(created.getDataVersion()).isEqualTo(5L);
+    assertThat(created.getKeyState()).isEqualTo(KeyState.HOT);
+  }
+
+  /** A policy-supplied value replaces a live resident once the data-plane guards accept it. */
+  @Test
+  void aPolicySuppliedValueReplacesALiveResident() {
+    cache.put("k", entry(1, KeyState.NORMAL));
+    WorkerDecision hot = wireMessage("k", WorkerType.HOT.code(), 2L);
+
+    context.settleHot(hot, new HotAction.Promote(HotValue.supplied("policy-value", 5L)));
+
+    CacheEntry promoted = cache.getIfPresent("k");
+    assertThat(promoted).isNotNull();
+    assertThat(promoted.getValue()).isEqualTo("policy-value");
+    assertThat(promoted.getDataVersion()).isEqualTo(5L);
+    assertThat(promoted.getKeyState()).isEqualTo(KeyState.HOT);
+  }
+
+  /** The resident fallback remains metadata-only: a policy cannot overwrite through it. */
+  @Test
+  void aResidentFallbackDoesNotReplaceALiveResident() {
+    cache.put("k", entry(1, KeyState.NORMAL));
+    WorkerDecision hot = wireMessage("k", WorkerType.HOT.code(), 2L);
+
+    context.settleHot(hot, new HotAction.Promote(HotValue.resident("stale-value", 5L)));
+
+    CacheEntry promoted = cache.getIfPresent("k");
+    assertThat(promoted).isNotNull();
+    assertThat(promoted.getValue()).isEqualTo("v");
+    assertThat(promoted.getDataVersion()).isEqualTo(1L);
+    assertThat(promoted.getKeyState()).isEqualTo(KeyState.HOT);
+  }
+
+  /**
+   * A missing node id is not an identity: two anonymous COOL decisions may come from different
+   * Workers, so their version counters are not comparable and must not be folded.
+   */
+  @Test
+  void reduceCool_doesNotFoldDecisionsWithoutANodeIdentity() {
+    WorkerDecisionHook hook = mock(WorkerDecisionHook.class);
+    context = new DefaultWorkerContext(cache, loader, entryLifecycle, stampClock, List.of(hook));
+    WorkerDecision cool10 = anonymousMessage("key1", WorkerType.COOL.code(), 10L);
+    WorkerDecision cool7 = anonymousMessage("key1", WorkerType.COOL.code(), 7L);
+
+    assertThat(context.reduceCool(List.of(cool10, cool7))).containsExactly(cool10, cool7);
+    verifyNoInteractions(hook);
+  }
+
+  private static WorkerDecision anonymousMessage(String key, String type, long dv) {
+    MessageProperties props = new MessageProperties();
+    props.setHeader(HEADER_TYPE, type);
+    props.setHeader(HEADER_VERSION, dv);
+    props.setHeader(HEADER_EPOCH, 1L);
+    props.setHeader(HEADER_MESSAGE_ID, 1L);
+    return WorkerDecision.from(new Message(key.getBytes(StandardCharsets.UTF_8), props));
   }
 
   // ── P0 scale re-balance ghost-COOL kill ──
@@ -734,6 +857,7 @@ class DefaultWorkerContextTest {
     cache.put("key1", hotEntryOwnedBy("worker-B", 10L));
     ConsistentHashRing ring = mock(ConsistentHashRing.class);
     HealthView healthView = mock(HealthView.class);
+    when(ring.getNodes()).thenReturn(Set.of("worker-B"));
     when(ring.locateNode(eq("key1"), any(HealthView.class))).thenReturn("worker-B");
     when(healthView.isCurrentIncarnation("worker-B", 1L)).thenReturn(true);
     WorkerDecisionHook hook = mock(WorkerDecisionHook.class);
@@ -745,7 +869,7 @@ class DefaultWorkerContextTest {
     assertThat(after.getKeyState()).isEqualTo(KeyState.HOT);
     assertThat(after.getDecisionVersion()).isEqualTo(10L);
     assertThat(after.getDecisionNodeId()).isEqualTo("worker-B");
-    verify(hook).onCoolSkipped(any());
+    verify(hook).onCoolSkipped(any(), any());
     verify(hook, never()).afterCoolDowngrade(any(), any());
   }
 
@@ -780,6 +904,7 @@ class DefaultWorkerContextTest {
     cache.put("key1", hotEntryOwnedBy("worker-B", 10L));
     ConsistentHashRing ring = mock(ConsistentHashRing.class);
     HealthView healthView = mock(HealthView.class);
+    when(ring.getNodes()).thenReturn(Set.of("worker-B"));
     when(ring.locateNode(eq("key1"), any(HealthView.class))).thenReturn("worker-A");
     when(healthView.isCurrentIncarnation("worker-B", 1L)).thenReturn(true);
     WorkerDecisionHook hook = mock(WorkerDecisionHook.class);
@@ -791,6 +916,40 @@ class DefaultWorkerContextTest {
     assertThat(after.getKeyState()).isEqualTo(KeyState.COOL);
     assertThat(after.getDecisionNodeId()).isEqualTo("worker-A");
     verify(hook).afterCoolDowngrade(any(), any());
+  }
+
+  /**
+   * The in-compute re-check never reconciles the ring: that walk would run inside Caffeine's
+   * bin lock. When a concurrent replacement makes the outer snapshot stale and the owner is
+   * still absent from the published ring, the guard fails open (the COOL applies), and only
+   * the lock-free pre-check has rebuilt.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  void handleCool_replacedSnapshot_doesNotRebuildTheRingInsideTheBinLock() {
+    Cache<String, CacheEntry> mockedCache = mock(Cache.class);
+    ConcurrentMap<String, CacheEntry> map = mock(ConcurrentMap.class);
+    when(mockedCache.asMap()).thenReturn(map);
+    CacheEntry snapshot = hotEntryOwnedBy("worker-B", 10L);
+    CacheEntry replacement = hotEntryOwnedBy("worker-B", 11L);
+    when(map.get("key1")).thenReturn(snapshot);
+    when(map.compute(eq("key1"), any())).thenAnswer(invocation -> {
+      BiFunction<String, CacheEntry, CacheEntry> mutation = invocation.getArgument(1);
+      return mutation.apply("key1", replacement);
+    });
+
+    ConsistentHashRing ring = mock(ConsistentHashRing.class);
+    HealthView healthView = mock(HealthView.class);
+    when(ring.getNodes()).thenReturn(Set.of());
+    when(ring.locateNode(eq("key1"), any(HealthView.class))).thenReturn("worker-A");
+    when(healthView.isCurrentIncarnation("worker-B", 1L)).thenReturn(true);
+    Cache<String, CacheEntry> lifecycleCache = Caffeine.newBuilder().build();
+    EntryLifecycleImpl lifecycle = new EntryLifecycleImpl(lifecycleCache, new ZetaProperties(), null);
+    context = new DefaultWorkerContext(mockedCache, loader, lifecycle, stampClock, List.of(), ring, healthView);
+
+    handleCool(workerMessageFrom("key1", WorkerType.COOL.code(), 3L, "worker-A"));
+
+    verify(ring, times(1)).rebuildIfPossible(healthView);
   }
 
   /**

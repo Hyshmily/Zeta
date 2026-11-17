@@ -198,7 +198,9 @@ class SyncMessageTest {
 
   @Test
   void parseBatch_skipsMalformedEntriesWithoutEatingTheRest() {
-    byte[] body = "[[] , [\"a\"], [\"b\", 5], [[\"nested\"], 6], [\"c\", 7], [\"d\", 8]]".getBytes(StandardCharsets.UTF_8);
+    byte[] body = "[[] , [\"a\"], [\"b\", 5], [[\"nested\"], 6], [\"c\", 7], [\"d\", 8]]".getBytes(
+      StandardCharsets.UTF_8
+    );
     MessageProperties props = new MessageProperties();
     props.setHeader(HEADER_TYPE, SyncType.INVALIDATE_BATCH.code());
     SyncMessage.ParsedBatch batch = SyncMessage.parseBatch(new Message(body, props));
@@ -214,6 +216,7 @@ class SyncMessageTest {
       assertThat(SyncType.parse(type.code())).isSameAs(type);
     }
     assertThat(SyncType.parse("UNKNOWN")).isNull();
+    assertThat(SyncType.parse(new StringBuilder("INVALIDATE"))).isSameAs(SyncType.INVALIDATE);
     assertThat(SyncType.parse(7)).isNull();
     assertThat(SyncType.parse(null)).isNull();
   }
@@ -236,5 +239,6 @@ class SyncMessageTest {
     assertThat(SyncType.INVALIDATE_ALL.isClear()).isTrue();
     assertThat(SyncType.INVALIDATE_PREFIX.isClear()).isTrue();
     assertThat(SyncType.INVALIDATE_BATCH.isClear()).isFalse();
+    assertThat(SyncType.INVALIDATE_BATCH.ignoresSelf()).isFalse();
   }
 }

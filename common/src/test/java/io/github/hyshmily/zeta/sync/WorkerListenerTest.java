@@ -20,21 +20,29 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.*;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import com.rabbitmq.client.Channel;
 import io.github.hyshmily.zeta.autoconfigure.ZetaProperties;
+import io.github.hyshmily.zeta.cache.EntryView;
 import io.github.hyshmily.zeta.cache.cachesupport.lifecycle.EntryLifecycleImpl;
 import io.github.hyshmily.zeta.cache.cachesupport.loader.CacheLoader;
 import io.github.hyshmily.zeta.cache.cachesupport.raw.CacheEntry;
 import io.github.hyshmily.zeta.cache.cachesupport.raw.EntryDraft;
 import io.github.hyshmily.zeta.model.DecisionStamp;
 import io.github.hyshmily.zeta.model.KeyState;
+import io.github.hyshmily.zeta.sync.dispatcher.KeyDispatcher;
+import io.github.hyshmily.zeta.sync.worker.CoolAction;
+import io.github.hyshmily.zeta.sync.worker.CoolSkipReason;
 import io.github.hyshmily.zeta.sync.worker.DefaultWorkerContext;
 import io.github.hyshmily.zeta.sync.worker.HotAction;
+import io.github.hyshmily.zeta.sync.worker.HotSkipReason;
+import io.github.hyshmily.zeta.sync.worker.HotValue;
 import io.github.hyshmily.zeta.sync.worker.WorkerDecision;
+import io.github.hyshmily.zeta.sync.worker.WorkerDecisionHook;
 import io.github.hyshmily.zeta.sync.worker.WorkerListener;
 import io.github.hyshmily.zeta.sync.worker.WorkerListenerProperties;
 import io.github.hyshmily.zeta.sync.worker.WorkerPolicy;
@@ -42,6 +50,7 @@ import io.github.hyshmily.zeta.sync.worker.WorkerType;
 import io.github.hyshmily.zeta.util.TimeSource;
 import io.github.hyshmily.zeta.util.clock.StampClock;
 import java.io.IOException;
+import java.lang.reflect.Field;
 import java.nio.charset.StandardCharsets;
 import java.util.Collections;
 import java.util.List;
@@ -50,6 +59,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.atomic.LongAdder;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -163,10 +173,10 @@ class WorkerListenerTest {
     doAnswer(invocation -> {
       captured.set(invocation.getArgument(0));
       coolSeen.countDown();
-      return true;
+      return CoolAction.DOWNGRADE;
     })
       .when(batchPolicy)
-      .cool(any());
+      .cool(any(), any());
 
     WorkerListenerProperties properties = new WorkerListenerProperties();
     properties.setJitterMs(0);
@@ -182,8 +192,8 @@ class WorkerListenerTest {
         Thread.currentThread().interrupt();
       }
     });
-    Message cool1Wire = wireMessage("key1", WorkerType.COOL.code(), 2L);
-    Message cool2Wire = wireMessage("key1", WorkerType.COOL.code(), 3L);
+    Message cool1Wire = workerMessageWithNodeIdEpoch("key1", WorkerType.COOL.code(), 2L, "worker", 1L);
+    Message cool2Wire = workerMessageWithNodeIdEpoch("key1", WorkerType.COOL.code(), 3L, "worker", 1L);
     WorkerDecision cool1 = WorkerDecision.from(cool1Wire);
     WorkerDecision cool2 = WorkerDecision.from(cool2Wire);
     batchListener.onMessage(channel, cool1Wire);
@@ -192,9 +202,9 @@ class WorkerListenerTest {
 
     assertThat(coolSeen.await(5, TimeUnit.SECONDS)).isTrue();
     assertThat(captured.get()).isEqualTo(cool2);
-    verify(batchPolicy).cool(eq(cool2));
-    verify(batchPolicy, never()).cool(eq(cool1));
-    verify(batchPolicy, never()).hot(any(), any());
+    verify(batchPolicy).cool(eq(cool2), any());
+    verify(batchPolicy, never()).cool(eq(cool1), any());
+    verify(batchPolicy, never()).hot(any(), any(), any());
   }
 
   /**
@@ -209,16 +219,16 @@ class WorkerListenerTest {
     doAnswer(invocation -> {
       capturedCool.set(invocation.getArgument(0));
       bothCalls.countDown();
-      return true;
+      return CoolAction.DOWNGRADE;
     })
       .when(batchPolicy)
-      .cool(any());
+      .cool(any(), any());
     doAnswer(invocation -> {
       bothCalls.countDown();
       return new HotAction.Promote(invocation.getArgument(1));
     })
       .when(batchPolicy)
-      .hot(any(), any());
+      .hot(any(), any(), any());
 
     WorkerListenerProperties properties = new WorkerListenerProperties();
     properties.setJitterMs(0);
@@ -232,9 +242,9 @@ class WorkerListenerTest {
         Thread.currentThread().interrupt();
       }
     });
-    Message cool1Wire = wireMessage("key1", WorkerType.COOL.code(), 2L);
-    Message cool2Wire = wireMessage("key1", WorkerType.COOL.code(), 3L);
-    Message hotWire = wireMessage("key1", WorkerType.HOT.code(), 4L);
+    Message cool1Wire = workerMessageWithNodeIdEpoch("key1", WorkerType.COOL.code(), 2L, "worker", 1L);
+    Message cool2Wire = workerMessageWithNodeIdEpoch("key1", WorkerType.COOL.code(), 3L, "worker", 1L);
+    Message hotWire = workerMessageWithNodeIdEpoch("key1", WorkerType.HOT.code(), 4L, "worker", 1L);
     WorkerDecision cool1 = WorkerDecision.from(cool1Wire);
     WorkerDecision cool2 = WorkerDecision.from(cool2Wire);
     WorkerDecision hot = WorkerDecision.from(hotWire);
@@ -245,9 +255,9 @@ class WorkerListenerTest {
 
     assertThat(bothCalls.await(5, TimeUnit.SECONDS)).isTrue();
     assertThat(capturedCool.get()).isEqualTo(cool2);
-    verify(batchPolicy).hot(eq(hot), any());
-    verify(batchPolicy).cool(eq(cool2));
-    verify(batchPolicy, never()).cool(eq(cool1));
+    verify(batchPolicy).hot(eq(hot), any(), any());
+    verify(batchPolicy).cool(eq(cool2), any());
+    verify(batchPolicy, never()).cool(eq(cool1), any());
   }
 
   /**
@@ -404,9 +414,18 @@ class WorkerListenerTest {
   void onMessage_cool_budgetExhausted_shouldBypassTheGlobalBudget() throws Exception {
     WorkerListenerProperties props = new WorkerListenerProperties();
     props.setJitterMs(0);
-    props.setMaxPendingUnits(0);
+    props.setMaxPendingUnits(1);
     ScheduledExecutorService sched = Executors.newScheduledThreadPool(2);
     WorkerListener starving = new WorkerListener(props, sched, newPolicy(k -> "v"), context, null);
+
+    // Fill the one-unit global budget so the COOL below can only pass through the
+    // control-plane bypass.
+    Field dispatcherField = WorkerListener.class.getDeclaredField("dispatcher");
+    dispatcherField.setAccessible(true);
+    KeyDispatcher<?> dispatcher = (KeyDispatcher<?>) dispatcherField.get(starving);
+    Field unitsField = KeyDispatcher.class.getDeclaredField("globalPendingUnits");
+    unitsField.setAccessible(true);
+    ((LongAdder) unitsField.get(dispatcher)).add(1L);
 
     cache.put("key1", hotEntry());
     starving.onMessage(channel, workerMessageOffWire("key1", WorkerType.COOL.code(), 2L));
@@ -425,6 +444,58 @@ class WorkerListenerTest {
       .isEqualTo(KeyState.COOL);
     assertThat(starving.coolDispatchRejections()).as("accepted, not refused").isZero();
     sched.shutdownNow();
+  }
+
+  /**
+   * A broken policy that returns {@code null} must not silently approve a COOL: the decision
+   * is settled as {@code POLICY_FAILED}, the entry keeps its HOT state and the hook still
+   * fires exactly once.
+   */
+  @Test
+  void onMessage_cool_nullPolicyAction_shouldNotDowngrade() throws IOException, InterruptedException {
+    WorkerDecisionHook hook = mock(WorkerDecisionHook.class);
+    context = new DefaultWorkerContext(cache, k -> "v", entryLifecycle, stampClock, List.of(hook));
+    WorkerPolicy broken = new WorkerPolicy() {
+      @Override
+      public CoolAction cool(WorkerDecision decision, EntryView current) {
+        return null;
+      }
+    };
+    WorkerListenerProperties props = new WorkerListenerProperties();
+    props.setJitterMs(0);
+    WorkerListener brokenListener = new WorkerListener(props, scheduler, broken, context, null);
+    cache.put("key1", hotEntry());
+
+    brokenListener.onMessage(channel, wireMessage("key1", WorkerType.COOL.code(), 2L));
+
+    awaitWorkerTasks();
+    assertThat(((CacheEntry) cache.getIfPresent("key1")).getKeyState()).isEqualTo(KeyState.HOT);
+    verify(hook).onCoolSkipped(any(), eq(CoolSkipReason.POLICY_FAILED));
+  }
+
+  /**
+   * A null HOT action is a broken policy, not a promotion: the decision is reported as
+   * {@code POLICY_FAILED} and no entry is created.
+   */
+  @Test
+  void onMessage_hot_nullPolicyAction_shouldNotPromote() throws IOException, InterruptedException {
+    WorkerDecisionHook hook = mock(WorkerDecisionHook.class);
+    context = new DefaultWorkerContext(cache, k -> "v", entryLifecycle, stampClock, List.of(hook));
+    WorkerPolicy broken = new WorkerPolicy() {
+      @Override
+      public HotAction hot(WorkerDecision decision, HotValue value, EntryView current) {
+        return null;
+      }
+    };
+    WorkerListenerProperties props = new WorkerListenerProperties();
+    props.setJitterMs(0);
+    WorkerListener brokenListener = new WorkerListener(props, scheduler, broken, context, null);
+
+    brokenListener.onMessage(channel, wireMessage("key1", WorkerType.HOT.code(), 2L));
+
+    awaitWorkerTasks();
+    assertThat(cache.getIfPresent("key1")).isNull();
+    verify(hook).onHotSkipped(any(), eq(HotSkipReason.POLICY_FAILED));
   }
 
   /**

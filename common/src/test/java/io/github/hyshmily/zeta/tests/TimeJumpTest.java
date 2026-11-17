@@ -18,7 +18,7 @@ package io.github.hyshmily.zeta.tests;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import io.github.hyshmily.zeta.sharding.HealthView;
-import io.github.hyshmily.zeta.sharding.HealthViewImpl;
+import io.github.hyshmily.zeta.sharding.ClusterHealth;
 import io.github.hyshmily.zeta.sync.worker.WorkerHeartbeatMessage;
 import io.github.hyshmily.zeta.util.TimeSource;
 import org.junit.jupiter.api.AfterEach;
@@ -78,7 +78,7 @@ class TimeJumpTest {
    */
   @Test
   void forwardWallJump_shouldNotKillAliveWorkers() {
-    HealthView view = new HealthViewImpl(5000);
+    HealthView view = new ClusterHealth(5000);
     view.onHeartbeat(heartbeat("w1", 1L));
 
     TimeSource.setTimeOffsetForTest(60_000, 0);
@@ -94,7 +94,7 @@ class TimeJumpTest {
    */
   @Test
   void backwardWallJump_shouldNotReviveDeadWorkers() {
-    HealthView view = new HealthViewImpl(5000);
+    HealthView view = new ClusterHealth(5000);
     view.onHeartbeat(heartbeat("w1", 1L));
 
     TimeSource.setTimeOffsetForTest(0, 10_000);
