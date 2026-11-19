@@ -33,7 +33,7 @@ import org.jspecify.annotations.NonNull;
  * favours CPU-bound workloads where queuing is preferred over creating more threads.
  *
  * <p>The executor uses a {@link ElasticTaskQueue} (backed by {@link java.util.concurrent.LinkedTransferQueue})
- * whose {@code offer()} method cooperates with this executor's thread-add tracking to implement the
+ * whose {@code offer()} method cooperates with this executor's thread-count tracking to implement the
  * Tomcat-style policy. A {@code submittedTasksCount} counter limits the total number of in-flight
  * tasks (queued + active) to {@code queueCapacity + maxThreads}.
  *
@@ -53,7 +53,9 @@ import org.jspecify.annotations.NonNull;
  * ({@link ThreadPoolExecutor.CallerRunsPolicy}, discard-style) decrements on return, a throwing
  * one (Abort) decrements before propagating its own exception. The over-cap pre-check in
  * {@link #execute(Runnable)} (past {@code maxSubmittedTaskCount}) calls the user's handler
- * directly after rolling the increment back. The counter is therefore symmetric for arbitrary
+ * directly after rolling the increment back. A failure that never reaches {@code reject} —
+ * a throwing {@link ThreadFactory} or {@code Thread.start} failing — is rolled back by
+ * {@link #execute(Runnable)}'s finally. The counter is therefore symmetric for arbitrary
  * handlers, with the force attempted exactly once per submission.
  * Documented edge case that is intentionally not detected:
  * {@link ThreadPoolExecutor.DiscardOldestPolicy} drops a QUEUED task that already counted and
@@ -64,16 +66,21 @@ import org.jspecify.annotations.NonNull;
 public class ElasticThreadPool extends ThreadPoolExecutor {
 
   /**
-   * Records a task removed by {@link #remove(Runnable)} while the pool is shutting down.
+   * Per-submission bookkeeping visible only to the thread inside {@link #execute(Runnable)}.
    * {@link ThreadPoolExecutor#execute(Runnable)} only ever calls {@code remove(command)} inside its
-   * {@code !isRunning(recheck) && remove(command)} shutdown recheck, immediately before calling
-   * {@code reject(command)} on the same thread. The marker lets that rejection skip the second
-   * decrement. Keeping the marker off the running path means normal {@link #execute(Runnable)} and
-   * {@link #remove(Runnable)} calls never touch a {@link ThreadLocal}; a marker left behind by an
-   * <em>external</em> removal is dropped by the next {@link #execute(Runnable)} on that thread,
-   * which always sees the pool already shut down.
+   * shutdown recheck, immediately before rejecting on the same thread; recording that removal here
+   * lets the rejection skip the second decrement. The frame also records that the internal handler
+   * ran, so a rejection exception is not compensated twice. Keeping the frame scoped to
+   * {@code super.execute} means an external {@link #remove(Runnable)} never writes a
+   * {@link ThreadLocal} that could outlive the pool.
    */
-  private static final ThreadLocal<Runnable> SHUTDOWN_REMOVED = new ThreadLocal<>();
+  private static final class ExecFrame {
+
+    private Runnable shutdownRemoved;
+    private boolean rejectedByInternal;
+  }
+
+  private static final ThreadLocal<ExecFrame> EXEC_FRAME = new ThreadLocal<>();
 
   private final AtomicInteger submittedTasksCount = new AtomicInteger(0);
 
@@ -137,24 +144,26 @@ public class ElasticThreadPool extends ThreadPoolExecutor {
       userHandler.rejectedExecution(command, this);
       return;
     }
-    // A marker left on this thread by an external remove() during shutdown cannot belong to this
-    // submission: the JDK's recheck writes its own marker inside super.execute, below. Clearing it
-    // first keeps the rejection handler from treating this submission as already compensated
-    // (which would leak one admission slot).
-    if (isShutdown()) {
-      SHUTDOWN_REMOVED.remove();
-    }
-    // No catch around super.execute: every rejection it can raise is already
-    // fully resolved by the internal force-first handler — the force, the
-    // user-handler delegation, and the counter compensation all happen there,
-    // with the user handler's own exception propagating unchanged.
+    // A rejection raised by super.execute is fully resolved by the internal force-first handler
+    // (force, user-handler delegation and compensation). Anything else — a ThreadFactory that
+    // throws, Thread.start failing with OOM — never reaches reject() or afterExecute, so the
+    // submission increment would leak. The frame distinguishes the two on the same thread and is
+    // restored for a nested execute from a CallerRunsPolicy task.
+    ExecFrame previous = EXEC_FRAME.get();
+    ExecFrame frame = new ExecFrame();
+    EXEC_FRAME.set(frame);
+    boolean completed = false;
     try {
       super.execute(command);
+      completed = true;
     } finally {
-      // Only the shutdown recheck on this thread can leave a marker: a running
-      // pool never touches the ThreadLocal at all.
-      if (isShutdown()) {
-        SHUTDOWN_REMOVED.remove();
+      if (previous == null) {
+        EXEC_FRAME.remove();
+      } else {
+        EXEC_FRAME.set(previous);
+      }
+      if (!completed && !frame.rejectedByInternal) {
+        submittedTasksCount.decrementAndGet();
       }
     }
   }
@@ -177,17 +186,16 @@ public class ElasticThreadPool extends ThreadPoolExecutor {
 
   @Override
   public boolean remove(Runnable task) {
-    // A removed queued task never reaches afterExecute's decrement — balance
-    // the submission increment here, or each external removal permanently
-    // leaks one slot of the admission ceiling (maxSubmittedTaskCount). When the
-    // JDK's shutdown recheck removes the command it is about to reject, the
-    // marker lets the rejection handler skip the second decrement; an external
-    // remove() during shutdown writes the same marker, and the next execute()
-    // drops it before submitting.
+    // A removed queued task never reaches afterExecute's decrement — balance the submission
+    // increment here, or each external removal permanently leaks one slot of the admission
+    // ceiling (maxSubmittedTaskCount). Only a removal inside execute's shutdown recheck may
+    // record a marker: writing one from an arbitrary long-lived thread would pin the task (and
+    // everything it closes over) in that thread's ThreadLocal forever.
     if (super.remove(task)) {
       submittedTasksCount.decrementAndGet();
-      if (isShutdown()) {
-        SHUTDOWN_REMOVED.set(task);
+      ExecFrame frame = EXEC_FRAME.get();
+      if (frame != null && isShutdown()) {
+        frame.shutdownRemoved = task;
       }
       return true;
     }
@@ -243,6 +251,19 @@ public class ElasticThreadPool extends ThreadPoolExecutor {
   }
 
   /**
+   * Initiates an orderly shutdown under the queue's lifecycle lock, so {@link ElasticTaskQueue#force}
+   * cannot pass its running check and then insert a task after the last worker has exited. Without
+   * the shared lock, a forced task could be queued into a pool that is already terminating and
+   * never execute.
+   */
+  @Override
+  public void shutdown() {
+    synchronized (((ElasticTaskQueue) getQueue()).lifecycleLock()) {
+      super.shutdown();
+    }
+  }
+
+  /**
    * Stop the executor and drain the queue of tasks that never started.
    *
    * <p>Tasks returned here never execute, so {@link #afterExecute} never fires for them;
@@ -291,10 +312,10 @@ public class ElasticThreadPool extends ThreadPoolExecutor {
    * Return the current number of in-flight submissions (queued + executing tasks).
    *
    * <p>The counter is conservative between a task body finishing and
-   * {@link #afterExecute} running, so a transient over-add is normal; it
+   * {@link #afterExecute} running, so a transient over-count is normal; it
    * drains back to zero.
    *
-   * @return the current submitted-task add
+   * @return the current number of in-flight submissions
    */
   public int getSubmittedTasksCount() {
     return submittedTasksCount.get();
@@ -335,12 +356,15 @@ public class ElasticThreadPool extends ThreadPoolExecutor {
       // and leaks a slot permanently.
       //
       // remove() already decremented the exact task the JDK is now rejecting, so
-      // consume that marker instead of decrementing twice. Clearing it before
-      // user code keeps a CallerRunsPolicy that removes another queued task on
-      // the normal decrement path.
-      boolean alreadyCompensated = SHUTDOWN_REMOVED.get() == task;
+      // consume that marker instead of decrementing twice. The frame is also marked
+      // as handled, or execute()'s finally would compensate the same submission.
+      ExecFrame frame = EXEC_FRAME.get();
+      boolean alreadyCompensated = frame != null && frame.shutdownRemoved == task;
       if (alreadyCompensated) {
-        SHUTDOWN_REMOVED.remove();
+        frame.shutdownRemoved = null;
+      }
+      if (frame != null) {
+        frame.rejectedByInternal = true;
       }
       try {
         userHandler.rejectedExecution(task, pool);

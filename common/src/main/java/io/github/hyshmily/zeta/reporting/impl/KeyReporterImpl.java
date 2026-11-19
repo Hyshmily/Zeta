@@ -24,10 +24,6 @@ import io.github.hyshmily.zeta.sharding.HealthView;
 import io.github.hyshmily.zeta.util.Internal;
 import io.github.hyshmily.zeta.util.TimeSource;
 import io.github.hyshmily.zeta.util.executor.ZetaThreadFactory;
-import lombok.Setter;
-import lombok.extern.slf4j.Slf4j;
-import org.jspecify.annotations.Nullable;
-
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -35,9 +31,12 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 import java.util.function.Predicate;
+import lombok.Setter;
+import lombok.extern.slf4j.Slf4j;
+import org.jspecify.annotations.Nullable;
 
 /**
- * Publishes per-key access-add batches to the Worker via {@link ReportPublisher}.
+ * Publishes per-key access-count batches to the Worker via {@link ReportPublisher}.
  *
  * <p>One producer call runs three stages, each with exactly one owner (design decisions:
  * reporting):
@@ -339,7 +338,7 @@ public class KeyReporterImpl implements KeyReporter {
     // moved the key to a node with no captured epoch, the admitted-target walk skips that node
     // and keeps the counts instead of dropping the key as unroutable.
     Predicate<String> admittedTarget = admission.epochs()::containsKey;
-    Map<String, Map<String, Long>> sharded = new HashMap<>();
+    Map<String, Map<String, Long>> sharded = new HashMap<>(Math.max(4, admission.epochs().size() * 2));
     for (Map.Entry<String, Long> entry : counts.entrySet()) {
       Long count = entry.getValue();
       if (entry.getKey() == null || count == null || count <= 0L) {
@@ -368,8 +367,11 @@ public class KeyReporterImpl implements KeyReporter {
 
     // The offer timeout is one budget for the whole flush, not one per routed target.
     // A broker stall with N alive Workers would otherwise block the tide thread for
-    // N × queueOfferTimeoutMs and delay the local sketch merge behind it.
-    long deadlineNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(queueOfferTimeoutMs);
+    // N × queueOfferTimeoutMs and delay the local sketch merge behind it. A zero
+    // timeout is not a zero budget: it means "offer without waiting", so there is no
+    // deadline to exhaust and every target gets a non-blocking offer.
+    boolean hasBudget = queueOfferTimeoutMs > 0;
+    long deadlineNanos = hasBudget ? System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(queueOfferTimeoutMs) : 0L;
     Iterator<Map.Entry<String, Map<String, Long>>> targets = sharded.entrySet().iterator();
     while (targets.hasNext()) {
       Map.Entry<String, Map<String, Long>> entry = targets.next();
@@ -387,25 +389,28 @@ public class KeyReporterImpl implements KeyReporter {
         continue;
       }
 
-      long remainingNanos = deadlineNanos - System.nanoTime();
-      if (remainingNanos <= 0) {
-        long remainingKeys = countsForTarget.size();
-        int remainingTargets = 1;
-        while (targets.hasNext()) {
-          remainingKeys += targets.next().getValue().size();
-          remainingTargets++;
+      long remainingNanos = 0L;
+      if (hasBudget) {
+        remainingNanos = deadlineNanos - System.nanoTime();
+        if (remainingNanos <= 0L) {
+          long remainingKeys = countsForTarget.size();
+          int remainingTargets = 1;
+          while (targets.hasNext()) {
+            remainingKeys += targets.next().getValue().size();
+            remainingTargets++;
+          }
+          long dropped = droppedCounter.addAndGet(remainingKeys);
+          current.recordDropped(remainingTargets);
+          log.debug(
+            "report flush offer budget exhausted, dropped {} keys across remaining targets, depth={}/{}, " +
+              "cumulativeDrops={}",
+            remainingKeys,
+            current.depth(),
+            queueCapacity,
+            dropped
+          );
+          break;
         }
-        long dropped = droppedCounter.addAndGet(remainingKeys);
-        current.recordDropped(remainingTargets);
-        log.debug(
-          "report flush offer budget exhausted, dropped {} keys across remaining targets, depth={}/{}, " +
-            "cumulativeDrops={}",
-          remainingKeys,
-          current.depth(),
-          queueCapacity,
-          dropped
-        );
-        break;
       }
 
       boolean accepted = current.enqueue(
@@ -442,7 +447,13 @@ public class KeyReporterImpl implements KeyReporter {
     Dispatcher current = dispatcher;
     return current == null
       ? null
-      : new DispatcherStats(current.depth(), current.expiredDeadTarget(), current.expiredStale(), current.dropped());
+      : new DispatcherStats(
+          current.depth(),
+          current.expiredDeadTarget(),
+          current.expiredStale(),
+          current.publishFailed(),
+          current.dropped()
+        );
   }
 
   @Override
@@ -459,7 +470,7 @@ public class KeyReporterImpl implements KeyReporter {
   }
 
   /**
-   * A batch of key-add mappings destined for a single Worker target.
+   * A batch of key-count mappings destined for a single Worker target.
    *
    * @param target      the Worker nodeId for this batch
    * @param targetEpoch the target's epoch at routing time — captured before the batch waits
@@ -489,6 +500,7 @@ public class KeyReporterImpl implements KeyReporter {
     private final AtomicLong expiredDeadTargetCount = new AtomicLong();
     private final AtomicLong expiredStaleCount = new AtomicLong();
     private final AtomicLong droppedCount = new AtomicLong();
+    private final AtomicLong publishFailedCount = new AtomicLong();
     private final ScheduledExecutorService publishTimer;
     /** One permanent slot per consumer thread, swept by the single timer. */
     private final ConsumerWatchdogSlot[] watchdogs;
@@ -617,6 +629,10 @@ public class KeyReporterImpl implements KeyReporter {
       return droppedCount.get();
     }
 
+    long publishFailed() {
+      return publishFailedCount.get();
+    }
+
     /**
      * Records batches the routing layer refused before an offer: a shared offer budget that
      * expired between targets. The queue's own {@link #enqueue} path counts a closed
@@ -717,6 +733,7 @@ public class KeyReporterImpl implements KeyReporter {
             )
           );
         } catch (RuntimeException e) {
+          publishFailedCount.incrementAndGet();
           log.warn("Failed to publish report batch for target={}, keys={}", batch.target(), batch.counts().size(), e);
         } finally {
           // Disarm waits for an in-flight interrupt: once it returns, no timer task can

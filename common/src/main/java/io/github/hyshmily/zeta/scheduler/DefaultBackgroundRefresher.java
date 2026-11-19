@@ -24,6 +24,7 @@ import io.github.hyshmily.zeta.cache.cachesupport.lifecycle.TtlPolicy;
 import io.github.hyshmily.zeta.cache.cachesupport.raw.CacheEntry;
 import io.github.hyshmily.zeta.cache.cachesupport.raw.EntryDraft;
 import io.github.hyshmily.zeta.cache.cachesupport.raw.VersionedValue;
+import io.github.hyshmily.zeta.exception.ZetaExceptionHandler;
 import io.github.hyshmily.zeta.model.DecisionStamp;
 import io.github.hyshmily.zeta.model.KeyState;
 import io.github.hyshmily.zeta.util.Internal;
@@ -83,7 +84,7 @@ public class DefaultBackgroundRefresher implements BackgroundRefresher {
 
   /**
    * Currently-leased keys for the {@code staleDebt} diagnostic view:
-   * key to first-lease wall time. Insertion-ordered so iteration is
+   * key to first-lease monotonic time. Insertion-ordered so iteration is
    * oldest-first without sorting; at {@link #MAX_LEASED_EPISODES} new keys are
    * refused rather than evicting the oldest debt. Every access is guarded by
    * this map's monitor; {@link #episodeCount} is the lock-free empty
@@ -215,6 +216,10 @@ public class DefaultBackgroundRefresher implements BackgroundRefresher {
           // stop re-arming it; the next explicit write or hard expiry is the recovery point.
           closeRetryWindowAfterEmptyRefresh(this);
         }
+      } catch (Throwable t) {
+        // A whenComplete callback's failure is swallowed by the discarded future: report it
+        // here, or a classifier/hook bug silently strands the entry and the limiter permit.
+        ZetaExceptionHandler.handleException("background refresh settlement failed: key=" + key, t);
       } finally {
         // Always remove the ticket and release the limiter permit so a future
         // refresh can be scheduled. Conditional removal by object identity
@@ -318,7 +323,7 @@ public class DefaultBackgroundRefresher implements BackgroundRefresher {
     if (limit <= 0) {
       return Map.of();
     }
-    long now = TimeSource.currentTimeMillis();
+    long now = TimeSource.monotonicMillis();
     List<Map.Entry<String, Long>> episodes;
     synchronized (leasedEpisodes) {
       episodes = new ArrayList<>(leasedEpisodes.entrySet());
@@ -501,6 +506,23 @@ public class DefaultBackgroundRefresher implements BackgroundRefresher {
   }
 
   /**
+   * Decides whether the failure may keep the entry servable. A classifier that throws is a
+   * broken policy, not a reason to extend the lease: log it and refuse.
+   *
+   * @param key   the refreshed key (diagnostic context)
+   * @param cause the peeled refresh failure
+   * @return the classifier verdict, or {@code false} when it threw
+   */
+  private boolean mayLease(String key, Throwable cause) {
+    try {
+      return classifier.test(cause);
+    } catch (RuntimeException e) {
+      log.warn("Lease classifier failed for key={}; refusing the lease", key, e);
+      return false;
+    }
+  }
+
+  /**
    * Lease-on-Failure (design decisions: expiry and refresh): keep a stale entry servable after its
    * background refresh failed, by extending its expire timestamps.
    *
@@ -544,8 +566,8 @@ public class DefaultBackgroundRefresher implements BackgroundRefresher {
    * @param cause  the peeled refresh failure (one wrapper layer removed)
    */
   private void leaseOnFailure(RefreshTicket ticket, Throwable cause) {
-    boolean mayLease = classifier.test(cause);
-    if (!mayLease) {
+    boolean leaseAllowed = mayLease(ticket.key, cause);
+    if (!leaseAllowed) {
       log.debug(
         "Lease-on-failure: classifier refused lease for key={} (cause {}), hard-expiring the entry",
         ticket.key,
@@ -558,6 +580,8 @@ public class DefaultBackgroundRefresher implements BackgroundRefresher {
     // updated outside the compute so the Caffeine bin lock is never held while
     // waiting for it — a diagnostics scrape copying the map must not stall L1
     // writers on this bin.
+    // Diagnostic age axis; the lease deadlines below use the entry's epoch-millis axis.
+    long leasedAt = TimeSource.monotonicMillis();
     cache
       .asMap()
       .compute(ticket.key, (key, entry) -> {
@@ -573,7 +597,7 @@ public class DefaultBackgroundRefresher implements BackgroundRefresher {
         }
 
         long now = TimeSource.currentTimeMillis();
-        if (!mayLease) {
+        if (!leaseAllowed) {
           // Both deadlines move into the past; the read path removes the entry on its next
           // pass, so an in-flight reader is never raced by an explicit removal.
           ticket.leaseOutcome = LeaseOutcome.EXPIRED;
@@ -618,7 +642,7 @@ public class DefaultBackgroundRefresher implements BackgroundRefresher {
         );
 
         ticket.leaseOutcome = LeaseOutcome.GRANTED;
-        ticket.leasedAtMs = now;
+        ticket.leasedAtMs = leasedAt;
         // Provisional keep-alive: durations, value, and all metadata preserved
         // verbatim; only the two expire timestamps move (explicit lease
         // arithmetic — the draft's computed expiry must not run here).
@@ -678,13 +702,19 @@ public class DefaultBackgroundRefresher implements BackgroundRefresher {
   /**
    * Admit a lease episode while preserving the diagnostic view's oldest-first meaning:
    * once the cap is reached, new keys are refused rather than evicting the oldest (and
-   * therefore most stale) debt. The check, insert and count move as one critical
+   * therefore most stale) debt. Before refusing, keys whose L1 entry already left are
+   * reaped, so a full view cannot pin itself on dead episodes until a diagnostics scrape
+   * happens to walk past them. The check, reap, insert and count move as one critical
    * section under the map's monitor.
    */
   private void recordLeaseEpisode(String key, long leasedAt) {
     synchronized (leasedEpisodes) {
       if (leasedEpisodes.size() >= MAX_LEASED_EPISODES && !leasedEpisodes.containsKey(key)) {
-        return;
+        leasedEpisodes.keySet().removeIf(k -> !cache.asMap().containsKey(k));
+        episodeCount = leasedEpisodes.size();
+        if (leasedEpisodes.size() >= MAX_LEASED_EPISODES) {
+          return;
+        }
       }
       if (leasedEpisodes.putIfAbsent(key, leasedAt) == null) {
         episodeCount++;

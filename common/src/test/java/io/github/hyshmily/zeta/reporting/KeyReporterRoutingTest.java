@@ -114,6 +114,24 @@ class KeyReporterRoutingTest {
   }
 
   @Test
+  void zeroOfferTimeout_publishesInsteadOfDropping() throws Exception {
+    KeyReporterImpl zeroTimeout = new KeyReporterImpl(testPublisher, "testApp", QUEUE_CAPACITY, 0, 1, ring, healthView);
+    zeroTimeout.start();
+    try {
+      registerWorker(healthView, "worker-1");
+      zeroTimeout.publishDirect(Map.of("zero-timeout-key", 1L));
+
+      awaitPublish(1);
+
+      assertThat(testPublisher.publishCount)
+        .as("a zero offer timeout means non-blocking, not an exhausted budget")
+        .isGreaterThanOrEqualTo(1);
+    } finally {
+      zeroTimeout.stop();
+    }
+  }
+
+  @Test
   void flush_fansOutOneBatchPerTarget() throws Exception {
     registerWorker(healthView, "worker-1");
     registerWorker(healthView, "worker-2");

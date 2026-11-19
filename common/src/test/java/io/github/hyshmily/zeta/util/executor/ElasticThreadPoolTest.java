@@ -385,6 +385,76 @@ class ElasticThreadPoolTest {
     }
   }
 
+  /**
+   * A thread factory that throws never reaches reject() or afterExecute. The submission increment
+   * must be rolled back by execute's finally, or every failed thread creation leaks an admission
+   * slot forever.
+   */
+  @Test
+  void threadFactoryFailure_shouldNotLeakSubmittedCount() {
+    var executor = new ElasticThreadPool(
+      1,
+      1,
+      60L,
+      TimeUnit.SECONDS,
+      10,
+      r -> {
+        throw new IllegalStateException("factory down");
+      },
+      (r, e) -> {
+        throw new RejectedExecutionException("rejected");
+      }
+    );
+    try {
+      assertThatThrownBy(() -> executor.execute(() -> {})).isInstanceOf(IllegalStateException.class);
+      assertThat(executor.getSubmittedTasksCount()).isZero();
+    } finally {
+      executor.shutdownNow();
+    }
+  }
+
+  /**
+   * A forced insert must start a consumer when every core thread has timed out; otherwise the task
+   * waits in the queue forever and a later shutdown can never terminate.
+   */
+  @Test
+  void force_afterAllWorkersTimedOut_shouldStartAConsumer() throws Exception {
+    var executor = new ElasticThreadPool(
+      1,
+      1,
+      20L,
+      TimeUnit.MILLISECONDS,
+      10,
+      r -> {
+        Thread t = new Thread(r, "test-timeout-executor");
+        t.setDaemon(true);
+        return t;
+      },
+      (r, e) -> {
+        throw new RejectedExecutionException("rejected");
+      }
+    );
+    executor.allowCoreThreadTimeOut(true);
+    ElasticTaskQueue queue = (ElasticTaskQueue) executor.getQueue();
+    try {
+      // A first task creates the core worker; after it finishes, the keep-alive must drain it.
+      CountDownLatch first = new CountDownLatch(1);
+      executor.execute(first::countDown);
+      assertThat(first.await(5, TimeUnit.SECONDS)).isTrue();
+      long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+      while (executor.getPoolSize() > 0 && System.nanoTime() < deadline) {
+        Thread.sleep(10L);
+      }
+      assertThat(executor.getPoolSize()).as("the core worker timed out").isZero();
+
+      CountDownLatch forced = new CountDownLatch(1);
+      assertThat(queue.force(forced::countDown)).isTrue();
+      assertThat(forced.await(5, TimeUnit.SECONDS)).as("force started a consumer").isTrue();
+    } finally {
+      executor.shutdownNow();
+    }
+  }
+
   @Test
   void force_shouldAcceptTask_whenRunning() throws Exception {
     var executor = newExecutor(1, 1, 10);

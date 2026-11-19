@@ -129,6 +129,13 @@ public final class InterruptingAsync {
    */
   private static final class InterruptingTask<T> extends CompletableFuture<T> implements Runnable {
 
+    /**
+     * Sentinel written to {@link #state} before a timeout or cancellation completes the future.
+     * A run that observes it must not publish its result: the interrupt and the terminal state are
+     * already decided, and completing from the worker would race the timeout into a loaded value.
+     */
+    private static final Object ABORTED = new Object();
+
     /** The execution budget in nanoseconds — the unit is folded in at construction. */
     private final long timeoutNanos;
 
@@ -165,13 +172,20 @@ public final class InterruptingAsync {
       } catch (Throwable t) {
         failure = t;
       } finally {
+        boolean aborted;
         synchronized (this) {
           // Leave the interruptible phase before publishing the outcome: complete*() runs the
           // dependent actions synchronously on this thread, and a stale interrupt flag (or a
           // still-armed timeout/cancel that could target this thread) would hit those callbacks
           // instead of the reader.
+          aborted = state == ABORTED;
           state = null;
           Thread.interrupted();
+        }
+        if (aborted) {
+          // A timeout or cancellation already interrupted this thread and owns the terminal
+          // state. Publishing here would race it back to a successful value.
+          return;
         }
       }
       if (failure == null) {
@@ -185,15 +199,14 @@ public final class InterruptingAsync {
 
     @Override
     public boolean completeExceptionally(Throwable cause) {
-      // Complete first: a reader that catches the interrupt can otherwise return and win
-      // the race with complete(value), turning a budget timeout into a loaded value. Once
-      // the future is settled the reader's completion is a no-op, so the interrupt only
-      // has to stop the still-running call.
-      boolean completed = super.completeExceptionally(cause);
-      if (completed && cause instanceof TimeoutException) {
+      // Interrupt and mark the task aborted BEFORE completing: complete*() runs non-async
+      // dependent actions synchronously on the calling thread (the JDK's shared delay scheduler
+      // for a timeout). A slow or lock-waiting callback must not delay the interrupt, and must
+      // not be able to deadlock that single scheduler thread against the interrupted reader.
+      if (cause instanceof TimeoutException && !isDone()) {
         interruptRunning();
       }
-      return completed;
+      return super.completeExceptionally(cause);
     }
 
     @Override
@@ -201,11 +214,10 @@ public final class InterruptingAsync {
       // CompletableFuture.cancel() does not know the thread running run(); the
       // interrupt has to come from the task's own state. Cancellation releases
       // the pool thread even when the caller passes false.
-      boolean cancelled = super.cancel(mayInterruptIfRunning);
-      if (cancelled) {
+      if (!isDone()) {
         interruptRunning();
       }
-      return cancelled;
+      return super.cancel(mayInterruptIfRunning);
     }
 
     /**
@@ -216,7 +228,7 @@ public final class InterruptingAsync {
     private void interruptRunning() {
       synchronized (this) {
         Object phase = state;
-        state = null;
+        state = ABORTED;
         if (phase instanceof Thread running) {
           running.interrupt();
         }

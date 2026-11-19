@@ -21,7 +21,7 @@ import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.Item;
 import org.junit.jupiter.api.Test;
 
 /**
- * Tests for {@link Item}, the immutable key-add pair reportToWorker used by the HeavyKeeper algorithm.
+ * Tests for {@link Item}, the immutable key-count pair reported by the HeavyKeeper algorithm.
  */
 class ItemTest {
 

@@ -98,6 +98,16 @@ class WaveCounterAdaptiveTest {
 
   // ---------------- MoonsTidalForce (promotion floor governor) ----------------
 
+  @Test
+  void boundary_isClampedBeforeTheIntNarrowing() throws Exception {
+    Object governor = governorOf(counter);
+    Method bounded = governor.getClass().getDeclaredMethod("computeBoundedFloor", long.class);
+    bounded.setAccessible(true);
+
+    assertThat((int) bounded.invoke(governor, Long.MAX_VALUE)).isEqualTo(256);
+    assertThat((int) bounded.invoke(governor, -1L)).isEqualTo(10);
+  }
+
   private static Object governorOf(WaveCounter c) throws Exception {
     Field f = WaveCounter.class.getDeclaredField("moonsTidalForce");
     f.setAccessible(true);
@@ -208,9 +218,9 @@ class WaveCounterAdaptiveTest {
     // and every tide reads as "quiet".  The volume is deliberately NOT part
     // of the TideReading (design decisions: sketch): the reading carries only the signals
     // onTide consumes; the volume channel is onVolume.
-    Method fold = governor.getClass().getDeclaredMethod("onVolume", long.class);
+    Method fold = governor.getClass().getDeclaredMethod("onVolume", long.class, long.class);
     fold.setAccessible(true);
-    fold.invoke(governor, volumeSeed);
+    fold.invoke(governor, volumeSeed, intervalMs);
     Method m = governor.getClass().getDeclaredMethod("onTide", tideReadingType());
     m.setAccessible(true);
     m.invoke(

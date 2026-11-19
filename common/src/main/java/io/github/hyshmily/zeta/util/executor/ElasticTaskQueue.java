@@ -30,11 +30,11 @@ import org.springframework.util.Assert;
  * while returning {@code true} queues the task. This queue:
  *
  * <ul>
- *   <li>Returns {@code false} when pool threads are saturated (submitted add &gt; pool size)
+ *   <li>Returns {@code false} when pool threads are saturated (submitted count &gt; pool size)
  *       and the pool has not yet reached maximum size, forcing thread creation.</li>
  *   <li>Returns {@code true} when the pool is already at maximum size, queueing the task.</li>
  *   <li>Returns {@code true} when the pool can absorb the task without growing
- *       (submitted add &le; pool size).</li>
+ *       (submitted count &le; pool size).</li>
  * </ul>
  *
  * <p><b>Lock-free counters first:</b> the decision reads {@code submittedTasksCount},
@@ -60,10 +60,10 @@ import org.springframework.util.Assert;
 public class ElasticTaskQueue extends LinkedTransferQueue<Runnable> {
 
   /**
-   * Owning executor. Written once during construction, before the executor is published, so
-   * every later {@link #offer} sees it without a volatile read.
+   * Owning executor. Written once by {@link #attach} and read lock-free by {@link #offer}; volatile
+   * so a thread that attaches after construction is still seen by an unsynchronized offer.
    */
-  private ElasticThreadPool executor;
+  private volatile ElasticThreadPool executor;
 
   /**
    * Attaches this queue to its executor. The queue is single-use: a second attach — even
@@ -101,18 +101,46 @@ public class ElasticTaskQueue extends LinkedTransferQueue<Runnable> {
    *
    * <p>Once the pool is shutting down the task is refused: a task queued through this
    * fallback would be drained at best, or silently left unexecuted at worst, so the
-   * caller's rejection handler decides. The shutdown check and the offer share the
-   * lifecycle lock with {@code shutdownNow()}, so a concurrent STOP-and-drain cannot
-   * strand the task after the check.
+   * caller's rejection handler decides. The shutdown check, the offer and the worker
+   * guarantee share the lifecycle lock with both shutdown methods, so neither a concurrent
+   * STOP-and-drain nor a graceful shutdown can strand the task after the check.
+   *
+   * <p>A forced insert bypasses {@code ThreadPoolExecutor}'s own "workerCount == 0 → start a
+   * worker" recheck. With the pool's threads timed out (core threads may time out) the task
+   * would sit in the queue forever, and a later {@code shutdown()} could never terminate.
+   * The insert therefore starts a core worker, or — when the pool has no core thread to
+   * start and no live worker — takes the task back out and lets the rejection handler run.
    *
    * @param task the task to insert
    * @return {@code true} if the task was accepted; {@code false} when the queue is
-   *         unattached or the executor is shut down
+   *         unattached, the executor is shut down, or no worker can consume it
    */
   public boolean force(@NonNull Runnable task) {
     synchronized (lifecycleLock) {
       ElasticThreadPool owner = executor;
-      return owner != null && !owner.isShutdown() && super.offer(task);
+      if (owner == null || owner.isShutdown() || !super.offer(task)) {
+        return false;
+      }
+      boolean workerStarted;
+      try {
+        workerStarted = owner.prestartCoreThread();
+      } catch (RuntimeException | Error e) {
+        // A thread factory failure must not leave the inserted task behind: undo the insert and
+        // let the caller's rejection handler own the failure. A concurrent worker may already
+        // have taken the task; remove() then returns false and the task is being executed.
+        return !super.remove(task);
+      }
+      if (workerStarted) {
+        return true;
+      }
+      if (owner.getPoolSize() > 0) {
+        // A non-core worker exists; the pool's own shutdown path also handles the queue.
+        return true;
+      }
+      // No core thread to start and no live worker: remove the task and report the refusal
+      // instead of leaving it in a queue nothing can drain. If the remove loses to a worker
+      // that appeared concurrently, the task is already owned and will execute.
+      return !super.remove(task);
     }
   }
 
@@ -151,7 +179,7 @@ public class ElasticTaskQueue extends LinkedTransferQueue<Runnable> {
     }
 
     // Elastic range only: read the pool size (one mainLock acquisition) to decide between
-    // growing and queueing. Read after the submitted add so the comparison uses the
+    // growing and queueing. Read after the submitted count so the comparison uses the
     // freshest thread add.
     int poolSize = owner.getPoolSize();
     if (submitted <= poolSize || poolSize >= maxSize) {

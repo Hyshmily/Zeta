@@ -95,8 +95,8 @@ public interface StampClock {
   long nextStamp();
 
   /**
-   * Atomically reserve a contiguous range of {@code add} stamps and return the base
-   * stamp: the caller owns exactly {@code [base, base + add - 1]} and may assign them
+   * Atomically reserve a contiguous range of {@code count} stamps and return the base
+   * stamp: the caller owns exactly {@code [base, base + count - 1]} and may assign them
    * in any order. One CAS — no concurrent {@link #nextStamp()} or {@link #nextStamps(int)}
    * call can land inside the reserved block, so a concurrent single write is ordered
    * against the whole batch at once: its stamp is either older than every batch stamp or
@@ -104,7 +104,7 @@ public interface StampClock {
    * invalidation hand each entry its own version while the per-key version guard sees a
    * batch-relative order that is never partial (design decisions: version stamps).
    *
-   * <p>{@code add} must be in {@code [1, MAX_ATOMIC_RANGE]}; a larger batch cannot fit
+   * <p>{@code count} must be in {@code [1, MAX_ATOMIC_RANGE]}; a larger batch cannot fit
    * one sequence window and would silently break the exclusive-reservation guarantee, so
    * it is rejected (argument contract — callers chunk by {@link #MAX_ATOMIC_RANGE}).
    *

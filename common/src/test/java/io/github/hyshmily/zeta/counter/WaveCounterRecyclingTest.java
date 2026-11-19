@@ -554,9 +554,6 @@ class WaveCounterRecyclingTest {
     ConcurrentHashMap<String, LongAdder> table = (ConcurrentHashMap<String, LongAdder>) reservoirField(counter).get(
       counter
     );
-    Field mergesField = WaveCounter.class.getDeclaredField("mergesInFlight");
-    mergesField.setAccessible(true);
-    Object merges = mergesField.get(counter);
     Field ebbField = WaveCounter.class.getDeclaredField("ebbReservoir");
     ebbField.setAccessible(true);
     @SuppressWarnings("unchecked")
@@ -566,15 +563,9 @@ class WaveCounterRecyclingTest {
 
     Method m = ceils
       .getClass()
-      .getDeclaredMethod(
-        "tryDrainInto",
-        WaveCounter.class,
-        ConcurrentHashMap.class,
-        LongAdder.class,
-        SoftReference.class
-      );
+      .getDeclaredMethod("tryDrainInto", WaveCounter.class, ConcurrentHashMap.class, SoftReference.class);
     m.setAccessible(true);
-    assertThat((boolean) m.invoke(ceils, counter, table, merges, ebb)).as("tryLock drain should succeed").isTrue();
+    assertThat((boolean) m.invoke(ceils, counter, table, ebb)).as("tryLock drain should succeed").isTrue();
 
     assertThat((int) sizeField.get(ceils)).as("tryDrainInto must reset size").isZero();
     assertThat(table.get("k").sum()).as("drained hot add must reach the shared table").isEqualTo(3);

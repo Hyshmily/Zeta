@@ -336,7 +336,7 @@ public class PeriodicScheduler extends ScheduledThreadPoolExecutor {
         // slot advances by exactly one period from here (see scheduleNext()).
         nextRunTimeNanos = System.nanoTime() + initialDelayNanos;
       }
-      scheduleLink(initialDelayNanos);
+      scheduleLink(initialDelayNanos, true);
       return this;
     }
 
@@ -393,10 +393,23 @@ public class PeriodicScheduler extends ScheduledThreadPoolExecutor {
       } else {
         delayNanos = -gapNanos;
       }
-      scheduleLink(delayNanos);
+      scheduleLink(delayNanos, false);
     }
 
-    private void scheduleLink(long delayNanos) {
+    /**
+     * Schedules one link.
+     *
+     * <p>A later link ends silently when the executor is shutting down: the chain has already run
+     * and its future reports done. The first link follows the {@code ScheduledExecutorService}
+     * contract instead — a submission to a shut-down executor throws
+     * {@link RejectedExecutionException} — while a chain cancelled before its first run still ends
+     * silently (the caller cancelled it, the executor did not refuse it).
+     *
+     * @param delayNanos the delay before this link
+     * @param initial    whether this is the first link of a new chain
+     * @throws RejectedExecutionException when {@code initial} is true and the executor is shut down
+     */
+    private void scheduleLink(long delayNanos, boolean initial) {
       int code = stateCode();
       if (code != ACTIVE) {
         unregister();
@@ -407,6 +420,9 @@ public class PeriodicScheduler extends ScheduledThreadPoolExecutor {
         // visible through isDone().
         PERIODIC_STATE.compareAndSet(this, ACTIVE, TERMINATED);
         unregister();
+        if (initial) {
+          throw new RejectedExecutionException("PeriodicScheduler is shut down");
+        }
         return;
       }
       try {
@@ -423,6 +439,9 @@ public class PeriodicScheduler extends ScheduledThreadPoolExecutor {
           rejected.cancel(false);
         }
         unregister();
+        if (initial) {
+          throw e;
+        }
         return;
       }
       // cancel()/terminate()/shutdown() may have raced the assignment above: they

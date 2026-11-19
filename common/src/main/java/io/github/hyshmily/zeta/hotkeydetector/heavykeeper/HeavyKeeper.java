@@ -56,11 +56,12 @@ import org.springframework.util.Assert;
 public class HeavyKeeper implements TopK {
 
   /**
-   * Release/acquire handle for a slot's fingerprint. The fingerprint is the slot's ownership tag:
-   * writers publish it last, after the windows and the running sum, and the lock-free
-   * {@link #probeSketch} reads it first with acquire ordering.
+   * Release/acquire handle for a slot word: the fingerprint ({@code base}) and the running
+   * sum ({@code base + 1}). A writer publishes the fingerprint last, after the windows and the
+   * running sum; the lock-free {@link #probeSketch} reads it first with acquire ordering and
+   * re-checks it after reading the sum.
    */
-  private static final VarHandle FINGERPRINT = MethodHandles.arrayElementVarHandle(int[].class);
+  private static final VarHandle SLOT = MethodHandles.arrayElementVarHandle(int[].class);
 
   /**
    * {@code cur} threshold above which stochastic sampling is replaced by direct
@@ -332,10 +333,12 @@ public class HeavyKeeper implements TopK {
 
   /**
    * 32-bit fingerprint for sketch slot indexing: the key's cached
-   * {@link String#hashCode()} passed through the Murmur3 finalizer.
+   * {@link String#hashCode()} passed through the Murmur3 finalizer. {@code 0} is the
+   * switching sentinel, so a real owner never carries it.
    */
   private static int fingerprint(String key) {
-    return Hashes.mix32(key.hashCode());
+    int fingerprint = Hashes.mix32(key.hashCode());
+    return fingerprint == 0 ? 1 : fingerprint;
   }
 
   /**
@@ -541,8 +544,11 @@ public class HeavyKeeper implements TopK {
    *
    * <p>Deliberately lock-free: {@link #decayMembership()} calls this under
    * {@code admissionLock}, and taking a stripe lock here would invert the class's
-   * stripe → admission order. The fingerprint is read with acquire ordering, so a
-   * matching fingerprint always comes with its slot payload.
+   * stripe → admission order. The read is a seqlock: the fingerprint is read with acquire
+   * ordering, the sum with acquire ordering, and the fingerprint is re-read. A takeover
+   * clears the fingerprint before it rewrites the sum, so a matching second read means the
+   * payload belongs to this key — an older owner's fingerprint can never be paired with the
+   * incoming key's count.
    *
    * @param itemFingerprint the member's captured fingerprint
    * @return the current estimate (possibly 0), or -1 when no row carries the fingerprint
@@ -552,12 +558,17 @@ public class HeavyKeeper implements TopK {
     boolean present = false;
     for (int i = 0; i < depth; i++) {
       int base = (i * width + bucketIndex(itemFingerprint, i)) * slotStride;
-      if ((int) FINGERPRINT.getAcquire(table, base) == itemFingerprint) {
-        present = true;
-        long sum = table[base + 1];
-        if (sum > max) {
-          max = sum;
-        }
+      if ((int) SLOT.getAcquire(table, base) != itemFingerprint) {
+        continue;
+      }
+      long sum = (int) SLOT.getAcquire(table, base + 1);
+      if ((int) SLOT.getAcquire(table, base) != itemFingerprint) {
+        // The slot changed hands after the first read: its new payload is not this key's.
+        continue;
+      }
+      present = true;
+      if (sum > max) {
+        max = sum;
       }
     }
     return present ? max : -1L;
@@ -610,14 +621,18 @@ public class HeavyKeeper implements TopK {
   }
 
   /**
-   * Initialise an empty sketch slot: write the fingerprint after the window and sum,
-   * then return the running {@code maxCount}.
+   * Initialise an empty sketch slot: detach the previous owner, then write the window and sum,
+   * and publish the fingerprint last.
    */
   private long updateEmptySlot(int base, int active, int itemFingerprint, long delta, long maxCount) {
+    // The sum reads 0 but the slot may still carry the previous owner's fingerprint: park it
+    // on the switching sentinel before the payload moves, so a concurrent probe cannot pair
+    // the old fingerprint with this key's count.
+    SLOT.setVolatile(table, base, 0);
     long next = applyIncrement(base, active, delta, maxCount);
     // Ownership is published last: a lock-free probe that observes this fingerprint must also
     // observe the window and the running sum written before it.
-    FINGERPRINT.setRelease(table, base, itemFingerprint);
+    SLOT.setRelease(table, base, itemFingerprint);
     return next;
   }
 
@@ -635,7 +650,7 @@ public class HeavyKeeper implements TopK {
     int actualDelta = (int) Math.min(delta, (long) Integer.MAX_VALUE - curSum);
     int sum = curSum + actualDelta;
     table[base + 2 + active] += actualDelta;
-    table[base + 1] = sum;
+    SLOT.setRelease(table, base + 1, sum);
     return Math.max(maxCount, sum);
   }
 
@@ -645,12 +660,16 @@ public class HeavyKeeper implements TopK {
    * share this body so they leave identical state. Callers hold the stripe lock.
    */
   private long takeoverSlot(int base, int active, int itemFingerprint, long delta, long maxCount) {
+    // Detach the previous owner before the payload moves: a probe that read the old
+    // fingerprint then sees the sentinel (or the new owner) on its second read and discards
+    // the sum it observed in between.
+    SLOT.setVolatile(table, base, 0);
     int winBase = base + 2;
     Arrays.fill(table, winBase, winBase + windowCount, 0);
     table[winBase + active] = (int) delta;
-    table[base + 1] = (int) delta;
+    SLOT.setRelease(table, base + 1, (int) delta);
     // Ownership last, for the same acquire/release reason as updateEmptySlot.
-    FINGERPRINT.setRelease(table, base, itemFingerprint);
+    SLOT.setRelease(table, base, itemFingerprint);
     return Math.max(maxCount, delta);
   }
 
@@ -724,7 +743,7 @@ public class HeavyKeeper implements TopK {
         table[off] = (int) newVal;
       }
     }
-    table[base + 1] = (int) Math.max(0, sumBefore - totalSubtracted);
+    SLOT.setRelease(table, base + 1, (int) Math.max(0, sumBefore - totalSubtracted));
     // The slot still belongs to the occupant: the incoming key contributed
     // nothing to it, so it must contribute nothing to the caller's estimate.
     // Returning the occupant's decayed slotSum here would let any cold key
@@ -753,7 +772,7 @@ public class HeavyKeeper implements TopK {
               // (the stripe lock serialises every writer of this slot).
               sum = 0;
             }
-            table[base + 1] = sum;
+            SLOT.setRelease(table, base + 1, sum);
           }
         }
       }
@@ -971,8 +990,13 @@ public class HeavyKeeper implements TopK {
     if (expelledQueue.offer(new Item(key, count))) {
       return;
     }
-    if ((expelledLogCounter.getAndIncrement() & (EXPELLED_LOG_INTERVAL - 1)) == 0) {
-      log.warn("Failed to offer {}: {} ({} suppressed since last log)", siteLabel, key, EXPELLED_LOG_INTERVAL);
+    long failures = expelledLogCounter.getAndIncrement();
+    if ((failures & (EXPELLED_LOG_INTERVAL - 1)) == 0L) {
+      if (failures == 0L) {
+        log.warn("Failed to offer {}: {}", siteLabel, key);
+      } else {
+        log.warn("Failed to offer {}: {} ({} suppressed since last log)", siteLabel, key, EXPELLED_LOG_INTERVAL - 1L);
+      }
     }
   }
 

@@ -17,8 +17,9 @@ package io.github.hyshmily.zeta.endpoint;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -29,7 +30,6 @@ import java.util.Map;
 import java.util.Set;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.mockito.ArgumentCaptor;
 import org.springframework.boot.actuate.endpoint.InvalidEndpointRequestException;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.server.ResponseStatusException;
@@ -65,20 +65,29 @@ class RingEndpointTest {
   }
 
   /**
-   * With no health view wired the constructor stores a zero-timeout fallback, so the ring
-   * always gets a non-null view and — no Worker ever being alive — resolves no node.
+   * With no health view wired the endpoint must not rebuild the ring from an empty liveness set;
+   * it reports the current snapshot and routes on that snapshot.
    */
   @Test
-  void keyMapping_shouldPassAZeroTimeoutFallbackWhenNoHealthViewIsWired() {
+  void keyMapping_shouldUseTheSnapshotWhenNoHealthViewIsWired() {
     RingEndpoint unwired = new RingEndpoint(ring, null);
+    when(ring.locateNode("k")).thenReturn("node1");
 
     Map<String, Object> result = unwired.keyMapping(new String[] { "k" });
 
-    ArgumentCaptor<HealthView> view = ArgumentCaptor.forClass(HealthView.class);
-    verify(ring).locateNode(eq("k"), view.capture());
-    assertThat(view.getValue()).isNotNull();
-    assertThat(view.getValue().isClusterHealthy()).isFalse();
-    assertThat(result.get("nodeId")).isNull();
+    verify(ring).locateNode("k");
+    verify(ring, never()).rebuildIfPossible(any());
+    assertThat(result.get("nodeId")).isEqualTo("node1");
+  }
+
+  @Test
+  void ringInfo_withoutHealthView_doesNotRebuildTheRing() {
+    RingEndpoint unwired = new RingEndpoint(ring, null);
+    when(ring.getNodes()).thenReturn(Set.of("node1"));
+
+    assertThat(unwired.ringInfo()).containsEntry("nodes", List.of("node1"));
+
+    verify(ring, never()).rebuildIfPossible(any());
   }
 
   @Test

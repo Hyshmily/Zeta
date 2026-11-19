@@ -77,7 +77,8 @@ class ZetaEndpointTest {
   /* helpers */
 
   private ZetaEndpoint endpointWithAll() {
-    return ZetaEndpoint.builder().identity(new io.github.hyshmily.zeta.util.NodeIdentity("test", 1))
+    return ZetaEndpoint.builder()
+      .identity(new io.github.hyshmily.zeta.util.NodeIdentity("test", 1))
       .hotKeyDetector(hotKeyDetector)
       .caffeineCache(caffeineCache)
       .singleFlight(singleFlight)
@@ -105,7 +106,7 @@ class ZetaEndpointTest {
     mockTopK(hotKeyDetector, List.of(new Item("k1", 10), new Item("k2", 7)), 200L);
     when(caffeineCache.estimatedSize()).thenReturn(42L);
     when(singleFlight.estimatedInFlightSize()).thenReturn(3L);
-    when(keyReporter.dispatcherStats()).thenReturn(new KeyReporter.DispatcherStats(7, 2, 0, 1));
+    when(keyReporter.dispatcherStats()).thenReturn(new KeyReporter.DispatcherStats(7, 2, 0, 0, 1));
     when(accessCounter.pendingKeyCount()).thenReturn(5L);
     when(backgroundRefresher.getRefreshLimiter()).thenReturn(new Semaphore(50));
     when(stampClock.skewMillis()).thenReturn(0L);
@@ -123,10 +124,14 @@ class ZetaEndpointTest {
     Map<String, Object> local = (Map<String, Object>) info.get("local");
     assertThat(local).containsEntry("totalRequests", 200L);
     assertThat(local).containsKey("topK");
+    @SuppressWarnings("unchecked")
+    List<Map<String, Object>> topK = (List<Map<String, Object>>) local.get("topK");
+    assertThat(topK.get(0)).containsEntry("key", "k1").containsEntry("count", 10L).doesNotContainKey("add");
     assertThat(local).containsEntry("cacheSize", 42L);
     assertThat(local).containsEntry("inFlightSize", 3L);
     assertThat(local).containsEntry("reportQueueDepth", 7);
     assertThat(local).containsEntry("reportQueueFullCount", 1L);
+    assertThat(local).containsEntry("reportPublishFailedCount", 0L);
     assertThat(local).containsEntry("reportPendingKeys", 5L);
     assertThat(local).containsEntry("refreshPoolAvailable", 50);
     assertThat(local).containsEntry("versionClockSkewMillis", 0L);
@@ -179,7 +184,8 @@ class ZetaEndpointTest {
   void localSection_shouldNotExposeDetectorConfiguration() {
     HeavyKeeper hk = new HeavyKeeper(10, 500, 4, 0.9, 5, 10_000, 3, false);
     hk.addDirect("k1", 20);
-    ZetaEndpoint ep = ZetaEndpoint.builder().identity(new io.github.hyshmily.zeta.util.NodeIdentity("test", 1))
+    ZetaEndpoint ep = ZetaEndpoint.builder()
+      .identity(new io.github.hyshmily.zeta.util.NodeIdentity("test", 1))
       .hotKeyDetector(hk)
       .caffeineCache(caffeineCache)
       .singleFlight(singleFlight)
@@ -211,7 +217,9 @@ class ZetaEndpointTest {
    */
   @Test
   void hotKeyInfo_shouldOmitSectionWhenAllComponentsNull() {
-    ZetaEndpoint minimal = ZetaEndpoint.builder().identity(new io.github.hyshmily.zeta.util.NodeIdentity("test", 1)).build();
+    ZetaEndpoint minimal = ZetaEndpoint.builder()
+      .identity(new io.github.hyshmily.zeta.util.NodeIdentity("test", 1))
+      .build();
     Map<String, Object> info = minimal.hotKeyInfo(100);
     assertThat(info).doesNotContainKeys("local", "worker", "sync");
     assertThat(info).containsKeys("instanceId", "jvmId");
@@ -246,7 +254,11 @@ class ZetaEndpointTest {
     when(hotKeyDetector.listTopN(100)).thenReturn(List.of());
     when(hotKeyDetector.total()).thenReturn(0L);
     when(caffeineCache.estimatedSize()).thenReturn(5L);
-    ZetaEndpoint ep = ZetaEndpoint.builder().identity(new io.github.hyshmily.zeta.util.NodeIdentity("test", 1)).hotKeyDetector(hotKeyDetector).caffeineCache(caffeineCache).build();
+    ZetaEndpoint ep = ZetaEndpoint.builder()
+      .identity(new io.github.hyshmily.zeta.util.NodeIdentity("test", 1))
+      .hotKeyDetector(hotKeyDetector)
+      .caffeineCache(caffeineCache)
+      .build();
 
     Map<String, Object> info = ep.hotKeyInfo(100);
     assertThat(info).containsKey("local");
@@ -261,7 +273,10 @@ class ZetaEndpointTest {
   @Test
   void hotKeyInfo_shouldIncludeSyncWhenOnlySyncComponents() {
     when(syncListener.foreignAppDrops()).thenReturn(3L);
-    ZetaEndpoint ep = ZetaEndpoint.builder().identity(new io.github.hyshmily.zeta.util.NodeIdentity("test", 1)).syncListener(syncListener).build();
+    ZetaEndpoint ep = ZetaEndpoint.builder()
+      .identity(new io.github.hyshmily.zeta.util.NodeIdentity("test", 1))
+      .syncListener(syncListener)
+      .build();
 
     Map<String, Object> info = ep.hotKeyInfo(100);
     assertThat(info).doesNotContainKeys("local", "worker");
@@ -276,7 +291,10 @@ class ZetaEndpointTest {
    */
   @Test
   void workerSection_shouldListWorkerHealth() {
-    ZetaEndpoint ep = ZetaEndpoint.builder().identity(new io.github.hyshmily.zeta.util.NodeIdentity("test", 1)).healthView(healthView).build();
+    ZetaEndpoint ep = ZetaEndpoint.builder()
+      .identity(new io.github.hyshmily.zeta.util.NodeIdentity("test", 1))
+      .healthView(healthView)
+      .build();
 
     Map<String, Object> info = ep.hotKeyInfo(100);
     Map<String, Object> worker = (Map<String, Object>) info.get("worker");
@@ -310,7 +328,8 @@ class ZetaEndpointTest {
     when(customTopK.listTopN(100)).thenReturn(List.of(new Item("k1", 1)));
     when(customTopK.total()).thenReturn(10L);
     when(caffeineCache.estimatedSize()).thenReturn(0L);
-    ZetaEndpoint ep = ZetaEndpoint.builder().identity(new io.github.hyshmily.zeta.util.NodeIdentity("test", 1))
+    ZetaEndpoint ep = ZetaEndpoint.builder()
+      .identity(new io.github.hyshmily.zeta.util.NodeIdentity("test", 1))
       .hotKeyDetector(customTopK)
       .caffeineCache(caffeineCache)
       .healthView(healthView)

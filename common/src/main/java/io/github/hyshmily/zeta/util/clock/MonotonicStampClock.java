@@ -178,7 +178,7 @@ public class MonotonicStampClock implements StampClock {
   @Override
   public long nextStamps(int count) {
     if (count < 1 || count > MAX_ATOMIC_RANGE) {
-      throw new IllegalArgumentException("nextStamps add must be 1.." + MAX_ATOMIC_RANGE + ", got " + count);
+      throw new IllegalArgumentException("nextStamps count must be 1.." + MAX_ATOMIC_RANGE + ", got " + count);
     }
     return allocate(count);
   }
@@ -229,18 +229,13 @@ public class MonotonicStampClock implements StampClock {
     for (;;) {
       long first = base(count, cur, nowTs, nodeBase);
       // base() answers -1 for a window past the 41-bit timestamp field: shifting it would
-      // drop the high bits and mint a stamp from the past. Refuse before the block tail is
-      // computed, so the sentinel can never be turned into a positive value by the addition.
-      if (first < 1L) {
+      // drop the high bits and mint a stamp from the past. The tail bound is a subtraction:
+      // adding it to a base near Long.MAX_VALUE would wrap negative and let the block escape
+      // the MAX_STAMP check. count <= MAX_ATOMIC_RANGE and MAX_STAMP > 4095 make this exact.
+      if (first < 1L || first > MAX_STAMP - (count - 1L)) {
         throw timestampSpaceExhausted(first, count, cur);
       }
       long top = first + (count - 1L);
-      // The only other illegal result is the reserved saturated sentinel. Refusing here keeps
-      // every issued stamp positive; a silent negative would be persisted and propagated
-      // cluster-wide.
-      if (top > MAX_STAMP) {
-        throw timestampSpaceExhausted(first, count, cur);
-      }
       // compareAndExchange returns the witness on failure, so a retry does not
       // need a second last.get() — the same state machine as observe().
       long witness = last.compareAndExchange(cur, top);
@@ -283,7 +278,12 @@ public class MonotonicStampClock implements StampClock {
     }
     long ownBase = (windowTs << TIMESTAMP_SHIFT) | nodeBits;
     long candidate = Math.max(ownBase, cur + 1L);
-    if (candidate + count - 1L <= (ownBase | SEQ_MASK)) {
+    // Subtract the block tail instead of adding it: candidate can sit at the top of the
+    // timestamp field, where candidate + count - 1 would overflow negative and pass the
+    // sequence-ceiling check. count - 1 <= 4095 <= ownCeiling, so the subtraction cannot
+    // underflow.
+    long ownCeiling = ownBase | SEQ_MASK;
+    if (candidate <= ownCeiling - (count - 1L)) {
       return candidate;
     }
     long nextTs = windowTs + 1L;
@@ -292,7 +292,14 @@ public class MonotonicStampClock implements StampClock {
 
   private static IllegalStateException timestampSpaceExhausted(long base, long count, long cur) {
     return new IllegalStateException(
-      "stamp timestamp space exhausted (41 bits since " + EPOCH + "): base=" + base + ", add=" + count + ", last=" + cur
+      "stamp timestamp space exhausted (41 bits since " +
+        EPOCH +
+        "): base=" +
+        base +
+        ", count=" +
+        count +
+        ", last=" +
+        cur
     );
   }
 

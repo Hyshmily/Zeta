@@ -35,10 +35,10 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import lombok.Builder;
+import org.jspecify.annotations.Nullable;
 import org.springframework.boot.actuate.endpoint.InvalidEndpointRequestException;
 import org.springframework.boot.actuate.endpoint.annotation.Endpoint;
 import org.springframework.boot.actuate.endpoint.annotation.ReadOperation;
-import org.springframework.lang.Nullable;
 
 /**
  * Actuator {@code /actuator/hotkey} endpoint that exposes runtime diagnostics.
@@ -219,6 +219,7 @@ public class ZetaEndpoint {
       if (stats != null) {
         local.put("reportQueueDepth", stats.depth());
         local.put("reportQueueFullCount", stats.dropped());
+        local.put("reportPublishFailedCount", stats.publishFailed());
       }
     }
 
@@ -293,16 +294,16 @@ public class ZetaEndpoint {
   }
 
   /**
-   * Convert a list of TopK {@link Item} records into a list of key-add maps
+   * Convert a list of TopK {@link Item} records into a list of key-count maps
    * suitable for JSON serialisation in the actuator response.
    *
    * @param items the TopK items to convert
-   * @return a list of maps, each containing {@code "key"} and {@code "add"}
+   * @return a list of maps, each containing {@code "key"} and {@code "count"}
    */
   private static List<Map<String, Object>> toTopKEntries(List<Item> items) {
     List<Map<String, Object>> entries = new ArrayList<>(items.size());
     for (Item item : items) {
-      entries.add(Map.of("key", item.key(), "add", item.count()));
+      entries.add(Map.of("key", item.key(), "count", item.count()));
     }
     return entries;
   }

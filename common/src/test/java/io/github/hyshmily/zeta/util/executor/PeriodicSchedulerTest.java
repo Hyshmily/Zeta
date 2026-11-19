@@ -165,6 +165,28 @@ class PeriodicSchedulerTest {
     }
   }
 
+  /**
+   * A periodic submission to a shut-down scheduler follows the
+   * {@link java.util.concurrent.ScheduledExecutorService} contract: it throws
+   * {@link java.util.concurrent.RejectedExecutionException} instead of silently returning a future
+   * that never runs.
+   */
+  @Test
+  void scheduleAtFixedRate_afterShutdown_shouldThrow() {
+    var executor = newExecutor();
+    try {
+      executor.shutdown();
+      assertThatThrownBy(() -> executor.scheduleAtFixedRate(() -> {}, 0, 10, TimeUnit.MILLISECONDS)).isInstanceOf(
+        java.util.concurrent.RejectedExecutionException.class
+      );
+      assertThatThrownBy(() -> executor.scheduleWithFixedDelay(() -> {}, 0, 10, TimeUnit.MILLISECONDS)).isInstanceOf(
+        java.util.concurrent.RejectedExecutionException.class
+      );
+    } finally {
+      executor.shutdownNow();
+    }
+  }
+
   @Test
   void shutdown_shouldStopTheChainSilently() throws Exception {
     var executor = newExecutor();

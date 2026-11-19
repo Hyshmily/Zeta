@@ -18,6 +18,8 @@ package io.github.hyshmily.zeta.util.clock;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import io.github.hyshmily.zeta.util.NodeIdentity;
+import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
@@ -26,6 +28,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -46,6 +49,31 @@ class MonotonicStampClockRangeTest {
     // The next single allocation must rank above the block's top — the
     // reservation owns the range exclusively.
     assertThat(clock.nextStamp()).isGreaterThan(base + 4);
+  }
+
+  /**
+   * A block whose tail would pass {@link Long#MAX_VALUE} must be refused, not wrapped negative.
+   * The base sits in the top timestamp window with the maximum node id, so
+   * {@code candidate + count - 1} overflows exactly as it did before the subtraction-based bound.
+   */
+  @Test
+  void nextStamps_refusesABlockWhoseTailWouldOverflowTheStampSpace() throws Exception {
+    MonotonicStampClock clock = new MonotonicStampClock(
+      NodeIdentity.MAX_NODE_ID,
+      MonotonicStampClock.DEFAULT_MAX_FORWARD_DRIFT_MS
+    );
+    AtomicLong floor = floorOf(clock);
+    long start = Long.MAX_VALUE - 10L;
+    floor.set(start);
+
+    assertThatThrownBy(() -> clock.nextStamps(16)).isInstanceOf(IllegalStateException.class);
+    assertThat(floor.get()).as("the refused block must not store a negative tail").isEqualTo(start);
+  }
+
+  private static AtomicLong floorOf(MonotonicStampClock clock) throws ReflectiveOperationException {
+    Field last = MonotonicStampClock.class.getDeclaredField("last");
+    last.setAccessible(true);
+    return (AtomicLong) last.get(clock);
   }
 
   @Test

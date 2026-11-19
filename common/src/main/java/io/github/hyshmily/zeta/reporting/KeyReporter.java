@@ -20,7 +20,7 @@ import java.util.Map;
 import org.jspecify.annotations.Nullable;
 
 /**
- * Publishes per-key access-add batches to the Worker via {@link ReportPublisher}.
+ * Publishes per-key access-count batches to the Worker via {@link ReportPublisher}.
  *
  * <p>The read path counts once in the shared {@code AccessCounter}, whose tide delivers
  * merged batches to {@link #publishBatch(Map, long)}; the reporter owns routing, batching
@@ -113,10 +113,11 @@ public interface KeyReporter {
    * @param expiredDeadTarget batches discarded because their target Worker failed the incarnation
    *                          check
    * @param expiredStale      batches discarded because they waited past the staleness bound
+   * @param publishFailed     batches whose publisher call threw (broker error, publish timeout)
    * @param dropped           batches not accepted by the dispatcher: the shared offer budget
    *                          expired, the queue stayed full past it, the dispatcher was already
    *                          closed, the batch was withdrawn after the offer during shutdown, or
    *                          the consumer's health probe failed
    */
-  record DispatcherStats(int depth, long expiredDeadTarget, long expiredStale, long dropped) {}
+  record DispatcherStats(int depth, long expiredDeadTarget, long expiredStale, long publishFailed, long dropped) {}
 }

@@ -23,7 +23,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 
 /**
- * Publishes batched access-add reports to the RabbitMQ report exchange.
+ * Publishes batched access-count reports to the RabbitMQ report exchange.
  * Each batch is routed to a specific Worker queue via the
  * {@code reportToWorker.<appName>.<nodeId>} routing key.
  */

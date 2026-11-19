@@ -23,8 +23,8 @@ import java.util.zip.CRC32;
 import org.junit.jupiter.api.Test;
 
 /**
- * Tests for {@link NodeIdentity}: explicit instance/node overrides, the auto-detected
- * fallback, the stable CRC32 derivation and the 10-bit node range.
+ * Tests for {@link NodeIdentity}: explicit instance/node overrides, the per-resolution
+ * auto-detected fallback, the stable CRC32 derivation and the 10-bit node range.
  */
 class NodeIdentityTest {
 
@@ -34,12 +34,13 @@ class NodeIdentityTest {
   }
 
   @Test
-  void autoDetectedInstanceIdIsStableWithinTheJvm() {
+  void autoDetectedInstanceIdsAreUniquePerResolution() {
     NodeIdentity first = NodeIdentity.resolve(null, null);
     NodeIdentity second = NodeIdentity.resolve(null, null);
 
-    assertThat(second.instanceId()).isEqualTo(first.instanceId());
-    assertThat(second.nodeId()).isEqualTo(first.nodeId());
+    assertThat(second.instanceId())
+      .as("two contexts in one JVM must not share a queue name")
+      .isNotEqualTo(first.instanceId());
   }
 
   @Test

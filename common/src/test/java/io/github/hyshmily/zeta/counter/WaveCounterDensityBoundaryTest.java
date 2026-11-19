@@ -148,6 +148,24 @@ class WaveCounterDensityBoundaryTest {
   }
 
   /**
+   * The non-overflow path must still honor the slots the surviving active set already occupies:
+   * 900 incumbents plus a 1024-key burst whose exact k-th largest allows a single pass would
+   * otherwise grow the active set to 1924.
+   */
+  @Test
+  void nonOverflowPromotion_neverExceedsHotLimit_withSurvivingIncumbents() throws Exception {
+    countKeys("inc-", 900, 30);
+    invokeDeliver(counter);
+    assertThat(activeBeaconSize(counter)).isGreaterThan(800).isLessThanOrEqualTo(900);
+
+    countKeys("new-", 1024, 40);
+    countKeys("inc-", 900, 1);
+    invokeDeliver(counter);
+
+    assertThat(activeBeaconSize(counter)).as("active set stays within hotLimit").isLessThanOrEqualTo(1024);
+  }
+
+  /**
    * Floor-dominance gate: when the floor sits ABOVE the histogram boundary
    * (all traffic in one low bucket), refinement is skipped and the single
    * pass promotes at the floor — the flat @12 pool fills hotLimit, nothing

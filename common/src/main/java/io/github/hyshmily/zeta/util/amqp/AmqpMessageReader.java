@@ -48,12 +48,15 @@ public final class AmqpMessageReader {
    * a different version of the sender), the method logs at DEBUG and returns
    * the {@code defaultValue}. Missing headers are silent.
    *
-   * @param props        the message properties containing the header
+   * @param props        the message properties containing the header; {@code null} returns the default
    * @param header       the header name to read
    * @param defaultValue the fallback value when the header is missing or non-numeric
    * @return the header's numeric value, or {@code defaultValue}
    */
-  public static long readLongHeader(MessageProperties props, String header, long defaultValue) {
+  public static long readLongHeader(@Nullable MessageProperties props, String header, long defaultValue) {
+    if (props == null) {
+      return defaultValue;
+    }
     Object value = props.getHeader(header);
     if (value instanceof Number n) {
       return n.longValue();
@@ -76,11 +79,14 @@ public final class AmqpMessageReader {
    * {@code toString()} because the sync wire treats the header as text (an older
    * sender may write a {@link CharSequence}); a missing header is {@code null}.
    *
-   * @param props  the message properties containing the header
+   * @param props  the message properties containing the header; {@code null} returns {@code null}
    * @param header the header name to read
    * @return the header text, or {@code null} when absent
    */
-  public static @Nullable String readStringHeader(MessageProperties props, String header) {
+  public static @Nullable String readStringHeader(@Nullable MessageProperties props, String header) {
+    if (props == null) {
+      return null;
+    }
     Object value = props.getHeader(header);
     if (value == null) {
       return null;
@@ -228,7 +234,9 @@ public final class AmqpMessageReader {
 
     /** Whether the sender declared an appName that differs from this instance's. */
     private boolean isForeign(@Nullable String senderApp) {
-      return appName != null && senderApp != null && !appName.equals(senderApp);
+      // A blank header declares no application: an older or differently configured sender must not
+      // be treated as a foreign tenant just because its header is empty.
+      return appName != null && senderApp != null && !senderApp.isBlank() && !appName.equals(senderApp);
     }
 
     /** Total foreign-app drops since startup. */
@@ -237,7 +245,7 @@ public final class AmqpMessageReader {
     }
 
     /** The most recently observed foreign sender appName, or {@code null}. */
-    public String lastForeignApp() {
+    public @Nullable String lastForeignApp() {
       return lastForeignApp;
     }
   }

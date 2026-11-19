@@ -65,8 +65,8 @@ class WaveCounterScanArrayShrinkTest {
     assertThat(passLong(a, "boundary")).isEqualTo(25);
     assertThat(length("allValues")).isEqualTo(32_768); // pow2 growth of 20000
     assertThat(length("allHashes")).isEqualTo(32_768);
-    assertThat(length("candidateIdx")).isEqualTo(20_000);
-    assertThat(length("bucketIdx")).isEqualTo(20_000);
+    assertThat(length("candidateIdx")).isEqualTo(32_768);
+    assertThat(length("bucketIdx")).isEqualTo(32_768);
 
     // tide B: the shortcut fires and overflows — the kth filter and the
     // incumbent split grow their views to the snapshot size
@@ -74,7 +74,7 @@ class WaveCounterScanArrayShrinkTest {
     Object b = runPass(counter, spike, FLOOR);
     assertThat(passBool(b, "overflow")).isTrue();
     assertThat(passLong(b, "boundary")).isEqualTo(25);
-    assertThat(length("aboveKthIdx")).isEqualTo(20_000);
+    assertThat(length("aboveKthIdx")).isEqualTo(32_768);
     assertThat(length("incumbentIdx")).isEqualTo(20_000);
     assertThat(length("newcomerIdx")).isEqualTo(20_000);
 
@@ -89,7 +89,7 @@ class WaveCounterScanArrayShrinkTest {
     Object d = runPass(counter, spike, FLOOR);
     assertThat(passLong(d, "boundary")).isEqualTo(25);
     assertThat(length("allValues")).isEqualTo(32_768);
-    assertThat(length("candidateIdx")).isEqualTo(20_000);
+    assertThat(length("candidateIdx")).isEqualTo(32_768);
   }
 
   /**

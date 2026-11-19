@@ -18,14 +18,13 @@ package io.github.hyshmily.zeta.sharding;
 import io.github.hyshmily.zeta.sync.worker.WorkerHeartbeatMessage;
 import io.github.hyshmily.zeta.util.Internal;
 import io.github.hyshmily.zeta.util.TimeSource;
-import lombok.Getter;
-import lombok.extern.slf4j.Slf4j;
-
 import java.util.HashSet;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.atomic.AtomicLong;
+import lombok.Getter;
+import lombok.extern.slf4j.Slf4j;
 
 /**
  * Cluster-wide view of Worker health, maintained by consuming periodic
@@ -426,14 +425,15 @@ public class ClusterHealth implements HealthView {
      */
     private volatile long aliveState;
 
-    /** Raw estimator state; written only under the owning health view's record lock. */
-    private long rttVarMs = MDEV_FLOOR_MS;
+    /** Raw estimator state, stored 4x like Linux's {@code mdev_us}; written under the record lock. */
+    private long rttVar4xMs = 4L * MDEV_FLOOR_MS;
     private long srttMs = -1L;
 
     /**
      * Dual-lifecycle word read by the hot path. Negative: the remaining warm-up
      * samples ({@code -WARMUP_SAMPLES .. -1}); non-negative: the published
-     * {@code srtt + 4 x rttVar} estimate. One volatile read answers both "is the
+     * {@code srtt + rttVar4xMs} estimate, where the variance term is already
+     * stored 4x. One volatile read answers both "is the
      * estimate trusted" and "what is it".
      */
     private volatile long estimateOrWarmup = -WARMUP_SAMPLES;
@@ -466,18 +466,21 @@ public class ClusterHealth implements HealthView {
       if (intervalMs > 0L) {
         if (srttMs < 0L) {
           srttMs = intervalMs;
-          rttVarMs = Math.max(intervalMs / 2L, MDEV_FLOOR_MS);
+          // RTTVAR = interval / 2, stored 4x: 4 * (interval / 2) = 2 * interval.
+          rttVar4xMs = Math.max(intervalMs * 2L, 4L * MDEV_FLOOR_MS);
         } else {
           long err = intervalMs - srttMs;
           srttMs += err / 8L;
-          long delta = Math.abs(err) - rttVarMs / 4L;
+          // RFC 6298 beta = 1/4 on the unscaled variance; the stored value is 4x, so
+          // the same step is (|err| - rttVar4x / 4) and the estimate adds rttVar4x once.
+          long delta = Math.abs(err) - (rttVar4xMs >> 2);
           if (err < 0L && delta > 0L) {
-            delta /= 8L;
+            delta >>= 3;
           }
-          rttVarMs = Math.max(MDEV_FLOOR_MS, rttVarMs + delta);
+          rttVar4xMs = Math.max(4L * MDEV_FLOOR_MS, rttVar4xMs + delta);
         }
         long state = estimateOrWarmup;
-        estimateOrWarmup = state < -1L ? state + 1L : srttMs + 4L * rttVarMs;
+        estimateOrWarmup = state < -1L ? state + 1L : srttMs + rttVar4xMs;
       }
       aliveState = ready ? now : ~now;
     }

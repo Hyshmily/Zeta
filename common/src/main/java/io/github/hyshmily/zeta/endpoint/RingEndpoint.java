@@ -15,7 +15,6 @@
  */
 package io.github.hyshmily.zeta.endpoint;
 
-import io.github.hyshmily.zeta.sharding.ClusterHealth;
 import io.github.hyshmily.zeta.sharding.ConsistentHashRing;
 import io.github.hyshmily.zeta.sharding.HealthView;
 import io.github.hyshmily.zeta.util.Internal;
@@ -42,8 +41,8 @@ import org.springframework.web.server.ResponseStatusException;
  * <p>Runs on the management plane (port, exposure, and roles honored via the
  * standard {@code management.*} configuration), unlike a plain MVC controller.
  *
- * <p>Both operations reconcile the ring from the health view before answering
- * (design decisions: topology).
+ * <p>Both operations reconcile the ring from the wired health view before answering;
+ * without one they report the current published snapshot (design decisions: topology).
  *
  * <p><b>Security:</b> This endpoint exposes cluster topology (live node addresses)
  * and per-key routing information. Protect it via Spring Security
@@ -57,10 +56,12 @@ public class RingEndpoint {
   @Nullable
   private final ConsistentHashRing ring;
 
-  /** A view with no records: every Worker is dead and the cluster is never healthy. */
-  private static final HealthView NO_HEALTH = new ClusterHealth(1L);
-
-  /** The live view, or {@link #NO_HEALTH} so an unwired endpoint never allocates per request. */
+  /**
+   * The wired health view, or {@code null} when the endpoint runs without one. A null view
+   * means the ring snapshot is read-only here: rebuilding from an empty liveness set would
+   * empty a ring this endpoint does not own.
+   */
+  @Nullable
   private final HealthView healthView;
 
   /**
@@ -73,7 +74,7 @@ public class RingEndpoint {
    */
   public RingEndpoint(@Nullable ConsistentHashRing ring, @Nullable HealthView healthView) {
     this.ring = ring;
-    this.healthView = healthView != null ? healthView : NO_HEALTH;
+    this.healthView = healthView;
   }
 
   /**
@@ -88,8 +89,9 @@ public class RingEndpoint {
   }
 
   /**
-   * Determine which node is responsible for the given key. With no Worker alive the
-   * mapping reports {@code null} for {@code nodeId}.
+   * Determine which node is responsible for the given key. With a wired health view and no
+   * alive Worker the mapping reports {@code null} for {@code nodeId}; without a view it reports
+   * the published snapshot's owner.
    *
    * @param keySegments the path segments of the key; a key containing {@code /} arrives as
    *                    several segments and is re-joined verbatim, or {@code null} when the
@@ -108,17 +110,18 @@ public class RingEndpoint {
     ConsistentHashRing activeRing = reconciledRing();
     Map<String, Object> result = new LinkedHashMap<>(2);
     result.put("key", key);
-    result.put("nodeId", activeRing.locateNode(key, healthView));
+    HealthView view = healthView;
+    result.put("nodeId", view != null ? activeRing.locateNode(key, view) : activeRing.locateNode(key));
     return result;
   }
 
   /**
-   * Reconcile the ring against the live health view and return it.
+   * Reconcile the ring against the live health view and return it. Without a wired health
+   * view the current published snapshot is returned unchanged; an absent ring is a disabled
+   * feature rather than a caller error, so the status line carries the signal — a probe that
+   * checks only the status must not mark an unwired ring plane healthy.
    *
-   * <p>An absent ring is a disabled feature rather than a caller error, so the status line carries
-   * the signal — a probe that checks only the status must not mark an unwired ring plane healthy.
-   *
-   * @return the wired ring, after a refresh from the health view
+   * @return the wired ring, after a refresh from the health view when one is wired
    * @throws ResponseStatusException with {@code 503 Service Unavailable} when no
    *                                {@link ConsistentHashRing} is wired
    */
@@ -129,7 +132,10 @@ public class RingEndpoint {
         "ConsistentHashRing not available: the report plane is disabled or RabbitMQ is absent"
       );
     }
-    ring.rebuildIfPossible(healthView);
+    HealthView view = healthView;
+    if (view != null) {
+      ring.rebuildIfPossible(view);
+    }
     return ring;
   }
 }

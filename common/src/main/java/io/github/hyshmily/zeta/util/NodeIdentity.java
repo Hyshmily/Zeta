@@ -33,8 +33,10 @@ import org.jspecify.annotations.Nullable;
  * <p>Resolution order for the instance id:
  * <ol>
  *   <li>{@code zeta.local.instance-id}, when non-blank</li>
- *   <li>{@code HOSTNAME} plus the {@code server.port} system property</li>
- *   <li>a random {@link UUID} plus the {@code server.port} system property</li>
+ *   <li>{@code <server.port|SERVER_PORT|instance>-<HOSTNAME|local>-<random 8 hex>}: the host and
+ *       port make the id readable, the random suffix makes it unique per context and per process.
+ *       Neither a hostname nor a process-wide UUID can distinguish two instances on one host or
+ *       two contexts in one JVM.</li>
  * </ol>
  *
  * <p>Resolution order for the node id:
@@ -96,7 +98,9 @@ public record NodeIdentity(String instanceId, long nodeId) {
       "Node identity: instanceId='{}', dataVersion node id {} (10 bits){}",
       resolvedInstance,
       resolvedNode,
-      configuredNodeId != null ? " from zeta.local.node-id" : " derived from the instance id"
+      configuredNodeId != null
+        ? " from zeta.local.node-id"
+        : " derived from the instance id; set zeta.local.node-id explicitly for clusters above ~30 instances (10-bit collision risk)"
     );
     return identity;
   }
@@ -111,12 +115,25 @@ public record NodeIdentity(String instanceId, long nodeId) {
     return JVM_ID;
   }
 
-  /** The auto-detected instance id: {@code <server.port|instance>-<hostname|uuid>}. */
+  /**
+   * The auto-detected instance id: {@code <port>-<hostname|local>-<random>}. The random suffix is
+   * generated per call on purpose: a hostname alone is shared by every instance on the host, and a
+   * process-wide UUID is shared by every context in the JVM. Both would give two instances the same
+   * queue name and node id.
+   */
   private static String autoInstanceId() {
-    String port = System.getProperty("server.port", "instance");
+    String port = System.getProperty("server.port");
+    if (port == null || port.isBlank()) {
+      port = System.getenv("SERVER_PORT");
+    }
+    if (port == null || port.isBlank()) {
+      port = "instance";
+    }
     String hostname = System.getenv("HOSTNAME");
-    String uniquePart = (hostname != null && !hostname.isBlank()) ? hostname : FallbackUuid.VALUE;
-    return port + "-" + uniquePart;
+    String hostPart = hostname != null && !hostname.isBlank() ? hostname : "local";
+    // The first eight characters of a UUID's string form are hex digits (the first group), so the
+    // suffix is short and safe in a queue name.
+    return port + "-" + hostPart + "-" + UUID.randomUUID().toString().substring(0, 8);
   }
 
   /** Stable mapping from an instance id to the 10-bit node space. */
@@ -124,13 +141,5 @@ public record NodeIdentity(String instanceId, long nodeId) {
     CRC32 crc = new CRC32();
     crc.update(instanceId.getBytes(StandardCharsets.UTF_8));
     return crc.getValue() & MAX_NODE_ID;
-  }
-
-  /** Lazy string form of {@link #JVM_UUID} for the no-hostname fallback. */
-  private static final class FallbackUuid {
-
-    private static final String VALUE = JVM_UUID.toString();
-
-    private FallbackUuid() {}
   }
 }

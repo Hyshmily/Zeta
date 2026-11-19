@@ -646,6 +646,15 @@ class WaveCounterTest {
   }
 
   @Test
+  void isDestroyed_shouldFollowTheShutdownFlag() {
+    assertThat(counter.isDestroyed()).isFalse();
+
+    counter.destroy();
+
+    assertThat(counter.isDestroyed()).isTrue();
+  }
+
+  @Test
   void estimatedSize_shouldReflectSharedTable() {
     for (int i = 0; i < 300; i++) {
       counter.count("key" + i, 1);
