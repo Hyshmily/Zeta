@@ -130,7 +130,7 @@ zeta:
   sync:
     enabled: true # 可选：跨实例 PUT/REFRESH/INVALIDATE
   local:
-    instance-id: ${HOSTNAME} # 队列名与 node-id 由它派生
+    instance-id: ${HOSTNAME}-1 # 每个实例唯一（同宿主多实例请加副本号/端口）
     node-id: 1 # 每个实例唯一；不设则取 instance-id 的 CRC32
 ```
 
@@ -365,7 +365,7 @@ public SyncPolicy mySyncPolicy() {
     }
 
     @Override
-    public SyncValueAction onValueResolved(SyncEvent event, Object value, EntryView current) {
+    public SyncValueAction settle(SyncEvent event, Object value, EntryView current) {
       return new SyncValueAction.Apply(redact(value));
     }
   };
@@ -375,7 +375,7 @@ public SyncPolicy mySyncPolicy() {
 | 接口           | 方法                                                                                            | 框架负责                                                                      |
 | -------------- | ----------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------- |
 | `WorkerPolicy` | `hot(WorkerDecision, HotValue, EntryView)`, `cool(WorkerDecision, EntryView)`，默认走标准流水线 | per-key 调度、`resolveHot`/`settleHot`/`settleCool`、版本/墓碑守卫、终态 Hook |
-| `SyncPolicy`   | `admit(SyncEvent, EntryView)`, `onValueResolved(SyncEvent, Object, EntryView)`                  | 批次归约、版本/墓碑/clear 守卫、值解码/回源、每个事件恰好一次终态 Hook        |
+| `SyncPolicy`   | `admit(SyncEvent, EntryView)`, `settle(SyncEvent, Object, EntryView)`                           | 批次归约、版本/墓碑/clear 守卫、值解码/回源、每个事件恰好一次终态 Hook        |
 
 **准入示例**
 
@@ -383,7 +383,7 @@ public SyncPolicy mySyncPolicy() {
 
 | `SyncAdmission`    | PUT / REFRESH                                       | INVALIDATE                    | INVALIDATE_ALL / INVALIDATE_PREFIX       |
 | ------------------ | --------------------------------------------------- | ----------------------------- | ---------------------------------------- |
-| `PROCEED`          | 解码/回源，随后 `onValueResolved`                   | 按事件版本逐出                | 记录水位 + 一次合并扫描                  |
+| `PROCEED`          | 解码/回源，随后 `settle`                            | 按事件版本逐出                | 记录水位 + 一次合并扫描                  |
 | `INVALIDATE_LOCAL` | 跳过解码/回源；本地失效（`DEGRADED_TO_INVALIDATE`） | 冗余（`POLICY_FAILED`）       | 视为 `PROCEED`（本身已在本地扫描）       |
 | `SKIP`             | 条目不变（`POLICY_REJECTED`）                       | 条目不变（`POLICY_REJECTED`） | 该 clear 不参与扫描（`POLICY_REJECTED`） |
 
@@ -434,14 +434,14 @@ public SyncPolicy localSourcePolicy() {
 
 **(3) 值解析之后**
 
-`onValueResolved` 只处理已解码的 PUT 或已回源的 REFRESH；无法解析的值不会到达这里，而是降级为按版本本地失效（`PAYLOAD_UNREADABLE`、`VALUE_NOT_FOUND`、`VALUE_DECLINED_BY_LOADER`）。
+`settle` 只处理已解码的 PUT 或已回源的 REFRESH；无法解析的值不会到达这里，而是降级为按版本本地失效（`PAYLOAD_UNREADABLE`、`VALUE_NOT_FOUND`、`VALUE_DECLINED_BY_LOADER`）。
 
 ```java
 @Bean
 public SyncPolicy curatedValuePolicy() {
   return new SyncPolicy() {
     @Override
-    public SyncValueAction onValueResolved(SyncEvent event, Object value, EntryView current) {
+    public SyncValueAction settle(SyncEvent event, Object value, EntryView current) {
       if (value instanceof User user) {
         if (user.deletedAt() != null) {
           return SyncValueAction.INVALIDATE; // 不缓存软删除行
@@ -468,13 +468,13 @@ public SyncPolicy curatedValuePolicy() {
 
 ## 注解
 
-| 注解              | 目标 | 作用                                                                                                                                     |
-| ----------------- | ---- | ---------------------------------------------------------------------------------------------------------------------------------------- |
-| `@ZetaCached`     | M    | 读穿透：命中不执行方法体；未命中执行一次并缓存非 `null` 结果。软过期与 SingleFlight 生效；key/TTL 在方法体之前解析，不可使用 `#result`。 |
-| `@ZetaPut`        | M    | 写穿透：先执行方法体，再缓存非 `null` 结果。读取 `#result` 的 key 在方法体后解析；`sync = false` 只写本实例。                            |
-| `@ZetaInvalidate` | M    | 默认在方法体之后删除条目（key 可用 `#result`）；`beforeInvocation = true` 改为先删除。`scope` 选择本地、远端或两者。                     |
+| 注解              | 目标         | 作用                                                                                                                                                          |
+| ----------------- | ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `@ZetaCached`     | M, A         | 读穿透：命中不执行方法体；未命中执行一次并缓存非 `null` 结果。`condition` 在 key 解析前绕过缓存；`Optional<T>` 底层存领域值。                                 |
+| `@ZetaPut`        | M, A         | 写穿透：先执行方法体，再缓存非 `null` 结果。`condition` 在 key 解析前跳过写入；`Optional<T>` 底层存领域值；读取 `#result` 的 key 在方法体后解析。             |
+| `@ZetaInvalidate` | M, A, 可重复 | 默认在方法体之后删除条目（condition 与 key 可用 `#result`）；`beforeInvocation = true` 改为先删除。`eachKey` 展开集合/数组，`allEntries` 清空整个 namespace。 |
 
-未知 SpEL 变量（含未编译参数名）、函数调用、保留名或超出 `long` 范围的数字 TTL 会启动失败。JDK 动态代理（Spring Data Repository、MyBatis Mapper、Feign Client）按业务接口解析注解计划。
+`M` = 方法，`A` = 注解类型。`@ZetaConfig` 提供类级 `cache`/TTL 默认值，按属性从最近的声明逐级合并（子类可以只覆盖 TTL 并继承命名空间），方法上的非空值优先。
 
 ### `@ZetaCached`
 
@@ -513,14 +513,22 @@ public class RankingService {
 @Service
 public class OrderService {
 
-  // unless 在方法体返回后求值：#result 为返回值；为 true 时照常返回给调用方，但本次结果不写缓存
+  // condition 在 key 之前求值：id 为 null 时绕过缓存，而不是让默认 key 失败
+  // unless 在方法体返回后求值：#result 为拆包后的领域值；为 true 时照常返回给调用方，但本次结果不写缓存
   // 返回 null 本来就不会写缓存；PENDING 订单由 unless 额外否决，下次读取继续穿透到数据库
-  @ZetaCached(cache = "orders", key = "#orderId", unless = "#result == null || #result.status == 'PENDING'")
+  @ZetaCached(
+    cache = "orders",
+    key = "#orderId",
+    condition = "#orderId != null",
+    unless = "#result == null || #result.status == 'PENDING'"
+  )
   public Order getOrder(String orderId) {
     return orderRepository.findById(orderId);
   }
 }
 ```
+
+`Optional<User>` 读取底层存 `User`，命中后重包；`Optional.empty()` 不缓存。带 `@ZetaCached` 和 `@AliasFor` 的组合注解与直接注解同样解析；类级 `@ZetaConfig` 提供 `cache`/TTL 默认值。
 
 ### `@ZetaPut`
 
@@ -531,6 +539,7 @@ public class AccountService {
 
   // 读取 #result 的 key（此处）在方法体返回后求值，因此可用 #result.id 读取数据库生成的主键；
   // 不读取 #result 的 key 在方法体之前求值，不会等事务提交后才暴露配置错误。
+  // 读取 #result 的 key 若解析为 null（例如生成的主键为空），则跳过本次写入，返回值仍照常返回。
   // TTL 在确认要写入时求值；同步写入的动态 hard TTL 会在方法体前做 permanent+sync 预检。
   // sync = true（默认）：写值通过消息通道广播给对等节点，对等节点直接应用、不重新回源
   @ZetaPut(cache = "accounts", key = "#result.id", hardTtl = "3600000")
@@ -546,7 +555,9 @@ public class AccountService {
 public class SessionService {
 
   // sync = false：只更新当前节点的 L1，不发送同步消息；对等节点保留各自副本直到 hardTtl 到期
-  @ZetaPut(cache = "user_sessions", key = "#token", sync = false, hardTtl = "1800000")
+  // condition 在 key 之前求值：token 为 null 时跳过写入，而不是让默认 key 失败
+  // Optional<UserSession> 底层存 UserSession；空 Optional 不写入
+  @ZetaPut(cache = "user_sessions", key = "#token", condition = "#token != null", sync = false, hardTtl = "1800000")
   public UserSession refreshLocalSession(String token) {
     return sessionClient.fetchRemoteSession(token);
   }
@@ -566,6 +577,12 @@ public class InventoryService {
   public void deductStock(Long skuId, int quantity) {
     inventoryRepository.decrease(skuId, quantity);
   }
+
+  // eachKey 把数组/Iterable 展开为逐个 key；allEntries = true 清空一个 namespace
+  @ZetaInvalidate(cache = "inventory", key = "#skuIds", eachKey = true)
+  public void deleteAll(long[] skuIds) {
+    inventoryRepository.deleteAll(skuIds);
+  }
 }
 
 // 7. 只清理远端副本（@ZetaInvalidate 指定 scope）
@@ -575,7 +592,9 @@ public class BroadcastService {
   // scope = REMOTE：本节点已通过其他路径（如 binlog 回放）刷新，只需通知远端节点丢弃副本
   // 默认后置失效，key 可用 #result；方法体可能返回 null 时请写 "#result?.id"
   // （key 为 null 即本次不删除），"#result != null ? #result.id : #fallbackId" 这类兜底表达式仍会执行
+  // @ZetaInvalidate 可重复：一次写可以删除第二个 namespace，每个声明有自己的 key/condition/scope
   @ZetaInvalidate(cache = "config", key = "#result.configKey", scope = InvalidatePolicy.Scope.REMOTE)
+  @ZetaInvalidate(cache = "config_index", key = "#result.configKey", scope = InvalidatePolicy.Scope.REMOTE)
   public ConfigItem updateRemoteCluster(ConfigUpdateForm form) {
     return configRepository.update(form);
   }

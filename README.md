@@ -130,7 +130,7 @@ zeta:
   sync:
     enabled: true # optional: cross-instance PUT/REFRESH/INVALIDATE
   local:
-    instance-id: ${HOSTNAME} # queue name and node-id derive from it
+    instance-id: ${HOSTNAME}-1 # unique per instance (add replica/port when several share a host)
     node-id: 1 # unique per instance; defaults to the CRC32 of instance-id
 ```
 
@@ -366,7 +366,7 @@ public SyncPolicy mySyncPolicy() {
     }
 
     @Override
-    public SyncValueAction onValueResolved(SyncEvent event, Object value, EntryView current) {
+    public SyncValueAction settle(SyncEvent event, Object value, EntryView current) {
       return new SyncValueAction.Apply(redact(value));
     }
   };
@@ -376,7 +376,7 @@ public SyncPolicy mySyncPolicy() {
 | Interface      | Methods                                                                                                            | Framework owns                                                                                    |
 | -------------- | ------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------- |
 | `WorkerPolicy` | `hot(WorkerDecision, HotValue, EntryView)`, `cool(WorkerDecision, EntryView)` — defaults run the standard pipeline | per-key dispatch, `resolveHot`/`settleHot`/`settleCool`, version/tombstone guards, terminal hooks |
-| `SyncPolicy`   | `admit(SyncEvent, EntryView)`, `onValueResolved(SyncEvent, Object, EntryView)`                                     | batch reduction, version/tombstone/clear guards, value decode/load, one terminal hook per event   |
+| `SyncPolicy`   | `admit(SyncEvent, EntryView)`, `settle(SyncEvent, Object, EntryView)`                                              | batch reduction, version/tombstone/clear guards, value decode/load, one terminal hook per event   |
 
 **Admission examples**
 
@@ -384,7 +384,7 @@ public SyncPolicy mySyncPolicy() {
 
 | `SyncAdmission`    | PUT / REFRESH                                                   | INVALIDATE                    | INVALIDATE_ALL / INVALIDATE_PREFIX            |
 | ------------------ | --------------------------------------------------------------- | ----------------------------- | --------------------------------------------- |
-| `PROCEED`          | decode/load, then `onValueResolved`                             | evict at the event version    | record the watermark + one coalesced sweep    |
+| `PROCEED`          | decode/load, then `settle`                                      | evict at the event version    | record the watermark + one coalesced sweep    |
 | `INVALIDATE_LOCAL` | skip decode/load; local invalidation (`DEGRADED_TO_INVALIDATE`) | redundant (`POLICY_FAILED`)   | treated as `PROCEED` (already sweeps locally) |
 | `SKIP`             | untouched (`POLICY_REJECTED`)                                   | untouched (`POLICY_REJECTED`) | drop this clear (`POLICY_REJECTED`)           |
 
@@ -436,14 +436,14 @@ public SyncPolicy localSourcePolicy() {
 
 **(3) After resolution**
 
-`onValueResolved` runs only for a decoded PUT or loaded REFRESH. An unresolvable value never reaches it; it degrades to a versioned invalidation (`PAYLOAD_UNREADABLE`, `VALUE_NOT_FOUND`, `VALUE_DECLINED_BY_LOADER`).
+`settle` runs only for a decoded PUT or loaded REFRESH. An unresolvable value never reaches it; it degrades to a versioned invalidation (`PAYLOAD_UNREADABLE`, `VALUE_NOT_FOUND`, `VALUE_DECLINED_BY_LOADER`).
 
 ```java
 @Bean
 public SyncPolicy curatedValuePolicy() {
   return new SyncPolicy() {
     @Override
-    public SyncValueAction onValueResolved(SyncEvent event, Object value, EntryView current) {
+    public SyncValueAction settle(SyncEvent event, Object value, EntryView current) {
       if (value instanceof User user) {
         if (user.deletedAt() != null) {
           return SyncValueAction.INVALIDATE; // never cache a soft-deleted row
@@ -470,13 +470,13 @@ Inject the `Zeta` bean for programmatic access: `get`, `put`, `invalidate` and t
 
 ## Annotations
 
-| Annotation        | Target | Effect                                                                                                                                                                                       |
-| ----------------- | ------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `@ZetaCached`     | M      | Read-through: a hit skips the body; a miss runs it once and caches the non-`null` result. Soft expiry and SingleFlight apply; key/TTLs resolve before the body, so `#result` is unavailable. |
-| `@ZetaPut`        | M      | Write-through: runs the body, then caches the non-`null` result. A key reading `#result` resolves after the body; `sync = false` writes this instance only.                                  |
-| `@ZetaInvalidate` | M      | Removes entries after the body by default (key may read `#result`); `beforeInvocation = true` removes first. `scope` covers local, remote or both.                                           |
+| Annotation        | Target       | Effect                                                                                                                                                                                              |
+| ----------------- | ------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `@ZetaCached`     | M, A         | Read-through: a hit skips the body; a miss runs it once and caches the non-`null` result. `condition` bypasses the cache before the key is resolved; `Optional<T>` stores the domain value.         |
+| `@ZetaPut`        | M, A         | Write-through: runs the body, then caches the non-`null` result. `condition` skips the write before the key; `Optional<T>` stores the domain value; a `#result` key resolves after the body.        |
+| `@ZetaInvalidate` | M, A, repeat | Removes entries after the body by default (condition and key may read `#result`); `beforeInvocation = true` removes first. `eachKey` expands a collection/array, `allEntries` clears the namespace. |
 
-Unknown SpEL variables (including uncompiled parameter names), function calls, reserved names or an out-of-`long` numeric TTL fail startup. A JDK proxy (Spring Data repository, MyBatis mapper, Feign client) resolves the plan against its business interfaces.
+`M` = method, `A` = annotation type. `@ZetaConfig` supplies the class-level `cache`/TTL defaults, merged attribute by attribute from the nearest declaration (so a subclass may override only its TTL and inherit the namespace); a method value wins.
 
 ### `@ZetaCached`
 
@@ -517,16 +517,24 @@ public class RankingService {
 @Service
 public class OrderService {
 
-  // unless is evaluated after the body returns: #result is the return value; when true the value
-  // is still returned to the caller but not written to the cache
+  // condition runs before the key: a null id bypasses the cache instead of failing the default key
+  // unless is evaluated after the body returns: #result is the unwrapped domain value; when true the
+  // value is still returned to the caller but not written to the cache
   // A null return is never cached anyway; PENDING orders are additionally vetoed by unless, so
   // the next read goes through to the database again
-  @ZetaCached(cache = "orders", key = "#orderId", unless = "#result == null || #result.status == 'PENDING'")
+  @ZetaCached(
+    cache = "orders",
+    key = "#orderId",
+    condition = "#orderId != null",
+    unless = "#result == null || #result.status == 'PENDING'"
+  )
   public Order getOrder(String orderId) {
     return orderRepository.findById(orderId);
   }
 }
 ```
+
+An `Optional<User>` read stores `User` and rewraps the hit; `Optional.empty()` is never cached. A composed annotation with `@ZetaCached` and `@AliasFor` is resolved like a direct one, and a class-level `@ZetaConfig` supplies the `cache`/TTL defaults.
 
 ### `@ZetaPut`
 
@@ -537,7 +545,9 @@ public class AccountService {
 
   // A key that reads #result (here) resolves after the body returns, so it can read the
   // database-generated id through #result.id; a key that does not read #result resolves before
-  // the body and cannot fail after the transaction commits. TTLs are evaluated when the write
+  // the body and cannot fail after the transaction commits. A result-dependent key that resolves
+  // to null (for example a generated id that is absent) skips the write; the returned value is
+  // still served to the caller. TTLs are evaluated when the write
   // happens; a synced dynamic hard TTL is pre-checked before the body for the permanent+sync rule.
   // sync = true (the default): the written value is broadcast to peers over the messaging channel,
   // and peers apply it directly without reading back from the source
@@ -555,7 +565,9 @@ public class SessionService {
 
   // sync = false: only this node's L1 is updated and no sync message is sent; peers keep their
   // own copy until hardTtl expires
-  @ZetaPut(cache = "user_sessions", key = "#token", sync = false, hardTtl = "1800000")
+  // condition runs before the key: a null token skips the write without failing the default key
+  // Optional<UserSession> would store UserSession; an empty Optional writes nothing
+  @ZetaPut(cache = "user_sessions", key = "#token", condition = "#token != null", sync = false, hardTtl = "1800000")
   public UserSession refreshLocalSession(String token) {
     return sessionClient.fetchRemoteSession(token);
   }
@@ -576,6 +588,12 @@ public class InventoryService {
   public void deductStock(Long skuId, int quantity) {
     inventoryRepository.decrease(skuId, quantity);
   }
+
+  // eachKey expands an array/Iterable into one removal per id; allEntries = true clears one namespace
+  @ZetaInvalidate(cache = "inventory", key = "#skuIds", eachKey = true)
+  public void deleteAll(long[] skuIds) {
+    inventoryRepository.deleteAll(skuIds);
+  }
 }
 
 // 7. Clear only the remote copies (@ZetaInvalidate with an explicit scope)
@@ -587,7 +605,10 @@ public class BroadcastService {
   // Post-invocation by default, so the key may use #result; write "#result?.id" when the body may
   // return null (a null key skips this removal), while a fallback expression such as
   // "#result != null ? #result.id : #fallbackId" still runs
+  // @ZetaInvalidate is repeatable: the same write can drop a second namespace, and each declaration
+  // has its own key/condition/policy
   @ZetaInvalidate(cache = "config", key = "#result.configKey", scope = InvalidatePolicy.Scope.REMOTE)
+  @ZetaInvalidate(cache = "config_index", key = "#result.configKey", scope = InvalidatePolicy.Scope.REMOTE)
   public ConfigItem updateRemoteCluster(ConfigUpdateForm form) {
     return configRepository.update(form);
   }
