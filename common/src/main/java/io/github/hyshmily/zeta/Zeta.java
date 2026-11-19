@@ -198,6 +198,7 @@ public interface Zeta {
    */
   default void tagAll(Collection<String> cacheKeys, TagMode mode) {
     Objects.requireNonNull(cacheKeys, "cacheKeys must not be null");
+    Objects.requireNonNull(mode, "mode must not be null");
     Map<String, Long> counts = new LinkedHashMap<>((int) (cacheKeys.size() / 0.75f) + 1);
     for (String cacheKey : cacheKeys) {
       counts.merge(cacheKey, 1L, Long::sum);
@@ -226,6 +227,14 @@ public interface Zeta {
    *
    * <p>The engine calls {@link CacheLoader#reload} (not {@link CacheLoader#load})
    * for its background refresh.
+   *
+   * <p><b>Loader thread contract.</b> With {@link GetPolicy#callerRunsLoader()}
+   * set, a load this call performs runs on the calling thread and the read
+   * returns only after that invocation completes. A same-key follower that joins
+   * another call's in-flight load performs no load of its own. A loader that
+   * owns caller-bound state — a one-shot invocation chain, a transaction, a
+   * security context — therefore requires caller-runs and must not expect its
+   * {@code load} to be replayed.
    *
    * <p>The options' TTL suppliers are lazy: a plain cache hit never evaluates
    * them, and a negative result is rejected with

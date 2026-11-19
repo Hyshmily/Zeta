@@ -176,6 +176,14 @@ public class BroadcastBuffer implements DisposableBean {
    */
   private final AtomicLong pendingSizeApprox = new AtomicLong();
 
+  /**
+   * Set by {@link #destroy()} before the final drain: a record that arrives during
+   * Spring's shutdown must not enter a window whose flush task can no longer run.
+   * Volatile: read on every {@link #record}/{@link #put}, written once on the
+   * closing thread.
+   */
+  private volatile boolean closed;
+
   private final Object scheduleLock = new Object();
 
   @GuardedBy("swapLock")
@@ -285,7 +293,7 @@ public class BroadcastBuffer implements DisposableBean {
    *                      to admit every record
    */
   public void record(String key, long version, byte@Nullable [] payload, @Nullable LongPredicate stillCurrent) {
-    if (publisher == null) {
+    if (publisher == null || closed) {
       return;
     }
     long sizeAfter;
@@ -353,6 +361,9 @@ public class BroadcastBuffer implements DisposableBean {
    *                     every record
    */
   public void put(String key, Object value, long version, @Nullable LongPredicate stillCurrent) {
+    if (closed) {
+      return;
+    }
     CacheSyncPublisher pub = publisherFor("PUT");
     if (pub == null || (stillCurrent != null && !stillCurrent.test(version))) {
       return;
@@ -396,17 +407,20 @@ public class BroadcastBuffer implements DisposableBean {
    * Broadcast a namespace clear: peers remove every entry whose key starts with
    * {@code prefix} and whose data version is at or below {@code clearStamp}.
    *
-   * @param prefix     the physical key prefix (never null or empty)
+   * @param prefix     the physical key prefix (null or empty is ignored)
    * @param clearStamp the data stamp the clear was allocated at
    */
   public void invalidatePrefix(String prefix, long clearStamp) {
+    if (prefix == null || prefix.isEmpty()) {
+      // An empty prefix matches every key locally but is dropped by the peers' wire
+      // validation; refusing it here keeps both planes agreeing that no clear happened.
+      return;
+    }
     CacheSyncPublisher pub = publisherFor("INVALIDATE_PREFIX");
     if (pub == null) {
       return;
     }
-    if (prefix != null && !prefix.isEmpty()) {
-      cancelMatching(prefix, clearStamp);
-    }
+    cancelMatching(prefix, clearStamp);
     sendInvalidate(() -> pub.broadcastInvalidatePrefix(prefix, clearStamp));
   }
 
@@ -728,11 +742,14 @@ public class BroadcastBuffer implements DisposableBean {
    * Drain the last window on shutdown. Sends synchronously on the closing thread
    * instead of handing the batch to {@code zetaSendExecutor}, whose own destroy
    * is {@code shutdownNow}: an asynchronous handoff here could be discarded
-   * before it runs. A broker failure still drops the batch — the buffer is
-   * lossy and the sync plane is at-most-once.
+   * before it runs. The buffer is closed first, so a record that races the drain
+   * is dropped instead of entering a window whose flush task can no longer fire.
+   * A broker failure still drops the batch — the buffer is lossy and the sync
+   * plane is at-most-once.
    */
   @Override
   public void destroy() {
+    closed = true;
     drain(false);
   }
 
@@ -772,8 +789,15 @@ public class BroadcastBuffer implements DisposableBean {
     if (async && sendExecutor != null) {
       submitSendChunks(toFlush);
     } else {
-      send(toFlush.entrySet());
+      send(detach(toFlush));
     }
+  }
+
+  /** A detached copy of the snapshot for the synchronous send path. */
+  private static List<SendItem> detach(Map<String, VersionInfo> pending) {
+    List<SendItem> items = new ArrayList<>(pending.size());
+    pending.forEach((key, info) -> items.add(new SendItem(key, info)));
+    return items;
   }
 
   /**
@@ -786,19 +810,25 @@ public class BroadcastBuffer implements DisposableBean {
    * earliest entries are the survivors; per-key convergence is version-guarded
    * and order-independent either way (design decisions: sync messages).
    *
+   * <p>Each chunk carries detached {@link SendItem}s rather than the map's
+   * {@code Map.Entry} objects: a {@code ConcurrentHashMap} entry keeps a field
+   * reference to its whole map, so one surviving chunk would pin the entire
+   * swapped snapshot — up to {@code MAX_PENDING_ENTRIES} entries and the
+   * 64 MB payload cap — until the last chunk ran.
+   *
    * @param toFlush the swapped-out map; the write-side swap guarantees no
    *                record is still merging into it, so the send sees a
    *                quiescent snapshot
    */
   private void submitSendChunks(Map<String, VersionInfo> toFlush) {
-    // A list of entries, not a new LinkedHashMap per chunk: the send loop is a
-    // pure traversal, so rehashing every key into a second map only allocates
+    // A list of detached entries, not a new LinkedHashMap per chunk: the send loop
+    // is a pure traversal, so rehashing every key into a second map only allocates
     // nodes and recomputes hashes. Each chunk is an independent list
     // (design decisions: buffering and ordering, chunk lifetime).
     int remaining = toFlush.size();
-    List<Map.Entry<String, VersionInfo>> chunk = new ArrayList<>(Math.min(SEND_CHUNK_SIZE, remaining));
+    List<SendItem> chunk = new ArrayList<>(Math.min(SEND_CHUNK_SIZE, remaining));
     for (Map.Entry<String, VersionInfo> entry : toFlush.entrySet()) {
-      chunk.add(entry);
+      chunk.add(new SendItem(entry.getKey(), entry.getValue()));
       remaining--;
       if (chunk.size() == SEND_CHUNK_SIZE) {
         submitSendChunk(chunk);
@@ -819,9 +849,9 @@ public class BroadcastBuffer implements DisposableBean {
    * fallback it would abort the caller's write path after the L1/version
    * mutation.
    *
-   * @param chunk the entries to send; never modified
+   * @param chunk the detached entries to send; never modified
    */
-  private void submitSendChunk(Collection<Map.Entry<String, VersionInfo>> chunk) {
+  private void submitSendChunk(Collection<SendItem> chunk) {
     try {
       // submitSendChunks is only called on the send-executor branch of flush().
       sendExecutor.execute(() -> send(chunk));
@@ -836,28 +866,28 @@ public class BroadcastBuffer implements DisposableBean {
    * per flush (first exception kept) instead of a per-key WARN with a full
    * stack trace.
    *
-   * @param toFlush the swapped-out entries (see {@link #submitSendChunks});
+   * @param toFlush the detached entries (see {@link #submitSendChunks});
    *                never mutated by this method
    */
-  private void send(Collection<Map.Entry<String, VersionInfo>> toFlush) {
-    if (publisher == null) {
+  private void send(Collection<SendItem> toFlush) {
+    CacheSyncPublisher pub = publisher;
+    if (pub == null) {
       return;
     }
 
-    CacheSyncPublisher pub = publisher;
     long failed = 0L;
     Exception firstError = null;
-    for (Map.Entry<String, VersionInfo> entry : toFlush) {
-      VersionInfo info = entry.getValue();
+    for (SendItem item : toFlush) {
+      VersionInfo info = item.info();
 
       try {
         if (info.payload() != null) {
           // Value-carrying PUT: peers apply the carried value version-guarded,
           // no per-instance reload. A null payload falls through to the
           // version-only REFRESH (peer reloads through the cluster loader).
-          pub.broadcastPut(entry.getKey(), info.version(), info.payload());
+          pub.broadcastPut(item.key(), info.version(), info.payload());
         } else {
-          pub.broadcastRefresh(entry.getKey(), info.version());
+          pub.broadcastRefresh(item.key(), info.version());
         }
       } catch (Exception e) {
         failed++;
@@ -920,11 +950,24 @@ public class BroadcastBuffer implements DisposableBean {
   }
 
   private void cancelScheduledFlush() {
-    if (scheduledFlush != null && !scheduledFlush.isDone()) {
-      scheduledFlush.cancel(false);
+    ScheduledFuture<?> current = scheduledFlush;
+    if (current != null) {
+      if (!current.isDone()) {
+        current.cancel(false);
+      }
+      // Clear even a completed future: keeping it would pin its task and result
+      // until the next schedule replaces it.
       scheduledFlush = null;
     }
   }
+
+  /**
+   * One pending sync record detached from the flushed map: the key plus the
+   * newest version and its payload snapshot. A {@code ConcurrentHashMap} entry
+   * would keep its whole map reachable; this carrier releases the snapshot as
+   * soon as its chunk has been sent.
+   */
+  private record SendItem(String key, VersionInfo info) {}
 
   /**
    * A pending sync record: the newest version for its key plus, for value-carrying

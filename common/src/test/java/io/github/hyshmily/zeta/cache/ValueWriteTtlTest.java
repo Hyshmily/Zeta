@@ -57,7 +57,7 @@ class ValueWriteTtlTest {
       .keyState(KeyState.HOT)
       .build();
 
-    CacheEntry updated = lifecycle.writeValue(hot, "new", 2, 10_000, 5_000, true);
+    CacheEntry updated = lifecycle.writeValue(hot, "new", 2, 10_000, 5_000, true, TimeSource.currentTimeMillis());
 
     assertThat(updated.getKeyState()).isEqualTo(KeyState.HOT);
     assertThat(updated.decision()).isSameAs(hot.decision());
@@ -77,7 +77,7 @@ class ValueWriteTtlTest {
       .keyState(KeyState.NORMAL)
       .build();
 
-    CacheEntry updated = lifecycle.writeValue(normal, "new", 2, 60_000, 30_000, false);
+    CacheEntry updated = lifecycle.writeValue(normal, "new", 2, 60_000, 30_000, false, TimeSource.currentTimeMillis());
 
     assertThat(updated.getKeyState()).isEqualTo(KeyState.NORMAL);
     assertThat(updated.getHardExpireAtMs()).isGreaterThan(oldHard);
@@ -85,7 +85,7 @@ class ValueWriteTtlTest {
 
   @Test
   void permanentNormalBaselineSurvivesCooling() {
-    CacheEntry normal = lifecycle.writeValue(null, "value", 1, 0L, 0L, false);
+    CacheEntry normal = lifecycle.writeValue(null, "value", 1, 0L, 0L, false, TimeSource.currentTimeMillis());
     assertThat(normal.getHardTtlMs()).isEqualTo(Long.MAX_VALUE);
     assertThat(normal.getNormalHardTtlMs()).isEqualTo(Long.MAX_VALUE);
 
@@ -108,7 +108,15 @@ class ValueWriteTtlTest {
       .keyState(KeyState.HOT)
       .build();
 
-    CacheEntry updated = lifecycle.writeValue(expiredHot, "fresh", 2, 60_000, 30_000, true);
+    CacheEntry updated = lifecycle.writeValue(
+      expiredHot,
+      "fresh",
+      2,
+      60_000,
+      30_000,
+      true,
+      TimeSource.currentTimeMillis()
+    );
 
     assertThat(updated.getKeyState()).isEqualTo(KeyState.HOT);
     assertThat(updated.decision()).isNull();
@@ -130,7 +138,7 @@ class ValueWriteTtlTest {
       null
     );
 
-    CacheEntry promoted = permanentLifecycle.writeValue(null, "value", 1, 0L, 0L, true);
+    CacheEntry promoted = permanentLifecycle.writeValue(null, "value", 1, 0L, 0L, true, TimeSource.currentTimeMillis());
 
     assertThat(promoted.getKeyState()).isEqualTo(KeyState.HOT);
     assertThat(promoted.getHardTtlMs()).isEqualTo(Long.MAX_VALUE);
@@ -178,7 +186,7 @@ class ValueWriteTtlTest {
       .keyState(KeyState.HOT)
       .build();
 
-    CacheEntry updated = lifecycle.writeValue(hot, "new", 2, 10_000, 5_000, true);
+    CacheEntry updated = lifecycle.writeValue(hot, "new", 2, 10_000, 5_000, true, TimeSource.currentTimeMillis());
 
     assertThat(updated.getSoftTtlMs()).isEqualTo(2_000);
     assertThat(updated.getSoftExpireAtMs()).isGreaterThan(TimeSource.currentTimeMillis());
@@ -194,7 +202,7 @@ class ValueWriteTtlTest {
       .keyState(KeyState.HOT)
       .build();
 
-    CacheEntry updated = lifecycle.writeValue(hot, "new", 2, 10_000, 5_000, true);
+    CacheEntry updated = lifecycle.writeValue(hot, "new", 2, 10_000, 5_000, true, TimeSource.currentTimeMillis());
 
     assertThat(updated.getSoftTtlMs()).isZero();
     assertThat(updated.getSoftExpireAtMs()).isZero();

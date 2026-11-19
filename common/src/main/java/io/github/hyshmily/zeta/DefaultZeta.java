@@ -15,8 +15,6 @@
  */
 package io.github.hyshmily.zeta;
 
-import static io.github.hyshmily.zeta.cache.CacheKeysPolicy.validKeys;
-
 import com.github.benmanes.caffeine.cache.Cache;
 import io.github.hyshmily.zeta.cache.HotKeyCache;
 import io.github.hyshmily.zeta.cache.cachesupport.loader.CacheLoader;
@@ -29,12 +27,15 @@ import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.Item;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.TopK;
 import io.github.hyshmily.zeta.model.ZetaCacheStats;
 import io.github.hyshmily.zeta.util.Internal;
+import org.jspecify.annotations.Nullable;
+import org.springframework.util.Assert;
+
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.function.Function;
 import java.util.function.Supplier;
-import org.jspecify.annotations.Nullable;
-import org.springframework.util.Assert;
+
+import static io.github.hyshmily.zeta.cache.CacheKeysPolicy.validKeys;
 
 /**
  * Default implementation of the {@link Zeta} facade — the sole public API

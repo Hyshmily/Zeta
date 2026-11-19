@@ -239,7 +239,15 @@ class EntryLifecycleImplTest {
       .keyState(KeyState.COOL)
       .build();
 
-    CacheEntry written = entryLifecycle.writeValue(cool, "new", 2, 60_000, 15_000, true);
+    CacheEntry written = entryLifecycle.writeValue(
+      cool,
+      "new",
+      2,
+      60_000,
+      15_000,
+      true,
+      TimeSource.currentTimeMillis()
+    );
 
     assertThat(written.getKeyState()).isEqualTo(KeyState.HOT);
     assertThat(written.getValue()).isEqualTo("new");
@@ -249,7 +257,15 @@ class EntryLifecycleImplTest {
     assertThat(written.getHardTtlMs()).isEqualTo(3_600_000);
     assertThat(written.getSoftTtlMs()).isEqualTo(300_000);
 
-    CacheEntry keptCool = entryLifecycle.writeValue(cool, "newer", 3, 60_000, 15_000, false);
+    CacheEntry keptCool = entryLifecycle.writeValue(
+      cool,
+      "newer",
+      3,
+      60_000,
+      15_000,
+      false,
+      TimeSource.currentTimeMillis()
+    );
     assertThat(keptCool.getKeyState()).isEqualTo(KeyState.COOL);
   }
 

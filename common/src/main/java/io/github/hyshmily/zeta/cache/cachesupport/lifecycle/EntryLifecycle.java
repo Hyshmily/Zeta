@@ -258,12 +258,12 @@ public interface EntryLifecycle {
    *
    * <p>A logically expired resident is treated as absent: the new value gets a
    * fresh lifetime instead of inheriting the dead entry's deadline. An
-   * existing elevated entry (HOT or COOL) keeps its state, decision lease and
-   * hard deadline; only the value, data stamp, birth stamp and capped soft
-   * window move. A COOL entry is rewritten to HOT when {@code promoteHot} is
-   * set — the degraded-mode write path — while retaining its decision lease. A
-   * NORMAL entry is rewritten with the caller's resolved TTLs, optionally
-   * promoted to local HOT.
+   * existing elevated entry (HOT or COOL) keeps its state, decision lease, hard
+   * deadline and stored normal TTL baselines; only the value, data stamp, birth
+   * stamp and capped soft window move. A COOL entry is rewritten to HOT when
+   * {@code promoteHot} is set — the degraded-mode write path — while retaining
+   * its decision lease. A NORMAL entry is rewritten with the caller's resolved
+   * TTLs, optionally promoted to local HOT.
    *
    * @param existing     the resident entry, or {@code null}
    * @param value        the value to store (never {@code null})
@@ -271,6 +271,7 @@ public interface EntryLifecycle {
    * @param hardTtlMs    the normal hard TTL for a fresh/NORMAL entry
    * @param softTtlMs    the normal soft TTL for a fresh/NORMAL entry
    * @param promoteHot   whether this write may promote a NORMAL or COOL entry to local HOT
+   * @param now          the caller's single epoch-millis sample
    * @return the entry to store
    */
   CacheEntry writeValue(
@@ -279,7 +280,8 @@ public interface EntryLifecycle {
     long version,
     long hardTtlMs,
     long softTtlMs,
-    boolean promoteHot
+    boolean promoteHot,
+    long now
   );
 
   /**

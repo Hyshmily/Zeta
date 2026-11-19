@@ -67,7 +67,19 @@ class ReadContextTest {
 
     assertThatThrownBy(ctx::hardTtlMs)
       .isInstanceOf(IllegalArgumentException.class)
-      .hasMessageContaining("hardTtlMs must not be negative");
+      .hasMessageContaining("hardTtlMs")
+      .hasMessageContaining("out of range");
     assertThat(evaluations).as("the supplier is evaluated exactly once before rejection").hasValue(1);
+  }
+
+  @Test
+  void lazyUnencodableTtl_shouldBeRejectedAtEvaluation() {
+    GetPolicy policy = new GetPolicy(() -> Long.MAX_VALUE - 1L, () -> 0L, StalePolicy.SOFT_REFRESH, true, false);
+    ReadContext ctx = ReadContext.of(null, policy);
+
+    assertThatThrownBy(ctx::hardTtlMs)
+      .isInstanceOf(IllegalArgumentException.class)
+      .hasMessageContaining("hardTtlMs")
+      .hasMessageContaining("out of range");
   }
 }

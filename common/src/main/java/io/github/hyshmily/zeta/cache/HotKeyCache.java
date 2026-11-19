@@ -514,8 +514,9 @@ public class HotKeyCache {
   /**
    * Batch variant of {@link #get(String, Supplier, GetPolicy)}. All keys share
    * the same explicit options (TTL overrides are evaluated once for the whole
-   * batch — the batch pipeline has no per-key lazy-TTL path); the positional
-   * {@code reader} governs loading. The batch pipeline carries no admission
+   * batch — the batch pipeline has no per-key lazy-TTL path — and validated
+   * before any load or breaker settlement); the positional {@code reader}
+   * governs loading. The batch pipeline carries no admission
    * filter — every non-{@code null} value is stored.
    *
    * <p>
@@ -542,9 +543,12 @@ public class HotKeyCache {
     GetPolicy options
   ) {
     // The batch pipeline has no per-key lazy-TTL path: evaluate the override
-    // suppliers once for the whole batch (the documented batch contract).
+    // suppliers once for the whole batch (the documented batch contract), and
+    // validate the result at this boundary exactly like the single-key lazy path.
     long hard = options.hardTtlMs().getAsLong();
     long soft = options.softTtlMs().getAsLong();
+    CacheEntry.requireEncodableTtl(hard, "hardTtlMs");
+    CacheEntry.requireEncodableTtl(soft, "softTtlMs");
     return batchGet(cacheKeys, reader, options, hard, soft);
   }
 
@@ -603,7 +607,9 @@ public class HotKeyCache {
         misses.add(key);
       }
     }
-    if (misses.isEmpty()) return results;
+    if (misses.isEmpty()) {
+      return results;
+    }
 
     loadAndCache(misses, reader, hardTtlMs, softTtlMs, report, results);
     return results;
@@ -669,7 +675,9 @@ public class HotKeyCache {
    * Judged against the caller's single {@code now} sample, and with zero lookups
    * on a fresh hit: only a genuinely soft-expired entry confirms it is still
    * resident before arming, because the refresh re-warms the key and must not
-   * fire for an entry a concurrent invalidate removed.
+   * fire for an entry a concurrent invalidate removed. The scheduled task holds
+   * only the reload source and the key — never the read context — so a queued
+   * refresh cannot pin the call's TTL suppliers or their SpEL scope.
    *
    * @param key   the cache key
    * @param entry the L1 entry in force for this read (never {@code null})
@@ -678,7 +686,8 @@ public class HotKeyCache {
    * @param now   the current epoch-millis (a single per-call sample)
    */
   private void refreshSoftExpire(String key, CacheEntry entry, ReadContext ctx, long now) {
-    if (!ctx.hasSource() || !ttlPolicy.isSoftExpired(entry, now)) {
+    CacheLoader<String, Object> source = ctx.loader();
+    if (source == null || !ttlPolicy.isSoftExpired(entry, now)) {
       return;
     }
 
@@ -691,12 +700,14 @@ public class HotKeyCache {
     }
 
     long softTtl = ttlPolicy.resolveRefreshSoftTtl(current, ctx.softTtlMs());
+    // Capture the reload source, never the context: a queued refresh must not pin
+    // the TTL suppliers or the SpEL scope that produced them.
     backgroundRefresher.triggerBackgroundRefresh(
       key,
       () -> {
         long stamp = nextStamp();
-        Object value = ctx.refreshValue(key);
-        return ctx.admits(value) ? new VersionedValue(value, stamp) : null;
+        Object value = source.reload(key);
+        return value != null && source.isCacheable(value) ? new VersionedValue(value, stamp) : null;
       },
       softTtl
     );
@@ -962,8 +973,8 @@ public class HotKeyCache {
    * once — without a second breaker probe, so a recovery that landed between
    * admission and resolution cannot turn a designed degradation into an
    * exception — and throw when nothing is servable. A <em>failed</em> load with
-   * an open breaker is a different contract: it still degrades to a miss (see
-   * {@link #resolveFailed}).
+   * an open breaker follows the same stale-first rule and rethrows the original
+   * cause when no stale entry is servable (see {@link #resolveFailed}).
    *
    * @param key    the key whose load was suppressed
    * @param status the suppression reason
@@ -983,9 +994,14 @@ public class HotKeyCache {
 
   /**
    * A real load failure: {@code Error} always propagates, an
-   * {@code InterruptedException} restores the interrupt bit and degrades, and an
-   * open breaker degrades to the stale fallback. Otherwise the cause is rethrown
+   * {@code InterruptedException} degrades to a miss, and an open breaker serves a
+   * hard-valid stale entry when one exists. Otherwise the cause is rethrown
    * (unchecked) or wrapped.
+   *
+   * <p>The thread that ran the reader owns the interrupt flag: {@code LoadFlights}
+   * restores it on the caller-affine and isolated paths, and an executor thread's
+   * interrupt belongs to the timeout that raised it. A follower that merely joins a
+   * failed future must never be interrupted for an outcome it only observed.
    *
    * @param key    the key whose load failed
    * @param cause  the reader failure
@@ -998,11 +1014,15 @@ public class HotKeyCache {
       throw err;
     }
     if (cause instanceof InterruptedException) {
-      Thread.currentThread().interrupt();
       return resolveNullAnswer(key, report);
     }
     if (singleFlight.isBreakerOpen(key)) {
-      return serveStaleEntry(key, report);
+      T stale = serveStaleEntry(key, report);
+      if (stale != null) {
+        return stale;
+      }
+      // Nothing servable: the failure is the only truthful answer. Falling through
+      // to null would make an outage indistinguishable from SOURCE_EMPTY.
     }
     if (cause instanceof RuntimeException re) {
       throw re;
@@ -1146,15 +1166,16 @@ public class HotKeyCache {
    * @param stamp        the incoming data stamp
    * @param equalApplies {@code true} for the REFRESH receiver (an equal version
    *                     applies)
+   * @param now          the caller's single epoch-millis sample
    * @return {@code true} when the write must leave the resident untouched
    */
-  private boolean writeRefused(String key, @Nullable CacheEntry entry, long stamp, boolean equalApplies) {
+  private boolean writeRefused(String key, @Nullable CacheEntry entry, long stamp, boolean equalApplies, long now) {
     if (entryLifecycle.staleAgainstInvalidation(key, stamp)) {
       return true;
     }
     return (
       entry != null &&
-      !ttlPolicy.isLogicallyExpired(entry) &&
+      !ttlPolicy.isLogicallyExpired(entry, now) &&
       (equalApplies ? VersionGuard.shouldSkipForRefresh(entry, stamp) : VersionGuard.shouldSkipForSync(entry, stamp))
     );
   }
@@ -1353,7 +1374,9 @@ public class HotKeyCache {
    * hard deadline (only the value, stamp and soft window move), and a
    * {@code NORMAL} entry keeps its stored normal hard/soft TTL baselines. An
    * absent or hard-expired key is rebuilt from the configured defaults.
-   * Changing a TTL is a {@code put}, never a refresh.
+   * A refresh never changes a stored TTL; a {@code put} can change it only on a
+   * {@code NORMAL} entry — an elevated entry's active regime and normal baseline
+   * stay with the state machine until demotion.
    *
    * <p><b>Ordering:</b> the version is allocated before the resident probe and
    * the load, so a concurrent write landing after the allocation holds the
@@ -1429,7 +1452,8 @@ public class HotKeyCache {
     // Value-only renewal: the resident owns the lifecycle policy, so its stored
     // normal baselines (0 = unset) win; only an absent/hard-expired key falls
     // back to the configured defaults. A HOT/COOL entry ignores these values:
-    // EntryLifecycle.writeValue keeps its active regime and hard deadline.
+    // EntryLifecycle.writeValue keeps its active regime, hard deadline and normal
+    // baseline.
     long hardTtlMs = live != null ? live.getNormalHardTtlMs() : ttlPolicy.effectiveHardTtlMs();
     if (hardTtlMs == 0L) {
       hardTtlMs = ttlPolicy.effectiveHardTtlMs();
@@ -1459,7 +1483,10 @@ public class HotKeyCache {
    * caller.
    *
    * <p>
-   * Pass 0 to use the configured default for that TTL type.
+   * Pass 0 to use the configured default for that TTL type. On an elevated
+   * (HOT/COOL) resident the call is a value-only update: the active TTL regime and
+   * the stored normal baseline survive, exactly as in a refresh. The state machine
+   * owns both until the entry returns to NORMAL.
    *
    * @param cacheKey  the key to write
    * @param value     the value to cache (never {@code null} — the facade
@@ -1472,12 +1499,12 @@ public class HotKeyCache {
   }
 
   /**
-   * Apply one write to L1, retire the key's dedup entry, and — when
-   * {@code broadcast} is set and the store was actually applied — broadcast the
-   * value-carrying PUT to peers (they apply version-guarded, no reload; degrades
-   * to a value-less REFRESH inside the broadcast buffer when the value is not
-   * serializable or over the size bound). This is the single apply tail of
-   * {@code putThrough}, {@code refresh} and {@code putLocal}.
+   * Apply one write to L1, retire the key's dedup entry when the store applied,
+   * and — when {@code broadcast} is set and the store was actually applied —
+   * broadcast the value-carrying PUT to peers (they apply version-guarded, no
+   * reload; degrades to a value-less REFRESH inside the broadcast buffer when the
+   * value is not serializable or over the size bound). This is the single apply
+   * tail of {@code putThrough}, {@code refresh} and {@code putLocal}.
    *
    * <p>
    * <b>L1 first, then the dedup removal, then the broadcast</b> (design
@@ -1486,11 +1513,14 @@ public class HotKeyCache {
    * failing broadcast must not leave that pre-write future replayable.
    *
    * <p>
-   * <b>A refused store broadcasts nothing.</b> The guard inside
+   * <b>A refused store does nothing else.</b> The guard inside
    * {@link #entryForWrite} can refuse the apply — a strictly newer resident, or
-   * a tombstone recorded between the stamp allocation and this compute.
-   * Broadcasting it would re-warm on peers a value this node has already
-   * superseded or invalidated.
+   * a tombstone recorded between the stamp allocation and this compute. Such a
+   * write landed no value, so it must not broadcast it (peers would re-warm a
+   * value this node already superseded or invalidated) and must not retire the
+   * dedup entry: the newer write or invalidation already retired the flight it
+   * superseded, and a flight created afterwards may be the one filling L1 with
+   * the newer value.
    */
   private void writeThroughApply(
     String key,
@@ -1504,13 +1534,16 @@ public class HotKeyCache {
     CacheEntry applied = EntryMutations.mutate(caffeineCache, key, entry ->
       entryForWrite(key, entry, value, stamp, normalHardTtl, normalSoftTtl, true, hot)
     );
-    singleFlight.invalidate(key);
-    // Only an applied store reaches peers: a refused write returns the untouched
-    // resident, whose older stamp cannot equal this call's freshly allocated one.
-    if (broadcast && applied != null && applied.getDataVersion() == stamp) {
-      // The predicate runs when the record enters the buffer, after serialization:
-      // an invalidation that lands while the payload is being built suppresses it.
-      broadcastBuffer.put(key, value, stamp, version -> !entryLifecycle.staleAgainstInvalidation(key, version));
+    // Only an applied store obsoletes a recorded load. A refused write returns the
+    // untouched resident, whose older stamp cannot equal this call's freshly
+    // allocated one.
+    if (applied != null && applied.getDataVersion() == stamp) {
+      singleFlight.invalidate(key);
+      if (broadcast) {
+        // The predicate runs when the record enters the buffer, after serialization:
+        // an invalidation that lands while the payload is being built suppresses it.
+        broadcastBuffer.put(key, value, stamp, version -> !entryLifecycle.staleAgainstInvalidation(key, version));
+      }
     }
   }
 
@@ -1554,12 +1587,17 @@ public class HotKeyCache {
     boolean equalApplies,
     boolean hot
   ) {
-    if (writeRefused(key, entry, stamp, equalApplies)) {
+    // One clock sample for the guard, the promotion decision and the rewrite: a
+    // second sample can cross the hard deadline between them and turn a live HOT
+    // rewrite into a fresh NORMAL one.
+    long now = TimeSource.currentTimeMillis();
+    if (writeRefused(key, entry, stamp, equalApplies, now)) {
       return entry;
     }
 
-    boolean promoteHot = hot && (entry == null || ttlPolicy.isLogicallyExpired(entry) || promotion.mayPromote(entry));
-    return entryLifecycle.writeValue(entry, value, stamp, normalHardTtl, normalSoftTtl, promoteHot);
+    boolean promoteHot =
+      hot && (entry == null || ttlPolicy.isLogicallyExpired(entry, now) || promotion.mayPromote(entry));
+    return entryLifecycle.writeValue(entry, value, stamp, normalHardTtl, normalSoftTtl, promoteHot, now);
   }
 
   /**
@@ -1568,8 +1606,8 @@ public class HotKeyCache {
    * and without reporting.
    * <p>
    * Existing entry metadata is preserved. On an elevated (HOT/COOL) existing
-   * entry the active TTL regime is kept as well — only the value, its stamp
-   * and the soft window are updated. If no entry
+   * entry the active TTL regime and the stored normal baseline are kept as well —
+   * only the value, its stamp and the soft window are updated. If no entry
    * exists, a fresh {@link CacheEntry} is created with {@link KeyState#HOT}
    * when the local TopK already contains the key, otherwise
    * {@link KeyState#NORMAL}.
@@ -1652,6 +1690,13 @@ public class HotKeyCache {
   /**
    * The batch body: resolve TTLs once, reserve one contiguous block per chunk,
    * then apply each row through the shared write tail.
+   *
+   * <p>The map is caller-supplied and may mutate under a direct (non-deferred)
+   * run. {@code Math.max(1, remaining)} keeps a stale zero size from requesting
+   * an empty stamp block (an infinite loop), and the inner {@code hasNext} guard
+   * keeps a shrinking map from calling {@code next()} past its last entry. A
+   * shrink can burn unused stamps in the reserved block — a harmless watermark
+   * hole, never a correctness gap.
    */
   private void executePutAll(Map<String, ?> entries, long hardTtlMs, long softTtlMs, boolean sync) {
     long effectiveHard = ttlPolicy.resolveEffectiveHardTtl(hardTtlMs);
@@ -1663,13 +1708,15 @@ public class HotKeyCache {
     var iterator = entries.entrySet().iterator();
     int remaining = entries.size();
     while (iterator.hasNext()) {
-      int blockSize = Math.min(remaining, StampClock.MAX_ATOMIC_RANGE);
+      int blockSize = Math.min(Math.max(1, remaining), StampClock.MAX_ATOMIC_RANGE);
       long base = stampClock.nextStamps(blockSize);
-      for (int i = 0; i < blockSize; i++) {
+      int applied = 0;
+      while (applied < blockSize && iterator.hasNext()) {
         Map.Entry<String, ?> entry = iterator.next();
-        writeThroughApply(entry.getKey(), entry.getValue(), base + i, effectiveHard, effectiveSoft, sync);
+        writeThroughApply(entry.getKey(), entry.getValue(), base + applied, effectiveHard, effectiveSoft, sync);
+        applied++;
       }
-      remaining -= blockSize;
+      remaining -= applied;
     }
   }
 
@@ -1826,16 +1873,17 @@ public class HotKeyCache {
    * {@code invalidateAll} or {@code invalidatePrefix} — never per swept key.
    *
    * <p>
-   * Weakly consistent key-set iteration: a key added mid-sweep either makes
+   * Weakly consistent entry-set iteration: a key added mid-sweep either makes
    * it (fine — the guard judges it) or is skipped because the iterator already
    * passed its bin. A skipped key whose write guard predates the clear stamp
    * therefore survives, bounded by its own hard TTL: the sweep is best-effort
    * termination, not a linearizable barrier.
    *
    * <p>
-   * Zero per-key allocation: {@code compute}'s return value is the post-image,
-   * so {@code null} already means "removed (or absent)" — no out-param holder is
-   * needed.
+   * The version and prefix tests run on the snapshot the iterator already holds,
+   * so an entry above the ceiling never takes the bin lock; only a candidate
+   * reaches {@code computeIfPresent}, which re-judges the live value and removes
+   * it. {@code null} is the post-image, so no out-param holder is needed.
    *
    * @param prefix         which physical keys the sweep may touch ({@code null}
    *                       = every key; the engine owns the only L1 table, so the
@@ -1844,13 +1892,18 @@ public class HotKeyCache {
    *                       allocated after it survives the sweep
    */
   private void sweep(@Nullable String prefix, long versionCeiling) {
-    for (String key : caffeineCache.asMap().keySet()) {
-      if (prefix != null && !key.startsWith(prefix)) {
+    for (Map.Entry<String, CacheEntry> candidate : caffeineCache.asMap().entrySet()) {
+      // Integer compare first: startsWith is the expensive half and most entries
+      // in a table-wide sweep fail this cheaper test.
+      if (candidate.getValue().getDataVersion() > versionCeiling) {
+        continue;
+      }
+      if (prefix != null && !candidate.getKey().startsWith(prefix)) {
         continue;
       }
       caffeineCache
         .asMap()
-        .compute(key, (k, entry) -> (entry != null && entry.getDataVersion() > versionCeiling) ? entry : null);
+        .computeIfPresent(candidate.getKey(), (key, entry) -> entry.getDataVersion() > versionCeiling ? entry : null);
     }
   }
 

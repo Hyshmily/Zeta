@@ -59,6 +59,16 @@ import org.springframework.transaction.support.TransactionSynchronizationManager
  * dropped on rollback, whether or not it broadcasts; {@code immediate = true}
  * runs on the calling thread before the transaction settles. For critical
  * invalidations, register an {@code afterCompletion} callback manually.
+ *
+ * <p><b>A cache write issued from an external {@code afterCompletion} is too late.</b>
+ * Spring snapshots the synchronization list before invoking {@code afterCommit}
+ * and again before {@code afterCompletion}; {@code isSynchronizationActive()}
+ * stays true until cleanup. A cache write or invalidation performed inside
+ * another synchronization's {@code afterCompletion(STATUS_COMMITTED)} therefore
+ * registers a callback this transaction will never visit, and the deferred work
+ * is dropped without an error. Such a hook must run the operation immediately
+ * ({@code InvalidatePolicy.immediate(true)} for an invalidation) or after the
+ * transaction has fully completed.
  */
 @Internal
 public final class TransactionSupport {

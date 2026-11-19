@@ -450,16 +450,21 @@ public class SlidingWindowBreaker implements CircuitBreaker {
    * together with the zeroed counters, so a reader that observes the new index
    * also observes the empty counters.
    *
-   * <p>A slot advanced by at most one ring is an out-of-order settlement and is
-   * discarded; a slot behind by any larger distance is the previous slice or a
-   * bucket idle past half the window-id range and is rotated to the caller's
-   * slice. A bucket older than the epoch's closed-window floor is rotated too,
-   * unless more than half a ring has elapsed since that floor was recorded; then
-   * the 24-bit comparison has wrapped and the normal forward-distance test is
-   * authoritative. The residual ambiguity is the wrap: a bucket within one ring
-   * width before {@code 2^24} slices is discarded for at most that many
-   * settlements, and a bucket exactly {@code 2^24} slices old contributes its
-   * stale counts once before the next settlement rotates it.
+   * <p>A slot advanced by at most one window is an out-of-order settlement and is
+   * discarded. A larger forward distance is ambiguous: the slot may be an old
+   * slice that wrapped (rotate it), or a live slot ahead of a settlement whose
+   * thread stalled past the window. For the lower half of that distance the cold
+   * path samples the live window once and discards the settlement when the slot
+   * still belongs to the live window set, so a pause cannot rotate a live bucket
+   * back to an old window and erase the counters it accumulated. A slot behind by
+   * any distance is the previous slice or a bucket idle past half the window-id
+   * range and is rotated to the caller's slice. A bucket older than the epoch's
+   * closed-window floor is rotated too, unless more than half a ring has elapsed
+   * since that floor was recorded; then the 24-bit comparison has wrapped and the
+   * normal forward-distance test is authoritative. The residual ambiguity is the
+   * wrap: a bucket within one ring width before {@code 2^24} slices is discarded
+   * for at most that many settlements, and a bucket exactly {@code 2^24} slices
+   * old contributes its stale counts once before the next settlement rotates it.
    *
    * @param e       the CLOSED epoch the caller sampled, carrying the window floor
    * @param success {@code true} for a success, {@code false} for a failure
@@ -489,10 +494,20 @@ public class SlidingWindowBreaker implements CircuitBreaker {
         }
         next = raw + increment;
       } else if (forward <= bucketSize) {
-        // The slot already advanced past this sample by at most one ring; a
+        // The slot already advanced past this sample by at most one window; a
         // settlement that sampled the clock before that rotation must not erase
         // the current window's counters.
         return;
+      } else if (forward <= (WINDOW_MASK >>> 1)) {
+        // Cold path: distinguish a late settlement (the thread stalled between sampling
+        // the clock and this CAS) from a bucket that wrapped half the ring ago. A slot
+        // still inside the live window set belongs to a live slice, so this sample is
+        // late and is discarded; anything older is rotated.
+        long liveWindow = (monotonicMillis() / slideMs + e.windowOffset) & WINDOW_MASK;
+        if (((liveWindow - stored) & WINDOW_MASK) < bucketSize) {
+          return;
+        }
+        next = (window << WINDOW_SHIFT) | increment;
       } else {
         // The previous slice, or a stale bucket idle past half the window-id
         // range: rotate is one write of the new window plus this settlement.

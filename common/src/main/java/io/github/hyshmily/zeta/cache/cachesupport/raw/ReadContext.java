@@ -40,11 +40,10 @@ import org.jspecify.annotations.Nullable;
  * <p>
  * One source abstraction: a typed {@link CacheLoader} or a plain supplier
  * adapted to one. The context holds no per-call key; {@link #loadValue(String)}
- * and {@link #refreshValue(String)} receive it from the caller, so a loader
- * call binds the key once instead of storing it in every context. The adapter
- * for a plain supplier is created lazily by {@link HotKeyCache} only when a
- * miss or a reconciliation actually needs a context; a plain hit allocates
- * neither the context nor the adapter.
+ * receives it from the caller, so a loader call binds the key once instead of
+ * storing it in every context. The adapter for a plain supplier is created
+ * lazily by {@link HotKeyCache} only when a miss or a reconciliation actually
+ * needs a context; a plain hit allocates neither the context nor the adapter.
  *
  * <p>
  * One instance per read call. The mutable memoization is confined to the
@@ -133,8 +132,8 @@ public final class ReadContext {
    *
    * @param loader     the refresh source (may be {@code null} when the policy
    *                   has no refresh branch)
-   * @param hardTtlMs  the batch-resolved hard TTL override
-   * @param softTtlMs  the batch-resolved soft TTL override
+   * @param hardTtlMs  the batch-resolved, already validated hard TTL override
+   * @param softTtlMs  the batch-resolved, already validated soft TTL override
    * @param report     whether this batch feeds Worker reporting
    * @param stalePolicy the batch-resolved stale policy
    * @return the per-call context
@@ -159,6 +158,19 @@ public final class ReadContext {
   }
 
   /**
+   * The single value source, or {@code null} when this call carries none.
+   *
+   * <p>The seam a background refresh captures: the scheduled task takes this
+   * reference instead of the context, so a queued refresh cannot pin the call's
+   * memoized TTL suppliers or the SpEL scope behind them.
+   *
+   * @return the loader/reader adapter, or {@code null}
+   */
+  public @Nullable CacheLoader<String, Object> loader() {
+    return loader;
+  }
+
+  /**
    * Loads the foreground miss value through the source.
    *
    * @param cacheKey the key to load
@@ -166,17 +178,6 @@ public final class ReadContext {
    */
   public @Nullable Object loadValue(String cacheKey) {
     return loader != null ? loader.load(cacheKey) : null;
-  }
-
-  /**
-   * Loads a background refresh value through the source's reload seam — a
-   * refresh may not resume caller-bound state.
-   *
-   * @param cacheKey the key to reload
-   * @return the refreshed value; {@code null} when the source produced none
-   */
-  public @Nullable Object refreshValue(String cacheKey) {
-    return loader != null ? loader.reload(cacheKey) : null;
   }
 
   /**
@@ -214,16 +215,21 @@ public final class ReadContext {
   /**
    * Memoized lazy hard TTL override (0 = use configured default): the
    * underlying (possibly SpEL-backed) supplier evaluates at most once per call.
-   * This is the boundary a lazy override is validated at: a negative result is
-   * rejected here, because the value does not exist until the supplier runs.
+   * This is the boundary a lazy override is validated at: the value does not
+   * exist until the supplier runs, so the same encodability rule the static
+   * {@link GetPolicy} boundary applies must be applied here.
    *
-   * @return the non-negative hard TTL override
-   * @throws IllegalArgumentException when the supplier returns a negative value
+   * @return the encodable hard TTL override
+   * @throws IllegalArgumentException when the supplier returns a negative value or
+   *                                  one above the packed maximum other than
+   *                                  {@link Long#MAX_VALUE}
    */
   public long hardTtlMs() {
     long resolved = hardTtl;
     if (resolved == UNRESOLVED && rawHardTtlMs != null) {
-      hardTtl = resolved = requireNonNegative(rawHardTtlMs.getAsLong(), "hardTtlMs");
+      long value = rawHardTtlMs.getAsLong();
+      CacheEntry.requireEncodableTtl(value, "hardTtlMs");
+      hardTtl = resolved = value;
     }
     return resolved;
   }
@@ -232,21 +238,18 @@ public final class ReadContext {
    * Memoized lazy soft TTL override (0 = use configured default), same contract
    * and validation as {@link #hardTtlMs()}.
    *
-   * @return the non-negative soft TTL override
-   * @throws IllegalArgumentException when the supplier returns a negative value
+   * @return the encodable soft TTL override
+   * @throws IllegalArgumentException when the supplier returns a negative value or
+   *                                  one above the packed maximum other than
+   *                                  {@link Long#MAX_VALUE}
    */
   public long softTtlMs() {
     long resolved = softTtl;
     if (resolved == UNRESOLVED && rawSoftTtlMs != null) {
-      softTtl = resolved = requireNonNegative(rawSoftTtlMs.getAsLong(), "softTtlMs");
+      long value = rawSoftTtlMs.getAsLong();
+      CacheEntry.requireEncodableTtl(value, "softTtlMs");
+      softTtl = resolved = value;
     }
     return resolved;
-  }
-
-  private static long requireNonNegative(long ttlMs, String name) {
-    if (ttlMs < 0) {
-      throw new IllegalArgumentException(name + " must not be negative");
-    }
-    return ttlMs;
   }
 }

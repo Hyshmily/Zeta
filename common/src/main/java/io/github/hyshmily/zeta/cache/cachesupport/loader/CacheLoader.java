@@ -72,6 +72,12 @@ public interface CacheLoader<K, V> {
    * foreground miss path. Runs on the calling thread when the read asks for
    * caller-runs, otherwise on the load executor.
    *
+   * <p>With caller-runs, a load this call performs completes on the calling thread before
+   * the read returns; the caller-affine path takes no timeout. A caller that owns a one-shot
+   * invocation chain, a transaction, a security context or MDC therefore requires caller-runs.
+   * A same-key follower that joins another call's in-flight load never invokes its own loader,
+   * so a loader must not assume {@code load} runs on every read.
+   *
    * @param key the key to load; never {@code null}
    * @return the loaded value, or {@code null} if the key does not exist
    */

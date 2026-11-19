@@ -26,11 +26,7 @@ import io.github.hyshmily.zeta.util.InterruptingAsync;
 import jakarta.annotation.PreDestroy;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.VarHandle;
-import java.util.Collection;
-import java.util.LinkedHashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.Objects;
+import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -331,6 +327,11 @@ public class LoadFlights implements SingleFlight {
       if (t instanceof Error err) {
         throw err;
       }
+      if (cause instanceof InterruptedException) {
+        // The reader ran on this thread, which is the only thread allowed to
+        // restore the flag: a follower never observes this outcome.
+        Thread.currentThread().interrupt();
+      }
       return LoaderOutcome.failed(cause);
     } finally {
       runningLoads.decrementAndGet();
@@ -590,7 +591,13 @@ public class LoadFlights implements SingleFlight {
     return value == null ? LoaderOutcome.sourceEmpty() : LoaderOutcome.loaded(value);
   }
 
-  /** Join a flight and classify the result. Never throws for a reader failure. */
+  /**
+   * Join a flight interruptibly and classify the result. Never throws for a reader
+   * failure. A follower's own interrupt cancels the wait with a
+   * {@code FAILED(InterruptedException)} outcome and restores that follower's flag;
+   * the reader's interrupt flag is owned by the thread that ran the reader, so a
+   * waiter never inherits it.
+   */
   @SuppressWarnings("unchecked")
   private <T> LoaderOutcome<T> settle(String key, InFlight flight) {
     if (flight == DENIED || flight == REJECTED || flight == CLOSED) {
@@ -600,9 +607,12 @@ public class LoadFlights implements SingleFlight {
       throw new IllegalStateException("re-entrant SingleFlight load for key: " + key);
     }
     try {
-      T result = (T) flight.join();
+      T result = (T) flight.get();
       return result == null ? LoaderOutcome.sourceEmpty() : LoaderOutcome.loaded(result);
-    } catch (CompletionException | CancellationException e) {
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+      return LoaderOutcome.failed(e);
+    } catch (ExecutionException | CancellationException e) {
       return failureOutcome(e);
     }
   }
@@ -629,14 +639,22 @@ public class LoadFlights implements SingleFlight {
    * @param error the reader or timeout failure carried by the flight
    * @return the classified outcome
    */
+  @SuppressWarnings("all")
   private <T> LoaderOutcome<T> failureOutcome(Throwable error) {
-    // Unwrap only the join envelope: a reader failure is tagged by executeLeaderTask
+    // Unwrap only the join envelopes: a reader failure is tagged by executeLeaderTask
     // (ReaderFailure), while the dedup layer's own timeout and submission rejection stay
     // bare. Classifying the fully unwrapped cause would turn a reader-thrown
     // RejectedExecutionException into a suppression the reader never saw.
     Throwable failure = error;
-    if (!(failure instanceof ReaderFailure) && failure instanceof CompletionException && failure.getCause() != null) {
-      failure = failure.getCause();
+    while (
+      !(failure instanceof ReaderFailure) &&
+      (failure instanceof CompletionException || failure instanceof ExecutionException)
+    ) {
+      Throwable next = failure.getCause();
+      if (next == null) {
+        break;
+      }
+      failure = next;
     }
     if (failure instanceof ReaderFailure readerFailure) {
       return LoaderOutcome.failed(causeOf(readerFailure));
@@ -651,8 +669,13 @@ public class LoadFlights implements SingleFlight {
       : LoaderOutcome.failed(causeOf(failure));
   }
 
-  /** A reader failure, tagged so it is never mistaken for a suppressed submission. */
-  private static final class ReaderFailure extends CompletionException {
+  /**
+   * A reader failure, tagged so it is never mistaken for a suppressed submission.
+   * A plain {@link RuntimeException}, not a {@link CompletionException}: the latter
+   * would be unwrapped by {@link CompletableFuture#get()} before it is wrapped in an
+   * {@link ExecutionException}, losing the tag a joining follower needs.
+   */
+  private static final class ReaderFailure extends RuntimeException {
 
     ReaderFailure(Throwable cause) {
       super(cause);
@@ -688,11 +711,14 @@ public class LoadFlights implements SingleFlight {
     }
   }
 
-  /** The real cause behind transport envelopes ({@code CompletionException}/{@code ExecutionException}). */
+  /** The real cause behind transport envelopes ({@code CompletionException}/{@code ExecutionException}) and the reader tag. */
   private static Throwable causeOf(Throwable error) {
     Throwable current = error;
     while (
-      (current instanceof CompletionException || current instanceof ExecutionException) && current.getCause() != null
+      (current instanceof CompletionException ||
+        current instanceof ExecutionException ||
+        current instanceof ReaderFailure) &&
+      current.getCause() != null
     ) {
       current = current.getCause();
     }

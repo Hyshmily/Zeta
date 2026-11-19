@@ -849,13 +849,13 @@ class ZetaCacheTest {
   }
 
   /**
-   * The same hard-TTL property on the load-throws path (computeInLock catch block):
-   * a kept entry that crosses its hard TTL during a failing load is not served as
-   * stale either, and the refused entry is evicted on the spot (see the sibling test
-   * for the rationale).
+   * The same hard-TTL property on the load-throws path: a kept entry that crosses its hard
+   * TTL during a failing load is not served as stale either, and the refused entry is evicted
+   * on the spot (see the sibling test for the rationale). With nothing servable the open
+   * breaker must not manufacture a miss: the original failure propagates.
    */
   @Test
-  void computeIfAbsent_revalidate_circuitBreakerOpen_hardExpiredDuringThrowingLoad_shouldReturnEmpty()
+  void computeIfAbsent_revalidate_circuitBreakerOpen_hardExpiredDuringThrowingLoad_shouldPropagateTheFailure()
     throws Exception {
     caffeineCache.put(
       "key1",
@@ -881,9 +881,11 @@ class ZetaCacheTest {
 
     Thread.sleep(500); // let the kept entry cross its hard expiry while the load is blocked
     releaseLoad.countDown();
-    String result = future.get(5, TimeUnit.SECONDS);
 
-    assertThat(result).isNull();
+    assertThatThrownBy(() -> future.get(5, TimeUnit.SECONDS))
+      .isInstanceOf(java.util.concurrent.ExecutionException.class)
+      .hasCauseInstanceOf(IllegalStateException.class)
+      .hasMessageContaining("boom");
     assertThat(caffeineCache.getIfPresent("key1"))
       .as("the hard-expired entry is evicted — neither served nor sentinelized, nor left to linger")
       .isNull();
