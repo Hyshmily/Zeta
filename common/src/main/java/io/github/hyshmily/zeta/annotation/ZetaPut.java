@@ -60,7 +60,9 @@ import java.lang.annotation.Target;
  * rolled-back write is never cached.
  *
  * <p>
- * <b>One verb per method</b> — see {@link ZetaCached}.
+ * <b>One read or write verb per method</b> — see {@link ZetaCached}. A method
+ * returning {@code Optional<T>} writes the unwrapped {@code T}; an empty
+ * {@code Optional} is a null result and writes nothing.
  *
  * <pre>{@code
  * @ZetaPut(cache = "users", key = "#user.id")
@@ -74,22 +76,23 @@ import java.lang.annotation.Target;
  * }
  * }</pre>
  */
-@Target(ElementType.METHOD)
+@Target({ ElementType.METHOD, ElementType.ANNOTATION_TYPE })
 @Retention(RetentionPolicy.RUNTIME)
 @Documented
 public @interface ZetaPut {
   /**
-   * The cache namespace, required (same encoding as {@link ZetaCached#cache()}).
+   * The cache namespace, or empty to inherit {@link ZetaConfig#cache()} (same
+   * encoding as {@link ZetaCached#cache()}).
    *
-   * @return the namespace
+   * @return the namespace, or empty to inherit the class configuration
    */
-  String cache();
+  String cache() default "";
 
   /**
    * SpEL expression resolving the logical key, evaluated once per call. The
    * arguments are bound as {@code #p0}/{@code #a0} and by parameter name,
    * {@code #root.*} is bound as on a read, and {@code #result} holds the
-   * returned value. An expression that does not read {@code #result} is
+   * unwrapped returned value. An expression that does not read {@code #result} is
    * resolved before the body; one that does is resolved after it returns. Empty
    * means the default key — see {@link ZetaCached#key()}.
    *
@@ -98,16 +101,34 @@ public @interface ZetaPut {
   String key() default "";
 
   /**
+   * SpEL expression deciding whether this call writes the result, evaluated
+   * before the key and before the body. A {@code false} result runs the body but
+   * writes nothing; it is the supported way to skip caching for a nullable key
+   * argument without making the default key accept a null argument.
+   *
+   * <p>
+   * {@code #result} is not available: use {@link #unless()} for a result-based
+   * veto. A malformed expression fails startup; a constant expression is evaluated once at
+   * resolution and must yield a {@code Boolean} or {@code null}. An expression that throws,
+   * returns {@code null} or returns a non-Boolean at evaluation time is treated as
+   * {@code false} and logged at DEBUG.
+   *
+   * @return the write condition, or empty for "always attempt the write"
+   */
+  String condition() default "";
+
+  /**
    * SpEL expression deciding whether this non-{@code null} result is written,
-   * evaluated once after the body returned with {@code #result} bound.
-   * {@code true} returns the value to the caller but writes no entry — the
-   * write-side counterpart of {@link ZetaCached#unless()}.
+   * evaluated once after the body returned with {@code #result} bound to the
+   * unwrapped domain value. {@code true} returns the value to the caller but
+   * writes no entry — the write-side counterpart of {@link ZetaCached#unless()}.
    *
    * <p>
    * An expression that throws at evaluation time fails open (the value is
    * written) and logs at DEBUG, because a broken veto must not silently stop every
    * write and must not become a per-call WARN storm; a malformed expression fails
-   * startup instead.
+   * startup instead, and a constant expression must yield a {@code Boolean} or {@code null} at
+   * resolution.
    *
    * @return the write veto expression, or empty for "always write"
    */
@@ -118,6 +139,7 @@ public @interface ZetaPut {
    * count or a SpEL expression (with {@code #result} bound when it reads it —
    * see {@link #key()}). Empty or {@code "0"} means the configured default. A
    * malformed expression, a digits-only literal outside the {@code long} range,
+   * a constant expression that evaluates negative (a likely 32-bit overflow),
    * or an unknown SpEL variable (when parameter names are discoverable) fails
    * startup; a runtime evaluation failure degrades to the default. Supports
    * {@code ${...}} placeholders. A permanent

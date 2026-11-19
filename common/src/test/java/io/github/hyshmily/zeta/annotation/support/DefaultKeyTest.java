@@ -13,11 +13,16 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.github.hyshmily.zeta.annotation.supporter;
+package io.github.hyshmily.zeta.annotation.support;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Set;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -186,7 +191,7 @@ class DefaultKeyTest {
 
     assertThatThrownBy(() -> DefaultKey.encode(new Object[] { self }))
       .isInstanceOf(IllegalStateException.class)
-      .hasMessageContaining("self-referential array")
+      .hasMessageContaining("cyclic array")
       .hasMessageContaining("explicit key");
   }
 
@@ -293,5 +298,76 @@ class DefaultKeyTest {
     assertThatThrownBy(() -> DefaultKey.encode(new Object[] { tooDeep }))
       .isInstanceOf(IllegalStateException.class)
       .hasMessageContaining("32 nested array levels");
+  }
+
+  @Test
+  @DisplayName("a List preserves order and keeps its own tag")
+  void listPreservesOrder() {
+    assertThat(DefaultKey.encode(new Object[] { List.of("a", "b") })).isEqualTo("[l[s1:a,s1:b]]");
+    assertThat(DefaultKey.encode(new Object[] { List.of("b", "a") })).isEqualTo("[l[s1:b,s1:a]]");
+    assertThat(DefaultKey.encode(new Object[] { List.of("a", "b") })).isNotEqualTo(
+      DefaultKey.encode(new Object[] { List.of("b", "a") })
+    );
+  }
+
+  @Test
+  @DisplayName("a Set is canonicalised across iteration order and implementation")
+  void setIsCanonicalised() {
+    Set<String> first = Set.of("a", "b");
+    Set<String> second = new LinkedHashSet<>(List.of("b", "a"));
+
+    assertThat(DefaultKey.encode(new Object[] { first })).isEqualTo("[t[s1:a,s1:b]]");
+    assertThat(DefaultKey.encode(new Object[] { second })).isEqualTo("[t[s1:a,s1:b]]");
+    assertThat(DefaultKey.encode(new Object[] { first })).isEqualTo(DefaultKey.encode(new Object[] { second }));
+  }
+
+  @Test
+  @DisplayName("a List and a Set with the same elements stay distinct")
+  void listAndSetStayDistinct() {
+    assertThat(DefaultKey.encode(new Object[] { List.of("a", "b") })).isNotEqualTo(
+      DefaultKey.encode(new Object[] { Set.of("a", "b") })
+    );
+  }
+
+  @Test
+  @DisplayName("collection element boundaries cannot collide")
+  void collectionElementBoundariesAreUnambiguous() {
+    String commaInsideElement = DefaultKey.encode(new Object[] { List.of("foo, bar", "baz") });
+    String commaInsideLastElement = DefaultKey.encode(new Object[] { List.of("foo", "bar, baz") });
+
+    assertThat(commaInsideElement).isEqualTo("[l[s8:foo, bar,s3:baz]]");
+    assertThat(commaInsideLastElement).isEqualTo("[l[s3:foo,s8:bar, baz]]");
+    assertThat(commaInsideElement).isNotEqualTo(commaInsideLastElement);
+  }
+
+  @Test
+  @DisplayName("nested collections recurse with the same part rules")
+  void nestedCollections() {
+    List<Object> value = List.of(List.of("a"), Set.of("b", "c"));
+
+    assertThat(DefaultKey.encode(new Object[] { value })).isEqualTo("[l[l[s1:a],t[s1:b,s1:c]]]");
+  }
+
+  @Test
+  @DisplayName("a self-referential collection is rejected instead of overflowing the stack")
+  void selfReferentialCollectionIsRejected() {
+    List<Object> self = new ArrayList<>();
+    self.add(self);
+
+    assertThatThrownBy(() -> DefaultKey.encode(new Object[] { self }))
+      .isInstanceOf(IllegalStateException.class)
+      .hasMessageContaining("cyclic collection")
+      .hasMessageContaining("explicit key");
+  }
+
+  @Test
+  @DisplayName("a collection above the element cap is rejected before building a giant key")
+  void collectionElementCapIsEnforced() {
+    List<String> values = Collections.nCopies(1025, "x");
+
+    assertThatThrownBy(() -> DefaultKey.encode(new Object[] { values }))
+      .isInstanceOf(IllegalStateException.class)
+      .hasMessageContaining("1024 elements")
+      .hasMessageContaining("explicit key");
   }
 }

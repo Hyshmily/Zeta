@@ -38,38 +38,54 @@ import java.lang.annotation.Target;
  * <p>
  * <b>Contract.</b>
  * <ul>
- * <li>{@code null} is never stored: a {@code null} result writes no entry and
- * the next read re-invokes the body.</li>
+ * <li>{@code null} is never stored: a {@code null} result or an empty
+ * {@code Optional} writes no entry and the next read re-invokes the body.</li>
  * <li>A body exception propagates to the caller unchanged and stores nothing.
  * Zeta does not convert a business failure into a value.</li>
  * <li>A background refresh cannot resume the interceptor chain
  * ({@code MethodInvocation.proceed()} is single-shot), so it invokes the
- * target method reflectively — <b>without</b> the transaction interceptor
- * and without method security. That is true even when the refresh executor
- * runs the task on the calling thread. A method whose body depends on
+ * target method reflectively — normally <b>without</b> the transaction
+ * interceptor and without method security. That is true even when the refresh
+ * executor runs the task on the calling thread. When only a proxy can invoke
+ * the annotated view (a repository or scoped-proxy fallback), the reflective
+ * call necessarily proceeds through the remaining advice chain; this cache
+ * advice is bypassed for that one call so the stale entry cannot be served,
+ * but a transaction advice outside it may run. A method whose body depends on
  * request-scoped state must therefore not be given a soft TTL. A refresh
  * failure reaches the engine's failure path (WARN plus lease-on-failure),
  * so a failing source keeps serving the stale value instead of re-running
  * the body on every stale read.</li>
- * <li>Configuration is validated when the bean is proxied: a blank
- * {@link #cache()}, a conflicting verb, two views declaring the same verb
- * with different attributes, a {@code void}/{@code Void} return, an
- * unparsable expression, an unknown SpEL variable (when the method's
- * parameter names are discoverable), an out-of-range {@code #pN}/{@code #aN},
- * a digits-only TTL literal outside the {@code long} range or a pre-body
- * {@code #result} fails startup, not the first call. Every candidate method of
- * the bean is checked on the first pointcut question, including through a JDK
- * proxy.</li>
- * <li>{@code root}, {@code this}, {@code result} and canonical
- * {@code pN}/{@code aN} are reserved SpEL bindings. A method parameter
- * with one of those names is rejected when an expression on the method is
- * compiled, so a parameter can never shadow a binding.</li>
+ * <li>Configuration is validated when the bean is proxied: a cache name that
+ * is still blank after the {@link ZetaConfig} fallback, a conflicting verb, two
+ * views declaring the same read/write verb with different attributes, a
+ * {@code void}/{@code Void} return, an unparsable expression, an unknown SpEL
+ * variable (when the method's parameter names are discoverable), an
+ * out-of-range {@code #pN}/{@code #aN}, a digits-only TTL literal outside the
+ * {@code long} range, a constant TTL expression that evaluates negative, or a pre-body
+ * {@code #result} fails startup, not the first
+ * call. Every candidate method of the bean is checked on the first pointcut
+ * question, including through a JDK proxy.</li>
+ * <li>{@code pN}/{@code aN} are generated positional bindings, so the slot
+ * table rejects a method parameter whose name would point at a different
+ * argument; a parameter named for its own slot is harmless. {@code #root},
+ * {@code #this} and {@code #result} are bound ahead of the parameter table,
+ * so a parameter with one of those names is legal, is omitted from the table,
+ * and the reserved name never resolves to it.</li>
  * </ul>
  *
  * <p>
- * <b>One verb per method.</b> A method may carry exactly one of
- * {@code @ZetaCached}, {@link ZetaPut} and {@link ZetaInvalidate}; a second one
- * is rejected at method resolution instead of being silently ignored.
+ * <b>One read or write verb per method.</b> A method may carry one of
+ * {@code @ZetaCached} and {@link ZetaPut}; declaring both is rejected at method
+ * resolution. {@link ZetaInvalidate} may be repeated, but may not be combined
+ * with a read or write verb on the same method. A composed annotation that
+ * meta-annotates one of the verbs is discovered with its {@code @AliasFor}
+ * overrides.
+ *
+ * <p>
+ * <b>{@code Optional} contracts.</b> A method returning {@code Optional<T>}
+ * stores the unwrapped {@code T}, so a raw and an optional read of the same
+ * domain value share one entry; a hit is rewrapped as {@code Optional.of(value)}.
+ * {@code Optional.empty()} is a null result and is never stored.
  *
  * <pre>{@code
  * @ZetaCached(cache = "users", key = "#id")
@@ -83,25 +99,28 @@ import java.lang.annotation.Target;
  * }
  * }</pre>
  */
-@Target(ElementType.METHOD)
+@Target({ ElementType.METHOD, ElementType.ANNOTATION_TYPE })
 @Retention(RetentionPolicy.RUNTIME)
 @Documented
 public @interface ZetaCached {
   /**
-   * The cache namespace, required. Every physical L1 key of this method is
-   * {@code cache + '\u0000' + key}, so two namespaces cannot collide on the
-   * same logical key. Must not contain {@code U+0000}. Supports {@code ${...}}
-   * placeholders, resolved once when the method's plan is created.
+   * The cache namespace, or empty to inherit {@link ZetaConfig#cache()} from the bean's user class
+   * (or the business interfaces of a JDK proxy), falling back to the method's declaring class.
+   * Every physical L1 key of this method is {@code cache + '\u0000' + key}, so two namespaces
+   * cannot collide on the same logical key. Must not contain {@code U+0000}. Supports
+   * {@code ${...}} placeholders, resolved once when the method's plan is created.
    *
-   * @return the namespace
+   * @return the namespace, or empty to inherit the class configuration
    */
-  String cache();
+  String cache() default "";
 
   /**
    * SpEL expression resolving the logical key, evaluated once per call with the
    * method arguments bound as {@code #p0}/{@code #a0} and by parameter name
-   * ({@code #id}) — discovered from the most-specific implementation method, so
-   * an interface method without parameter metadata still binds by name.
+   * ({@code #id}) — discovered from the method that declares the verb
+   * annotation, falling back to the most-specific method when the declaring view
+   * has no parameter metadata, so an interface method without metadata still
+   * binds by name.
    * {@code #root.methodName}, {@code #root.method}, {@code #root.target},
    * {@code #root.targetClass}, {@code #root.args} and
    * {@code @beanName.method(...)}
@@ -110,7 +129,7 @@ public @interface ZetaCached {
    *
    * <p>
    * Empty means the default key: a canonical encoding of the arguments (see
-   * {@link io.github.hyshmily.zeta.annotation.supporter.DefaultKey}) — text
+   * {@link io.github.hyshmily.zeta.annotation.support.DefaultKey}) — text
    * values length-prefixed, numeric/Boolean and primitive-array elements
    * tagged, not the bare {@code toString()} of a list. A {@code null} argument
    * or a resolved {@code null} key is a configuration bug and fails the call
@@ -124,23 +143,50 @@ public @interface ZetaCached {
    * {@code byte[]}/{@code String[]}, {@code #root.args}, a varargs tail, or an
    * array {@code #result} on a write — is encoded by content with the same
    * canonical encoder. Its identity hash is never used, so a freshly built
-   * array still hits the same entry.
+   * array still hits the same entry. Only the whole {@code #root.args} reference
+   * (parentheses allowed) uses the multi-argument default encoding; a larger
+   * expression that returns the argument array is encoded as one value.
+   *
+   * <p>
+   * A context-free expression is folded to a constant physical key at
+   * resolution; a constant {@code null} key fails startup instead of failing
+   * every call.
    *
    * @return the key expression, or empty for the default key
    */
   String key() default "";
 
   /**
+   * SpEL expression deciding whether this call enters the cache at all,
+   * evaluated before the key and before the body. A {@code false} result runs
+   * the body directly: no L1 lookup, no loader and no key resolution. This is
+   * the supported way to skip a cache for a nullable key argument —
+   * {@code condition = "#id != null"} — without making the default key accept a
+   * null argument.
+   *
+   * <p>
+   * {@code #result} is not available: the expression runs before the body. A
+   * malformed expression fails startup; a constant expression is evaluated once at resolution and
+   * must yield a {@code Boolean} or {@code null}. An expression that throws, returns {@code null}
+   * or returns a non-Boolean at evaluation time is treated as {@code false} and logged at DEBUG.
+   * A broken admission guard must not admit a call the caller meant to bypass.
+   *
+   * @return the entry condition, or empty for "always enter the cache"
+   */
+  String condition() default "";
+
+  /**
    * SpEL expression deciding whether this result is stored, evaluated at most
-   * once per load with {@code #result} bound. {@code true} serves the value but
-   * writes no entry — the {@code unless} contract of Spring's
-   * {@code @Cacheable}, without requiring Spring Cache.
+   * once per load with {@code #result} bound to the unwrapped domain value.
+   * {@code true} serves the value but writes no entry — the {@code unless}
+   * contract of Spring's {@code @Cacheable}, without requiring Spring Cache.
    *
    * <p>
    * An expression that throws at evaluation time fails open (the value is
    * stored) and logs at DEBUG, because a broken veto must not turn every read into a
    * miss and must not become a per-call WARN storm; a malformed expression fails
-   * startup instead.
+   * startup instead, and a constant expression must yield a {@code Boolean} or {@code null} at
+   * resolution.
    *
    * @return the store veto expression, or empty for "always store"
    */
@@ -157,7 +203,10 @@ public @interface ZetaCached {
    * resolution; surrounding whitespace is ignored, a negative literal clamps to
    * {@code 0} (the configured default), and a digits-only literal outside the
    * {@code long} range fails startup. Supports {@code ${...}} placeholders. An
-   * expression is compiled once and evaluated lazily — only when the engine
+   * expression is compiled once; a context-free expression is folded at
+   * resolution, and a negative fold fails startup because SpEL's integer
+   * arithmetic overflows at 32 bits. A dynamic expression is evaluated lazily —
+   * only when the engine
    * actually needs it (entry creation, promotion to HOT, renewal, or a
    * soft-expire refresh), never on a plain hit. A malformed expression or an
    * unknown SpEL variable fails startup; at evaluation time a negative result

@@ -13,13 +13,12 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.github.hyshmily.zeta.annotation.supporter;
+package io.github.hyshmily.zeta.annotation.support;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.lang.reflect.Method;
-import java.util.Set;
 import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -50,11 +49,6 @@ class CompiledExpressionTest {
   @SuppressWarnings("unused")
   private String fixtureWithNonCanonicalName(String p01) {
     return p01;
-  }
-
-  @SuppressWarnings("unused")
-  private String fixtureWithPositionalName(String p1) {
-    return p1;
   }
 
   @SuppressWarnings("unused")
@@ -102,13 +96,14 @@ class CompiledExpressionTest {
   }
 
   @Test
-  @DisplayName("variables are collected from the parsed AST, not from literal text")
-  void variablesComeFromTheAst() {
-    CompiledExpression cached = compiled("#p0 == #result");
+  @DisplayName("the AST flags are collected from the parsed tree, not from literal text")
+  void flagsComeFromTheAst() {
+    assertThat(compiled("#p0 == #result").referencesResult()).isTrue();
+    assertThat(compiled("'#result' + \"#p0\"").referencesResult()).isFalse();
+    assertThat(compiled("#root.args[0]").referencesResult()).isFalse();
 
-    assertThat(cached.variables()).containsExactlyInAnyOrder("p0", "result");
-    assertThat(compiled("'#result' + \"#p0\"").variables()).isEmpty();
-    assertThat(compiled("#root.args[0]").variables()).containsExactly("root");
+    assertThat(compiled("#root.args").wholeRootArgs()).isTrue();
+    assertThat(compiled("#root.args[0]").wholeRootArgs()).isFalse();
   }
 
   @Test
@@ -165,6 +160,37 @@ class CompiledExpressionTest {
   }
 
   @Test
+  @DisplayName("a named variable without parameter metadata fails resolution instead of resolving to null")
+  void namedVariableWithoutParameterNamesFailsResolution() {
+    assertThatThrownBy(() -> CompiledExpression.of("#userId", parser, "key", method, null, true))
+      .isInstanceOf(IllegalStateException.class)
+      .hasMessageContaining("parameter names are not available")
+      .hasMessageContaining("-parameters")
+      .hasMessageContaining("#p0");
+    assertThat(CompiledExpression.of("#p0", parser, "key", method, null, true).absent()).isFalse();
+    assertThat(CompiledExpression.of("#root.args[0]", parser, "key", method, null, true).absent()).isFalse();
+    assertThat(CompiledExpression.of("#result", parser, "unless", method, null, true).absent()).isFalse();
+  }
+
+  @Test
+  @DisplayName("a SpEL function call is rejected: the evaluation context registers no functions")
+  void functionCallsAreRejected() {
+    assertThatThrownBy(() -> compiled("#hash(#p0)"))
+      .isInstanceOf(IllegalStateException.class)
+      .hasMessageContaining("cannot call SpEL function")
+      .hasMessageContaining("no functions are registered")
+      .hasMessageContaining("fixture");
+  }
+
+  @Test
+  @DisplayName("root-relative indexer, selection and projection are dynamic, never folded as constants")
+  void rootRelativeCollectionNodesAreDynamic() {
+    assertThat(compiled("[0]").constant()).isFalse();
+    assertThat(compiled("?[#this != null]").constant()).isFalse();
+    assertThat(compiled("![#this]").constant()).isFalse();
+  }
+
+  @Test
   @DisplayName("every assignment form is rejected: cache expressions are read-only")
   void assignmentsAreRejected() {
     assertThatThrownBy(() -> compiled("#x = 1"))
@@ -178,6 +204,16 @@ class CompiledExpressionTest {
       .isInstanceOf(IllegalStateException.class)
       .hasMessageContaining("must not contain assignments");
     assertThatThrownBy(() -> compiled("(#x = 1) + #x"))
+      .isInstanceOf(IllegalStateException.class)
+      .hasMessageContaining("must not contain assignments");
+    assertThatThrownBy(() -> compiled("#x++"))
+      .isInstanceOf(IllegalStateException.class)
+      .hasMessageContaining("must not contain assignments")
+      .hasMessageContaining("read-only");
+    assertThatThrownBy(() -> compiled("#x--"))
+      .isInstanceOf(IllegalStateException.class)
+      .hasMessageContaining("must not contain assignments");
+    assertThatThrownBy(() -> compiled("#root.args[0].age++"))
       .isInstanceOf(IllegalStateException.class)
       .hasMessageContaining("must not contain assignments");
   }
@@ -195,6 +231,23 @@ class CompiledExpressionTest {
   }
 
   @Test
+  @DisplayName("a context-free expression is folded once and a failure names its role and method")
+  void constantExpressionsAreFoldedOnce() {
+    assertThat(compiled("60 * 1000").evaluateConstant()).isEqualTo(60_000);
+    assertThat(compiled("#p0").evaluateConstant()).isNull();
+    assertThat(compiled("null").evaluateConstant()).isNull();
+    assertThat(CompiledExpression.ABSENT.evaluateConstant()).isNull();
+
+    assertThatThrownBy(() ->
+      CompiledExpression.of("1 / 0", parser, "hardTtl", method, names(method), true)
+    )
+      .isInstanceOf(IllegalStateException.class)
+      .hasMessageContaining("hardTtl")
+      .hasMessageContaining("failed constant evaluation")
+      .hasMessageContaining("fixture");
+  }
+
+  @Test
   @DisplayName("a pre-body #result is rejected")
   void resultIsRejectedBeforeTheBody() {
     assertThatThrownBy(() -> preBody("#result.id"))
@@ -205,13 +258,13 @@ class CompiledExpressionTest {
   }
 
   @Test
-  @DisplayName("a parameter named result is rejected because #result is reserved")
-  void resultNamedParameterIsRejected() throws NoSuchMethodException {
+  @DisplayName("a parameter named result is legal; #result stays the bound body result")
+  void resultNamedParameterIsAllowed() throws NoSuchMethodException {
     Method withResult = CompiledExpressionTest.class.getDeclaredMethod("fixtureWithResultParameter", String.class);
 
-    assertThatThrownBy(() -> CompiledExpression.of("#result", parser, "key", withResult, names(withResult), false))
-      .isInstanceOf(IllegalStateException.class)
-      .hasMessageContaining("reserved parameter 'result'");
+    assertThat(CompiledExpression.of("#p0", parser, "key", withResult, names(withResult), false).absent()).isFalse();
+    assertThat(CompiledExpression.of("#result", parser, "key", withResult, names(withResult), true).absent()).isFalse();
+    assertThat(CompiledExpression.argumentIndex("result", names(withResult))).isEqualTo(-1);
   }
 
   @Test
@@ -225,30 +278,20 @@ class CompiledExpressionTest {
   }
 
   @Test
-  @DisplayName("a parameter named p1 is rejected because positional bindings are reserved")
-  void positionalParameterNameIsRejected() throws NoSuchMethodException {
-    Method methodWithP1 = CompiledExpressionTest.class.getDeclaredMethod("fixtureWithPositionalName", String.class);
+  @DisplayName("referencesResult sees #result but not text inside a string literal")
+  void referencesResultSkipsStringLiterals() {
+    assertThat(compiled("#result.id").referencesResult()).isTrue();
+    assertThat(compiled("#result").referencesResult()).isTrue();
+    assertThat(compiled("#p0 == #result").referencesResult()).isTrue();
 
-    assertThatThrownBy(() -> CompiledExpression.of("#p1", parser, "key", methodWithP1, names(methodWithP1), true))
-      .isInstanceOf(IllegalStateException.class)
-      .hasMessageContaining("reserved parameter 'p1'");
-  }
-
-  @Test
-  @DisplayName("references sees a variable but not text inside a string literal")
-  void referencesSkipsStringLiterals() {
-    assertThat(compiled("#result.id").references("result")).isTrue();
-    assertThat(compiled("#result").references("result")).isTrue();
-    assertThat(compiled("#p0 == #result").references("result")).isTrue();
-
-    assertThat(unchecked("#resultX").references("result")).isFalse();
-    assertThat(compiled("#p0").references("result")).isFalse();
-    assertThat(compiled("'#result'").references("result")).isFalse();
-    assertThat(compiled("#p0 == 'it''s #result'").references("result")).isFalse();
-    assertThat(compiled("\"#result\"").references("result")).isFalse();
-    assertThat(compiled("\"it\"\"s #result\"").references("result")).isFalse();
-    assertThat(compiled("'say \"hi\" #result'").references("result")).isFalse();
-    assertThat(compiled("\"#result\" + #result").references("result")).isTrue();
+    assertThat(unchecked("#resultX").referencesResult()).isFalse();
+    assertThat(compiled("#p0").referencesResult()).isFalse();
+    assertThat(compiled("'#result'").referencesResult()).isFalse();
+    assertThat(compiled("#p0 == 'it''s #result'").referencesResult()).isFalse();
+    assertThat(compiled("\"#result\"").referencesResult()).isFalse();
+    assertThat(compiled("\"it\"\"s #result\"").referencesResult()).isFalse();
+    assertThat(compiled("'say \"hi\" #result'").referencesResult()).isFalse();
+    assertThat(compiled("\"#result\" + #result").referencesResult()).isTrue();
   }
 
   private String@Nullable [] names(Method target) {
@@ -264,6 +307,6 @@ class CompiledExpressionTest {
   }
 
   private CompiledExpression unchecked(String raw) {
-    return new CompiledExpression(raw, parser.parseExpression(raw), Set.of("resultX"), false);
+    return new CompiledExpression.Present(raw, parser.parseExpression(raw), false, false, false, null);
   }
 }

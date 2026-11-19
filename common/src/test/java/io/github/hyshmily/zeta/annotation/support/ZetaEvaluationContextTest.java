@@ -13,11 +13,12 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.github.hyshmily.zeta.annotation.supporter;
+package io.github.hyshmily.zeta.annotation.support;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import java.io.Serializable;
 import java.lang.reflect.Method;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -38,7 +39,7 @@ class ZetaEvaluationContextTest {
 
   private final Object[] arguments = { "ACME", 7 };
 
-  private final ZetaEvaluationContext.Support support = ZetaEvaluationContext.Support.defaults();
+  private final ZetaEvaluationContext.ExpressionSupport support = ZetaEvaluationContext.ExpressionSupport.defaults();
 
   private Method method;
 
@@ -60,15 +61,26 @@ class ZetaEvaluationContextTest {
     public String join(String... ids) {
       return String.join(",", ids);
     }
+
+    public String merge(String[] left, String[] right) {
+      return String.join(",", left) + "|" + String.join(",", right);
+    }
+
+    public String echo(Serializable... values) {
+      return String.join(",", java.util.Arrays.stream(values).map(Object::toString).toList());
+    }
+  }
+
+  private ParameterBindings bindings(Method method) {
+    return ParameterBindings.of(method, parameterNames.getParameterNames(method));
   }
 
   private ZetaEvaluationContext context() {
-    return ZetaEvaluationContext.of(
-      ZetaEvaluationContext.Root.of(target, Fixture.class, method, arguments),
-      parameterNames.getParameterNames(method),
-      null,
-      support
-    );
+    return context(method, arguments, support);
+  }
+
+  private ZetaEvaluationContext context(Method method, Object[] args, ZetaEvaluationContext.ExpressionSupport support) {
+    return ZetaEvaluationContext.create(target, Fixture.class, method, args, bindings(method), null, support);
   }
 
   private Object evaluate(String expression) {
@@ -101,18 +113,18 @@ class ZetaEvaluationContextTest {
   }
 
   @Test
-  @DisplayName("withResult binds #result without replacing the root")
-  void withResultBindsResult() {
-    ZetaEvaluationContext context = context().withResult("loaded");
+  @DisplayName("bindResult binds #result without replacing the root")
+  void bindResultBindsResult() {
+    ZetaEvaluationContext context = context().bindResult("loaded");
 
     assertThat(parser.parseExpression("#result").getValue(context)).isEqualTo("loaded");
     assertThat(parser.parseExpression("#root.methodName").getValue(context)).isEqualTo("find");
   }
 
   @Test
-  @DisplayName("withResult(null) binds a null result")
-  void withResultBindsNull() {
-    ZetaEvaluationContext context = context().withResult(null);
+  @DisplayName("bindResult(null) binds a null result")
+  void bindResultBindsNull() {
+    ZetaEvaluationContext context = context().bindResult(null);
 
     assertThat(parser.parseExpression("#result").getValue(context)).isNull();
     assertThat(parser.parseExpression("#root.methodName").getValue(context)).isEqualTo("find");
@@ -144,13 +156,8 @@ class ZetaEvaluationContextTest {
     assertThat(context().getPropertyAccessors()).isSameAs(context().getPropertyAccessors());
     assertThat(context().getMethodResolvers()).isSameAs(context().getMethodResolvers());
 
-    ZetaEvaluationContext.Support other = ZetaEvaluationContext.Support.defaults();
-    ZetaEvaluationContext otherContext = ZetaEvaluationContext.of(
-      ZetaEvaluationContext.Root.of(target, Fixture.class, method, arguments),
-      parameterNames.getParameterNames(method),
-      null,
-      other
-    );
+    ZetaEvaluationContext.ExpressionSupport other = ZetaEvaluationContext.ExpressionSupport.defaults();
+    ZetaEvaluationContext otherContext = context(method, arguments, other);
 
     assertThat(otherContext.getPropertyAccessors()).isNotSameAs(context().getPropertyAccessors());
     assertThat(otherContext.getMethodResolvers()).isNotSameAs(context().getMethodResolvers());
@@ -175,11 +182,7 @@ class ZetaEvaluationContextTest {
   void getArgsReusesTheEmptyArray() throws NoSuchMethodException {
     Method empty = Fixture.class.getDeclaredMethod("empty");
     Object[] noArgs = new Object[0];
-    ZetaEvaluationContext context = ZetaEvaluationContext.of(
-      ZetaEvaluationContext.Root.of(target, Fixture.class, empty, noArgs),
-      parameterNames.getParameterNames(empty),
-      null
-    );
+    ZetaEvaluationContext context = context(empty, noArgs, support);
 
     assertThat(context.root().getArgs()).isSameAs(noArgs);
   }
@@ -188,11 +191,7 @@ class ZetaEvaluationContextTest {
   @DisplayName("a vararg parameter binds the remaining arguments as one array")
   void varargsBindAsOneArray() throws NoSuchMethodException {
     Method join = Fixture.class.getDeclaredMethod("join", String[].class);
-    ZetaEvaluationContext context = ZetaEvaluationContext.of(
-      ZetaEvaluationContext.Root.of(target, Fixture.class, join, new Object[] { "a", "b" }),
-      parameterNames.getParameterNames(join),
-      null
-    );
+    ZetaEvaluationContext context = context(join, new Object[] { "a", "b" }, support);
 
     assertThat((Object[]) parser.parseExpression("#ids").getValue(context)).containsExactly("a", "b");
     assertThat((Object[]) parser.parseExpression("#p0").getValue(context)).containsExactly("a", "b");
@@ -216,25 +215,53 @@ class ZetaEvaluationContextTest {
   }
 
   @Test
-  @DisplayName("packArguments adapts expanded, one-value and packed varargs for reflection")
-  void packArgumentsAdaptsEveryVarargsShape() throws NoSuchMethodException {
+  @DisplayName("a generic interface's erased Object[] varargs tail is copied to the declared component type")
+  void erasedVarargsAreCopiedToTheComponentType() throws NoSuchMethodException {
     Method join = Fixture.class.getDeclaredMethod("join", String[].class);
+    Object[] erased = { new Object[] { "a", "b" } };
+    ZetaEvaluationContext context = varargsContext(join, parameterNames.getParameterNames(join), erased);
 
-    assertThat((Object[]) ZetaEvaluationContext.packArguments(join, new Object[] { "a", "b" })[0])
-      .containsExactly("a", "b");
-    assertThat((Object[]) ZetaEvaluationContext.packArguments(join, new Object[] { "a" })[0])
-      .containsExactly("a");
-    assertThat((Object[]) ZetaEvaluationContext.packArguments(join, new Object[0])[0]).isEmpty();
+    Object value = parser.parseExpression("#ids").getValue(context);
+    assertThat(value).isInstanceOf(String[].class);
+    assertThat((String[]) value).containsExactly("a", "b");
+  }
 
-    Object[] packed = { new String[] { "a", "b" } };
-    assertThat(ZetaEvaluationContext.packArguments(join, packed)).isSameAs(packed);
+  @Test
+  @DisplayName("a non-varargs array parameter binds as its declared array type")
+  void erasedArrayParametersAreCopiedToTheComponentType() throws NoSuchMethodException {
+    Method merge = Fixture.class.getDeclaredMethod("merge", String[].class, String[].class);
+    Object[] erased = { new Object[] { "a" }, new Object[] { "b" } };
+    ZetaEvaluationContext context = context(merge, erased, support);
+
+    assertThat((String[]) parser.parseExpression("#left").getValue(context)).containsExactly("a");
+    assertThat((String[]) parser.parseExpression("#right").getValue(context)).containsExactly("b");
+    assertThat((String[]) parser.parseExpression("#p1").getValue(context)).containsExactly("b");
+  }
+
+  /**
+   * Every array is {@link Serializable}, so testing the component type with {@code isInstance}
+   * mistakes the erased {@code Object[]} container for one element of a {@code Serializable...}
+   * method.
+   */
+  @Test
+  @DisplayName("an erased Object[] varargs tail under a Serializable bound resolves to the declared array")
+  void serializableBoundArraysAreNormalized() throws NoSuchMethodException {
+    Method echo = Fixture.class.getDeclaredMethod("echo", Serializable[].class);
+    Object[] erased = { new Object[] { "a", "b" } };
+
+    ZetaEvaluationContext context = context(echo, erased, support);
+    assertThat(parser.parseExpression("#p0").getValue(context)).isInstanceOf(Serializable[].class);
   }
 
   private ZetaEvaluationContext varargsContext(Method join, String[] names, Object[] args) {
-    return ZetaEvaluationContext.of(
-      ZetaEvaluationContext.Root.of(target, Fixture.class, join, args),
-      names,
-      null
+    return ZetaEvaluationContext.create(
+      target,
+      Fixture.class,
+      join,
+      args,
+      ParameterBindings.of(join, names),
+      null,
+      support
     );
   }
 }

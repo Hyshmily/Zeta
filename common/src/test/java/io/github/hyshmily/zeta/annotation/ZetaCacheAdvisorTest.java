@@ -65,14 +65,17 @@ import org.springframework.core.Ordered;
 class ZetaCacheAdvisorTest {
 
   private Zeta zeta;
+  private PlanResolver resolver;
   private ZetaCacheInterceptor interceptor;
   private ZetaCacheAdvisor advisor;
 
   @BeforeEach
   void setUp() {
     zeta = mock(Zeta.class);
-    interceptor = new ZetaCacheInterceptor(zeta, null);
-    advisor = new ZetaCacheAdvisor(interceptor);
+    resolver = new PlanResolver(null);
+    interceptor = new ZetaCacheInterceptor(zeta, resolver);
+    advisor = new ZetaCacheAdvisor(resolver);
+    advisor.setAdvice(interceptor);
   }
 
   /**
@@ -285,6 +288,21 @@ class ZetaCacheAdvisorTest {
   }
 
   @Test
+  @DisplayName("the class filter skips infrastructure but admits business classes and JDK proxies")
+  void classFilterSkipsInfrastructure() {
+    var filter = advisor.getPointcut().getClassFilter();
+    Class<?> proxyClass = java.lang.reflect.Proxy.newProxyInstance(
+      Runnable.class.getClassLoader(),
+      new Class<?>[] { Runnable.class },
+      (proxy, method, args) -> null
+    ).getClass();
+
+    assertThat(filter.matches(String.class)).isFalse();
+    assertThat(filter.matches(VerbService.class)).isTrue();
+    assertThat(filter.matches(proxyClass)).isTrue();
+  }
+
+  @Test
   @DisplayName("the pointcut matches only non-static, non-private verb methods")
   void pointcutMatchesVerbMethodsOnly() throws NoSuchMethodException {
     Class<VerbService> type = VerbService.class;
@@ -373,7 +391,7 @@ class ZetaCacheAdvisorTest {
 
     Field classPlans = PlanResolver.class.getDeclaredField("classPlans");
     classPlans.setAccessible(true);
-    Map<?, ?> plans = (Map<?, ?>) ((ClassValue<?>) classPlans.get(resolver)).get(DualKeyReaderImpl.class);
+    Map<?, ?> plans = (Map<?, ?>) ((Map<?, ?>) classPlans.get(resolver)).get(DualKeyReaderImpl.class);
 
     assertThat(plans).hasSize(2);
     assertThat(plans.get(declared))

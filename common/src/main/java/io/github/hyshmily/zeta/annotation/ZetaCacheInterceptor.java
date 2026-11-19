@@ -16,219 +16,135 @@
 package io.github.hyshmily.zeta.annotation;
 
 import io.github.hyshmily.zeta.Zeta;
-import io.github.hyshmily.zeta.annotation.supporter.CompiledExpression;
-import io.github.hyshmily.zeta.annotation.supporter.DefaultKey;
-import io.github.hyshmily.zeta.annotation.supporter.ZetaEvaluationContext;
+import io.github.hyshmily.zeta.annotation.CachePlan.ResolvedTarget;
+import io.github.hyshmily.zeta.annotation.support.CompiledExpression;
+import io.github.hyshmily.zeta.annotation.support.InvocationArguments;
+import io.github.hyshmily.zeta.annotation.support.ZetaEvaluationContext;
 import io.github.hyshmily.zeta.cache.cachesupport.loader.CacheLoader;
 import io.github.hyshmily.zeta.cache.cachesupport.policy.GetPolicy;
-import io.github.hyshmily.zeta.cache.cachesupport.policy.InvalidatePolicy;
 import io.github.hyshmily.zeta.cache.cachesupport.policy.PutPolicy;
-import io.github.hyshmily.zeta.cache.cachesupport.policy.StalePolicy;
 import io.github.hyshmily.zeta.util.Internal;
-import java.lang.reflect.Array;
-import java.lang.reflect.InvocationTargetException;
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.VarHandle;
 import java.lang.reflect.Method;
-import java.math.BigDecimal;
-import java.math.BigInteger;
+import java.lang.reflect.Proxy;
+import java.util.List;
+import java.util.Optional;
 import java.util.function.LongSupplier;
 import lombok.extern.slf4j.Slf4j;
 import org.aopalliance.intercept.MethodInterceptor;
 import org.aopalliance.intercept.MethodInvocation;
+import org.jspecify.annotations.NonNull;
 import org.jspecify.annotations.Nullable;
-import org.springframework.aop.TargetClassAware;
+import org.springframework.aop.ProxyMethodInvocation;
+import org.springframework.aop.TargetSource;
 import org.springframework.aop.framework.Advised;
-import org.springframework.aop.framework.AopProxyUtils;
-import org.springframework.aop.support.AopUtils;
-import org.springframework.beans.factory.BeanFactory;
-import org.springframework.expression.spel.ast.Literal;
-import org.springframework.expression.spel.standard.SpelExpression;
-import org.springframework.expression.spel.standard.SpelExpressionParser;
-import org.springframework.expression.spel.support.StandardEvaluationContext;
+import org.springframework.core.BridgeMethodResolver;
+import org.springframework.core.BridgeMethodResolver;
 
 /**
  * The one advice behind {@link ZetaCached}, {@link ZetaPut} and
  * {@link ZetaInvalidate}: {@link PlanResolver} resolves the method's plan once,
- * the advice resolves the key once, and then performs exactly one data verb
+ * the advice resolves the key once, and then performs the plan's data verbs
  * against the {@link Zeta} facade.
  *
- * <p><b>No cache abstraction in the middle.</b> The annotations are not Spring
- * Cache operations, so there is no {@code CacheManager}, no {@code Cache}, no
- * {@code CacheOperationSource} and no second interceptor to keep inert. The
- * only Spring contract this class honours is the method-interceptor one, and
- * the only Zeta contract is the facade's — which is why a read can hand the
- * method body to {@link Zeta#get} as a real loader: soft-expire
- * (stale-while-revalidate) and SingleFlight dedup come for free, and a new
- * attribute can never mean two different things in two places.
- *
- * <p><b>One method, one verb.</b> A method carrying two of the three
- * annotations is a configuration error and is rejected at resolution instead of
- * one annotation silently shadowing the other.
- *
- * <p><b>Resolution is the fail-fast boundary, and {@link PlanResolver} owns it.</b>
- * {@link ZetaCacheAdvisor}'s pointcut calls {@link #matches} while Spring is deciding
- * whether to proxy a bean, so a blank namespace, a void/Void return, a conflicting verb,
- * an unparsable expression, an unknown or out-of-range variable, a pre-body
- * {@code #result} or a permanent synced write fails bean creation instead of the first
- * request. The resolver scans every candidate method of the target class once: a JDK proxy
- * matches lazily per call, so without that scan a malformed second verb would surface only
- * in production. Its table is keyed by the target class, with a CGLIB proxy sharing the
- * user class's table, so a validated class answers every later question about one of its
- * views with one lookup and no annotation scan.
- *
- * <p><b>One resolution, every view.</b> The most-specific implementation method
- * is resolved once per candidate, and it is stored in the plan: SpEL parameter
- * names are discovered from it (an interface method reported by a JDK proxy has
- * no parameter metadata of its own, so the declaring method is the fallback), a
- * background refresh invokes it, and its reflective access is claimed once
- * instead of on every refresh. Every view of an annotated group maps to the
- * same plan instance, so an interface verb is never compiled twice.
- *
- * <p><b>Key.</b> Resolved once per call and reused by every consumer:
- * {@code cache + '\u0000' + key}, the namespace encoding that keeps two cache
- * names from colliding in the single L1 table. An absent {@code key} attribute
- * derives the canonical {@link DefaultKey} encoding of the arguments. A simple
- * single-argument expression ({@code #id}, {@code #p0}, {@code #a0}) resolves
- * straight from the argument array; a no-argument default key and a
- * whole-literal expression are precomputed at resolution. Anything else goes
- * through SpEL, whose parser runs in MIXED mode so a repeatedly evaluated
- * expression is compiled after its first few interpreted evaluations.
- *
- * <p><b>Body exceptions.</b> The read path returns a {@link BodyFailure}
- * sentinel from the loader instead of throwing, because a business exception
- * must reach the caller unchanged and must not be counted as a data-source
- * failure (that would drive the breaker open). The sentinel is never stored and
- * is rethrown by the caller. On the background-refresh leg the failure is
- * thrown to the engine instead: there is no caller to rethrow to, and the
- * engine's WARN plus lease-on-failure path must observe a real failure.
+ * <p><b>The method body is the loader.</b> A read hands the invocation to
+ * {@link Zeta#get}, so soft-expire (stale-while-revalidate) and SingleFlight
+ * dedup come for free. A business exception must reach the caller unchanged and
+ * must not be counted as a data-source failure (that would drive the breaker
+ * open), so the read path returns a {@link BodyFailure} sentinel from the loader
+ * and rethrows it as the caller's cause; the refresh leg throws instead, because
+ * the engine's failure path (WARN plus lease-on-failure) must observe a real
+ * failure (design decisions: annotations).
  *
  * <p><b>Thread contract.</b> {@code MethodInvocation.proceed()} is single-shot
  * and not thread-safe, so it serves only the first load, on the invocation
  * thread — the body therefore keeps its transaction, security context and MDC.
- * The loader owns that one-shot chain and claims it at most once; the
- * invocation chain is released as soon as the foreground read returns, because
- * a refresh task may outlive the caller and must not pin the proxy chain,
- * target and original advice state. The refresh goes through
- * {@link CacheLoader#reload}, which invokes the target method reflectively,
- * <b>outside</b> the advice chain; that refreshed value is only ever written to
- * the local L1. A method whose body depends on request-scoped state must not be
+ * The invocation chain is released as soon as the foreground read returns,
+ * because a refresh task may outlive the caller and must not pin the proxy
+ * chain. The refresh goes through {@link CacheLoader#reload}, which invokes the
+ * target method reflectively. When only a proxy can invoke that method, the
+ * reflective call is marked so this advice lets it reach the body instead of
+ * re-entering the cache read; that refreshed value is only ever written to the
+ * local L1. A method whose body depends on request-scoped state must not be
  * given a soft TTL.
  *
- * <p><b>One context per phase.</b> A context is built from the call's immutable
- * inputs when a phase needs one: the result-independent key before the body,
- * and one shared post-body context for {@code unless}, a result-dependent key
- * and the TTLs evaluated when the write happens. A read's TTL suppliers still
- * build their own context when the engine evaluates them, so an evaluation on
- * a refresh thread, after the caller returned, or inline on the caller's
- * thread cannot observe another phase's state.
+ * <p>Resolution, key encoding, the per-phase evaluation context and the
+ * fail-fast validation rules are owned by {@link PlanResolver} and
+ * {@link CachePlan} (design decisions: annotations, design decisions:
+ * annotation attributes).
  */
 @Slf4j
 @Internal
 public final class ZetaCacheInterceptor implements MethodInterceptor {
 
-  private static final BigDecimal MAX_LONG_DECIMAL = BigDecimal.valueOf(Long.MAX_VALUE);
-
   private static final Object[] NO_ARGS = new Object[0];
 
-  private static final LongSupplier ZERO = () -> 0L;
+  /**
+   * The proxy a background refresh is invoking reflectively on this thread, if any. A refresh that
+   * cannot reach a callable target invokes the proxy itself; without this marker that reflective
+   * call re-enters this advice chain and serves the stale entry as the "refreshed" value (or joins
+   * its own load). The marker is scoped to the reflective call and matched by proxy identity and
+   * method signature, so a body's nested call to another cache method is not bypassed.
+   */
+  private static final ThreadLocal<RefreshBypass> REFRESH_BYPASS = new ThreadLocal<>();
 
   private final Zeta zeta;
 
   private final PlanResolver resolver;
 
+  private final CacheFailurePolicy failurePolicy;
+
   /**
    * Create the interceptor.
    *
-   * @param zeta        the facade every data verb goes through
-   * @param beanFactory the bean factory backing {@code @beanName} SpEL and
-   *                    {@code ${...}} attribute placeholders, or {@code null}
-   *                    to disable both
+   * @param zeta          the facade every data verb goes through
+   * @param resolver      the plan source shared with the advisor
+   * @param failurePolicy the cache-side failure policy
    */
-  public ZetaCacheInterceptor(Zeta zeta, @Nullable BeanFactory beanFactory) {
+  public ZetaCacheInterceptor(Zeta zeta, PlanResolver resolver, CacheFailurePolicy failurePolicy) {
     this.zeta = zeta;
-    this.resolver = new PlanResolver(beanFactory);
+    this.resolver = resolver;
+    this.failurePolicy = failurePolicy;
   }
 
-  /** The pointcut decision, delegated to the resolved plan table. */
-  boolean matches(Method method, Class<?> targetClass) {
-    return resolver.matches(method, targetClass);
+  /**
+   * Create the interceptor with the default failure policy.
+   *
+   * @param zeta     the facade every data verb goes through
+   * @param resolver the plan source shared with the advisor
+   */
+  public ZetaCacheInterceptor(Zeta zeta, PlanResolver resolver) {
+    this(zeta, resolver, CacheFailurePolicy.defaults());
   }
 
   @Override
-  public Object invoke(MethodInvocation invocation) throws Throwable {
-    Method method = invocation.getMethod();
-    if (method.getDeclaringClass() == Object.class) {
+  public Object invoke(@NonNull MethodInvocation invocation) throws Throwable {
+    if (bypassesRefreshReentry(invocation)) {
+      return invocation.proceed();
+    }
+    PlanResolver.InvocationPlan resolved = resolver.resolveInvocation(invocation);
+    if (resolved == null) {
       return invocation.proceed();
     }
 
-    // Spring's MethodInvocation.getThis() is the TARGET object, not the proxy
-    // (the proxy is ProxyMethodInvocation.getProxy()). A nested proxy — a
-    // FactoryBean returning a proxy, a scoped target — is the only case that
-    // needs unwrapping. Unwrap once here: every SpEL context and a background
-    // refresh reuse the same receiver instead of walking the proxy chain again.
-    // The unwrap stops at the first object that still implements the reported
-    // method's declaring type: an interface proxy (a Spring Data repository, a
-    // mapper) has a target implementation that does not implement the
-    // interface, and reflectively invoking that target would fail.
-    Object target = findUltimateTargetObject(invocation.getThis(), method);
-    Class<?> targetClass = planClass(target, method);
-
-    Plan plan = resolver.plan(method, targetClass);
-    if (plan == null) {
-      return invocation.proceed();
-    }
+    CachePlan plan = resolved.plan();
+    Object target = resolved.target();
+    Class<?> targetClass = resolved.targetClass();
     Object[] args = invocation.getArguments();
-    if (plan instanceof Plan.Read read) {
-      return read(invocation, method, read, target, targetClass, args);
+    if (args == null) {
+      args = NO_ARGS;
     }
-    if (plan instanceof Plan.Write write) {
+    if (plan instanceof CachePlan.Read read) {
+      return read(invocation, read, target, targetClass, args);
+    }
+    if (plan instanceof CachePlan.Write write) {
       return write(invocation, write, target, targetClass, args);
     }
-    if (plan instanceof Plan.Invalidate invalidation) {
-      return invalidate(invocation, invalidation, target, targetClass, args);
+    if (plan instanceof CachePlan.Invalidate invalidate) {
+      return invalidate(invocation, invalidate, target, targetClass, args);
     }
-    throw new IllegalStateException("Unknown plan type: " + plan.getClass());
-  }
-
-  /**
-   * Unwrap nested proxies down to the object the method body should run on.
-   * {@code invocation.getThis()} is already the target object, so this is a
-   * no-op for every ordinary proxy; only a target that is itself an
-   * {@link Advised} proxy needs the singleton-target unwrap, and a
-   * non-singleton {@code TargetSource} keeps the proxy it cannot unwrap. An
-   * interface proxy stops at the proxy itself when the next target no longer
-   * implements the reported method's declaring type: that object is the only
-   * one both the plan lookup and a reflective reload can use.
-   *
-   * @param candidate the invocation target
-   * @param method    the reported method the receiver must be able to invoke
-   * @return the deepest target that still implements the method's declaring type
-   */
-  private static @Nullable Object findUltimateTargetObject(@Nullable Object candidate, Method method) {
-    Object current = candidate;
-    while (current instanceof Advised advised) {
-      Object next = AopProxyUtils.getSingletonTarget(advised);
-      if (next == null || next == current || !method.getDeclaringClass().isInstance(next)) {
-        return current;
-      }
-      current = next;
-    }
-    return current;
-  }
-
-  /**
-   * The class the plan table is keyed on: the target's user class when it still
-   * implements the reported method, otherwise the method's declaring type. A
-   * Spring Data repository proxy's ultimate target is {@code SimpleJpaRepository},
-   * which does not implement the repository interface; keying on it would miss
-   * every plan and silently bypass the cache.
-   */
-  private static Class<?> planClass(@Nullable Object target, Method method) {
-    if (target == null) {
-      return method.getDeclaringClass();
-    }
-    Class<?> ultimate =
-      target instanceof TargetClassAware ? AopProxyUtils.ultimateTargetClass(target) : target.getClass();
-    return method.getDeclaringClass().isAssignableFrom(ultimate) ? ultimate : method.getDeclaringClass();
+    throw new AssertionError("unknown plan type: " + plan.getClass());
   }
 
   /**
@@ -239,570 +155,355 @@ public final class ZetaCacheInterceptor implements MethodInterceptor {
    */
   private Object read(
     MethodInvocation invocation,
-    Method method,
-    Plan.Read plan,
+    CachePlan.Read plan,
     @Nullable Object target,
     Class<?> targetClass,
     Object[] args
   ) throws Throwable {
+    // One detached argument view for the key, the post-body unless and a reflective refresh: a
+    // later caller or body mutation must not change what is evaluated after the body. A flat
+    // argument list is returned as-is, so an array-free call copies nothing. The copy is deferred
+    // until after a condition that needs no context, so a bypassed call pays none.
+    boolean conditionContext = plan.condition().needsContext();
+    Object[] snapshot = conditionContext ? InvocationArguments.snapshot(args) : args;
+    ZetaEvaluationContext pre = conditionContext ? resolver.createContext(plan, target, targetClass, snapshot) : null;
+    if (!conditionPasses(plan.condition(), pre, plan.specific())) {
+      return invocation.proceed();
+    }
+    if (!conditionContext) {
+      snapshot = InvocationArguments.snapshot(args);
+      if (plan.key().needsContext()) {
+        pre = resolver.createContext(plan, target, targetClass, snapshot);
+      }
+    }
     // Resolve the key before touching the engine or allocating the loader, so a
     // null argument or a null key fails without a doomed load object.
-    String key = plan.key().resolve(args, preContextIfNeeded(plan, target, targetClass, args));
-    ReadLoader loader = new ReadLoader(invocation, method, plan, target, targetClass, args);
+    String key = plan.key().resolve(snapshot, pre);
+    ReadLoader loader = new ReadLoader(invocation, plan, target, targetClass, snapshot, pre);
     try {
       Object value = zeta.get(key, loader, loader.readPolicy());
       if (value instanceof BodyFailure failure) {
         throw failure.cause();
       }
-      return value;
+      return plan.optional() ? wrapOptional(value) : value;
     } finally {
       // A refresh task can retain this loader after the caller returns; the advice chain is
       // useless to it (reload never proceeds) and is released here. The loader keeps the target
-      // and a defensive copy of the arguments for the reflective reload only. A method whose
-      // body depends on request-scoped or caller-mutated argument state must not use a soft TTL:
-      // the refresh cannot snapshot arbitrary mutable objects, only the argument array and its
-      // array elements.
+      // and its array-argument snapshot. A method whose body depends on request-scoped or
+      // caller-mutated argument state must not use a soft TTL: the refresh cannot snapshot
+      // arbitrary mutable objects, only the argument array and its array elements.
       loader.release();
     }
   }
 
   /**
-   * The write: the result-independent key resolves before the body, so a null
+   * The write: a false condition runs the body without resolving the key or
+   * writing. A result-independent key resolves before the body, so a null
    * argument or a null key fails before the transaction commits. A synced
    * dynamic hard TTL is the only TTL evaluated before the body: a permanent
    * value cannot be broadcast, and that rejection must precede the business
    * side effect. Every other TTL waits until the body returned a non-null,
    * non-vetoed value, and all post-body expressions share one context bound to
-   * that value.
+   * that value. A result-dependent key that resolves to null skips the write:
+   * the body has already produced its side effect, so a null key is a no-op
+   * rather than a failure.
    */
   private Object write(
     MethodInvocation invocation,
-    Plan.Write plan,
+    CachePlan.Write plan,
     @Nullable Object target,
     Class<?> targetClass,
     Object[] args
   ) throws Throwable {
-    ZetaEvaluationContext preContext = plan.needsPreContext() ? newContext(plan, target, targetClass, args) : null;
-    KeyPlan keyPlan = plan.key();
-    String key = keyPlan.resultDependent() ? null : keyPlan.resolve(args, preContext);
-    long preflightHardMs = preflightHardTtl(plan, preContext);
-
-    Object value = invocation.proceed();
-    if (value == null) {
-      return null;
-    }
-
-    // The one post-body context: unless, a result-dependent key and every TTL
-    // evaluated at write time share it, so they all see the same #result.
-    ZetaEvaluationContext postContext = null;
-    if (!plan.unless().absent()) {
-      postContext = newPostContext(plan, target, targetClass, args, value);
-      if (vetoed(plan.unless(), postContext)) {
-        return value;
-      }
-    }
-    if (postContext == null && plan.needsPostWriteContext()) {
-      postContext = newPostContext(plan, target, targetClass, args, value);
-    }
-    if (key == null) {
-      key = keyPlan.resolve(args, postContext);
-    }
-    zeta.put(key, value, writePolicy(plan, preflightHardMs, postContext));
-    return value;
-  }
-
-  /** The synced dynamic hard TTL the pre-body phase validates, or {@code 0} when there is none. */
-  private long preflightHardTtl(Plan.Write plan, @Nullable ZetaEvaluationContext context) {
-    if (!plan.preflightHard()) {
-      return 0L;
-    }
-    long hardMs = evaluateTtl(plan.ttls().hard(), context, plan.specific());
-    PutPolicy.requireSyncable(hardMs, true);
-    return hardMs;
-  }
-
-  /** The write policy: the prebuilt one, else the TTLs evaluated against the post-body context. */
-  private PutPolicy writePolicy(Plan.Write plan, long preflightHardMs, @Nullable ZetaEvaluationContext context) {
-    PutPolicy prebuilt = plan.prebuiltPolicy();
-    if (prebuilt != null) {
-      return prebuilt;
-    }
-    long hardMs = plan.preflightHard() ? preflightHardMs : evaluateTtl(plan.ttls().hard(), context, plan.specific());
-    long softMs = evaluateTtl(plan.ttls().soft(), context, plan.specific());
-    return PutPolicy.of(hardMs, softMs, plan.sync());
-  }
-
-  /** The invalidation: after the body by default, before it on request. */
-  private Object invalidate(
-    MethodInvocation invocation,
-    Plan.Invalidate plan,
-    @Nullable Object target,
-    Class<?> targetClass,
-    Object[] args
-  ) throws Throwable {
-    // `immediate` and `beforeInvocation` are the same fact: a removal that must
-    // run before the body cannot wait for the transaction's after-commit hook.
-    InvalidatePolicy policy = plan.policy();
-    KeyPlan keyPlan = plan.key();
-    // A before-invocation key cannot read #result (rejected at resolution), so
-    // the immediate form always has a resolved key here; the after-the-body
-    // form may defer a #result key until the body returned.
-    String key = keyPlan.resultDependent()
-      ? null
-      : keyPlan.resolve(args, preContextIfNeeded(plan, target, targetClass, args));
-    if (policy.immediate()) {
-      zeta.invalidate(key, policy);
+    ZetaEvaluationContext pre = plan.needsPreContext() ? resolver.createContext(plan, target, targetClass, args) : null;
+    if (!conditionPasses(plan.condition(), pre, plan.specific())) {
       return invocation.proceed();
     }
+    CachePlan.Key keyPlan = plan.key();
+    String key = keyPlan.resultDependent() ? null : keyPlan.resolve(args, pre);
+    long preflightHardMs = plan.preflightHardTtl(pre);
 
-    Object value = invocation.proceed();
-    if (key == null) {
-      // A key that reads #result is resolved against the returned value; a null
-      // result is a null dereference in the expression, so an expression that
-      // accepts one writes #result?.id (null → no removal). A key that simply
-      // resolves to null is a no-op removal.
-      key = keyPlan.resolveOrNull(args, newPostContext(plan, target, targetClass, args, value));
+    Object returned = invocation.proceed();
+    Object value = plan.optional() ? unwrapOptional(returned) : returned;
+    if (value == null) {
+      return returned;
     }
-    if (key != null) {
-      zeta.invalidate(key, policy);
+
+    // One post-body context for unless, a result-dependent key and every TTL evaluated
+    // at write time, so they all see the same #result. The pre-body context is reused
+    // when it exists: the phases never overlap, so binding the result on it is safe.
+    ZetaEvaluationContext post = plan.needsPostContext()
+      ? postContextFrom(plan, pre, target, targetClass, args, value)
+      : null;
+    if (vetoed(plan.unless(), post, plan.specific())) {
+      return returned;
     }
-    return value;
+    if (keyPlan.resultDependent()) {
+      key = keyPlan.resolveOrNull(args, post);
+      if (key == null) {
+        return returned;
+      }
+    }
+    // Policy assembly is validation, not an engine failure: a result-dependent permanent synced
+    // TTL or an unencodable duration must surface after the body (the only point it is knowable)
+    // instead of being logged away as a failed cache write.
+    PutPolicy policy = plan.policy(preflightHardMs, post);
+    try {
+      zeta.put(key, value, policy);
+    } catch (RuntimeException e) {
+      failurePolicy.onFailure(new CacheFailure(CacheVerb.PUT, plan.cache(), List.of(key), value, e, false));
+    }
+    return returned;
   }
 
   /**
-   * Logs one annotation-expression evaluation failure at DEBUG. A broken
-   * expression sits on a hot path and must not become a per-call log storm.
+   * Run every declared invalidation in its phase. A target that can resolve before the body is
+   * resolved and validated first, so a later declaration's null argument or bad key cannot leave an
+   * earlier removal applied while the body never runs. A conditional or result-dependent target
+   * resolves after the body, against the one post-body context.
    */
-  private void logEvaluationFailure(String role, Method method, RuntimeException failure) {
-    log.debug("[Zeta] {} evaluation failed for {}: {}", role, method, failure.toString());
+  private Object invalidate(
+    MethodInvocation invocation,
+    CachePlan.Invalidate plan,
+    @Nullable Object target,
+    Class<?> targetClass,
+    Object[] args
+  ) throws Throwable {
+    List<CachePlan.Invalidate.Operation> operations = plan.operations();
+    int size = operations.size();
+    ZetaEvaluationContext pre = plan.needsPreContext() ? resolver.createContext(plan, target, targetClass, args) : null;
+
+    @Nullable
+    ResolvedTarget[] beforeBody = null;
+    for (int i = 0; i < size; i++) {
+      CachePlan.Invalidate.Operation operation = operations.get(i);
+      if (!operation.targetBeforeBody()) {
+        continue;
+      }
+      // An immediate removal evaluates its condition in this phase; a present condition on a
+      // deferred removal is evaluated after the body, so it must not run here.
+      if (operation.immediate() && !conditionPasses(operation.condition(), pre, plan.specific())) {
+        continue;
+      }
+      if (beforeBody == null) {
+        beforeBody = new ResolvedTarget[size];
+      }
+      beforeBody[i] = operation.target().resolve(args, pre, false);
+    }
+    if (beforeBody != null) {
+      for (int i = 0; i < size; i++) {
+        CachePlan.Invalidate.Operation operation = operations.get(i);
+        if (operation.immediate()) {
+          apply(beforeBody[i], operation);
+        }
+      }
+    }
+
+    Object returned = invocation.proceed();
+
+    ZetaEvaluationContext post = plan.needsPostContext()
+      ? postContextFrom(plan, pre, target, targetClass, args, plan.optional() ? unwrapOptional(returned) : returned)
+      : null;
+    // A resolution failure on one declaration must not suppress the others. Collect the first
+    // failure, run every remaining removal, then rethrow it: the body already committed, so one
+    // malformed expression cannot leave every other namespace stale.
+    RuntimeException failure = null;
+    for (int i = 0; i < size; i++) {
+      CachePlan.Invalidate.Operation operation = operations.get(i);
+      try {
+        if (operation.targetBeforeBody()) {
+          // An immediate removal already ran; a deferred one applies its pre-body resolution now.
+          if (beforeBody != null && !operation.immediate()) {
+            apply(beforeBody[i], operation);
+          }
+          continue;
+        }
+        if (conditionPasses(operation.condition(), post, plan.specific())) {
+          apply(operation.target().resolve(args, post, true), operation);
+        }
+      } catch (RuntimeException e) {
+        if (failure == null) {
+          failure = e;
+        } else {
+          failure.addSuppressed(e);
+        }
+      }
+    }
+    if (failure != null) {
+      throw failure;
+    }
+    return returned;
   }
 
   /**
-   * Evaluate one TTL against the context of the current phase. A constant
-   * returns its folded value without a context; a negative or absent result
-   * clamps to {@code 0} (use the configured default), and an evaluation failure
-   * is logged at DEBUG and degrades the same way, because a runtime failure
-   * must not fail the cache operation.
+   * Apply one resolved target through the engine, routing an engine failure to the policy. A
+   * {@code null} target is no work: the declaration removed nothing in this phase.
    */
-  private long evaluateTtl(Ttl ttl, @Nullable ZetaEvaluationContext context, Method method) {
-    if (ttl.isConstant()) {
-      return ttl.literalMs();
+  private void apply(@Nullable ResolvedTarget target, CachePlan.Invalidate.Operation operation) {
+    if (target == null) {
+      return;
+    }
+    if (target instanceof ResolvedTarget.Single single) {
+      try {
+        zeta.invalidate(single.key(), operation.policy());
+      } catch (RuntimeException e) {
+        failurePolicy.onFailure(
+          new CacheFailure(CacheVerb.INVALIDATE, single.cache(), List.of(single.key()), null, e, operation.immediate())
+        );
+      }
+      return;
+    }
+    if (target instanceof ResolvedTarget.Many many) {
+      try {
+        zeta.invalidate(many.keys(), operation.policy());
+      } catch (RuntimeException e) {
+        failurePolicy.onFailure(
+          new CacheFailure(CacheVerb.INVALIDATE, many.cache(), many.keys(), null, e, operation.immediate())
+        );
+      }
+      return;
+    }
+    String cache = ((ResolvedTarget.All) target).cache();
+    try {
+      zeta.clearNamespace(cache, operation.policy());
+    } catch (RuntimeException e) {
+      failurePolicy.onFailure(new CacheFailure(CacheVerb.CLEAR, cache, List.of(), null, e, operation.immediate()));
+    }
+  }
+
+  /**
+   * Evaluate an admission condition. A false result bypasses the cache; a broken
+   * guard also bypasses it, because admitting a call the caller meant to skip is
+   * the unsafe direction.
+   */
+  private boolean conditionPasses(
+    CompiledExpression condition,
+    @Nullable ZetaEvaluationContext context,
+    Method method
+  ) {
+    if (condition.absent()) {
+      return true;
     }
     try {
-      Number value = ttl.expression().getValue(context, Number.class);
-      return value == null ? 0L : clampTtl(value);
+      return Boolean.TRUE.equals(condition.getValue(context, Boolean.class));
     } catch (RuntimeException e) {
-      logEvaluationFailure(ttl.role(), method, e);
-      return 0L;
-    }
-  }
-
-  /**
-   * Clamp a TTL number to {@code [0, Long.MAX_VALUE]}. {@link BigInteger} and
-   * {@link BigDecimal} do not saturate in {@code longValue()}: they keep the low
-   * 64 bits, so a huge positive value can become negative and silently degrade
-   * to the default TTL. Compare first and use the permanent sentinel as the
-   * upper bound.
-   */
-  private static long clampTtl(Number value) {
-    if (value instanceof BigInteger integer) {
-      if (integer.signum() <= 0) {
-        return 0L;
-      }
-      return integer.bitLength() > 63 ? Long.MAX_VALUE : integer.longValue();
-    }
-    if (value instanceof BigDecimal decimal) {
-      if (decimal.signum() <= 0) {
-        return 0L;
-      }
-      return decimal.compareTo(MAX_LONG_DECIMAL) > 0 ? Long.MAX_VALUE : decimal.longValue();
-    }
-    long millis = value.longValue();
-    return Math.max(millis, 0L);
-  }
-
-  /** The one read-policy shape every annotation read uses. */
-  static GetPolicy readPolicy(LongSupplier hardTtlMs, LongSupplier softTtlMs) {
-    return new GetPolicy(hardTtlMs, softTtlMs, StalePolicy.SOFT_REFRESH, true, true);
-  }
-
-  /**
-   * @param unless  the expression to evaluate
-   * @param context the context bound to the post-body value
-   * @return whether the present {@code unless} expression rejects the bound
-   *         result (fail-open)
-   */
-  private boolean vetoed(CompiledExpression unless, ZetaEvaluationContext context) {
-    try {
-      return Boolean.TRUE.equals(unless.getValue(context, Boolean.class));
-    } catch (RuntimeException e) {
-      logEvaluationFailure("unless", context.root().getMethod(), e);
+      log.debug("[Zeta] condition evaluation failed for {}: {}", method, e.toString());
       return false;
     }
   }
 
   /**
-   * Build a fresh SpEL context for one evaluation phase. The root wraps the
-   * immutable invocation inputs; the context is confined to the thread that
-   * evaluates the expression.
+   * Evaluate the store veto. A broken guard keeps the value, the opposite of a broken admission
+   * condition.
+   *
+   * @param unless  the expression to evaluate; an absent attribute vetoes nothing
+   * @param context the context bound to the post-body value
+   * @param method  the method the attribute belongs to
+   * @return whether the expression rejects the bound result (fail-open)
    */
-  private ZetaEvaluationContext newContext(Plan plan, @Nullable Object target, Class<?> targetClass, Object[] args) {
-    ZetaEvaluationContext.Root root = ZetaEvaluationContext.Root.of(target, targetClass, plan.specific(), args);
-    return ZetaEvaluationContext.of(root, plan.parameterNames(), resolver.beanResolver(), resolver.expressionSupport());
+  private boolean vetoed(CompiledExpression unless, @Nullable ZetaEvaluationContext context, Method method) {
+    if (unless.absent()) {
+      return false;
+    }
+    try {
+      return Boolean.TRUE.equals(unless.getValue(context, Boolean.class));
+    } catch (RuntimeException e) {
+      // A broken expression sits on a hot path and must not become a per-call log storm.
+      log.debug("[Zeta] unless evaluation failed for {}: {}", method, e.toString());
+      return false;
+    }
   }
 
-  /** A fresh context bound to the body's result for the post-body evaluation phase. */
-  private ZetaEvaluationContext newPostContext(
-    Plan plan,
+  /**
+   * The post-body context: the pre-body context rebound to the result when one exists, else a
+   * fresh one. Reusing it is safe because the phases never overlap.
+   */
+  private ZetaEvaluationContext postContextFrom(
+    CachePlan plan,
+    @Nullable ZetaEvaluationContext pre,
     @Nullable Object target,
     Class<?> targetClass,
     Object[] args,
     @Nullable Object result
   ) {
-    return newContext(plan, target, targetClass, args).withResult(result);
+    ZetaEvaluationContext context = pre != null ? pre : resolver.createContext(plan, target, targetClass, args);
+    return context.bindResult(result);
   }
 
-  /** The pre-body context when the key needs one, otherwise {@code null}. */
-  private @Nullable ZetaEvaluationContext preContextIfNeeded(
-    Plan plan,
-    @Nullable Object target,
-    Class<?> targetClass,
-    Object[] args
-  ) {
-    return plan.key().needsContext() ? newContext(plan, target, targetClass, args) : null;
+  private static @Nullable Object unwrapOptional(@Nullable Object value) {
+    return value instanceof Optional<?> optional ? optional.orElse(null) : value;
   }
 
-  /**
-   * What one annotated method does, resolved once per (method, user class).
-   * A sealed hierarchy rather than one record with unused fields: an attribute
-   * that cannot apply to a verb is not representable.
-   */
-  sealed interface Plan {
-    /** The most-specific implementation method: SpEL parameter discovery, reflective refresh. */
-    Method specific();
-
-    /** The method's parameter names, discovered once at resolution ({@code null} when unavailable). */
-    String@Nullable [] parameterNames();
-
-    /** The key plan; absent expression means the default key. */
-    @SuppressWarnings("all")
-    KeyPlan key();
-
-    /** {@code @ZetaCached}. */
-    record Read(
-      Method specific,
-      String@Nullable [] parameterNames,
-      KeyPlan key,
-      CompiledExpression unless,
-      Ttls ttls,
-      @Nullable GetPolicy prebuiltPolicy
-    ) implements Plan {}
-
-    /** {@code @ZetaPut}. */
-    record Write(
-      Method specific,
-      String@Nullable [] parameterNames,
-      KeyPlan key,
-      CompiledExpression unless,
-      Ttls ttls,
-      boolean sync,
-      @Nullable PutPolicy prebuiltPolicy
-    ) implements Plan {
-      /** Whether the hard TTL is dynamic, result-independent and validated before the body. */
-      boolean preflightHard() {
-        return sync && !ttls.hard().isConstant() && !ttls.hard().resultDependent();
-      }
-
-      /** Whether the pre-body phase needs an evaluation context. */
-      boolean needsPreContext() {
-        return (!key.resultDependent() && key.needsContext()) || preflightHard();
-      }
-
-      /** Whether the post-veto write phase needs an evaluation context. */
-      boolean needsPostWriteContext() {
-        return key.resultDependent() || (!ttls.hard().isConstant() && !preflightHard()) || !ttls.soft().isConstant();
-      }
-    }
-
-    /** {@code @ZetaInvalidate}. */
-    record Invalidate(
-      Method specific,
-      String@Nullable [] parameterNames,
-      KeyPlan key,
-      InvalidatePolicy policy
-    ) implements Plan {}
+  private static Object wrapOptional(@Nullable Object value) {
+    return Optional.ofNullable(value);
   }
 
   /**
-   * A key expression plus the zero-SpEL fast path. {@code argumentIndex >= 0}
-   * means the expression is exactly one argument reference; {@code rootArgs}
-   * means it is exactly {@code #root.args}; {@code expression} is {@code null}
-   * for those and the default-key/constant forms, so their parsed AST is not
-   * retained. Otherwise the compiled expression is evaluated. {@code constantKey}
-   * is the full physical key when the expression cannot depend on the invocation.
-   *
-   * <p>Every value an explicit expression selects is encoded as one default-key
-   * argument, so {@code key = "#id"} and an absent {@code key} address the same
-   * entry for a single-id method. A whole {@code #root.args} selects the argument
-   * list itself and uses the multi-argument default encoding instead.
+   * Whether this invocation is the reflective refresh call for which {@link #REFRESH_BYPASS} was
+   * armed. The marker is not consumed here: it stays valid for the whole reflective call so a
+   * nested proxy layer of the same refresh is bypassed too, and the caller restores it in a
+   * {@code finally}. A nested call to a different method does not match the signature and keeps
+   * its normal cache semantics.
    */
-  record KeyPlan(
-    String namespace,
-    Method method,
-    int argumentIndex,
-    boolean rootArgs,
-    boolean resultDependent,
-    @Nullable String constantKey,
-    @Nullable CompiledExpression expression,
-    @Nullable String rawExpression
-  ) {
-    static KeyPlan of(
-      String namespace,
-      Method method,
-      CompiledExpression expression,
-      String@Nullable [] parameterNames
-    ) {
-      String constantKey = constantKeyOf(namespace, method, expression);
-      int index = constantKey == null ? argumentIndex(expression, parameterNames) : -1;
-      // A varargs tail is one array parameter (or several expanded arguments).
-      // Only the SpEL lookup path preserves both shapes; the single-argument fast
-      // path would read just the first expanded element.
-      if (index >= 0 && method.isVarArgs() && index == method.getParameterCount() - 1) {
-        index = -1;
-      }
-      boolean rootArgs = constantKey == null && index < 0 && expression.wholeRootArgs();
-      CompiledExpression retained =
-        constantKey == null && index < 0 && !rootArgs && !expression.absent() ? expression : null;
-      return new KeyPlan(
-        namespace,
-        method,
-        index,
-        rootArgs,
-        expression.references("result"),
-        constantKey,
-        retained,
-        expression.raw()
-      );
-    }
-
-    /**
-     * Precompute the full physical key when it cannot depend on the invocation:
-     * the no-argument default key ({@code namespace + "[]"}) and an expression
-     * whose whole AST is a non-null literal. A literal key is what it says, so
-     * evaluating it through SpEL on every call buys nothing.
-     */
-    private static @Nullable String constantKeyOf(String namespace, Method method, CompiledExpression compiled) {
-      if (compiled.absent()) {
-        return method.getParameterCount() == 0 ? namespace + DefaultKey.encode(NO_ARGS) : null;
-      }
-      if (compiled.expression() instanceof SpelExpression spel && spel.getAST() instanceof Literal literal) {
-        Object value = literal.getLiteralValue().getValue();
-        if (value != null) {
-          return DefaultKey.encodeSingle(namespace, value);
-        }
-      }
-      return null;
-    }
-
-    /**
-     * The physical key.
-     *
-     * @param args    the invocation arguments
-     * @param context the context, or {@code null} when the key needs none
-     * @return the physical key
-     * @throws IllegalStateException when the key expression resolves to
-     *                               {@code null}
-     */
-    String resolve(Object[] args, @Nullable ZetaEvaluationContext context) {
-      String resolved = resolveOrNull(args, context);
-      if (resolved == null) {
-        throw new IllegalStateException("cache key '" + rawExpression + "' resolved to null for " + method);
-      }
-      return resolved;
-    }
-
-    /**
-     * The physical key, or {@code null} when a present expression resolved to
-     * {@code null}. {@code context} must be non-null whenever
-     * {@link #needsContext()} is true.
-     */
-    @Nullable
-    String resolveOrNull(Object[] args, @Nullable ZetaEvaluationContext context) {
-      if (constantKey != null) {
-        return constantKey;
-      }
-      if (argumentIndex >= 0) {
-        Object argument = args[argumentIndex];
-        return argument == null ? null : encodeValue(namespace, argument);
-      }
-      if (rootArgs || expression == null) {
-        return defaultKey(args);
-      }
-      Object value = expression.getValue(context);
-      return value == null ? null : encodeValue(namespace, value);
-    }
-
-    /**
-     * The physical key for one explicitly selected value, encoded as one
-     * argument of the default key. That is what makes {@code key = "#id"} and an
-     * absent key address the same entry for a single-argument method, and it
-     * keeps arrays encoded by content instead of the identity hash of
-     * {@code Object.toString()}.
-     */
-    private static String encodeValue(String namespace, Object value) {
-      return DefaultKey.encodeSingle(namespace, value);
-    }
-
-    /**
-     * Whether resolution needs a SpEL context: a retained expression that is
-     * not already folded to a constant key or a single argument reference.
-     */
-    boolean needsContext() {
-      return expression != null;
-    }
-
-    /**
-     * The canonical default key under this plan's namespace; a null top-level
-     * argument is a configuration error, not a key.
-     */
-    private String defaultKey(Object[] args) {
-      for (int i = 0; i < args.length; i++) {
-        if (args[i] == null) {
-          throw new IllegalStateException(
-            "null argument " + i + " for " + method + ": pass a non-null argument or declare key = \"...\""
-          );
-        }
-      }
-      return DefaultKey.encode(namespace, args);
-    }
-
-    /**
-     * Recognize a key that reads exactly one argument — {@code #p0}/{@code #a0}
-     * or a bare parameter name — so the common single-id key resolves straight
-     * from the argument array instead of through SpEL. Anything else returns
-     * {@code -1} and keeps the full expression path.
-     *
-     * <p>The expression must be one variable reference, not a text form: a
-     * literal {@code '#p1'} or a longer expression is never mistaken for a
-     * reference. A bare parameter name is looked up in the discovered parameter
-     * list; a canonical {@code #pN}/{@code #aN} is an index. {@code #root},
-     * {@code #this} and {@code #result} are not parameter names, so they keep
-     * the expression path. A non-canonical name such as {@code #p01},
-     * {@code #accountId} or {@code #page} is only ever a variable name — never an
-     * index reinterpretation. The range is validated by
-     * {@link CompiledExpression#of}; this method only classifies the shape.
-     */
-    private static int argumentIndex(CompiledExpression expression, String@Nullable [] parameterNames) {
-      String name = expression.singleVariable();
-      return name == null ? -1 : CompiledExpression.argumentIndex(name, parameterNames);
-    }
-  }
-
-  /** Both TTL attributes of one verb, classified at resolution. */
-  record Ttls(Ttl hard, Ttl soft) {
-    boolean bothConstant() {
-      return hard.isConstant() && soft.isConstant();
-    }
+  private static boolean bypassesRefreshReentry(MethodInvocation invocation) {
+    RefreshBypass bypass = REFRESH_BYPASS.get();
+    return (
+      bypass != null &&
+      invocation instanceof ProxyMethodInvocation proxyInvocation &&
+      bypass.matches(proxyInvocation.getProxy(), invocation.getMethod())
+    );
   }
 
   /**
-   * One TTL attribute classified at resolution. An integral literal — optionally
-   * signed, after stripping surrounding whitespace — and a context-free SpEL
-   * expression such as {@code 60000L} or {@code 60 * 1000} are folded to a
-   * constant (negative values clamp to {@code 0}, the configured default) and to
-   * one prebuilt {@link LongSupplier}, so a static TTL costs no lambda and no
-   * SpEL per call. A floating-point literal is rejected: milliseconds are
-   * discrete, and accepting {@code 1e3} or {@code NaN} only buys precision
-   * hazards. A literal outside the {@code long} range fails resolution with a
-   * range error. Anything else is SpEL compiled once and evaluated lazily;
-   * {@code resultDependent} marks an expression that must wait for the body. A
-   * parse failure fails resolution; only a runtime evaluation failure degrades
-   * to the configured default, so a broken attribute can never fail a read.
+   * Whether {@code reported} is the same operation as {@code token} across a bridge or erased
+   * view. Parameter assignability alone is too wide: it would match an unrelated overload such as
+   * {@code load(String)} against {@code load(CharSequence)}.
    */
-  record Ttl(
-    String role,
-    long literalMs,
-    @Nullable LongSupplier constantSupplier,
-    CompiledExpression expression,
-    boolean resultDependent
-  ) {
-    static Ttl of(
-      String role,
-      @Nullable String raw,
-      SpelExpressionParser parser,
-      Method method,
-      String@Nullable [] parameterNames,
-      boolean resultAllowed
-    ) {
-      String literal = raw == null ? null : raw.strip();
-      if (literal == null || literal.isEmpty()) {
-        return constant(role, 0L);
-      }
-      if (isInteger(literal)) {
-        try {
-          return constant(role, Math.max(0L, Long.parseLong(literal)));
-        } catch (NumberFormatException overflow) {
-          throw new IllegalStateException(
-            role + " literal '" + literal + "' on " + method + " exceeds the long range",
-            overflow
-          );
-        }
-      }
-      CompiledExpression compiled = CompiledExpression.of(literal, parser, role, method, parameterNames, resultAllowed);
-      if (compiled.constant()) {
-        Object value = compiled.getValue(new StandardEvaluationContext());
-        if (!(value instanceof Number number) || number instanceof Double || number instanceof Float) {
-          throw new IllegalStateException(role + " '" + literal + "' on " + method + " must be an integral number");
-        }
-        return constant(role, clampTtl(number));
-      }
-      return new Ttl(role, 0L, null, compiled, resultAllowed && compiled.references("result"));
-    }
-
-    private static Ttl constant(String role, long ms) {
-      return new Ttl(role, ms, ms == 0L ? ZERO : () -> ms, CompiledExpression.ABSENT, false);
-    }
-
-    boolean isConstant() {
-      return constantSupplier != null;
-    }
-
-    /**
-     * Whether the hard TTL is the constant {@link Long#MAX_VALUE} (permanent),
-     * which {@code sync = true} cannot broadcast safely.
-     */
-    boolean isPermanent() {
-      return isConstant() && literalMs == Long.MAX_VALUE;
-    }
-
-    private static boolean isInteger(String raw) {
-      int start = raw.charAt(0) == '+' || raw.charAt(0) == '-' ? 1 : 0;
-      if (start == raw.length()) {
-        return false;
-      }
-      for (int i = start; i < raw.length(); i++) {
-        char c = raw.charAt(i);
-        if (c < '0' || c > '9') {
-          return false;
-        }
-      }
+  private static boolean sameOperation(Method token, Method reported) {
+    if (token.equals(reported)) {
       return true;
     }
+    if (
+      BridgeMethodResolver.findBridgedMethod(reported).equals(token) ||
+      BridgeMethodResolver.findBridgedMethod(token).equals(reported)
+    ) {
+      return true;
+    }
+    // A CGLIB proxy reports the generated subclass method; it has the same signature as the plan
+    // method but a different declaring class. Exact parameter types keep this from matching an
+    // unrelated overload such as load(String) against load(CharSequence).
+    if (!token.getName().equals(reported.getName())) {
+      return false;
+    }
+    Class<?>[] tokenParameters = token.getParameterTypes();
+    Class<?>[] reportedParameters = reported.getParameterTypes();
+    if (tokenParameters.length != reportedParameters.length) {
+      return false;
+    }
+    for (int i = 0; i < tokenParameters.length; i++) {
+      if (tokenParameters[i] != reportedParameters[i]) {
+        return false;
+      }
+    }
+    return true;
   }
 
   /**
-   * The engine loader for one annotated read: immutable invocation inputs plus
-   * the one-shot advice chain, which only the foreground {@link #load} may
-   * claim. A refresh never touches the chain, and a retained loader therefore
-   * pins neither the proxy nor any evaluation state.
+   * The engine loader for one annotated read: the invocation inputs plus the one-shot advice
+   * chain, which only the foreground {@link #load} may claim. A refresh never touches the chain,
+   * and the foreground context is cleared before the foreground call returns, so a retained loader
+   * pins neither the proxy nor any evaluation state; a later inline refresh that reuses the
+   * invocation thread sees {@code released} and builds a stack-local context instead of filling
+   * the cleared field again. The read snapshots array-valued arguments before the key runs, and
+   * before any condition that can read them; an argument list with no array is stored as-is.
    *
    * <p>The loader is also the call's only wrapper object: a write or an
-   * invalidation allocates none, and the evaluation contexts are local to the
-   * phase that builds them, never retained past the foreground call.
+   * invalidation allocates none, and the foreground read builds at most one evaluation context,
+   * reused by the pre-body phase, the lazy TTL suppliers and the post-body {@code unless}.
    */
   private final class ReadLoader implements CacheLoader<String, Object> {
 
-    private final Plan.Read plan;
+    private final CachePlan.Read plan;
 
     /** The method the invocation reported; the reflective fallback when the target does not implement the specific one. */
     private final Method method;
@@ -813,27 +514,68 @@ public final class ZetaCacheInterceptor implements MethodInterceptor {
 
     private final Object[] args;
 
+    /** The invocation thread; only it may reuse {@link #foregroundContext}. */
+    private final Thread foregroundThread;
+
+    private static final VarHandle CHAIN;
+
+    static {
+      try {
+        CHAIN = MethodHandles.lookup().findVarHandle(ReadLoader.class, "chain", MethodInvocation.class);
+      } catch (ReflectiveOperationException e) {
+        throw new ExceptionInInitializerError(e);
+      }
+    }
+
     /**
-     * The one-shot advice chain, claimed and cleared on the invocation thread.
-     * A read sets {@code callerRunsLoader}, so the engine's foreground load is
-     * this thread; the refresh path reads only the immutable fields.
+     * The foreground one-shot advice chain until {@link #load} claims it; {@code null} once
+     * consumed or released. A refresh never reads or writes it.
      */
-    private MethodInvocation chain;
+    private volatile @Nullable MethodInvocation chain;
+
+    /**
+     * The invocation thread's single evaluation context, built on first use and cleared by
+     * {@link #release()}. A refresh thread never reads it; it builds its own context.
+     */
+    private @Nullable ZetaEvaluationContext foregroundContext;
+
+    /**
+     * Whether the foreground call has returned. Only the invocation thread writes it, and the
+     * context cache is read only behind the same thread check, so no cross-thread publication is
+     * needed: another thread already fails that check, and the invocation thread observes its own
+     * write. Once released, a later inline refresh reusing this thread builds a fresh context
+     * instead of pinning a new one on a loader the engine may retain.
+     */
+    private boolean released;
 
     private ReadLoader(
       MethodInvocation chain,
-      Method method,
-      Plan.Read plan,
+      CachePlan.Read plan,
       @Nullable Object target,
       Class<?> targetClass,
-      Object[] args
+      Object[] snapshot,
+      @Nullable ZetaEvaluationContext foregroundContext
     ) {
       this.plan = plan;
       this.chain = chain;
       this.target = target;
       this.targetClass = targetClass;
-      this.args = snapshotArguments(args);
-      this.method = method;
+      this.args = snapshot;
+      this.method = chain.getMethod();
+      this.foregroundThread = Thread.currentThread();
+      this.foregroundContext = foregroundContext;
+    }
+
+    private ZetaEvaluationContext evaluationContext() {
+      if (Thread.currentThread() == foregroundThread && !released) {
+        ZetaEvaluationContext current = foregroundContext;
+        if (current == null) {
+          current = resolver.createContext(plan, target, targetClass, args);
+          foregroundContext = current;
+        }
+        return current;
+      }
+      return resolver.createContext(plan, target, targetClass, args);
     }
 
     /** The read options: one prebuilt instance when both TTLs are constants, otherwise lazy suppliers. */
@@ -842,25 +584,31 @@ public final class ZetaCacheInterceptor implements MethodInterceptor {
       if (prebuilt != null) {
         return prebuilt;
       }
-      Ttls ttls = plan.ttls();
-      return ZetaCacheInterceptor.readPolicy(ttlSupplier(ttls.hard()), ttlSupplier(ttls.soft()));
+      CachePlan.Ttls ttls = plan.ttls();
+      return CachePlan.readPolicy(ttlSupplier(ttls.hard()), ttlSupplier(ttls.soft()));
     }
 
     /** A supplier that evaluates the TTL lazily, or the prebuilt constant one. */
-    private LongSupplier ttlSupplier(Ttl ttl) {
+    private LongSupplier ttlSupplier(CachePlan.Ttl ttl) {
       LongSupplier constant = ttl.constantSupplier();
-      return constant != null
-        ? constant
-        : () -> evaluateTtl(ttl, newContext(plan, target, targetClass, args), plan.specific());
+      return constant != null ? constant : () -> ttl.evaluate(evaluationContext());
     }
 
-    /** Foreground miss load: the invocation chain may be resumed, once, on the invocation thread. */
+    /**
+     * Foreground miss load: the invocation chain may be resumed, once, on the invocation thread. A
+     * load reported from another thread runs the body reflectively instead, because
+     * {@code proceed()} is single-shot and must keep the caller's transaction/security context.
+     */
     @Override
     public Object load(String key) {
-      MethodInvocation invocation = chain;
-      chain = null;
+      // proceed() is single-shot and thread-confined. A load reported on another thread (an
+      // engine change or a custom executor) must not resume it there; it runs the body
+      // reflectively, like a refresh, rather than corrupting the invocation context.
+      MethodInvocation invocation =
+        Thread.currentThread() == foregroundThread ? (MethodInvocation) CHAIN.getAndSet(this, null) : null;
       try {
-        return invocation != null ? invocation.proceed() : invokeTarget();
+        Object value = invocation != null ? invocation.proceed() : invokeTarget();
+        return plan.optional() ? unwrapOptional(value) : value;
       } catch (Error fatal) {
         throw fatal;
       } catch (Throwable failure) {
@@ -886,7 +634,8 @@ public final class ZetaCacheInterceptor implements MethodInterceptor {
     @Override
     public Object reload(String key) {
       try {
-        return invokeTarget();
+        Object value = invokeTarget();
+        return plan.optional() ? unwrapOptional(value) : value;
       } catch (Error | RuntimeException failure) {
         throw failure;
       } catch (Throwable checked) {
@@ -899,74 +648,93 @@ public final class ZetaCacheInterceptor implements MethodInterceptor {
       if (value == null || value instanceof BodyFailure) {
         return false;
       }
-      CompiledExpression unless = plan.unless();
-      if (unless.absent()) {
+      if (!plan.hasUnless()) {
         return true;
       }
-      // The context is built only for a present expression, so the common
-      // (no-unless) read pays no evaluation allocation.
-      return !vetoed(unless, newPostContext(plan, target, targetClass, args, value));
+      // Only a dynamic expression needs a context; a constant guard is a stored field read. The
+      // invocation thread rebinds its one context to this value; a refresh thread builds its own.
+      ZetaEvaluationContext context = plan.unless().needsContext() ? evaluationContext().bindResult(value) : null;
+      return !vetoed(plan.unless(), context, method);
     }
 
-    /** Drop the one-shot advice chain as soon as the foreground read returns. */
+    /**
+     * Drop the one-shot advice chain and the foreground context as soon as the foreground read
+     * returns. The foreground {@link #load}, when it runs, completes on the invocation thread
+     * before {@code get} returns, so clearing the chain here cannot race a first load.
+     */
     void release() {
+      released = true;
       chain = null;
+      foregroundContext = null;
     }
 
     private Object invokeTarget() throws Throwable {
-      if (target == null) {
+      Object receiver = target;
+      if (receiver == null) {
         throw new IllegalStateException(
           "cannot refresh " + method + " reflectively: the invocation has no target object"
         );
       }
-      // The plan's method is the implementation method; when the target is an unwrappable proxy
-      // that does not implement it, fall back to the method the invocation reported. An interface
-      // proxy whose target implements a super-interface (Spring Data: SimpleJpaRepository for
-      // CrudRepository) implements neither, so the last resort is the most specific method on the
-      // target's own class — otherwise every background refresh fails with
-      // "object is not an instance of declaring class".
-      Method invocable = plan.specific();
-      if (!invocable.getDeclaringClass().isInstance(target)) {
-        invocable = method.getDeclaringClass().isInstance(target)
-          ? method
-          : AopUtils.getMostSpecificMethod(method, target.getClass());
-        if (!invocable.getDeclaringClass().isInstance(target)) {
-          invocable = method;
+      // A scoped bean's target is resolved per call and must be released after the refresh. The
+      // proxy itself only dispatches back into this advice chain, which would re-enter the cache
+      // read instead of running the body.
+      TargetSource source = null;
+      Object scoped = receiver;
+      Object scopedTarget = null;
+      TargetSource candidate = receiver instanceof Advised advised ? advised.getTargetSource() : null;
+      if (candidate != null && !candidate.isStatic()) {
+        source = candidate;
+        scopedTarget = source.getTarget();
+        if (scopedTarget == null) {
+          throw new IllegalStateException("TargetSource returned no target for refresh of " + method);
         }
       }
       try {
-        return invocable.invoke(target, ZetaEvaluationContext.packArguments(invocable, args));
-      } catch (InvocationTargetException e) {
-        throw e.getCause();
+        if (scopedTarget != null) {
+          // A scoped target can itself be a proxy (a factory product or a nested AOP proxy);
+          // unwrap it again so the refresh reaches the object that runs the body.
+          scoped = PlanResolver.unwrapTarget(scopedTarget, method);
+        }
+        Object invocationTarget =
+          scoped != receiver && resolver.targetMethods().canInvoke(scoped, method) ? scoped : receiver;
+        Method targetMethod = resolver
+          .targetMethods()
+          .invocable(plan.specific(), plan.erasedBridge(), invocationTarget, method);
+        // The only refresh target left that re-enters this advice chain is a proxy (the repository
+        // fallback or a scoped proxy that cannot invoke the method). Mark that one reflective call
+        // so invoke() lets it reach the body instead of reading the entry being refreshed.
+        Object proxy =
+          invocationTarget instanceof Advised || Proxy.isProxyClass(invocationTarget.getClass())
+            ? invocationTarget
+            : null;
+        RefreshBypass previous = proxy == null ? null : REFRESH_BYPASS.get();
+        if (proxy != null) {
+          REFRESH_BYPASS.set(new RefreshBypass(proxy, targetMethod, plan.specific()));
+        }
+        try {
+          return TargetMethodResolver.invoke(targetMethod, invocationTarget, args);
+        } finally {
+          if (proxy != null) {
+            if (previous == null) {
+              REFRESH_BYPASS.remove();
+            } else {
+              REFRESH_BYPASS.set(previous);
+            }
+          }
+        }
+      } finally {
+        if (source != null) {
+          source.releaseTarget(scopedTarget);
+        }
       }
     }
   }
 
-  /**
-   * Copy the invocation argument array and every array element it holds. The loader outlives
-   * the invocation (a soft refresh keeps it until the background reload), and a caller that
-   * mutates its own array after the call must not change the arguments that reload reuses. A
-   * non-array mutable object is still shared; such a method must not declare a soft TTL.
-   *
-   * @param args the invocation arguments
-   * @return a snapshot safe to retain, with array elements copied by content
-   */
-  @SuppressWarnings("all")
-  private static Object[] snapshotArguments(Object[] args) {
-    if (args.length == 0) {
-      return NO_ARGS;
+  /** The proxy and the two method views one reflective refresh is invoking on this thread. */
+  private record RefreshBypass(Object proxy, Method target, Method specific) {
+    boolean matches(@Nullable Object candidate, Method reported) {
+      return candidate == proxy && (sameOperation(target, reported) || sameOperation(specific, reported));
     }
-    Object[] copy = args.clone();
-    for (int i = 0; i < copy.length; i++) {
-      Object argument = copy[i];
-      if (argument != null && argument.getClass().isArray()) {
-        int length = Array.getLength(argument);
-        Object cloned = Array.newInstance(argument.getClass().getComponentType(), length);
-        System.arraycopy(argument, 0, cloned, 0, length);
-        copy[i] = cloned;
-      }
-    }
-    return copy;
   }
 
   /** A completed load whose value is a failure; never stored. */

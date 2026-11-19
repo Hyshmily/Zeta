@@ -13,11 +13,14 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.github.hyshmily.zeta.annotation.supporter;
+package io.github.hyshmily.zeta.annotation.support;
 
 import io.github.hyshmily.zeta.util.Internal;
 import java.math.BigDecimal;
 import java.math.BigInteger;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Set;
 import org.jspecify.annotations.Nullable;
 
 /**
@@ -41,6 +44,8 @@ import org.jspecify.annotations.Nullable;
  * part(BigInteger) ::= "N:" text
  * part(BigDecimal) ::= "E:" text
  * part(Boolean)    ::= "Z:" text
+ * part(Iterable)   ::= "l[" (part ("," part)*)? "]"
+ * part(Set)        ::= "t[" (sorted-part ("," sorted-part)*)? "]"
  * part(array)      ::= "a" component "[" (part ("," part)*)? "]"
  * part(other)      ::= "o" length ":" text      (the value's String.valueOf)
  * </pre>
@@ -56,45 +61,57 @@ import org.jspecify.annotations.Nullable;
  * {@code 0.0} render identically: Java's {@code ==} treats them as equal, and a
  * key that kept them apart would miss for a numerically equal argument.
  *
+ * <p><b>A {@code List} preserves order; a {@code Set} is canonicalised.</b> A
+ * {@code Set} is encoded as {@code t[...]} with its element encodings sorted, so
+ * {@code Set.of("a", "b")} produces the same physical key on every JVM
+ * regardless of the implementation's iteration order or hash salt. A
+ * {@code List} and any other {@code Iterable} use {@code l[...]} in iteration
+ * order; two lists with the same elements in different order are different
+ * keys. A {@code Set} and a {@code List} with the same elements are different
+ * keys because their runtime shapes differ.
+ *
  * <p><b>Collision-free across argument boundaries, arity and the common value
  * shapes.</b> Every part is self-delimiting: its tag identifies the shape, an
  * {@code s}/{@code c}/{@code q}/{@code o} text carries its length before the
- * separator, and an array is bracketed and recursed, so no delimiter inside a
- * value can move an argument boundary. Therefore {@code ("foo, bar", "baz")}
- * and {@code ("foo", "bar, baz")} differ; {@code []} can never equal a
- * single-argument key, because every part starts with a tag; arrays are encoded
- * by content rather than identity hash; and {@code "1"}, {@code '1'},
- * {@code new StringBuilder("1")}, {@code 1}, {@code 1L} and
- * {@code new BigDecimal("1")} all carry different tags.
+ * separator, and an array or collection is bracketed and recursed, so no
+ * delimiter inside a value can move an argument boundary. Therefore
+ * {@code ("foo, bar", "baz")} and {@code ("foo", "bar, baz")} differ;
+ * {@code []} can never equal a single-argument key, because every part starts
+ * with a tag; arrays and collections are encoded by content rather than identity
+ * hash; and {@code "1"}, {@code '1'}, {@code new StringBuilder("1")},
+ * {@code 1}, {@code 1L} and {@code new BigDecimal("1")} all carry different
+ * tags.
  *
- * <p><b>Remaining limits.</b> A non-array object that is not one of the tagged
- * scalar shapes is rendered by {@link String#valueOf(Object)}, so two values
- * (or types) with the same {@code toString()} share a key — an untagged
- * {@link Number} subclass such as {@code AtomicInteger} falls into this group.
- * Every reference array carries the same {@code aO} component tag, so two
- * different component classes whose element encodings coincide (e.g.
- * {@code String[]{"a"}} and {@code Object[]{"a"}}) share a key. A value type or
- * array shape that must not collide with another should declare an explicit
- * {@code key} expression.
+ * <p><b>Remaining limits.</b> A non-array, non-collection object is rendered by
+ * {@link String#valueOf(Object)}, so two values (or types) with the same
+ * {@code toString()} share a key — an untagged {@link Number} subclass such as
+ * {@code AtomicInteger} falls into this group. Every reference array carries the
+ * same {@code aO} component tag, so two different component classes whose
+ * element encodings coincide (e.g. {@code String[]{"a"}} and
+ * {@code Object[]{"a"}}) share a key. A {@link java.util.Map} is not an
+ * {@code Iterable} and still uses {@code toString()}; an unordered {@code Map}
+ * should declare an explicit key. A value type or array shape that must not
+ * collide with another should declare an explicit {@code key} expression.
  *
- * <p><b>Large values.</b> An array is encoded element by element, so a
- * multi-megabyte binary argument produces a key of comparable size. Declare an
- * explicit key — a hash or an identifier — for large buffers. A non-array
- * object's {@code toString()} is its own contract; a self-referential
- * {@code List}/{@code Map} that recurses through {@code toString()} is outside
- * this encoder's cycle detection and will overflow the stack in that method.
+ * <p><b>Large values.</b> An array or collection is encoded element by element,
+ * so a multi-megabyte binary argument produces a key of comparable size. Declare
+ * an explicit key — a hash or an identifier — for large buffers. A non-array,
+ * non-collection object's {@code toString()} is its own contract; a
+ * self-referential {@code Map} or custom object that recurses through
+ * {@code toString()} is outside this encoder's cycle detection and will
+ * overflow the stack in that method.
  *
- * <p><b>Cycles.</b> A reference array containing itself directly is rejected
- * immediately; any other cycle is rejected when a nested reference array is
- * already on the current recursion path, or by the {@value #MAX_DEPTH}-level
- * depth cap when its period is longer than that path. Both fail the call with a
- * configuration error instead of overflowing the stack or expanding an indirect
- * cycle, and both are fixed by declaring an explicit {@code key} expression.
- * The same depth cap rejects an acyclic graph that is nested too deeply.
+ * <p><b>Cycles.</b> A reference array or collection that repeats a container already
+ * on the current recursion path is rejected at that first repeat; a cycle whose
+ * period is longer than the path is rejected by the {@value #MAX_DEPTH}-level
+ * depth cap. A collection with more
+ * than {@value #MAX_ELEMENTS} elements is rejected instead of producing a giant
+ * key. All of these fail the call with a configuration error and are fixed by
+ * declaring an explicit {@code key} expression.
  *
  * <p>The caller validates the arguments: a {@code null} top-level argument is
  * rejected before {@link #encode} is called, so {@code null} is only encodable
- * as an array element, where it renders as {@code n}.
+ * as an array/collection element, where it renders as {@code n}.
  */
 @Internal
 public final class DefaultKey {
@@ -103,9 +120,16 @@ public final class DefaultKey {
    * Maximum array nesting depth. Deep enough for every realistic DTO shape and
    * shallow enough that a cycle longer than this cap, and any acyclic graph,
    * fails without exhausting the stack; a shorter cycle is rejected earlier by
-   * the ancestor check in {@link #array}.
+   * the ancestor check in {@link #enterContainer}.
    */
   private static final int MAX_DEPTH = 32;
+
+  /**
+   * Maximum elements in one collection key. Deep enough for a realistic id
+   * batch and small enough that a malformed or unbounded {@link Iterable} fails
+   * instead of building a multi-megabyte key.
+   */
+  private static final int MAX_ELEMENTS = 1024;
 
   /**
    * Encode one invocation's arguments under an already resolved key prefix.
@@ -121,7 +145,9 @@ public final class DefaultKey {
     if (args.length == 0) {
       return prefix + "[]";
     }
-    StringBuilder key = new StringBuilder(prefix.length() + 32);
+    StringBuilder key = new StringBuilder(
+      args.length == 1 ? singleValueCapacity(prefix, args[0]) : prefix.length() + 32
+    );
     key.append(prefix).append('[');
     for (int i = 0; i < args.length; i++) {
       if (i > 0) {
@@ -153,10 +179,21 @@ public final class DefaultKey {
    * @return the physical key
    */
   public static String encodeSingle(String prefix, Object value) {
-    StringBuilder key = new StringBuilder(prefix.length() + 24);
+    StringBuilder key = new StringBuilder(singleValueCapacity(prefix, value));
     key.append(prefix).append('[');
     part(key, value, 0, null);
     return key.append(']').toString();
+  }
+
+  /**
+   * The builder capacity for one encoded value: the two brackets, the value's tag, the colon and
+   * the worst-case ten-digit decimal length of a String's length prefix, plus its text. Sizing from
+   * the text avoids a grow-and-copy on every call; the other common scalars fit a 24-character
+   * default (a Long is the widest).
+   */
+  private static int singleValueCapacity(String prefix, Object value) {
+    int extra = value instanceof String string ? string.length() + 14 : 24;
+    return prefix.length() + extra;
   }
 
   private static void part(StringBuilder key, @Nullable Object value, int depth, Object@Nullable [] ancestors) {
@@ -194,6 +231,10 @@ public final class DefaultKey {
       // table. The common cached argument shapes are String, the wrappers and
       // Boolean; Character/CharSequence are rarer and keep their tags.
       text(key, 'q', sequence.toString());
+    } else if (value instanceof Set<?> set) {
+      collection(key, set, depth + 1, ancestors, true);
+    } else if (value instanceof Iterable<?> iterable) {
+      collection(key, iterable, depth + 1, ancestors, false);
     } else if (value.getClass().isArray()) {
       array(key, value, depth + 1, ancestors);
     } else {
@@ -202,15 +243,126 @@ public final class DefaultKey {
   }
 
   /**
+   * Encode one collection. A {@code Set} is canonicalised by sorting its encoded
+   * elements, so an unordered set produces the same key on every JVM; any other
+   * {@code Iterable} keeps its iteration order.
+   *
+   * <p>The ancestor chain is allocated lazily, only when an element is itself a
+   * collection or array. A flat collection and every primitive array therefore
+   * allocate no chain. A nested container that repeats an ancestor on the current
+   * path fails at the first repeat, so a branching cycle cannot expand
+   * exponentially; the depth cap catches a longer cycle and acyclic nesting.
+   */
+  private static void collection(
+    StringBuilder key,
+    Iterable<?> values,
+    int depth,
+    Object@Nullable [] ancestors,
+    boolean sorted
+  ) {
+    Object[] chain = ancestors;
+    enterContainer(values, depth, chain, "collection");
+
+    if (sorted) {
+      key.append("t[");
+      List<String> parts = new ArrayList<>();
+      StringBuilder encoded = new StringBuilder();
+      int count = 0;
+      for (Object element : values) {
+        if (++count > MAX_ELEMENTS) {
+          throw tooManyElements();
+        }
+        chain = ensureAncestors(values, element, depth, chain);
+        encoded.setLength(0);
+        part(encoded, element, depth, chain);
+        parts.add(encoded.toString());
+      }
+      parts.sort(null);
+      for (int i = 0; i < parts.size(); i++) {
+        if (i > 0) {
+          key.append(',');
+        }
+        key.append(parts.get(i));
+      }
+    } else {
+      key.append("l[");
+      int count = 0;
+      for (Object element : values) {
+        if (++count > MAX_ELEMENTS) {
+          throw tooManyElements();
+        }
+        if (count > 1) {
+          key.append(',');
+        }
+        chain = ensureAncestors(values, element, depth, chain);
+        part(key, element, depth, chain);
+      }
+    }
+    key.append(']');
+  }
+
+  /**
+   * Enter one container: enforce the depth cap, reject a container already on the current path, and
+   * record it as the path's newest ancestor. The chain exists from the second nesting level onwards;
+   * a top-level container allocates it lazily in its element loop.
+   */
+  private static void enterContainer(Object container, int depth, Object@Nullable [] ancestors, String kind) {
+    if (depth > MAX_DEPTH) {
+      throw new IllegalStateException(
+        "default cache key exceeds " + MAX_DEPTH + " nested " + kind + " levels; declare an explicit key"
+      );
+    }
+    if (depth > 1 && ancestors != null) {
+      for (int i = 0; i < depth - 1; i++) {
+        if (ancestors[i] == container) {
+          throw new IllegalStateException(
+            "default cache key cannot encode a cyclic " + kind + "; declare an explicit key"
+          );
+        }
+      }
+      ancestors[depth - 1] = container;
+    }
+  }
+
+  /**
+   * Allocate the ancestor chain when a top-level container is about to recurse into a nested one.
+   * A flat collection or reference array allocates nothing.
+   */
+  private static Object@Nullable [] ensureAncestors(
+    Object container,
+    @Nullable Object element,
+    int depth,
+    Object@Nullable [] chain
+  ) {
+    if (chain == null && depth == 1 && isContainer(element)) {
+      Object[] allocated = new Object[MAX_DEPTH];
+      allocated[0] = container;
+      return allocated;
+    }
+    return chain;
+  }
+
+  /** Whether an element can recurse into the container encoder. */
+  private static boolean isContainer(@Nullable Object value) {
+    return value != null && (value instanceof Iterable<?> || value.getClass().isArray());
+  }
+
+  private static IllegalStateException tooManyElements() {
+    return new IllegalStateException(
+      "default cache key collection exceeds " + MAX_ELEMENTS + " elements; declare an explicit key"
+    );
+  }
+
+  /**
    * Encode one array. Each branch writes its own component prefix and loops
    * over the concrete type, so no element is boxed, no {@link java.lang.reflect.Array#get}
    * call is made and no component class or descriptor string is resolved.
    *
    * <p>A reference array records itself in a lazily allocated ancestor chain
-   * only when it actually contains another reference array. A nested array that
-   * matches an ancestor is a cycle and fails at the first repeat, so a branching
-   * cycle cannot expand exponentially; a flat reference array and every
-   * primitive array allocate no chain.
+   * only when it actually contains another container (array or collection). A
+   * nested container that matches an ancestor is a cycle and fails at the first
+   * repeat, so a branching cycle cannot expand exponentially; a flat reference
+   * array and every primitive array allocate no chain.
    */
   private static void array(StringBuilder key, Object array, int depth, Object@Nullable [] ancestors) {
     if (depth > MAX_DEPTH) {
@@ -220,32 +372,13 @@ public final class DefaultKey {
     }
     if (array instanceof Object[] values) {
       Object[] chain = ancestors;
-      if (depth > 1) {
-        // The parent enters this branch only after allocating the chain and
-        // recording itself at depth - 2 (the depth-1 array at index 0).
-        for (int i = 0; i < depth - 1; i++) {
-          if (chain != null && chain[i] == values) {
-            throw new IllegalStateException("default cache key cannot encode a cyclic array; declare an explicit key");
-          }
-        }
-        if (chain != null) {
-          chain[depth - 1] = values;
-        }
-      }
+      enterContainer(values, depth, chain, "array");
       key.append("aO[");
       for (int i = 0; i < values.length; i++) {
         if (i > 0) {
           key.append(',');
         }
-        if (values[i] == array) {
-          throw new IllegalStateException(
-            "default cache key cannot encode a self-referential array; declare an explicit key"
-          );
-        }
-        if (depth == 1 && chain == null && values[i] instanceof Object[]) {
-          chain = new Object[MAX_DEPTH];
-          chain[0] = values;
-        }
+        chain = ensureAncestors(values, values[i], depth, chain);
         part(key, values[i], depth, chain);
       }
     } else if (array instanceof byte[] values) {
