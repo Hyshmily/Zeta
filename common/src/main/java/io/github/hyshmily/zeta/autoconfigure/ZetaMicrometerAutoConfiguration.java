@@ -115,6 +115,7 @@ public class ZetaMicrometerAutoConfiguration {
    *   <tr><td>{@code zeta.singleflight.inflight}</td><td>Loader suppliers currently executing</td><td>&mdash;</td></tr>
    *   <tr><td>{@code zeta.reporter.queue.depth}</td><td>Reporter queue backlog</td><td>&mdash;</td></tr>
    *   <tr><td>{@code zeta.reporter.queue.dropped.total}</td><td>Cumulative dropped batches</td><td>&mdash;</td></tr>
+   *   <tr><td>{@code zeta.reporter.publish.failed.total}</td><td>Cumulative publisher failures</td><td>&mdash;</td></tr>
    *   <tr><td>{@code zeta.reporter.queue.expired.dead.total}</td><td>Expired batches: dead target Worker</td><td>&mdash;</td></tr>
    *   <tr><td>{@code zeta.reporter.queue.expired.stale.total}</td><td>Expired batches: 5s staleness</td><td>&mdash;</td></tr>
    *   <tr><td>{@code zeta.reporter.pending.keys}</td><td>Keys buffered in reporter counter cache</td><td>&mdash;</td></tr>
@@ -322,19 +323,22 @@ public class ZetaMicrometerAutoConfiguration {
    * @param registry the Micrometer meter registry
    */
   private static void registerReporterMeters(KeyReporter reporter, MeterRegistry registry) {
-    Gauge.builder("zeta.reporter.queue.depth", reporter, r -> dispatcherStat(r, s -> s.depth(), -1d)).register(
-      registry
-    );
+    Gauge.builder("zeta.reporter.queue.depth", reporter, r ->
+      dispatcherStat(r, KeyReporter.DispatcherStats::depth, -1d)
+    ).register(registry);
     FunctionCounter.builder("zeta.reporter.queue.dropped.total", reporter, r ->
-      dispatcherStat(r, s -> s.dropped(), 0d)
+      dispatcherStat(r, KeyReporter.DispatcherStats::dropped, 0d)
+    ).register(registry);
+    FunctionCounter.builder("zeta.reporter.publish.failed.total", reporter, r ->
+      dispatcherStat(r, KeyReporter.DispatcherStats::publishFailed, 0d)
     ).register(registry);
     // The two expiry causes select different actions: a dead target means topology/health,
     // a stale batch means backpressure. Their sum is not exposed — it can never disagree.
     FunctionCounter.builder("zeta.reporter.queue.expired.dead.total", reporter, r ->
-      dispatcherStat(r, s -> s.expiredDeadTarget(), 0d)
+      dispatcherStat(r, KeyReporter.DispatcherStats::expiredDeadTarget, 0d)
     ).register(registry);
     FunctionCounter.builder("zeta.reporter.queue.expired.stale.total", reporter, r ->
-      dispatcherStat(r, s -> s.expiredStale(), 0d)
+      dispatcherStat(r, KeyReporter.DispatcherStats::expiredStale, 0d)
     ).register(registry);
     // zeta.reporter.pending.keys is registered from the shared access counter: the reporter
     // owns no counting reservoir (design decisions: access counting).

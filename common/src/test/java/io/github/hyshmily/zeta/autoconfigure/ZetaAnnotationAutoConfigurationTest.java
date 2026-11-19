@@ -24,6 +24,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import io.github.hyshmily.zeta.Zeta;
+import io.github.hyshmily.zeta.annotation.CacheFailurePolicy;
 import io.github.hyshmily.zeta.annotation.ZetaCacheAdvisor;
 import io.github.hyshmily.zeta.annotation.ZetaCacheInterceptor;
 import io.github.hyshmily.zeta.annotation.ZetaCached;
@@ -38,6 +39,7 @@ import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.context.annotation.Lazy;
 
 @DisplayName("ZetaAnnotationAutoConfiguration")
 class ZetaAnnotationAutoConfigurationTest {
@@ -63,17 +65,16 @@ class ZetaAnnotationAutoConfigurationTest {
   }
 
   @Test
-  @DisplayName("an application-supplied interceptor wins and the advisor still points at it")
-  void customInterceptorWins() {
-    ZetaCacheInterceptor custom = new ZetaCacheInterceptor(mock(Zeta.class), null);
+  @DisplayName("a user CacheFailurePolicy bean replaces the default")
+  void customFailurePolicyWins() {
+    CacheFailurePolicy custom = failure -> {};
     runner
       .withBean(Zeta.class, () -> mock(Zeta.class))
       .withBean(HotKeyCache.class, () -> mock(HotKeyCache.class))
-      .withBean(ZetaCacheInterceptor.class, () -> custom)
+      .withBean(CacheFailurePolicy.class, () -> custom)
       .run(context -> {
-        assertThat(context).hasSingleBean(ZetaCacheInterceptor.class);
-        assertThat(context.getBean(ZetaCacheInterceptor.class)).isSameAs(custom);
-        assertThat(context.getBean(ZetaCacheAdvisor.class).getAdvice()).isSameAs(custom);
+        assertThat(context).hasSingleBean(CacheFailurePolicy.class);
+        assertThat(context.getBean(CacheFailurePolicy.class)).isSameAs(custom);
       });
   }
 
@@ -97,6 +98,36 @@ class ZetaAnnotationAutoConfigurationTest {
       .run(context -> {
         assertThat(context).doesNotHaveBean(ZetaCacheInterceptor.class);
         assertThat(context).doesNotHaveBean(ZetaCacheAdvisor.class);
+      });
+  }
+
+  static final AtomicInteger LAZY_FACADE_CREATED = new AtomicInteger();
+
+  @Configuration(proxyBeanMethods = false)
+  static class LazyFacadeConfiguration {
+
+    @Bean
+    @Lazy
+    Zeta lazyZeta() {
+      LAZY_FACADE_CREATED.incrementAndGet();
+      return mock(Zeta.class);
+    }
+
+    @Bean
+    HotKeyCache hotKeyCache() {
+      return mock(HotKeyCache.class);
+    }
+  }
+
+  @Test
+  @DisplayName("advisor and plan resolver never pull the facade during BeanPostProcessor registration")
+  void advisorCreationDoesNotCreateTheFacade() {
+    LAZY_FACADE_CREATED.set(0);
+    runner
+      .withUserConfiguration(LazyFacadeConfiguration.class)
+      .run(context -> {
+        assertThat(context).hasSingleBean(ZetaCacheAdvisor.class);
+        assertThat(LAZY_FACADE_CREATED).hasValue(0);
       });
   }
 

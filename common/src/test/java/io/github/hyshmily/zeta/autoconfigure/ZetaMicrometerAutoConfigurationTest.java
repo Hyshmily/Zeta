@@ -133,7 +133,7 @@ class ZetaMicrometerAutoConfigurationTest {
     SingleFlight sf = mock(SingleFlight.class);
     when(sf.estimatedInFlightSize()).thenReturn(2L);
     KeyReporter reporter = mock(KeyReporter.class);
-    when(reporter.dispatcherStats()).thenReturn(new KeyReporter.DispatcherStats(10, 0, 0, 5));
+    when(reporter.dispatcherStats()).thenReturn(new KeyReporter.DispatcherStats(10, 0, 0, 0, 5));
     // design decisions: access counting: pending keys read from the shared counter's real reservoir.
     io.github.hyshmily.zeta.cache.AccessCounter accessCounter = new io.github.hyshmily.zeta.cache.AccessCounter(
       mock(io.github.hyshmily.zeta.hotkeydetector.HotKeyDetector.class),

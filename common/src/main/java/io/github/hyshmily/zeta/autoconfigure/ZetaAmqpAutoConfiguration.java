@@ -274,7 +274,7 @@ public class ZetaAmqpAutoConfiguration {
     }
 
     /**
-     * Create the {@link ReportPublisher} for sending batched access-add reports to the Worker.
+     * Create the {@link ReportPublisher} for sending batched access-count reports to the Worker.
      */
     @Bean
     @ConditionalOnMissingBean
@@ -804,6 +804,7 @@ public class ZetaAmqpAutoConfiguration {
     @Primary
     @Bean("zetaHeartbeatConnectionFactory")
     @ConditionalOnMissingBean(name = "zetaHeartbeatConnectionFactory")
+    @SuppressWarnings("all")
     public CachingConnectionFactory heartbeatConnectionFactory(
       ObjectProvider<RabbitProperties> propertiesProvider,
       ResourceLoader resourceLoader

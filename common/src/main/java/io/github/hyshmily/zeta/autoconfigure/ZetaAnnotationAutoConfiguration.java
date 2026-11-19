@@ -16,6 +16,8 @@
 package io.github.hyshmily.zeta.autoconfigure;
 
 import io.github.hyshmily.zeta.Zeta;
+import io.github.hyshmily.zeta.annotation.CacheFailurePolicy;
+import io.github.hyshmily.zeta.annotation.PlanResolver;
 import io.github.hyshmily.zeta.annotation.ZetaCacheAdvisor;
 import io.github.hyshmily.zeta.annotation.ZetaCacheInterceptor;
 import io.github.hyshmily.zeta.cache.HotKeyCache;
@@ -33,6 +35,7 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Import;
 import org.springframework.context.annotation.ImportBeanDefinitionRegistrar;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.context.annotation.Role;
 import org.springframework.core.type.AnnotationMetadata;
 
@@ -71,17 +74,46 @@ import org.springframework.core.type.AnnotationMetadata;
 public class ZetaAnnotationAutoConfiguration {
 
   /**
-   * Create the one advice behind the three annotations.
+   * Create the lightweight plan source. It depends only on the bean factory:
+   * no cache engine, no facade, no scheduler.
    *
-   * @param zeta        the facade every verb goes through
    * @param beanFactory the bean factory backing {@code @beanName} SpEL and
    *                    {@code ${...}} attribute placeholders
-   * @return the interceptor
+   * @return the plan resolver
+   */
+  @Bean
+  @Role(BeanDefinition.ROLE_INFRASTRUCTURE)
+  @ConditionalOnMissingBean
+  public PlanResolver zetaPlanResolver(BeanFactory beanFactory) {
+    return new PlanResolver(beanFactory);
+  }
+
+  /**
+   * Create the default cache-side failure policy. A user bean replaces it.
+   *
+   * @return the default policy
    */
   @Bean
   @ConditionalOnMissingBean
-  public ZetaCacheInterceptor zetaCacheInterceptor(Zeta zeta, BeanFactory beanFactory) {
-    return new ZetaCacheInterceptor(zeta, beanFactory);
+  public CacheFailurePolicy zetaCacheFailurePolicy() {
+    return CacheFailurePolicy.defaults();
+  }
+
+  /**
+   * Create the one advice behind the three annotations. The bean is resolved
+   * lazily by {@link ZetaCacheAdvisor#INTERCEPTOR_BEAN_NAME}, so this method —
+   * and the {@link Zeta} facade it needs — runs when the first advised bean is
+   * proxied, not while BeanPostProcessors are being registered.
+   *
+   * @param zeta        the facade every verb goes through
+   * @param resolver    the plan source shared with the advisor
+   * @param failurePolicy the cache-side failure policy
+   * @return the interceptor
+   */
+  @Bean(name = ZetaCacheAdvisor.INTERCEPTOR_BEAN_NAME)
+  @Lazy
+  public ZetaCacheInterceptor zetaCacheInterceptor(Zeta zeta, PlanResolver resolver, CacheFailurePolicy failurePolicy) {
+    return new ZetaCacheInterceptor(zeta, resolver, failurePolicy);
   }
 
   /**
@@ -93,14 +125,14 @@ public class ZetaAnnotationAutoConfiguration {
    * infrastructure-role advisors, so an application-role advisor would be
    * ignored whenever this configuration provides the auto-proxy infrastructure.
    *
-   * @param interceptor the advice to apply
+   * @param resolver the lightweight plan source
    * @return the advisor
    */
   @Bean
   @Role(BeanDefinition.ROLE_INFRASTRUCTURE)
   @ConditionalOnMissingBean
-  public static ZetaCacheAdvisor zetaCacheAdvisor(ZetaCacheInterceptor interceptor) {
-    return new ZetaCacheAdvisor(interceptor);
+  public static ZetaCacheAdvisor zetaCacheAdvisor(PlanResolver resolver) {
+    return new ZetaCacheAdvisor(resolver);
   }
 
   /**
