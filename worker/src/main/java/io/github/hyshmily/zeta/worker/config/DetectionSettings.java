@@ -117,7 +117,33 @@ public record DetectionSettings(
     private DetectionSettings validate() {
       window = resolveGeometry(detection.getWindow());
       WorkerProperties.Cooling cooling = detection.getCooling();
-      boolean lowQps = usesLowQps();
+      if (cooling == null) {
+        errors.add("detection.cooling must not be null");
+        cooling = new WorkerProperties.Cooling();
+      }
+      WorkerProperties.Limits limits = detection.getLimits();
+      if (limits == null) {
+        errors.add("detection.limits must not be null");
+        limits = new WorkerProperties.Limits();
+      }
+      List<WorkerProperties.Rule> configuredRules = detection.getRules();
+      if (configuredRules == null) {
+        errors.add("detection.rules must not be null; use an empty list");
+        configuredRules = List.of();
+      }
+      if (cooling.getThreads() < 1 || cooling.getThreads() > 128) {
+        errors.add("detection.cooling.threads must be 1..128");
+      }
+      if (limits.getMaxActiveHotKeys() < 1) {
+        errors.add("detection.limits.max-active-hot-keys must be >= 1");
+      }
+      if (limits.getMaxHotBroadcastsPerSecond() < 1) {
+        errors.add("detection.limits.max-hot-broadcasts-per-second must be >= 1");
+      }
+      if (limits.getMaxCoolBroadcastsPerSecond() < 1) {
+        errors.add("detection.limits.max-cool-broadcasts-per-second must be >= 1");
+      }
+      boolean lowQps = usesLowQps(configuredRules);
       // The re-check period only governs LOW_QPS rules. An EXPIRE-only configuration must not be
       // forced to shrink it to fit a short window the rule never reads.
       checkIntervalMs = lowQps
@@ -132,7 +158,7 @@ public record DetectionSettings(
       RuleSet ruleSet = null;
       if (window != null) {
         validateWindowBounds(retentionMs, lowQps);
-        ruleSet = resolveRuleSet();
+        ruleSet = resolveRuleSet(configuredRules);
       }
 
       if (!errors.isEmpty()) {
@@ -141,7 +167,6 @@ public record DetectionSettings(
         );
       }
 
-      WorkerProperties.Limits limits = detection.getLimits();
       DetectionSettings settings = new DetectionSettings(
         detection.isEnabled(),
         window,
@@ -195,13 +220,13 @@ public record DetectionSettings(
     /**
      * Whether any rule would actually read the global LOW_QPS re-check interval.
      */
-    private boolean usesLowQps() {
+    private boolean usesLowQps(List<WorkerProperties.Rule> configuredRules) {
       WorkerProperties.Defaults defaults = detection.getDefaults();
       if (defaults != null && isLowQps(defaults.getCool())) {
         return true;
       }
-      for (WorkerProperties.Rule rule : detection.getRules()) {
-        if (isLowQps(rule.getCool())) {
+      for (WorkerProperties.Rule rule : configuredRules) {
+        if (rule != null && isLowQps(rule.getCool())) {
           return true;
         }
       }
@@ -236,9 +261,9 @@ public record DetectionSettings(
     }
 
     @Nullable
-    private RuleSet resolveRuleSet() {
+    private RuleSet resolveRuleSet(List<WorkerProperties.Rule> configuredRules) {
       HotKeyRule defaultRule = resolveDefaultRule();
-      List<HotKeyRule> rules = resolveConfiguredRules(detection.getRules());
+      List<HotKeyRule> rules = resolveConfiguredRules(configuredRules);
       if (defaultRule == null) {
         return detection.isEnabled() ? null : RuleSet.of(rules, DISABLED_DEFAULT_RULE);
       }
@@ -273,7 +298,13 @@ public record DetectionSettings(
       ids.add(DEFAULT_RULE_ID);
       for (int i = 0; i < configured.size(); i++) {
         WorkerProperties.Rule rule = configured.get(i);
-        String id = rule.getId() == null || rule.getId().isBlank() ? "rule-" + (i + 1) : rule.getId();
+        if (rule == null) {
+          errors.add("detection.rules[" + i + "] must not be null");
+          continue;
+        }
+        // Trim before the reserved-id comparison: " defaults " is the default rule's id with
+        // padding, not a different rule, and an untrimmed metric tag would split the series.
+        String id = rule.getId() == null || rule.getId().isBlank() ? "rule-" + (i + 1) : rule.getId().trim();
         if (!ids.add(id)) {
           // The first definition owns the id; keeping the duplicate would make RuleSet.of throw a
           // bare IllegalArgumentException before the validator can report its collected errors.
@@ -416,6 +447,11 @@ public record DetectionSettings(
       }
 
       long coolAfterMs = millis(cool.getCoolAfter(), "rule '" + id + "'.cool.cool-after");
+      if (coolAfterMs <= 0L) {
+        // millis() already recorded the missing/zero/overflow error; the bound check below would
+        // add a misleading "0ms must be >= 1s" line on top of it.
+        return null;
+      }
       if (coolAfterMs < 1_000L) {
         errors.add("rule '" + id + "'.cool.cool-after must be >= 1s");
         return null;
@@ -438,6 +474,10 @@ public record DetectionSettings(
       }
 
       long lowQpsForMs = millis(cool.getLowQpsFor(), "rule '" + id + "'.cool.low-qps-for");
+      if (lowQpsForMs <= 0L) {
+        // millis() already recorded the violation; do not follow it with a window-bound error.
+        return null;
+      }
       if (lowQpsForMs < window.windowMs()) {
         errors.add(
           "rule '" +
@@ -536,6 +576,15 @@ public record DetectionSettings(
       );
     }
     warnTrackedKeyMemory(maxTrackedKeys);
+    if (window.alignedSlices() < 4) {
+      log.warn(
+        "detection.window.slices rounds to {} slice(s): the detector sums windowSize + 1 slices, so " +
+          "the effective span is up to {}ms (the configured window is {}ms); use at least 4 slices",
+        window.alignedSlices(),
+        window.windowMs() + window.sliceMs(),
+        window.windowMs()
+      );
+    }
     long checksPerSecond = 0L;
     long refreshPerLanePerSecond = 0L;
     for (HotKeyRule rule : ruleSet.allRules()) {
@@ -550,7 +599,9 @@ public record DetectionSettings(
         checksPerSecond = Math.max(checksPerSecond, ruleChecks);
         long coolQps = window.toEffectiveQps(rule.coolCount());
         long hotQps = window.toEffectiveQps(rule.hotCount());
-        if (coolQps * 10 > 9 * hotQps) {
+        // Compare the window counts in double: coolQps * 10 overflows long for a saturated
+        // conversion, and going back through toEffectiveQps would add a second rounding step.
+        if ((double) rule.coolCount() > (double) rule.hotCount() * 0.9d) {
           log.warn(
             "rule '{}': cool-qps (~{} qps) is within 10% of hot-qps (~{} qps); the hysteresis band is very narrow",
             rule.id(),

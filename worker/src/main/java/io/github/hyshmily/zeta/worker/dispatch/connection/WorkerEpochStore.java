@@ -106,6 +106,12 @@ public final class WorkerEpochStore {
     Path path = (epochFile != null ? epochFile : defaultEpochFile(workerId)).toAbsolutePath().normalize();
     synchronized (WorkerEpochStore.class) {
       Path parent = path.getParent();
+      if (parent == null) {
+        // A filesystem root is not an epoch file, and there is no directory to create or rename
+        // into. Fail the configuration instead of falling back to a clock-only epoch that the
+        // operator will never see repaired.
+        throw new IllegalArgumentException("epochFile must have a parent directory, got: " + path);
+      }
       try {
         Files.createDirectories(parent);
       } catch (Exception e) {

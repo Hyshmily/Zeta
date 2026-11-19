@@ -54,8 +54,9 @@ import org.springframework.amqp.rabbit.core.RabbitTemplate;
  * suppressed because the last wire state is COOL, since an App may have promoted locally after it. A
  * send failure keeps the last confirmed version and wire type but clears the confirmation and
  * debounce anchor. A record whose last wire state is COOL is retained for twice
- * {@code broadcast.max-decision-age-ms}; a HOT record until a COOL is accepted. The cache has no
- * size cap.
+ * {@code broadcast.max-decision-age-ms}; a HOT record is retained for as long as it remains the
+ * last confirmed wire state, with a size cap as the backstop for a COOL that never reached the
+ * funnel (queue saturation).
  *
  * <p>Only the dispatcher's drain thread calls the package-private classification and send methods,
  * so every accepted-record mutation is single-threaded; {@link AcceptedDecision} values are
@@ -107,24 +108,26 @@ public class WorkerBroadcaster {
   private static final long DEDUP_WINDOW_MS = 100L;
 
   /**
-   * Retention of a record whose last accepted decision is HOT. The record is the only evidence the
-   * cluster was told the key is hot, and a hot key can keep its seat indefinitely, so the record
-   * must outlive every state the cluster can still hold; one hundred years is a bound no process
-   * reaches while staying clear of duration arithmetic.
+   * Retention of a record that still carries the long HOT retention. Such a record is the only
+   * evidence the cluster was told the key is hot, and a hot key can keep its seat indefinitely, so
+   * it must outlive every state the cluster can still hold; one hundred years is a bound no process
+   * reaches while staying clear of duration arithmetic. A failed or expired COOL clears the
+   * retention bit, so the bound applies only while the Worker still holds the key hot.
    */
   private static final long HOT_RECORD_RETENTION_NANOS = TimeUnit.DAYS.toNanos(36_500L);
 
   /**
    * Per-key wire state and ordering watermark. Every field is immutable so a record read through the
-   * cache is a stable fact. {@code meta} packs the last <em>confirmed</em> wire type, whether a send
-   * completed, and a 30-bit send instant used only for the 100 ms debounce. The 30-bit instant wraps
-   * about every 12.4 days; unsigned modular subtraction still measures any interval below half the
-   * ring, orders of magnitude above the debounce window.
+   * cache is a stable fact. {@code flags} packs the last <em>confirmed</em> wire type, whether a send
+   * completed, and whether the record still needs the long HOT retention; {@code sentAtMs} is the
+   * monotonic instant of that send, used only for the 100 ms debounce. The instant is a full
+   * {@code long}; a narrowed field aliases intervals across its wrap, and a HOT record can outlive
+   * any such wrap by years.
    */
-  private record AcceptedDecision(long version, int meta) {
-    private static final int HOT_BIT = 1 << 31;
-    private static final int CONFIRMED_BIT = 1 << 30;
-    private static final int TIMESTAMP_MASK = CONFIRMED_BIT - 1;
+  private record AcceptedDecision(long sentAtMs, long version, int flags) {
+    private static final int HOT_BIT = 1;
+    private static final int CONFIRMED_BIT = 1 << 1;
+    private static final int HOT_RETENTION_BIT = 1 << 2;
 
     /**
      * Records a decision that reached the AMQP client.
@@ -135,8 +138,8 @@ public class WorkerBroadcaster {
      * @return the confirmed record
      */
     static AcceptedDecision confirmed(long version, boolean hot, long sentAtMs) {
-      int meta = CONFIRMED_BIT | ((int) sentAtMs & TIMESTAMP_MASK) | (hot ? HOT_BIT : 0);
-      return new AcceptedDecision(version, meta);
+      int flags = CONFIRMED_BIT | (hot ? HOT_BIT | HOT_RETENTION_BIT : 0);
+      return new AcceptedDecision(sentAtMs, version, flags);
     }
 
     /**
@@ -147,26 +150,46 @@ public class WorkerBroadcaster {
      * @return a copy with the wire state and debounce anchor unchanged
      */
     AcceptedDecision advance(long version) {
-      return new AcceptedDecision(version, meta);
+      return new AcceptedDecision(sentAtMs, version, flags);
     }
 
     /**
      * Clears the confirmation and debounce anchor while keeping the last confirmed version and wire
      * type. Called when a publish throws: the broker may or may not have received the failed
      * decision, so it cannot become wire truth, but the version it was ordered against must stay
-     * suppressed.
+     * suppressed. The long HOT retention is cleared too: the failed transition may be the one whose
+     * seat the dispatcher returns, so the record only needs the queue-residency bound to keep its
+     * version watermark.
      *
      * @return a copy that only carries the last confirmed watermark and wire type
      */
     AcceptedDecision unconfirmed() {
-      return new AcceptedDecision(version, meta & HOT_BIT);
+      return new AcceptedDecision(0L, version, flags & HOT_BIT);
+    }
+
+    /**
+     * Gives up the long HOT retention while keeping the wire state and debounce anchor. Called when
+     * a COOL expired before it could be sent: the cluster may still be hot, but this Worker is not,
+     * so the record only needs the queue-residency bound.
+     *
+     * @return a copy whose retention is the COOL bound
+     */
+    AcceptedDecision retentionLimited() {
+      return new AcceptedDecision(sentAtMs, version, flags & ~HOT_RETENTION_BIT);
     }
 
     /**
      * @return whether the last confirmed wire state was HOT
      */
     boolean hot() {
-      return (meta & HOT_BIT) != 0;
+      return (flags & HOT_BIT) != 0;
+    }
+
+    /**
+     * @return whether this record still requires the long HOT retention
+     */
+    boolean hotRetained() {
+      return (flags & HOT_RETENTION_BIT) != 0;
     }
 
     /**
@@ -177,19 +200,20 @@ public class WorkerBroadcaster {
      * @return {@code true} when the decision is a duplicate of the last real send
      */
     boolean debounced(boolean hot, long nowMs) {
-      if ((meta & CONFIRMED_BIT) == 0 || hot() != hot) {
+      if ((flags & CONFIRMED_BIT) == 0 || hot() != hot) {
         return false;
       }
-      int elapsed = ((int) nowMs - (meta & TIMESTAMP_MASK)) & TIMESTAMP_MASK;
-      return elapsed < DEDUP_WINDOW_MS;
+      long elapsed = nowMs - sentAtMs;
+      return elapsed >= 0L && elapsed < DEDUP_WINDOW_MS;
     }
   }
 
   /**
-   * Caffeine variable expiry: a HOT record is retained for the lifetime of the Worker's hot state,
-   * while a COOL-state record keeps the queue-residency bound. Expiring a hot record would let a stale
-   * HOT or an old COOL be re-sent after the key's queue decisions settled; the App's version guard
-   * makes the replay harmless, but the send is wasted.
+   * Caffeine variable expiry: a record that still carries the long HOT retention is kept for the
+   * lifetime of the Worker's hot state, while a record whose COOL was accepted, whose publish
+   * failed or whose COOL expired keeps the queue-residency bound. Expiring a long-retained record
+   * would let a stale HOT or an old COOL be re-sent after the key's queue decisions settled; the
+   * App's version guard makes the replay harmless, but the send is wasted.
    */
   private record AcceptedDecisionExpiry(long coolRetentionNanos) implements Expiry<String, AcceptedDecision> {
     @Override
@@ -218,7 +242,7 @@ public class WorkerBroadcaster {
     }
 
     private long retentionNanos(AcceptedDecision value) {
-      return value.hot() ? Math.max(HOT_RECORD_RETENTION_NANOS, coolRetentionNanos) : coolRetentionNanos;
+      return value.hotRetained() ? Math.max(HOT_RECORD_RETENTION_NANOS, coolRetentionNanos) : coolRetentionNanos;
     }
   }
 
@@ -231,10 +255,11 @@ public class WorkerBroadcaster {
   record Verdict(Delivery outcome, @Nullable AcceptedDecision prev) {}
 
   /**
-   * Per-key wire state, retention state-dependent but never size-bounded. A COOL-state record is
+   * Per-key wire state with a state-dependent retention and a size cap. A COOL-state record is
    * retained for twice the maximum queue residency, so it expires only after every decision that
-   * could still be compared against it has already been dropped as expired; a hot record is
-   * retained until a COOL is accepted.
+   * could still be compared against it has already been dropped as expired; a hot record keeps the
+   * long retention until a COOL is accepted, a COOL publish fails or a COOL expires. The cap is the
+   * backstop for a COOL dropped before the funnel (queue saturation), which no record update sees.
    */
   private final Cache<String, AcceptedDecision> accepted;
 
@@ -275,6 +300,7 @@ public class WorkerBroadcaster {
    * @param identity          this process's immutable node id and epoch
    * @param metrics           the emission counters (a meter-less instance is a no-op)
    * @param maxDecisionAgeMs  the queue-residency bound whose double sizes the COOL retention
+   * @param maxAcceptedEntries the hard cap on retained per-key records
    */
   public WorkerBroadcaster(
     RabbitTemplate rabbitTemplate,
@@ -282,8 +308,15 @@ public class WorkerBroadcaster {
     String appName,
     WorkerIdentity identity,
     WorkerDetectionMetrics metrics,
-    long maxDecisionAgeMs
+    long maxDecisionAgeMs,
+    long maxAcceptedEntries
   ) {
+    if (maxDecisionAgeMs <= 0L) {
+      throw new IllegalArgumentException("maxDecisionAgeMs must be positive, got " + maxDecisionAgeMs);
+    }
+    if (maxAcceptedEntries <= 0L) {
+      throw new IllegalArgumentException("maxAcceptedEntries must be positive, got " + maxAcceptedEntries);
+    }
     this.metrics = metrics;
     this.identity = identity;
     this.rabbitTemplate = rabbitTemplate;
@@ -298,7 +331,10 @@ public class WorkerBroadcaster {
       appName
     );
     long retentionMs = maxDecisionAgeMs > Long.MAX_VALUE / 2L ? Long.MAX_VALUE : 2L * maxDecisionAgeMs;
-    this.accepted = Caffeine.newBuilder().expireAfter(new AcceptedDecisionExpiry(toNanos(retentionMs))).build();
+    this.accepted = Caffeine.newBuilder()
+      .maximumSize(maxAcceptedEntries)
+      .expireAfter(new AcceptedDecisionExpiry(toNanos(retentionMs)))
+      .build();
   }
 
   /** Converts a millisecond retention to nanoseconds, saturating instead of wrapping. */
@@ -430,6 +466,12 @@ public class WorkerBroadcaster {
   private Delivery settle(Delivery outcome, @Nullable AcceptedDecision prev, ZetaDecision decision) {
     switch (outcome) {
       case EXPIRED -> {
+        // A COOL that expired before it could be sent is the last evidence the Worker held the
+        // key hot. Drop the century retention so a one-off key cannot pin its record forever;
+        // the wire state and watermark stay untouched because the cluster may still be hot.
+        if (prev != null && prev.hotRetained() && decision.type() == ZetaDecision.DecisionType.COOL) {
+          accepted.put(decision.cacheKey(), prev.retentionLimited());
+        }
       }
       case ELIDED -> {
         AcceptedDecision record = Objects.requireNonNull(prev, "elision requires a predecessor");

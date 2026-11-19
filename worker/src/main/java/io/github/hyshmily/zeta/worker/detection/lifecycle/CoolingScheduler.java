@@ -24,6 +24,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.context.SmartLifecycle;
 
 /**
  * Drives the cool-down checks: one thread per striped wheel, each advancing its wheel, draining the
@@ -36,7 +37,7 @@ import lombok.extern.slf4j.Slf4j;
  * (design decisions: worker cooling).
  */
 @Slf4j
-public class CoolingScheduler {
+public class CoolingScheduler implements SmartLifecycle {
 
   private final DecisionDispatcher dispatcher;
   private final HotKeyRegistry registry;
@@ -148,6 +149,35 @@ public class CoolingScheduler {
    * wheel count. An interrupt during shutdown is recorded and the remaining threads are still
    * joined; returning early would leave later wheels advancing during context teardown.
    */
+  /**
+   * The advancing threads are started by the constructor, so the lifecycle start has nothing to do.
+   * Implemented so {@link #stop()} runs before singleton destruction; the dispatcher's final drain
+   * then starts only after these threads have stopped submitting.
+   */
+  @Override
+  public void start() {
+    // The constructor starts the advancing threads.
+  }
+
+  @Override
+  public void stop() {
+    shutdown();
+  }
+
+  @Override
+  public boolean isRunning() {
+    return running;
+  }
+
+  /**
+   * Stops before the dispatcher ({@code MAX_VALUE - 20}) so no COOL is submitted during its final
+   * drain.
+   */
+  @Override
+  public int getPhase() {
+    return Integer.MAX_VALUE - 10;
+  }
+
   @PreDestroy
   public void shutdown() {
     running = false;

@@ -74,7 +74,15 @@ class DecisionDispatcherTest {
   void setUp() {
     meterRegistry = new SimpleMeterRegistry();
     metrics = new WorkerDetectionMetrics(meterRegistry);
-    broadcaster = new WorkerBroadcaster(rabbitTemplate, "ex", "app", new WorkerIdentity("node", 0L), metrics, 30_000L);
+    broadcaster = new WorkerBroadcaster(
+      rabbitTemplate,
+      "ex",
+      "app",
+      new WorkerIdentity("node", 0L),
+      metrics,
+      30_000L,
+      65_536L
+    );
   }
 
   @AfterEach
@@ -1314,6 +1322,25 @@ class DecisionDispatcherTest {
     await(() -> aborted.contains("stale@1"), 2_000);
     assertThat(aborted).containsExactly("stale@1");
     assertThat(dispatcher.hotDepth()).isZero();
+  }
+
+  /**
+   * An Error kills the drain thread. The dispatcher must mark itself stopped in that path too, or
+   * later submissions keep filling queues that no one drains and leak HOT seats.
+   */
+  @Test
+  void anErrorStopsTheDispatcherAndRefusesLaterSubmissions() {
+    doThrow(new AssertionError("fatal send failure"))
+      .when(rabbitTemplate)
+      .send(anyString(), anyString(), any(Message.class));
+    dispatcher = dispatcher(1_000, 1_000, 8, 32, 30_000L);
+
+    assertThat(dispatcher.submit(ZetaDecision.hot("k", 1L))).isTrue();
+    await(() -> !dispatcher.isRunning(), 5_000L);
+    assertThat(dispatcher.isRunning()).as("the drain thread died").isFalse();
+    assertThat(dispatcher.submit(ZetaDecision.cool("k", 2L)))
+      .as("a submission after the drain died is refused, not queued")
+      .isFalse();
   }
 
   private double counter(String name, String type) {

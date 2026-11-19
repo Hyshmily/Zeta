@@ -43,7 +43,8 @@ class WorkerBroadcasterHotCoolHotTest {
       "testApp",
       new WorkerIdentity("test-node", 0L),
       new WorkerDetectionMetrics(null),
-      30_000L
+      30_000L,
+      65_536L
     );
 
     broadcaster.send(ZetaDecision.hot("k", 1L), Long.MAX_VALUE);

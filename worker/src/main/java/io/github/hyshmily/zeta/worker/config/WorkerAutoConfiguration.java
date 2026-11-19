@@ -419,15 +419,25 @@ public class WorkerAutoConfiguration {
     @Qualifier("zetaWorkerBroadcastRabbitTemplate") RabbitTemplate rabbitTemplate,
     ZetaAppProperties appProperties,
     WorkerIdentity identity,
-    WorkerDetectionMetrics metrics
+    WorkerDetectionMetrics metrics,
+    DetectionSettings settings
   ) {
+    // Every live HOT seat has a record, and a COOL dropped before the funnel leaves its record
+    // behind. Four times the seat plus queue sizes keeps the cache above the number of keys the
+    // detection plane can hold concurrently; the floor keeps small deployments comfortably bounded.
+    long liveCapacity =
+      (long) settings.maxActiveHotKeys() +
+      properties.getBroadcast().getHotQueueCapacity() +
+      properties.getBroadcast().getCoolQueueCapacity();
+    long maxAcceptedEntries = Math.max(65_536L, 4L * liveCapacity);
     return new WorkerBroadcaster(
       rabbitTemplate,
       properties.getMessaging().getBroadcastExchange(),
       appProperties.getAppName(),
       identity,
       metrics,
-      properties.getBroadcast().getMaxDecisionAgeMs()
+      properties.getBroadcast().getMaxDecisionAgeMs(),
+      maxAcceptedEntries
     );
   }
 

@@ -31,6 +31,7 @@ import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import lombok.extern.slf4j.Slf4j;
 import org.jspecify.annotations.Nullable;
+import org.springframework.context.SmartLifecycle;
 
 /**
  * The single submission point for Worker decisions: one HOT queue, one COOL queue, and a drain thread
@@ -64,7 +65,7 @@ import org.jspecify.annotations.Nullable;
  */
 @Slf4j
 @Internal
-public class DecisionDispatcher {
+public class DecisionDispatcher implements SmartLifecycle {
 
   /**
    * Retry pace after a failed send; the broker, not a token bucket, is the reason to pause.
@@ -594,7 +595,10 @@ public class DecisionDispatcher {
             if (!running) {
               break;
             }
-            // Keep the broker-failure retry pace; a failed decision never consumes a token.
+            // Keep the broker-failure retry pace; a failed decision never consumes a token. Drop
+            // the permits accumulated while the broker was failing so a sustained outage cannot
+            // grow an unbounded semaphore count that the next empty round has to drain.
+            pendingSignal.drainPermits();
             Thread.sleep(FAILURE_BACKOFF_MS);
             continue;
           }
@@ -614,12 +618,20 @@ public class DecisionDispatcher {
           if (!running) {
             break;
           }
+          pendingSignal.drainPermits();
           Thread.sleep(FAILURE_BACKOFF_MS);
+        } catch (Error e) {
+          log.error("Decision drain thread terminated by Error; stopping dispatcher", e);
+          throw e;
         }
       }
     } catch (InterruptedException e) {
       Thread.currentThread().interrupt();
     } finally {
+      // The drain thread is the only consumer. If it exits for any reason (including an Error),
+      // submissions must stop believing the dispatcher is alive: otherwise they keep filling
+      // queues nobody drains and leak HOT seats until saturation.
+      running = false;
       drainRemaining();
     }
   }
@@ -1084,6 +1096,35 @@ public class DecisionDispatcher {
    * second bounded join; a blocking AMQP call can ignore the interrupt, so the final state is
    * reported rather than claimed impossible.
    */
+  /**
+   * The drain thread is started by the constructor, so the lifecycle start has nothing to do.
+   * Implemented so {@link #stop()} runs before singleton destruction: the broker connection
+   * factory is then still open while the final drain spends its remaining budget.
+   */
+  @Override
+  public void start() {
+    // The constructor starts the drain thread.
+  }
+
+  @Override
+  public void stop() {
+    shutdown();
+  }
+
+  @Override
+  public boolean isRunning() {
+    return running;
+  }
+
+  /**
+   * Stops after the cooling scheduler ({@code MAX_VALUE - 10}) and after the listeners (which use
+   * the default phase), so no COOL is submitted once the final drain has begun.
+   */
+  @Override
+  public int getPhase() {
+    return Integer.MAX_VALUE - 20;
+  }
+
   @PreDestroy
   public void shutdown() {
     running = false;

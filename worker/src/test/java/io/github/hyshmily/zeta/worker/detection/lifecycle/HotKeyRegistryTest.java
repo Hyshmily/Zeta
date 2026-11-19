@@ -382,11 +382,11 @@ class HotKeyRegistryTest {
 
   /**
    * The lateness metric belongs to the check the wheel's owner actually evaluates: a wheel-fired
-   * check reports the delay against the deadline it replaces, while {@code repair()} only re-links
-   * and records no sample of its own.
+   * check reports the delay against the deadline it replaces, while {@code repair()} leaves a linked
+   * node alone and records no sample of its own.
    */
   @Test
-  void aWheelFiredCheckRecordsItsLatenessAndRepairRecordsNone() {
+  void aWheelFiredCheckRecordsItsLatenessAndRepairLeavesTheLinkedNodeAlone() {
     SimpleMeterRegistry meterRegistry = new SimpleMeterRegistry();
     long base = TimeSource.monotonicMillis();
     try {
@@ -408,9 +408,9 @@ class HotKeyRegistryTest {
       ).isGreaterThanOrEqualTo(50.0d);
 
       TimeSource.setTimeOffsetForTest(0, -base + 11_050);
-      assertThat(registry.repair()).isEqualTo(1);
+      assertThat(registry.repair()).as("a node still linked in the wheel is late, not lost").isZero();
       assertThat(meterRegistry.get(WorkerDetectionMetrics.METRIC_COOLING_LATENESS).timer().count())
-        .as("repair re-links without evaluating, so it records no lateness")
+        .as("repair evaluates nothing, so it records no lateness")
         .isEqualTo(1);
     } finally {
       TimeSource.setTimeOffsetForTest(0, 0);
@@ -510,12 +510,12 @@ class HotKeyRegistryTest {
   }
 
   /**
-   * A check that has only just reached its deadline may still be owned by a wheel thread; the repair
-   * leaves it alone. Only a check that stays overdue past the grace is re-linked, and re-linking does
-   * not evaluate: the wheel remains the only evaluator.
+   * A check still linked in a wheel belongs to that wheel, however overdue it looks: re-linking it
+   * would contend every stripe and wheel lock while the wheel catches up. Only an unscheduled check
+   * is repaired, and re-linking does not evaluate — the wheel remains the only evaluator.
    */
   @Test
-  void repairLeavesAJustDueCheckToTheWheel() {
+  void repairLeavesALinkedCheckToTheWheel() {
     long base = TimeSource.monotonicMillis();
     try {
       TimeSource.setTimeOffsetForTest(0, -base);
@@ -531,10 +531,8 @@ class HotKeyRegistryTest {
       assertThat(registry.repair()).as("a check at its deadline belongs to the wheel's thread").isZero();
 
       TimeSource.setTimeOffsetForTest(0, -base + 11_001);
-      assertThat(registry.repair()).isEqualTo(2);
-      assertThat(first.wheelState)
-        .as("the repair re-links; the wheel owns the evaluation")
-        .isEqualTo(TimerWheel.SCHEDULED);
+      assertThat(registry.repair()).as("both checks are still owned by the wheel").isZero();
+      assertThat(first.wheelState).as("the repair does not take over a linked node").isEqualTo(TimerWheel.SCHEDULED);
       assertThat(registry.isHot("k1")).isTrue();
       assertConserved(registry);
     } finally {

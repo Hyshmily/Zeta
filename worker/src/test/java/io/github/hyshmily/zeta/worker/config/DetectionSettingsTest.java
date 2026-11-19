@@ -184,6 +184,67 @@ class DetectionSettingsTest {
       .hasMessageContaining("maximum supported millisecond value");
   }
 
+  /**
+   * A zero duration is reported once, by the primitive conversion, not again by the strategy bound
+   * as a misleading "0ms must be >= 1s".
+   */
+  @Test
+  void rejectsAZeroCoolAfterWithoutDuplicatingTheBoundError() {
+    WorkerProperties properties = base(100, 50);
+    WorkerProperties.Cool cool = new WorkerProperties.Cool();
+    cool.setStrategy(CoolStrategy.COOL_FOR_EXPIRE);
+    cool.setCoolAfter(Duration.ZERO);
+    properties.getDetection().getDefaults().setCool(cool);
+
+    assertThatThrownBy(() -> DetectionSettings.of(properties))
+      .isInstanceOf(IllegalStateException.class)
+      .hasMessageContaining("cool.cool-after must be positive")
+      .hasMessageNotContaining("must be >= 1s");
+  }
+
+  @Test
+  void rejectsACoolingThreadCountOutsideTheSupportedRange() {
+    WorkerProperties properties = base(100, 50);
+    properties.getDetection().getCooling().setThreads(0);
+    assertThatThrownBy(() -> DetectionSettings.of(properties))
+      .isInstanceOf(IllegalStateException.class)
+      .hasMessageContaining("detection.cooling.threads");
+
+    properties.getDetection().getCooling().setThreads(129);
+    assertThatThrownBy(() -> DetectionSettings.of(properties))
+      .isInstanceOf(IllegalStateException.class)
+      .hasMessageContaining("detection.cooling.threads");
+  }
+
+  @Test
+  void rejectsANullRulesList() {
+    WorkerProperties properties = base(100, 50);
+    properties.getDetection().setRules(null);
+
+    assertThatThrownBy(() -> DetectionSettings.of(properties))
+      .isInstanceOf(IllegalStateException.class)
+      .hasMessageContaining("detection.rules must not be null");
+  }
+
+  /** Padding must not smuggle a configured rule past the reserved-id check. */
+  @Test
+  void trimsRuleIdsBeforeTheReservedIdCheck() {
+    WorkerProperties properties = base(100, 50);
+    WorkerProperties.Rule rule = new WorkerProperties.Rule();
+    rule.setId(" defaults ");
+    WorkerProperties.Match match = new WorkerProperties.Match();
+    match.setType(MatchType.PREFIX);
+    match.setKey("user:");
+    rule.setMatch(match);
+    rule.setHotQps(10);
+    rule.setCool(lowQps(5, Duration.ofSeconds(1)));
+    properties.getDetection().getRules().add(rule);
+
+    assertThatThrownBy(() -> DetectionSettings.of(properties))
+      .isInstanceOf(IllegalStateException.class)
+      .hasMessageContaining("id 'defaults' is duplicated");
+  }
+
   @Test
   void rejectsAnExpireRuleThatAlsoSetsLowQpsFields() {
     WorkerProperties properties = base(100, 50);

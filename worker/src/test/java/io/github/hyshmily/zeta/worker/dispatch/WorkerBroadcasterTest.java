@@ -30,6 +30,8 @@ import io.github.hyshmily.zeta.sync.worker.WorkerType;
 import io.github.hyshmily.zeta.worker.dispatch.connection.WorkerIdentity;
 import io.github.hyshmily.zeta.worker.metrics.WorkerDetectionMetrics;
 import java.util.List;
+import java.util.OptionalLong;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -65,7 +67,8 @@ class WorkerBroadcasterTest {
       "testApp",
       new WorkerIdentity("test-node", EPOCH),
       new WorkerDetectionMetrics(null),
-      30_000L
+      30_000L,
+      65_536L
     );
   }
 
@@ -368,7 +371,8 @@ class WorkerBroadcasterTest {
       "testApp",
       new WorkerIdentity("test-node", EPOCH),
       new WorkerDetectionMetrics(null),
-      1L
+      1L,
+      65_536L
     );
 
     assertThat(broadcaster.send(ZetaDecision.hot("k", 1L), Long.MAX_VALUE)).isEqualTo(WorkerBroadcaster.Delivery.SENT);
@@ -380,15 +384,50 @@ class WorkerBroadcasterTest {
     verify(rabbitTemplate, times(2)).send(any(), any(), any(Message.class));
   }
 
-  /** The accepted-record cache has no size cap: a maximum would evict a live ordering predecessor. */
+  /**
+   * A COOL that expires before it can be sent must not leave its key's HOT record with the
+   * century retention: the Worker no longer holds the key hot, so the record only needs the
+   * queue-residency bound.
+   */
   @Test
-  void acceptedRecordsHaveNoMaximumSize() throws Exception {
+  void anExpiredCoolGivesUpTheHotRecordsLongRetention() throws Exception {
+    broadcaster = new WorkerBroadcaster(
+      rabbitTemplate,
+      BROADCAST,
+      "testApp",
+      new WorkerIdentity("test-node", EPOCH),
+      new WorkerDetectionMetrics(null),
+      1_000L,
+      65_536L
+    );
+    assertThat(broadcaster.send(ZetaDecision.hot("k", 1L), Long.MAX_VALUE)).isEqualTo(WorkerBroadcaster.Delivery.SENT);
+    assertThat(broadcaster.send(ZetaDecision.cool("k", 2L), 0L)).isEqualTo(WorkerBroadcaster.Delivery.EXPIRED);
+
+    var field = WorkerBroadcaster.class.getDeclaredField("accepted");
+    field.setAccessible(true);
+    @SuppressWarnings("unchecked")
+    Cache<String, ?> cache = (Cache<String, ?>) field.get(broadcaster);
+    OptionalLong retention = cache.policy().expireVariably().orElseThrow().getExpiresAfter("k", TimeUnit.NANOSECONDS);
+    assertThat(retention).as("the record still exists").isPresent();
+    assertThat(retention.getAsLong())
+      .as("the failed COOL dropped the century retention")
+      .isLessThan(TimeUnit.DAYS.toNanos(1L));
+  }
+
+  /**
+   * The accepted-record cache is size-bounded: a COOL dropped before the funnel (queue saturation)
+   * never updates its HOT record, so without the cap one-off keys would pin their records forever.
+   * Evicting a live predecessor only costs a redundant send; the App's version guard absorbs it.
+   */
+  @Test
+  void acceptedRecordsAreBounded() throws Exception {
     var field = WorkerBroadcaster.class.getDeclaredField("accepted");
     field.setAccessible(true);
     @SuppressWarnings("unchecked")
     Cache<String, ?> cache = (Cache<String, ?>) field.get(broadcaster);
 
-    assertThat(cache.policy().eviction()).as("no maximumSize").isEmpty();
+    assertThat(cache.policy().eviction()).as("maximumSize").isPresent();
+    assertThat(cache.policy().eviction().orElseThrow().getMaximum()).isEqualTo(65_536L);
   }
 
   /** The accepted-version probe answers the same question the funnel's supersede check does. */
@@ -449,7 +488,15 @@ class WorkerBroadcasterTest {
   /** The token-starved head's committed elision advances the same version watermark as the send path. */
   @Test
   void committedElidedCoolAdvancesTheWatermark() {
+    // The 100 ms debounce starts inside send(), so everything between it and classify() must be
+    // warm: the first Mockito invocation and the first AssertJ assertion can each take long enough
+    // to expire the window on a cold test JVM.
+    assertThat(0).isZero();
+    broadcaster.send(ZetaDecision.cool("warmup", 1L), Long.MAX_VALUE);
+    clearInvocations(rabbitTemplate);
+
     assertThat(broadcaster.send(ZetaDecision.cool("k", 4L), Long.MAX_VALUE)).isEqualTo(WorkerBroadcaster.Delivery.SENT);
+    assertThat(broadcaster.acceptedVersion("k")).isEqualTo(4L);
 
     ZetaDecision cool = ZetaDecision.cool("k", 5L);
     WorkerBroadcaster.Verdict verdict = broadcaster.classify(cool, Long.MAX_VALUE);

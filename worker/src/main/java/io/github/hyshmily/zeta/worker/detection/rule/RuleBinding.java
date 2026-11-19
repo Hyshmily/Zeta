@@ -132,20 +132,23 @@ public final class RuleBinding {
  * The counters of one rule id.
  *
  * <p>
- * {@code matches}, {@code promotions} and {@code cools} are Micrometer
- * counters: the registry
- * holds each meter strongly, so a scrape always finds the live value and no
- * extra state object has
- * to be kept reachable. {@code aborts} is endpoint-only and stays a
- * {@link LongAdder}.
+ * Every total is a {@link LongAdder} and is the value the endpoint and the
+ * startup warning read: Micrometer's {@code Counter.count()} is not a cumulative
+ * total on a step registry (OTLP, Datadog, StatsD, ...), and a meter-less
+ * registry returns zero forever. The same increments also feed the three
+ * Micrometer meters so a scrape still sees the series; the meters are a
+ * reporting side channel, never the source of truth.
  */
 final class RuleCounters {
 
+  private final LongAdder matches = new LongAdder();
+  private final LongAdder promotions = new LongAdder();
   private final LongAdder aborts = new LongAdder();
+  private final LongAdder cools = new LongAdder();
 
-  private Counter matches;
-  private Counter promotions;
-  private Counter cools;
+  private Counter matchMeter;
+  private Counter promotionMeter;
+  private Counter coolMeter;
 
   /**
    * Registers the three counters for this rule id. Called once, before the
@@ -155,19 +158,19 @@ final class RuleCounters {
    * @param ruleId  the rule id that tags the series
    */
   void bind(WorkerDetectionMetrics metrics, String ruleId) {
-    this.matches = metrics.ruleMatches(ruleId);
-    this.promotions = metrics.rulePromotions(ruleId);
-    this.cools = metrics.ruleCools(ruleId);
+    this.matchMeter = metrics.ruleMatches(ruleId);
+    this.promotionMeter = metrics.rulePromotions(ruleId);
+    this.coolMeter = metrics.ruleCools(ruleId);
   }
 
   /** @return the cumulative eligible-report count */
   long matches() {
-    return (long) matches.count();
+    return matches.sum();
   }
 
   /** @return the cumulative promotion count */
   long promotions() {
-    return (long) promotions.count();
+    return promotions.sum();
   }
 
   /** @return the cumulative aborted-promotion count */
@@ -177,17 +180,23 @@ final class RuleCounters {
 
   /** @return the cumulative cool-out count */
   long cools() {
-    return (long) cools.count();
+    return cools.sum();
   }
 
   /** Records one eligible report. */
   void match() {
     matches.increment();
+    if (matchMeter != null) {
+      matchMeter.increment();
+    }
   }
 
   /** Records one promotion. */
   void promotion() {
     promotions.increment();
+    if (promotionMeter != null) {
+      promotionMeter.increment();
+    }
   }
 
   /** Records one aborted promotion. */
@@ -198,26 +207,28 @@ final class RuleCounters {
   /** Records one cool-out. */
   void cool() {
     cools.increment();
+    if (coolMeter != null) {
+      coolMeter.increment();
+    }
   }
 
   /**
-   * Removes this id's three meters. A late update still lands on the field the
-   * meter reads, but the
-   * removed meter is never scraped again; removal is idempotent, and a partially
-   * bound counter
-   * skips the handles it never received.
+   * Removes this id's three meters. A late update still lands on the adder and
+   * the meter handle, but the removed meter is never scraped again; removal is
+   * idempotent, and a partially bound counter skips the handles it never
+   * received.
    *
    * @param metrics the detection meters that own the three registrations
    */
   void retire(WorkerDetectionMetrics metrics) {
-    if (matches != null) {
-      metrics.remove(matches);
+    if (matchMeter != null) {
+      metrics.remove(matchMeter);
     }
-    if (promotions != null) {
-      metrics.remove(promotions);
+    if (promotionMeter != null) {
+      metrics.remove(promotionMeter);
     }
-    if (cools != null) {
-      metrics.remove(cools);
+    if (coolMeter != null) {
+      metrics.remove(coolMeter);
     }
   }
 }

@@ -301,6 +301,7 @@ public class WorkerProperties {
      * are single-owner, so a key space split across wheels is what parallelizes the checks.
      */
     @Min(1)
+    @Max(128)
     private int threads = 2;
   }
 

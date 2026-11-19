@@ -33,7 +33,7 @@ import org.springframework.amqp.rabbit.annotation.RabbitListener;
  * well-formed {@code (key, count)} pair is handed to {@link DetectionPipeline}, which owns the
  * window, the rules and the HOT set.
  *
- * <p>Malformed entries — a null key, a null count, a non-positive count — are dropped before the
+ * <p>Malformed entries — a null or blank key, a null count, a non-positive count — are dropped before the
  * pipeline: a negative count would push negative mass into the sliding window and corrupt every
  * threshold downstream. Every report is fenced by incarnation: a durable queue or a bound App
  * dispatcher can outlive a Worker restart, and replaying pre-restart windows as current traffic
@@ -154,7 +154,7 @@ public class ReportConsumer {
       try {
         String key = entry.getKey();
         Long count = entry.getValue();
-        if (key == null || count == null || count <= 0) {
+        if (key == null || key.isBlank() || count == null || count <= 0) {
           malformed++;
           continue;
         }

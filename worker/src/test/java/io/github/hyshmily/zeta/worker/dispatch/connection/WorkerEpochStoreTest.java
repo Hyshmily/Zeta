@@ -16,6 +16,7 @@
 package io.github.hyshmily.zeta.worker.dispatch.connection;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
@@ -49,6 +50,14 @@ class WorkerEpochStoreTest {
     Path path = WorkerEpochStore.defaultEpochFile(null);
 
     assertThat(path.getFileName().toString()).isEqualTo("zeta-epoch-unknown");
+  }
+
+  /** A filesystem root has no parent directory to write or rename into: fail the configuration. */
+  @Test
+  void rejectsAnEpochFileWithoutAParentDirectory() {
+    assertThatThrownBy(() -> WorkerEpochStore.initEpoch("worker", Path.of("/")))
+      .isInstanceOf(IllegalArgumentException.class)
+      .hasMessageContaining("parent directory");
   }
 
   @Test

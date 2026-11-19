@@ -58,13 +58,6 @@ import org.jspecify.annotations.Nullable;
  */
 public class HotKeyRegistry {
 
-  /**
-   * How far past its deadline a check may be before the repair sweep re-links it. A check that
-   * reaches its deadline is normally taken by the owning wheel thread within the hand-off latency;
-   * re-linking then would move a merely late node and wake its owner for no reason.
-   */
-  private static final long REPAIR_GRACE_MS = 1_000L;
-
   /** What one due check decided; the caller owns the mutation and the metrics. */
   private enum KeyStateTransition {
     /** The rule cools on its fixed lifetime. */
@@ -366,24 +359,23 @@ public class HotKeyRegistry {
   }
 
   /**
-   * Re-links every entry whose registered check is missing or overdue by more than
-   * {@link #REPAIR_GRACE_MS}.
+   * Re-links every entry whose registered check is missing.
    *
    * <p>
-   * An unscheduled node has no wheel owner, so the scan re-links it on the first sweep; a node still
-   * linked in a wheel is only late, and moving it would wake its owner for nothing. A detached node
-   * is already in the owner's batch and is left alone. The scan is only a hint: the stripe lock
-   * re-checks the predicate, so a check the owner handled between scan and lock is left alone. The
-   * wheel stays the only evaluator; a dead wheel owner cannot be replaced here, and the App's hot
-   * hard TTL bounds the keys it held.
+   * An unscheduled node has no wheel owner, so the scan re-links it on the first sweep. A node still
+   * linked in a wheel is only late — moving it would take every stripe and wheel lock again while
+   * the wheel thread is already catching up, amplifying exactly the pause that made it late. A
+   * detached node is already in the owner's batch and is left alone. The scan is only a hint: the
+   * stripe lock re-checks the predicate, so a check the owner handled between scan and lock is left
+   * alone. The wheel stays the only evaluator; a dead wheel owner cannot be replaced here, and the
+   * App's hot hard TTL bounds the keys it held.
    *
-   * @return the number of overdue checks the scan re-linked
+   * @return the number of lost checks the scan re-linked
    */
   public int repair() {
-    long now = TimeSource.monotonicMillis();
     int repaired = 0;
     for (HE candidate : hotKeys.values()) {
-      if (!needsRepair(candidate, now)) {
+      if (!needsRepair(candidate)) {
         continue;
       }
 
@@ -391,7 +383,7 @@ public class HotKeyRegistry {
       ReentrantLock lock = stripe(hash);
       lock.lock();
       try {
-        if (candidate.retired() || !needsRepair(candidate, now)) {
+        if (candidate.retired() || !needsRepair(candidate)) {
           continue;
         }
         // The wheel is the only evaluator: re-link the lost node and wake its owner. A node the
@@ -403,25 +395,22 @@ public class HotKeyRegistry {
         lock.unlock();
       }
     }
+    // A late wheel may have missed its own wake while it was busy; one signal per sweep bounds
+    // that latency without re-linking a single still-owned node.
+    wheels.signalAll();
     return repaired;
   }
 
   /**
-   * Whether the entry's check is missing or overdue past the repair grace. An unscheduled entry has
-   * no owner and is due immediately; a node linked in a wheel is late, not lost, until the grace
-   * elapses. The deadline comparison subtracts from the clock so a saturated far-future deadline
-   * stays future instead of wrapping negative.
+   * Whether the entry's check is lost. Only {@link TimerWheel#UNSCHEDULED} means no owner: a node
+   * linked in a bucket or detached into the owner's batch is still the wheel's responsibility.
    *
    * @param entry the candidate entry
-   * @param now   the sweep's monotonic sample
    * @return {@code true} when the scan should re-link the entry
    */
-  private static boolean needsRepair(HE entry, long now) {
-    int wheelState = entry.wheelState;
-    if (wheelState == TimerWheel.DETACHED) {
-      return false;
-    }
-    return wheelState == TimerWheel.UNSCHEDULED || entry.nextCheckAt <= now - REPAIR_GRACE_MS;
+  @SuppressWarnings("all")
+  private static boolean needsRepair(HE entry) {
+    return entry.wheelState == TimerWheel.UNSCHEDULED;
   }
 
   /** @return the number of keys currently holding a seat */

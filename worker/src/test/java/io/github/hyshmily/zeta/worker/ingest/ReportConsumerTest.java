@@ -102,9 +102,11 @@ class ReportConsumerTest {
   }
 
   @Test
-  void dropsNullAndNonPositiveEntriesBeforeThePipeline() {
+  void dropsNullBlankAndNonPositiveEntriesBeforeThePipeline() {
     Map<String, Long> counts = new HashMap<>();
     counts.put("ok", 3L);
+    counts.put("", 1L);
+    counts.put("   ", 1L);
     counts.put("zero", 0L);
     counts.put("negative", -1L);
     counts.put("null", null);
@@ -112,6 +114,8 @@ class ReportConsumerTest {
     consumer(0).onReport(message(EPOCH, counts));
 
     verify(pipeline).onReport(eq("ok"), eq(3L), anyLong(), anyLong());
+    verify(pipeline, never()).onReport(eq(""), eq(1L), anyLong(), anyLong());
+    verify(pipeline, never()).onReport(eq("   "), eq(1L), anyLong(), anyLong());
     verify(pipeline, never()).onReport(eq("zero"), eq(0L), anyLong(), anyLong());
     verify(pipeline, never()).onReport(eq("negative"), eq(-1L), anyLong(), anyLong());
     verify(pipeline, never()).onReport(eq("null"), eq(0L), anyLong(), anyLong());
