@@ -30,10 +30,10 @@ import org.jspecify.annotations.Nullable;
  * only for the effective winner; a covered PUT/REFRESH/INVALIDATE is reported to the hook as
  * {@link SyncSkipReason#COVERED_BY_NEWER_EVENT} without reaching the policy. The winner is
  * then admitted by {@link #admit}; an admitted value is resolved (PUT decode or REFRESH
- * load) and passed to {@link #onValueResolved}. A value that cannot be resolved never
+ * load) and passed to {@link #settle}. A value that cannot be resolved never
  * reaches the policy; the framework reports the matching skip and applies its versioned
  * local invalidation fallback. A resolution that raced a newer resident or an invalidation
- * is settled as a skip before {@code onValueResolved} is called.
+ * is settled as a skip before {@code settle} is called.
  *
  * <p>A policy runs on the cache-sync ordered dispatcher, never on the AMQP consumer
  * thread. The {@link EntryView} is a read-only snapshot; the framework re-checks every
@@ -62,7 +62,8 @@ public interface SyncPolicy {
   }
 
   /**
-   * Decide what to do after a PUT payload decoded or a REFRESH loader resolved a value.
+   * Settle the value a PUT payload decoded or a REFRESH loader resolved: apply it, invalidate
+   * locally, or skip.
    *
    * <p>The framework re-checks the loader's {@code isCacheable} on an {@link
    * SyncValueAction.Apply} value, so a policy cannot bypass admission. The event's version
@@ -74,7 +75,7 @@ public interface SyncPolicy {
    *                      {@code null}
    * @return the value action; never {@code null}
    */
-  default SyncValueAction onValueResolved(SyncEvent event, Object resolvedValue, @Nullable EntryView current) {
+  default SyncValueAction settle(SyncEvent event, Object resolvedValue, @Nullable EntryView current) {
     return new SyncValueAction.Apply(resolvedValue);
   }
 }

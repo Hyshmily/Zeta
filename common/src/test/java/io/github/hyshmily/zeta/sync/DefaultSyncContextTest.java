@@ -607,7 +607,7 @@ class DefaultSyncContextTest {
     context = newContext(k -> "refreshed", List.of(hook));
     SyncPolicy rejecting = new SyncPolicy() {
       @Override
-      public SyncValueAction onValueResolved(SyncEvent event, Object resolvedValue, EntryView current) {
+      public SyncValueAction settle(SyncEvent event, Object resolvedValue, EntryView current) {
         return SyncValueAction.SKIP;
       }
     };
@@ -645,13 +645,13 @@ class DefaultSyncContextTest {
 
   /** A thrown policy failure still runs the covered-invalidate fallback exactly once. */
   @Test
-  void onValueResolvedFailureSettlesAsPolicyFailedAndAppliesTheCoveredInvalidate() {
+  void throwingSettleSettlesAsPolicyFailedAndAppliesTheCoveredInvalidate() {
     cache.put("key1", entry(1, KeyState.NORMAL));
     SyncHook hook = mock(SyncHook.class);
     context = newContext(k -> "refreshed", List.of(hook));
     SyncPolicy broken = new SyncPolicy() {
       @Override
-      public SyncValueAction onValueResolved(SyncEvent event, Object resolvedValue, EntryView current) {
+      public SyncValueAction settle(SyncEvent event, Object resolvedValue, EntryView current) {
         throw new IllegalStateException("policy down");
       }
     };

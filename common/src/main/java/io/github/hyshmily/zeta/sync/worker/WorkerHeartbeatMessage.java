@@ -63,6 +63,10 @@ public record WorkerHeartbeatMessage(
 
   public WorkerHeartbeatMessage {
     workerId = Objects.requireNonNull(workerId, "workerId must not be null").trim();
+    if (workerId.isBlank()) {
+      throw new IllegalArgumentException("workerId must not be blank");
+    }
+    appName = appName == null || appName.isBlank() ? null : appName;
   }
 
   /**

@@ -15,6 +15,8 @@
  */
 package io.github.hyshmily.zeta.sync.local;
 
+import static io.github.hyshmily.zeta.constants.ZetaConstants.Amqp.*;
+
 import com.rabbitmq.client.Channel;
 import io.github.hyshmily.zeta.sync.dispatcher.KeyDispatcher;
 import io.github.hyshmily.zeta.sync.worker.WorkerListener;
@@ -25,18 +27,15 @@ import io.github.hyshmily.zeta.util.amqp.AmqpMessageReader;
 import io.github.hyshmily.zeta.util.amqp.AmqpMessageReader.AppIsolationFilter;
 import io.github.hyshmily.zeta.util.clock.StampClock;
 import jakarta.annotation.PreDestroy;
-import lombok.extern.slf4j.Slf4j;
-import org.jspecify.annotations.Nullable;
-import org.springframework.amqp.core.Message;
-import org.springframework.amqp.core.MessageProperties;
-
 import java.io.IOException;
 import java.util.List;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.LongAdder;
-
-import static io.github.hyshmily.zeta.constants.ZetaConstants.Amqp.*;
+import lombok.extern.slf4j.Slf4j;
+import org.jspecify.annotations.Nullable;
+import org.springframework.amqp.core.Message;
+import org.springframework.amqp.core.MessageProperties;
 
 /**
  * Listens for cache synchronization messages (INVALIDATE / REFRESH / PUT and the
@@ -101,7 +100,7 @@ public class CacheSyncListener {
   /**
    * Cumulative messages the ordered dispatcher refused (per-key queue full, global budget
    * exhausted, or the listener closing). Each is applied by the no-hook rejection fallback;
-   * a growing add signals dispatcher saturation.
+   * a growing count signals dispatcher saturation.
    */
   private final LongAdder syncDispatchRejections = new LongAdder();
 
@@ -223,7 +222,7 @@ public class CacheSyncListener {
    *
    * @return the last foreign appName, or {@code null}
    */
-  public String lastForeignApp() {
+  public @Nullable String lastForeignApp() {
     return isolation.lastForeignApp();
   }
 

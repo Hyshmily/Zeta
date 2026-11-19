@@ -169,6 +169,18 @@ class WorkerHeartbeatMessageTest {
   }
 
   @Test
+  void constructor_rejectsABlankWorkerId() {
+    assertThatThrownBy(() -> new WorkerHeartbeatMessage(0L, "   ", 0L, false, null))
+      .isInstanceOf(IllegalArgumentException.class)
+      .hasMessageContaining("workerId");
+  }
+
+  @Test
+  void constructor_normalizesABlankAppNameToNull() {
+    assertThat(new WorkerHeartbeatMessage(0L, "w-1", 0L, false, "   ").appName()).isNull();
+  }
+
+  @Test
   void typeConstant_shouldBeWorkHb() {
     assertThat(WorkerHeartbeatMessage.TYPE).isEqualTo("WORKER_HB");
   }

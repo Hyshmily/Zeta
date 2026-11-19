@@ -33,6 +33,7 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 import lombok.extern.slf4j.Slf4j;
 import org.jspecify.annotations.Nullable;
 import org.springframework.amqp.core.Message;
@@ -111,6 +112,8 @@ public record SyncMessage(long id, String cacheKey, SyncType type, long version,
   private static final ObjectMapper BATCH_MAPPER = new ObjectMapper();
 
   public SyncMessage {
+    Objects.requireNonNull(cacheKey, "cacheKey must not be null");
+    Objects.requireNonNull(type, "type must not be null");
     if (type == SyncType.INVALIDATE_BATCH) {
       throw new IllegalArgumentException(
         "INVALIDATE_BATCH is a wire frame; decode it with SyncMessage.parseBatch(Message)"
@@ -298,7 +301,7 @@ public record SyncMessage(long id, String cacheKey, SyncType type, long version,
    * @return the decoded invalidations and their maximum version, or {@code null}
    *         when the body is unusable
    */
-  private static ParsedBatch parseBatchBody(byte[] body, long id) {
+  private static @Nullable ParsedBatch parseBatchBody(byte[] body, long id) {
     try (JsonParser parser = BATCH_MAPPER.getFactory().createParser(body)) {
       if (parser.nextToken() != JsonToken.START_ARRAY) {
         return null;

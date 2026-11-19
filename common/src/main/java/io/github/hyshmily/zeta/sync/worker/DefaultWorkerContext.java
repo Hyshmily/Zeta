@@ -213,6 +213,25 @@ public class DefaultWorkerContext implements WorkerContext, WorkerControl {
 
     String key = decision.cacheKey();
     HotValue candidate = ((HotAction.Promote) action).value();
+    if (candidate.source() == HotValue.Source.POLICY_SUPPLIED) {
+      // A policy-supplied data version is adopted by this node, so it must be mergeable into the
+      // local stamp floor: otherwise every later local write allocates a smaller stamp and loses
+      // the version guard. The loader admission is re-checked for the same reason SyncPolicy
+      // re-checks it — a replacement value never bypasses the deployment's own admission rule.
+      if (!admitsValue(key, candidate.value())) {
+        fireOnHotSkipped(decision, HotSkipReason.VALUE_DECLINED_BY_LOADER);
+        return;
+      }
+      if (!stampClock.observe(candidate.dataVersion())) {
+        log.warn(
+          "settleHot: refusing policy-supplied dataVersion {} (outside the local clock's merge range): key={}",
+          candidate.dataVersion(),
+          key
+        );
+        fireOnHotSkipped(decision, HotSkipReason.VERSION_UNORDERABLE);
+        return;
+      }
+    }
     long hotHardTtl = ttlPolicy.effectiveHotHardTtlMs();
     long hotSoftTtl = ttlPolicy.effectiveHotSoftTtlMs();
     DecisionStamp stamp = decision.stamp();
@@ -300,6 +319,7 @@ public class DefaultWorkerContext implements WorkerContext, WorkerControl {
    *
    * @return the created entry, or {@code null} when the promotion was refused
    */
+  @Nullable
   private CacheEntry createHot(String key, DecisionStamp stamp, HotValue candidate, long hotHardTtl, long hotSoftTtl) {
     if (entryLifecycle.staleAgainstInvalidation(key, candidate.dataVersion())) {
       log.debug("settleHot: promotion refused, key was invalidated during the load: {}", key);
@@ -318,6 +338,34 @@ public class DefaultWorkerContext implements WorkerContext, WorkerControl {
       )
       .keyState(KeyState.HOT)
       .build();
+  }
+
+  @Override
+  public @Nullable CoolSkipReason preCheckCool(WorkerDecision decision) {
+    requireType(decision, WorkerType.COOL);
+    CacheEntry snapshot = cache.asMap().get(decision.cacheKey());
+    return snapshot == null ? CoolSkipReason.NOT_FOUND_OR_EXPIRED : coolSkipReason(snapshot, decision, true);
+  }
+
+  /**
+   * The cluster loader's admission check for a policy-supplied value. The loader SPI is treated as
+   * fallible: an exception is a refusal, so the decision still takes one terminal skip hook instead
+   * of escaping the applier.
+   *
+   * @param key   the affected key (for the WARN line)
+   * @param value the replacement value
+   * @return {@code true} when no loader is configured or the loader admits the value
+   */
+  private boolean admitsValue(String key, Object value) {
+    if (clusterLoader == null) {
+      return true;
+    }
+    try {
+      return clusterLoader.isCacheable(value);
+    } catch (Exception e) {
+      log.warn("ClusterLoader.isCacheable failed for key={}, refusing the policy-supplied value", key, e);
+      return false;
+    }
   }
 
   @Override
@@ -345,7 +393,9 @@ public class DefaultWorkerContext implements WorkerContext, WorkerControl {
     }
 
     CacheEntry snapshot = cache.asMap().get(first.cacheKey());
-    DecisionStamp effective = snapshot != null ? snapshot.decision() : null;
+    // A logically expired resident is not a decision floor: the single-message path reports
+    // NOT_FOUND_OR_EXPIRED before VERSION_STALE, so the folded path must start from the same state.
+    DecisionStamp effective = snapshot != null && !ttlPolicy.isLogicallyExpired(snapshot) ? snapshot.decision() : null;
     WorkerDecision winner = null;
     for (WorkerDecision candidate : batch) {
       if (VersionGuard.shouldSkipForWorker(effective, candidate.stamp())) {

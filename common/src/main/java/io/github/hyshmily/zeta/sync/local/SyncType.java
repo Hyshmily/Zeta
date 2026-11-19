@@ -31,8 +31,8 @@ import org.jspecify.annotations.Nullable;
  *       spread across peers.</li>
  * </ul>
  *
- * <p>The enum name is the wire value; {@link #parse(String)} is the one place the header
- * string becomes an operation.
+ * <p>The enum name is the wire value; {@link #parse(Object)} is the one place the header
+ * value becomes an operation.
  */
 public enum SyncType {
   INVALIDATE(0),

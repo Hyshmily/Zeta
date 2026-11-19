@@ -29,6 +29,12 @@ public enum HotSkipReason {
    */
   NO_PROMOTABLE_VALUE,
 
+  /** A custom policy supplied a data version the local stamp clock cannot merge. */
+  VERSION_UNORDERABLE,
+
+  /** The loader's {@code isCacheable} declined the policy-supplied value. */
+  VALUE_DECLINED_BY_LOADER,
+
   /** A custom policy refused the promotion. */
   POLICY_REJECTED,
 

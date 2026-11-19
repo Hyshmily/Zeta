@@ -24,15 +24,13 @@ import io.github.hyshmily.zeta.cache.cachesupport.loader.singleflight.SingleFlig
 import io.github.hyshmily.zeta.cache.cachesupport.raw.CacheEntry;
 import io.github.hyshmily.zeta.cache.cachesupport.raw.EntryMutations;
 import io.github.hyshmily.zeta.cache.cachesupport.raw.EntryMutations.Applied;
+import io.github.hyshmily.zeta.exception.ZetaExceptionHandler;
 import io.github.hyshmily.zeta.sync.DecisionPlaneSupport;
 import io.github.hyshmily.zeta.sync.DecisionPlaneSupport.LoadResult;
 import io.github.hyshmily.zeta.util.Internal;
 import io.github.hyshmily.zeta.util.TimeSource;
 import io.github.hyshmily.zeta.util.clock.StampClock;
 import io.github.hyshmily.zeta.util.version.VersionGuard;
-import lombok.extern.slf4j.Slf4j;
-import org.jspecify.annotations.Nullable;
-
 import java.util.*;
 import java.util.concurrent.Executor;
 import java.util.concurrent.RejectedExecutionException;
@@ -40,6 +38,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
+import lombok.extern.slf4j.Slf4j;
+import org.jspecify.annotations.Nullable;
 
 /**
  * Applies one granted sync batch through the {@link SyncPolicy} decision points and the
@@ -346,8 +346,8 @@ public class DefaultSyncContext {
 
     SyncValueAction action = callPolicy(
       event,
-      "onValueResolved",
-      () -> policy.onValueResolved(event, value, resolvedView),
+      "settle",
+      () -> policy.settle(event, value, resolvedView),
       () -> applyCoveredInvalidateFallback(batch, key)
     );
     if (action == null) {
@@ -432,9 +432,13 @@ public class DefaultSyncContext {
    * @param policy the event policy
    */
   private void applyClearBatch(Batch.Clear batch, SyncPolicy policy) {
+    // Resolve the effective stamps once, in ascending peer order, before any policy call: a
+    // policy and a hook that correlate events by version must see the same replacement for an
+    // over-drift peer stamp.
+    Map<Long, Long> effective = resolveClearVersions(batch.messages());
     List<SyncMessage> accepted = new ArrayList<>(batch.messages().size());
     for (SyncMessage message : batch.messages()) {
-      SyncEvent event = SyncEvent.from(message);
+      SyncEvent event = SyncEvent.from(message, effective.get(message.version()));
       SyncAdmission admission = callPolicy(event, "admit", () -> policy.admit(event, null), null);
       if (admission == null) {
         continue;
@@ -450,7 +454,7 @@ public class DefaultSyncContext {
       return;
     }
 
-    ClearMarks marks = collectMarks(accepted);
+    ClearMarks marks = collectMarks(accepted, effective);
     if (marks.isEmpty()) {
       return;
     }
@@ -579,7 +583,15 @@ public class DefaultSyncContext {
       }
       long hardTtl = resident != null ? resident.getHardTtlMs() : ttlPolicy.effectiveHardTtlMs();
       long softTtl = resident != null ? resident.getSoftTtlMs() : ttlPolicy.effectiveSoftTtlMs();
-      return entryLifecycle.writeValue(resident, value, version, hardTtl, softTtl, false);
+      return entryLifecycle.writeValue(
+        resident,
+        value,
+        version,
+        hardTtl,
+        softTtl,
+        false,
+        TimeSource.currentTimeMillis()
+      );
     });
     if (applied.changed()) {
       invalidateDedupEntry(key);
@@ -636,44 +648,6 @@ public class DefaultSyncContext {
   private record EvictOutcome(boolean stale) {}
 
   /**
-   * Reduces one granted clear batch to its effective watermarks. A prefix clear at or below
-   * the table-wide stamp is dropped: the table-wide stamp already covers every key it could
-   * target.
-   *
-   * <p>Marks are resolved in ascending peer order so replacement stamps preserve peer order;
-   * otherwise an older full clear could outrank a newer prefix clear.
-   */
-  private ClearMarks collectMarks(List<SyncMessage> batch) {
-    long rawFull = 0L;
-    Map<String, Long> rawPrefixes = new HashMap<>(2);
-    for (SyncMessage message : batch) {
-      switch (message.type()) {
-        case INVALIDATE_ALL -> rawFull = Math.max(rawFull, message.version());
-        case INVALIDATE_PREFIX -> rawPrefixes.merge(message.cacheKey(), message.version(), Math::max);
-        default -> {
-        }
-      }
-    }
-
-    TreeSet<Long> ordered = new TreeSet<>(rawPrefixes.values());
-    if (rawFull > 0L) {
-      ordered.add(rawFull);
-    }
-    Map<Long, Long> effective = new HashMap<>(ordered.size());
-    for (Long stamp : ordered) {
-      effective.put(stamp, resolveEffectiveVersion(stamp));
-    }
-
-    long fullStamp = rawFull > 0L ? effective.get(rawFull) : 0L;
-    Map<String, Long> prefixStamps = new HashMap<>(rawPrefixes.size());
-    rawPrefixes.forEach((prefix, stamp) -> prefixStamps.put(prefix, effective.get(stamp)));
-    if (fullStamp > 0L) {
-      prefixStamps.values().removeIf(prefixStamp -> prefixStamp <= fullStamp);
-    }
-    return new ClearMarks(fullStamp, Map.copyOf(prefixStamps));
-  }
-
-  /**
    * The version a peer mutation is persisted at: the peer stamp when the anti-drift guard
    * accepts it, otherwise a fresh local stamp allocated at apply time (design decisions:
    * version stamps).
@@ -718,9 +692,16 @@ public class DefaultSyncContext {
         if (marks == null) {
           return;
         }
-        int removed = sweep(marks.fullStamp(), marks.prefixStamps());
-        if (removed > 0) {
-          logSweep("swept", marks, removed);
+        try {
+          int removed = sweep(marks.fullStamp(), marks.prefixStamps());
+          if (removed > 0) {
+            logSweep("swept", marks, removed);
+          }
+        } catch (RuntimeException e) {
+          // The watermarks are recorded before the walk, so a failed sweep cannot resurrect a
+          // pre-clear fill; the remaining entries converge through their hard TTL. Report the
+          // failure and drain the next marks instead of losing the executor thread's cycle.
+          ZetaExceptionHandler.handleException("clear sweep failed", e);
         }
       }
     } finally {
@@ -745,8 +726,72 @@ public class DefaultSyncContext {
   }
 
   /**
-   * The effective watermarks of one clear batch: the table-wide stamp plus the scoped
-   * prefix stamps that outrank it. Immutable; merged by taking the highest stamp per scope.
+   * The effective watermarks of one clear batch, resolving each peer stamp exactly once.
+   *
+   * @param batch the clear messages
+   * @return the marks for the batch
+   */
+  private ClearMarks collectMarks(List<SyncMessage> batch) {
+    return collectMarks(batch, resolveClearVersions(batch));
+  }
+
+  /**
+   * The effective watermarks of one clear batch from already-resolved stamps: the table-wide
+   * stamp plus the scoped prefix stamps that outrank it. Immutable; merged by taking the
+   * highest stamp per scope.
+   *
+   * @param batch     the clear messages
+   * @param effective raw peer stamp → effective local stamp, resolved by
+   *                  {@link #resolveClearVersions(List)}
+   * @return the marks for the batch
+   */
+  private ClearMarks collectMarks(List<SyncMessage> batch, Map<Long, Long> effective) {
+    long rawFull = 0L;
+    Map<String, Long> rawPrefixes = new HashMap<>(2);
+    for (SyncMessage message : batch) {
+      switch (message.type()) {
+        case INVALIDATE_ALL -> rawFull = Math.max(rawFull, message.version());
+        case INVALIDATE_PREFIX -> rawPrefixes.merge(message.cacheKey(), message.version(), Math::max);
+        default -> {
+        }
+      }
+    }
+
+    long fullStamp = rawFull > 0L ? effective.get(rawFull) : 0L;
+    Map<String, Long> prefixStamps = new HashMap<>(rawPrefixes.size());
+    rawPrefixes.forEach((prefix, stamp) -> prefixStamps.put(prefix, effective.get(stamp)));
+    if (fullStamp > 0L) {
+      prefixStamps.values().removeIf(prefixStamp -> prefixStamp <= fullStamp);
+    }
+    return new ClearMarks(fullStamp, Map.copyOf(prefixStamps));
+  }
+
+  /**
+   * Resolve every distinct clear stamp in ascending peer order, so replacement stamps preserve
+   * peer order: an older full clear must not outrank a newer prefix clear after both have been
+   * re-stamped. Resolution happens once per raw stamp; a skipped clear may burn a local stamp
+   * (a harmless watermark hole) but can never make the policy and the hook disagree.
+   *
+   * @param batch the clear messages
+   * @return raw peer stamp → effective local stamp
+   */
+  private Map<Long, Long> resolveClearVersions(List<SyncMessage> batch) {
+    TreeSet<Long> ordered = new TreeSet<>();
+    for (SyncMessage message : batch) {
+      if (message.type().isClear()) {
+        ordered.add(message.version());
+      }
+    }
+    Map<Long, Long> effective = new HashMap<>(ordered.size());
+    for (Long stamp : ordered) {
+      effective.put(stamp, resolveEffectiveVersion(stamp));
+    }
+    return effective;
+  }
+
+  /**
+   * The effective watermarks of one clear batch: the table-wide stamp plus the scoped prefix
+   * stamps that outrank it. Immutable; merged by taking the highest stamp per scope.
    */
   private record ClearMarks(long fullStamp, Map<String, Long> prefixStamps) {
     boolean isEmpty() {
@@ -818,6 +863,7 @@ public class DefaultSyncContext {
       }
       // No per-key dedup kill here (design decisions: invalidation): the clear family already
       // marked every pre-clear flight above, and the watermark refuses any pre-clear fill.
+      didRemove[0] = false;
       EntryMutations.mutate(cache, key, existing -> {
         if (
           existing == null || (liveResident(existing) != null && VersionGuard.shouldSkipForRefresh(existing, stamp))

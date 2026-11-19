@@ -31,6 +31,7 @@ import java.util.List;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.atomic.LongAdder;
 import lombok.extern.slf4j.Slf4j;
+import org.jspecify.annotations.Nullable;
 import org.springframework.amqp.core.Message;
 import org.springframework.amqp.core.MessageProperties;
 
@@ -58,7 +59,7 @@ public class WorkerListener {
   /**
    * Cumulative COOL decisions the per-key ordered dispatcher refused (per-key
    * queue full or dispatcher closed). Each one is applied inline on the
-   * consumer thread (see {@link #onDispatchRejected}), so a growing add signals
+   * consumer thread (see {@link #onDispatchRejected}), so a growing count signals
    * dispatcher saturation — degraded ordering, not data loss.
    */
   private final LongAdder coolDispatchRejections = new LongAdder();
@@ -149,7 +150,7 @@ public class WorkerListener {
    *
    * @return the last foreign appName, or {@code null}
    */
-  public String lastForeignApp() {
+  public @Nullable String lastForeignApp() {
     return isolation.lastForeignApp();
   }
 
@@ -270,6 +271,11 @@ public class WorkerListener {
 
   private void invokeCool(WorkerDecision decision) {
     try {
+      CoolSkipReason precheck = context.preCheckCool(decision);
+      if (precheck != null) {
+        context.settleCool(decision, new CoolAction.Skip(precheck));
+        return;
+      }
       EntryView current = context.view(decision.cacheKey());
       CoolAction action;
       try {

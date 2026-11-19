@@ -181,6 +181,7 @@ class WorkerListenerTest {
     WorkerListenerProperties properties = new WorkerListenerProperties();
     properties.setJitterMs(0);
     WorkerListener batchListener = new WorkerListener(properties, scheduler, batchPolicy, context, null);
+    cache.put("key1", hotEntry());
 
     // Keep the single scheduler thread busy so both submissions land in the same key worker
     // before its first cycle grants; this makes the run deterministic instead of timing-based.
@@ -233,6 +234,7 @@ class WorkerListenerTest {
     WorkerListenerProperties properties = new WorkerListenerProperties();
     properties.setJitterMs(0);
     WorkerListener batchListener = new WorkerListener(properties, scheduler, batchPolicy, context, null);
+    cache.put("key1", hotEntry());
 
     CountDownLatch release = new CountDownLatch(1);
     scheduler.execute(() -> {
@@ -474,6 +476,27 @@ class WorkerListenerTest {
   }
 
   /**
+   * A COOL for a missing key is settled before the policy sees it: the hook reports the real
+   * {@code NOT_FOUND_OR_EXPIRED} reason, not whatever the policy would have returned.
+   */
+  @Test
+  void onMessage_cool_missingEntry_shouldSkipBeforeThePolicy() throws IOException, InterruptedException {
+    WorkerDecisionHook hook = mock(WorkerDecisionHook.class);
+    context = new DefaultWorkerContext(cache, k -> "v", entryLifecycle, stampClock, List.of(hook));
+    WorkerPolicy rejecting = mock(WorkerPolicy.class);
+    when(rejecting.cool(any(), any())).thenReturn(new CoolAction.Skip(CoolSkipReason.POLICY_REJECTED));
+    WorkerListenerProperties props = new WorkerListenerProperties();
+    props.setJitterMs(0);
+    WorkerListener rejectingListener = new WorkerListener(props, scheduler, rejecting, context, null);
+
+    rejectingListener.onMessage(channel, wireMessage("absent", WorkerType.COOL.code(), 2L));
+
+    awaitWorkerTasks();
+    verify(hook).onCoolSkipped(any(), eq(CoolSkipReason.NOT_FOUND_OR_EXPIRED));
+    verify(rejecting, never()).cool(any(), any());
+  }
+
+  /**
    * A null HOT action is a broken policy, not a promotion: the decision is reported as
    * {@code POLICY_FAILED} and no entry is created.
    */
@@ -674,6 +697,8 @@ class WorkerListenerTest {
     isolated.onMessage(channel, workerMessageWithAppName("k2", WorkerType.COOL.code(), 3L, "appB"));
     isolated.onMessage(channel, workerMessageWithAppName("k3", WorkerType.HOT.code(), 4L, "appA"));
     isolated.onMessage(channel, wireMessage("k4", WorkerType.HOT.code(), 5L));
+    // A blank header declares no application; it is not a foreign tenant.
+    isolated.onMessage(channel, workerMessageWithAppName("k5", WorkerType.HOT.code(), 6L, "   "));
     awaitWorkerTasks(sched);
 
     assertThat(isolated.foreignAppDrops()).isEqualTo(2);

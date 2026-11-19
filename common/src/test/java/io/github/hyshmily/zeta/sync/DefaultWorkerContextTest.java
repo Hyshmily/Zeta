@@ -75,6 +75,7 @@ class DefaultWorkerContextTest {
     stampClock = org.mockito.Mockito.mock(StampClock.class);
     org.mockito.Mockito.when(stampClock.nextStamp()).thenReturn(1L);
     org.mockito.Mockito.when(stampClock.nextStamps(org.mockito.ArgumentMatchers.anyInt())).thenReturn(1L);
+    org.mockito.Mockito.when(stampClock.observe(anyLong())).thenReturn(true);
     context = new DefaultWorkerContext(cache, loader, entryLifecycle, stampClock, Collections.emptyList());
   }
 
@@ -291,6 +292,28 @@ class DefaultWorkerContextTest {
     verify(hook).onCoolSkipped(eq(cool10), eq(CoolSkipReason.VERSION_STALE));
     verify(hook).onCoolSkipped(eq(cool7), eq(CoolSkipReason.VERSION_STALE));
     verify(hook, never()).afterCoolDowngrade(any(), any());
+  }
+
+  /**
+   * An expired resident is no longer a version floor. The batch reducer must report the winner as
+   * {@code NOT_FOUND_OR_EXPIRED} (the same reason the single-message path reports) instead of
+   * comparing against a decision no reader can see.
+   */
+  @Test
+  void handleCoolBatch_doesNotUseAnExpiredResidentAsTheVersionFloor() {
+    CacheEntry expired = EntryDraft.of(entry(100, KeyState.HOT))
+      .hardExpiryAt(TimeSource.currentTimeMillis() - 1L)
+      .build();
+    cache.put("key1", expired);
+    WorkerDecisionHook hook = mock(WorkerDecisionHook.class);
+    context = new DefaultWorkerContext(cache, loader, entryLifecycle, stampClock, List.of(hook));
+    WorkerDecision cool10 = wireMessage("key1", WorkerType.COOL.code(), 10L);
+    WorkerDecision cool7 = wireMessage("key1", WorkerType.COOL.code(), 7L);
+
+    handleCoolBatch(List.of(cool10, cool7));
+
+    verify(hook).onCoolSkipped(eq(cool10), eq(CoolSkipReason.NOT_FOUND_OR_EXPIRED));
+    verify(hook).onCoolSkipped(eq(cool7), eq(CoolSkipReason.VERSION_STALE));
   }
 
   /**
@@ -788,6 +811,36 @@ class DefaultWorkerContextTest {
     assertThat(created.getValue()).isEqualTo("policy-value");
     assertThat(created.getDataVersion()).isEqualTo(5L);
     assertThat(created.getKeyState()).isEqualTo(KeyState.HOT);
+  }
+
+  /**
+   * A policy-supplied version is not trusted blindly: the local stamp floor must be able to merge
+   * it, or every later local write would allocate a smaller version and lose the guard.
+   */
+  @Test
+  void aPolicySuppliedValueWithAnUnmergeableVersionIsSkipped() {
+    when(stampClock.observe(5L)).thenReturn(false);
+    WorkerDecisionHook hook = mock(WorkerDecisionHook.class);
+    context = new DefaultWorkerContext(cache, loader, entryLifecycle, stampClock, List.of(hook));
+    WorkerDecision hot = wireMessage("k", WorkerType.HOT.code(), 1L);
+
+    context.settleHot(hot, new HotAction.Promote(HotValue.supplied("policy-value", 5L)));
+
+    assertThat(cache.getIfPresent("k")).isNull();
+    verify(hook).onHotSkipped(eq(hot), eq(HotSkipReason.VERSION_UNORDERABLE));
+  }
+
+  /** A policy-supplied value still respects the deployment's own loader admission rule. */
+  @Test
+  void aPolicySuppliedValueDeclinedByTheLoaderIsSkipped() {
+    WorkerDecisionHook hook = mock(WorkerDecisionHook.class);
+    context = new DefaultWorkerContext(cache, decliningLoader("rejected"), entryLifecycle, stampClock, List.of(hook));
+    WorkerDecision hot = wireMessage("k", WorkerType.HOT.code(), 1L);
+
+    context.settleHot(hot, new HotAction.Promote(HotValue.supplied("policy-value", 5L)));
+
+    assertThat(cache.getIfPresent("k")).isNull();
+    verify(hook).onHotSkipped(eq(hot), eq(HotSkipReason.VALUE_DECLINED_BY_LOADER));
   }
 
   /** A policy-supplied value replaces a live resident once the data-plane guards accept it. */

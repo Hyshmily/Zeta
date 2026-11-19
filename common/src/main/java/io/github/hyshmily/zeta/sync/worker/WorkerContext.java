@@ -54,6 +54,17 @@ interface WorkerContext {
   EntryView view(String cacheKey);
 
   /**
+   * Pre-check a COOL decision before the policy sees it: a missing/expired entry, a stale decision
+   * and a ghost COOL are decided here, so the policy is never called for an invalid event and its
+   * {@link CoolAction.Skip} cannot mask the real reason.
+   *
+   * @param decision the COOL decision to check; must not be null and must be COOL
+   * @return the skip reason, or {@code null} when the policy may decide
+   */
+  @Nullable
+  CoolSkipReason preCheckCool(WorkerDecision decision);
+
+  /**
    * Apply a COOL action atomically and report its terminal hook.
    *
    * @param decision the COOL decision being settled; must not be null and must be COOL

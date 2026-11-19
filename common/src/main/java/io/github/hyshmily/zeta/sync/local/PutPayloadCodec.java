@@ -62,15 +62,19 @@ import org.jspecify.annotations.Nullable;
  * {@code byte[]} carries its type marker and round-trips as the exact runtime class the
  * writer stored. Deserialization enforces a polymorphic whitelist — JDK value types, JDK
  * {@link Collection}/{@link Map} implementations in {@code java.util} (other packages and the
- * legacy {@link Properties} and {@link Hashtable} containers are denied),
- * {@code io.github.hyshmily.zeta.model.*} plus the configured
- * {@code zeta.sync.put-allowed-packages}; a business DTO outside it fails closed and the
- * receiver degrades to a versioned INVALIDATE.
+ * legacy {@link Properties} and {@link Hashtable} containers are denied), arrays whose
+ * component type the whitelist admits, {@code io.github.hyshmily.zeta.model.*} plus the
+ * configured {@code zeta.sync.put-allowed-packages}; a business DTO outside it fails closed
+ * and the receiver degrades to a versioned INVALIDATE.
  *
  * <p>A JDK collection implementation that the receiver cannot instantiate (an immutable
  * {@code List.of} family, a {@code Collections} view, {@code Arrays.asList}) is written under
  * the type id of a standard {@code ArrayList}/{@code HashSet}/{@code HashMap}, so it
- * round-trips without widening the receiver's allowlist.
+ * round-trips without widening the receiver's allowlist. An {@code EnumSet}/{@code EnumMap}
+ * cannot be reconstructed that way (the element type would be lost), so a root value of either
+ * degrades to REFRESH. A root value the receiver would deny — the legacy containers or a
+ * {@code Collection}/{@code Map} outside {@code java.util} — is not serialized at all:
+ * {@link #encode} returns {@code null} and the write degrades to REFRESH.
  */
 @Slf4j
 @Internal
@@ -109,6 +113,13 @@ public final class PutPayloadCodec {
    */
   public byte@Nullable [] encode(@Nullable Object value) {
     if (value == null || maxBytes <= 0) {
+      return null;
+    }
+    if (cannotCarryContainer(value)) {
+      log.debug(
+        "Put payload root {} is not a receiver-instantiable java.util container, degrading to REFRESH",
+        value.getClass().getName()
+      );
       return null;
     }
     // byte[] travels Base64-encoded (4/3× expansion), so the exact pre-encoding
@@ -194,6 +205,26 @@ public final class PutPayloadCodec {
     typing.inclusion(JsonTypeInfo.As.WRAPPER_ARRAY);
 
     return JsonMapper.builder().findAndAddModules().setDefaultTyping(typing).build();
+  }
+
+  /**
+   * Whether the receiver would deny this root container: the legacy types and any
+   * {@link Collection}/{@link Map} outside {@code java.util}. Serializing it would only spend
+   * the payload before the receiver degrades the PUT to an INVALIDATE.
+   */
+  private static boolean cannotCarryContainer(Object value) {
+    if (value instanceof Properties || value instanceof Hashtable) {
+      return true;
+    }
+    if (value instanceof EnumSet<?> || value instanceof EnumMap<?, ?>) {
+      // The runtime classes are package-private / have no no-arg constructor, and normalizing
+      // to a HashSet/HashMap would drop the enum element type.
+      return true;
+    }
+    return (
+      (value instanceof Collection<?> || value instanceof Map<?, ?>) &&
+      !"java.util".equals(value.getClass().getPackageName())
+    );
   }
 
   /**
@@ -335,13 +366,26 @@ public final class PutPayloadCodec {
     @Override
     public Validity validateSubType(MapperConfig<?> config, JavaType baseType, JavaType subType)
       throws JsonMappingException {
-      Class<?> raw = subType.getRawClass();
+      // An array's component type is the loadable class: validate it as if it were the
+      // sub-type, or allowIfSubTypeIsArray() would admit an array of any classpath type.
+      JavaType target = subType;
+      while (target.isArrayType()) {
+        JavaType content = target.getContentType();
+        if (content == null) {
+          return Validity.DENIED;
+        }
+        target = content;
+      }
+      Class<?> raw = target.getRawClass();
+      if (raw.isPrimitive() || raw == Object.class) {
+        return Validity.ALLOWED;
+      }
       if (raw == Properties.class || raw == Hashtable.class || isNonJdkContainer(raw)) {
         return Validity.DENIED;
       }
       return delegate.validateSubClassName(config, baseType, raw.getName()) == Validity.ALLOWED
         ? Validity.ALLOWED
-        : delegate.validateSubType(config, baseType, subType);
+        : delegate.validateSubType(config, baseType, target);
     }
 
     /** A Collection/Map implementation outside {@code java.util} is not a payload value type. */

@@ -26,6 +26,8 @@ import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.EnumMap;
+import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Hashtable;
@@ -139,7 +141,8 @@ class PutPayloadCodecTest {
 
   /**
    * Only {@code java.util} Collection/Map implementations are payload value types: a third-party
-   * Map must not become instantiable from a broker-writable sender.
+   * Map must not become instantiable from a broker-writable sender, and the sender degrades it to
+   * REFRESH instead of spending a payload the receiver would deny.
    */
   @Test
   void nonJdkMapImplementationsAreDenied() {
@@ -147,13 +150,12 @@ class PutPayloadCodecTest {
     ThirdPartyMap map = new ThirdPartyMap();
     map.put("k", "v");
 
-    assertThat(codec.encode(map)).isNotNull();
-    assertThat(codec.decode(codec.encode(map))).isNull();
+    assertThat(codec.encode(map)).isNull();
   }
 
   /**
    * A package prefix admits a name, not every subtype: a Map implementation inside the allowed
-   * package still fails the JDK-container rule.
+   * package still fails the JDK-container rule, so its payload is not built at all.
    */
   @Test
   void aContainerInAnAllowedPackageIsStillDenied() {
@@ -161,8 +163,31 @@ class PutPayloadCodecTest {
     AllowedContainer container = new AllowedContainer();
     container.put("k", "v");
 
-    assertThat(codec.encode(container)).isNotNull();
-    assertThat(codec.decode(codec.encode(container))).isNull();
+    assertThat(codec.encode(container)).isNull();
+  }
+
+  /** EnumSet/EnumMap cannot be reconstructed without losing the enum type: degrade at the source. */
+  @Test
+  void enumContainersDegradeToRefresh() {
+    PutPayloadCodec codec = new PutPayloadCodec(4_096, List.of());
+
+    assertThat(codec.encode(EnumSet.of(java.time.DayOfWeek.MONDAY))).isNull();
+
+    Map<java.time.DayOfWeek, String> enumMap = new EnumMap<>(java.time.DayOfWeek.class);
+    enumMap.put(java.time.DayOfWeek.MONDAY, "start");
+    assertThat(codec.encode(enumMap)).isNull();
+  }
+
+  /** An array is admitted only when its component type is: the element is the loadable class. */
+  @Test
+  void arrayComponentTypesAreValidated() {
+    PutPayloadCodec codec = new PutPayloadCodec(4_096, List.of());
+
+    Object strings = codec.decode(codec.encode(new String[] { "a", "b" }));
+    assertThat(strings).isInstanceOf(String[].class);
+    assertThat((String[]) strings).containsExactly("a", "b");
+
+    assertThat(codec.decode(codec.encode(new Properties[] { new Properties() }))).isNull();
   }
 
   /** The built-in allowlist admits {@code io.github.hyshmily.zeta.model.*}, not the whole framework. */
