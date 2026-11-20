@@ -27,6 +27,7 @@ import io.github.hyshmily.zeta.sync.local.CacheSyncPublisher;
 import io.github.hyshmily.zeta.sync.local.PutPayloadCodec;
 import io.github.hyshmily.zeta.util.NodeIdentity;
 import io.github.hyshmily.zeta.util.clock.StampClock;
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -111,6 +112,26 @@ class CacheSyncPublisherTest {
   void broadcastRefresh_withNullKey_shouldSkip() {
     publisher.broadcastRefresh(null, 1L);
     verify(rabbitTemplate, never()).send(anyString(), anyString(), any());
+  }
+
+  /** A suppressed duplicate is not a failure: the caller must not count it against the buffer. */
+  @Test
+  void aDeduplicatedSendReturnsTrue() {
+    assertThat(publisher.broadcastRefresh("key1", 1L)).isTrue();
+    assertThat(publisher.broadcastRefresh("key1", 1L)).as("dedup-suppressed send").isTrue();
+    assertThat(publisher.sendFailures()).isZero();
+  }
+
+  /** A broker failure is reported to the caller and counted by the publisher. */
+  @Test
+  void aBrokerFailureReturnsFalseAndCounts() {
+    doThrow(new RuntimeException("broker down"))
+      .when(rabbitTemplate)
+      .send(anyString(), anyString(), any(Message.class));
+
+    assertThat(publisher.broadcastRefresh("key1", 1L)).isFalse();
+    assertThat(publisher.broadcastPut("key2", 1L, "value".getBytes(StandardCharsets.UTF_8))).isFalse();
+    assertThat(publisher.sendFailures()).isEqualTo(2);
   }
 
   /**

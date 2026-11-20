@@ -103,7 +103,7 @@ public class DefaultWorkerContext implements WorkerContext, WorkerControl {
   /**
    * Creates a context with shard-ownership awareness on the COOL path.
    *
-   * <p>When {@code ring} and {@code healthView} are both non-null, {@link #cool} additionally
+   * <p>When {@code ring} and {@code healthView} are both non-null, {@link #coolApply(WorkerDecision)} additionally
    * rejects a stale cross-Worker COOL that would kill a live owner's in-force HOT while the
    * ring still routes the key to that owner (see {@link #isStaleCrossNodeCool}). Either
    * argument may be {@code null} to disable that refinement.
@@ -246,11 +246,12 @@ public class DefaultWorkerContext implements WorkerContext, WorkerControl {
         if (!candidate.canWriteValue()) {
           return existing;
         }
+        // A new entry has no per-call baseline to preserve: use the configured hot durations.
         CacheEntry created = createHot(key, stamp, candidate, hotHardTtl, hotSoftTtl);
         return created != null ? created : existing;
       }
 
-      return promoteExisting(key, existing, stamp, candidate, hotHardTtl, hotSoftTtl);
+      return promoteExisting(key, existing, stamp, candidate);
     });
 
     if (!applied.changed()) {
@@ -273,21 +274,22 @@ public class DefaultWorkerContext implements WorkerContext, WorkerControl {
    *
    * <p>The writable value (loaded or policy-supplied) is written only when it is provably fresh:
    * a positive data stamp, no newer resident and no invalidation tombstone at that stamp.
-   * Otherwise the decision metadata is promoted; the hot TTLs apply only when the soft window
-   * is still open and the candidate can write a value or no loader is configured. A resident
-   * whose soft window is already closed keeps that closed window: reopening it would hide the
-   * pending reload for a whole hot TTL.
+   * Otherwise the decision metadata is promoted.
+   *
+   * <p>The hot TTLs are resolved from the entry's own normal baselines, with the global hot
+   * defaults as floors — the same rule as local promotion — so a 24-hour or permanent per-call
+   * TTL is never shortened to the configured one-hour hot TTL. The hard deadline is recomputed
+   * from that duration; the soft deadline goes through
+   * {@link TtlPolicy#transitionSoftExpireAt(CacheEntry, long, long)}, which leaves an
+   * already-closed window in the past so a metadata-only promotion cannot hide a pending reload.
    *
    * @return the promoted entry
    */
-  private CacheEntry promoteExisting(
-    String key,
-    CacheEntry entry,
-    DecisionStamp stamp,
-    HotValue candidate,
-    long hotHardTtl,
-    long hotSoftTtl
-  ) {
+  private CacheEntry promoteExisting(String key, CacheEntry entry, DecisionStamp stamp, HotValue candidate) {
+    long normalHard = entry.getNormalHardTtlMs() > 0L ? entry.getNormalHardTtlMs() : ttlPolicy.effectiveHardTtlMs();
+    long normalSoft = entry.getNormalSoftTtlMs() > 0L ? entry.getNormalSoftTtlMs() : ttlPolicy.effectiveSoftTtlMs();
+    long hotHardTtl = ttlPolicy.resolveHotHardTtl(normalHard);
+    long hotSoftTtl = ttlPolicy.resolveHotSoftTtl(normalSoft);
     EntryDraft promoted = entryLifecycle.editEntry(entry).decision(stamp).keyState(KeyState.HOT);
     if (
       candidate.canWriteValue() &&
@@ -302,13 +304,14 @@ public class DefaultWorkerContext implements WorkerContext, WorkerControl {
         .build();
     }
 
-    // Not provably fresher: promote the decision only. A writable candidate (or a no-loader
-    // deployment) adopts the HOT TTLs; a loader-failure fallback keeps its deadlines so stale
-    // data is not made to look freshly loaded, and a closed soft window stays closed.
-    if ((candidate.canWriteValue() || clusterLoader == null) && !ttlPolicy.isSoftExpired(entry)) {
-      promoted.ttl(hotHardTtl, hotSoftTtl);
-    }
-    return promoted.build();
+    // Not provably fresher: promote the decision metadata. The hot TTLs still apply — the entry
+    // is HOT even when only its stale value could be reused — but a soft window a peer already
+    // closed stays closed.
+    long now = TimeSource.currentTimeMillis();
+    return promoted
+      .ttlDurations(hotHardTtl, hotSoftTtl)
+      .expiryAt(ttlPolicy.hardExpireAt(hotHardTtl), ttlPolicy.transitionSoftExpireAt(entry, hotSoftTtl, now))
+      .build();
   }
 
   /**

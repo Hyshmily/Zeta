@@ -320,13 +320,14 @@ class BroadcastBufferTest {
   // ── Error handling ──
 
   /**
-   * Verifies that when the publisher throws on one key, flush catches the exception and continues
-   * processing remaining keys.
+   * Verifies that when the publisher throws on one key, flush catches the exception, continues
+   * processing remaining keys and counts one failed broadcast.
    */
   @Test
   void flush_whenPublisherThrows_shouldNotPropagate() {
     CacheSyncPublisher throwingPub = mock(CacheSyncPublisher.class);
     doThrow(new RuntimeException("publisher failure")).when(throwingPub).broadcastRefresh("bad-key", 1L);
+    when(throwingPub.broadcastRefresh("good-key", 2L)).thenReturn(true);
 
     BroadcastBuffer buf = new BroadcastBuffer(scheduler, throwingPub, 5000L, Math.max(5000L, 2_000), null);
     buf.record("bad-key", 1L, null, null);
@@ -335,6 +336,25 @@ class BroadcastBufferTest {
     assertThatCode(buf::flush).doesNotThrowAnyException();
     verify(throwingPub).broadcastRefresh("bad-key", 1L);
     verify(throwingPub).broadcastRefresh("good-key", 2L);
+    assertThat(buf.sendFailures()).isEqualTo(1);
+  }
+
+  /**
+   * The publisher's silent contract reports broker failures by returning {@code false}. The
+   * buffer must count them: a void broadcast would leave {@code sendFailures} at zero while the
+   * {@code zeta.stall.broadcast_storm.stopped.total} meter missed a broker outage.
+   */
+  @Test
+  void flush_whenPublisherReturnsFalse_shouldCountSendFailures() {
+    CacheSyncPublisher failing = mock(CacheSyncPublisher.class);
+    when(failing.broadcastRefresh(anyString(), anyLong())).thenReturn(false);
+
+    BroadcastBuffer buf = new BroadcastBuffer(scheduler, failing, 5000L, Math.max(5000L, 2_000), null);
+    buf.record("a", 1L, null, null);
+    buf.record("b", 2L, null, null);
+    buf.flush();
+
+    assertThat(buf.sendFailures()).isEqualTo(2);
   }
 
   // ── Send executor isolation (design decisions: buffering and ordering) ──

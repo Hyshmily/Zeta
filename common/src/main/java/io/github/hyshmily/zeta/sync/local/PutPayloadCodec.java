@@ -75,6 +75,11 @@ import org.jspecify.annotations.Nullable;
  * degrades to REFRESH. A root value the receiver would deny — the legacy containers or a
  * {@code Collection}/{@code Map} outside {@code java.util} — is not serialized at all:
  * {@link #encode} returns {@code null} and the write degrades to REFRESH.
+ *
+ * <p>The root-container check is shallow. An {@code EnumSet}/{@code EnumMap} or a non-{@code
+ * java.util} container nested inside a DTO is not detected on the writer; the receiver applies the
+ * same allowlist to every nested type, fails closed, and degrades that PUT to a versioned
+ * INVALIDATE. The value still converges through the peer's loader.
  */
 @Slf4j
 @Internal
@@ -198,7 +203,6 @@ public final class PutPayloadCodec {
       }
     }
     ObjectMapper.DefaultTypeResolverBuilder typing = new NormalizingTypeResolverBuilder(
-      ObjectMapper.DefaultTyping.EVERYTHING,
       new PayloadTypeValidator(ptv.build())
     );
     typing.init(JsonTypeInfo.Id.CLASS, null);
@@ -264,15 +268,26 @@ public final class PutPayloadCodec {
   /**
    * Installs the normalizing resolver on the serialization side only; deserialization keeps
    * the standard class-name resolver, so a wire id is gated by the same polymorphic validator
-   * as before.
+   * as before. {@code NON_FINAL} is only the superclass's applicability marker: {@link #useForType}
+   * decides every non-primitive type, including the final value types that
+   * {@code DefaultTyping.EVERYTHING} used to cover.
    */
   private static final class NormalizingTypeResolverBuilder extends ObjectMapper.DefaultTypeResolverBuilder {
 
-    private NormalizingTypeResolverBuilder(
-      ObjectMapper.DefaultTyping applicability,
-      PolymorphicTypeValidator subtypeValidator
-    ) {
-      super(applicability, subtypeValidator);
+    private NormalizingTypeResolverBuilder(PolymorphicTypeValidator subtypeValidator) {
+      super(ObjectMapper.DefaultTyping.NON_FINAL, subtypeValidator);
+    }
+
+    /**
+     * Default typing applies to every non-primitive value, so a final {@code Long},
+     * {@code BigDecimal} or {@code byte[]} still carries its type marker on the wire.
+     *
+     * @param type the declared type
+     * @return {@code true} unless the type is primitive
+     */
+    @Override
+    public boolean useForType(JavaType type) {
+      return !type.isPrimitive();
     }
 
     @Override

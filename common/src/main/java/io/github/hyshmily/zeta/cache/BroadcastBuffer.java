@@ -29,6 +29,7 @@ import java.util.Map;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
+import java.util.function.BooleanSupplier;
 import java.util.function.LongPredicate;
 import lombok.extern.slf4j.Slf4j;
 import org.jspecify.annotations.Nullable;
@@ -75,7 +76,8 @@ import org.springframework.beans.factory.DisposableBean;
  * total serialized payload bytes; crossing either cap triggers an immediate
  * flush (off-loaded to the scheduler thread) rather than deferring further.
  *
- * <p>Send-failure logging is aggregated to one WARN per flush (design decisions: buffering and ordering). The send loop can additionally be handed off to a
+ * <p>Put/refresh send-failure logging is aggregated to one WARN per executor chunk (design decisions: buffering and ordering);
+ * an invalidation publish failure is one WARN per message. The send loop can additionally be handed off to a
  * dedicated executor (design decisions: buffering and ordering) so a broker outage never stalls the
  * shared scheduler — production wiring must pass the executor for that
  * guarantee to hold; without one, sends run synchronously on the calling thread.
@@ -157,8 +159,8 @@ public class BroadcastBuffer implements DisposableBean {
   private final AtomicLong invalidatesDropped = new AtomicLong();
 
   /**
-   * Cumulative put/refresh broadcasts that failed to send (broker errors in
-   * {@link #send}) — the attribution counter behind
+   * Cumulative put/refresh broadcasts that failed to send — the publisher returned
+   * {@code false} or a custom implementation threw. The attribution counter behind
    * {@code zeta.stall.broadcast_storm.stopped.total}.
    */
   private final AtomicLong sendFailureCounter = new AtomicLong();
@@ -384,7 +386,7 @@ public class BroadcastBuffer implements DisposableBean {
       return;
     }
     cancel(key, version);
-    sendInvalidate(() -> pub.broadcastInvalidate(key, version));
+    sendInvalidate("INVALIDATE", () -> pub.broadcastInvalidate(key, version));
   }
 
   /**
@@ -400,7 +402,7 @@ public class BroadcastBuffer implements DisposableBean {
       return;
     }
     cancelBatch(entries);
-    sendInvalidate(() -> pub.broadcastInvalidateBatch(entries));
+    sendInvalidate("INVALIDATE_BATCH", () -> pub.broadcastInvalidateBatch(entries));
   }
 
   /**
@@ -421,7 +423,7 @@ public class BroadcastBuffer implements DisposableBean {
       return;
     }
     cancelMatching(prefix, clearStamp);
-    sendInvalidate(() -> pub.broadcastInvalidatePrefix(prefix, clearStamp));
+    sendInvalidate("INVALIDATE_PREFIX", () -> pub.broadcastInvalidatePrefix(prefix, clearStamp));
   }
 
   /**
@@ -437,7 +439,7 @@ public class BroadcastBuffer implements DisposableBean {
       return;
     }
     cancelMatching(null, clearStamp);
-    sendInvalidate(() -> pub.broadcastInvalidateAll(clearStamp));
+    sendInvalidate("INVALIDATE_ALL", () -> pub.broadcastInvalidateAll(clearStamp));
   }
 
   /**
@@ -466,28 +468,34 @@ public class BroadcastBuffer implements DisposableBean {
 
   /**
    * Run one INVALIDATE-family publish, off the calling thread when a send
-   * executor is wired (design decisions: invalidation). Executor saturation or shutdown drops the
-   * message with a counted DEBUG line — at-most-once sync means the peer
-   * converges via the next write or its hard TTL.
+   * executor is wired (design decisions: invalidation). A publish that reports failure is
+   * logged once for this message; the publisher keeps the volume counter. Executor
+   * saturation or shutdown drops the message with a counted DEBUG line — at-most-once
+   * sync means the peer converges via the next write or its hard TTL.
    *
+   * @param op   the message type named in the failure line
    * @param send the publish action (never {@code null})
    */
-  private void sendInvalidate(Runnable send) {
+  private void sendInvalidate(String op, BooleanSupplier send) {
     Executor executor = sendExecutor;
     if (executor == null) {
       // Manual construction / tests: no executor, so send synchronously.
-      send.run();
+      if (!send.getAsBoolean()) {
+        log.warn("Failed to send {} sync message", op);
+      }
       return;
     }
 
     try {
       executor.execute(() -> {
         try {
-          send.run();
+          if (!send.getAsBoolean()) {
+            log.warn("Failed to send {} sync message", op);
+          }
         } catch (RuntimeException e) {
-          // The publisher logs and counts its own broker failures; this guard keeps an
-          // executor-side failure from killing a pooled thread.
-          log.debug("INVALIDATE send failed on send executor: {}", e.toString());
+          // A custom publisher may still throw; this guard keeps an executor-side
+          // failure from killing a pooled thread.
+          log.warn("Failed to send {} sync message: {}", op, e.toString());
         }
       });
     } catch (RuntimeException ignored) {
@@ -854,7 +862,9 @@ public class BroadcastBuffer implements DisposableBean {
   private void submitSendChunk(Collection<SendItem> chunk) {
     try {
       // submitSendChunks is only called on the send-executor branch of flush().
-      sendExecutor.execute(() -> send(chunk));
+      if (sendExecutor != null) {
+        sendExecutor.execute(() -> send(chunk));
+      }
     } catch (RuntimeException e) {
       logExecutorDrop(chunk.size(), e);
     }
@@ -862,9 +872,10 @@ public class BroadcastBuffer implements DisposableBean {
 
   /**
    * Sends a flushed snapshot to the sync publisher, one attempt per key, never
-   * aborting on a partial failure. Failures are aggregated into a single WARN
-   * per flush (first exception kept) instead of a per-key WARN with a full
-   * stack trace.
+   * aborting on a partial failure. The publisher reports a failed publish by returning
+   * {@code false} (or throwing from a custom implementation); failures are aggregated into a
+   * single WARN per send call instead of one per-key WARN with a full stack trace. One call
+   * carries one executor chunk, so a 1024-key chunk cannot flood the log.
    *
    * @param toFlush the detached entries (see {@link #submitSendChunks});
    *                never mutated by this method
@@ -876,20 +887,21 @@ public class BroadcastBuffer implements DisposableBean {
     }
 
     long failed = 0L;
-    Exception firstError = null;
+    RuntimeException firstError = null;
     for (SendItem item : toFlush) {
       VersionInfo info = item.info();
-
       try {
-        if (info.payload() != null) {
-          // Value-carrying PUT: peers apply the carried value version-guarded,
-          // no per-instance reload. A null payload falls through to the
-          // version-only REFRESH (peer reloads through the cluster loader).
-          pub.broadcastPut(item.key(), info.version(), info.payload());
-        } else {
-          pub.broadcastRefresh(item.key(), info.version());
+        // Value-carrying PUT: peers apply the carried value version-guarded,
+        // no per-instance reload. A null payload falls through to the
+        // version-only REFRESH (peer reloads through the cluster loader).
+        boolean sent =
+          info.payload() != null
+            ? pub.broadcastPut(item.key(), info.version(), info.payload())
+            : pub.broadcastRefresh(item.key(), info.version());
+        if (!sent) {
+          failed++;
         }
-      } catch (Exception e) {
+      } catch (RuntimeException e) {
         failed++;
         if (firstError == null) {
           firstError = e;
@@ -899,7 +911,11 @@ public class BroadcastBuffer implements DisposableBean {
 
     if (failed > 0) {
       sendFailureCounter.addAndGet(failed);
-      log.warn("Failed to send {} of {} put/refresh broadcasts: {}", failed, toFlush.size(), firstError.toString());
+      if (firstError != null) {
+        log.warn("Failed to send {} of {} put/refresh broadcasts: {}", failed, toFlush.size(), firstError.toString());
+      } else {
+        log.warn("Failed to send {} of {} put/refresh broadcasts (broker send failed)", failed, toFlush.size());
+      }
     }
   }
 

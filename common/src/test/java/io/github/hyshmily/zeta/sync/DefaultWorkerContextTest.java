@@ -184,7 +184,8 @@ class DefaultWorkerContextTest {
 
   /**
    * A resident whose soft window a peer REFRESH/INVALIDATE already closed must not have it
-   * reopened by a metadata-only HOT promotion: the next read has to reload.
+   * reopened by a metadata-only HOT promotion: the next read has to reload. The hard deadline is
+   * still extended by the hot regime, so the entry does not die on its old normal deadline.
    */
   @Test
   void handleHot_withoutLoaderKeepsAClosedSoftWindowClosed() {
@@ -206,8 +207,62 @@ class DefaultWorkerContextTest {
     assertThat(promoted).isNotNull();
     assertThat(promoted.getKeyState()).isEqualTo(KeyState.HOT);
     assertThat(promoted.getValue()).isEqualTo("v");
-    assertThat(promoted.getHardExpireAtMs()).isEqualTo(resident.getHardExpireAtMs());
     assertThat(promoted.getSoftExpireAtMs()).isEqualTo(resident.getSoftExpireAtMs());
+    assertThat(promoted.getHardExpireAtMs())
+      .as("the hot regime extends the hard deadline even when the soft window is closed")
+      .isGreaterThan(resident.getHardExpireAtMs());
+  }
+
+  /**
+   * A HOT promotion is a floor, never a cap: an entry written with a 24-hour per-call TTL keeps
+   * that lifetime instead of being shortened to the configured one-hour hot TTL.
+   */
+  @Test
+  void handleHot_preservesALongerNormalHardTtl() {
+    long normalHardTtl = 86_400_000L;
+    long now = TimeSource.currentTimeMillis();
+    CacheEntry resident = EntryDraft.blank(null)
+      .value("v")
+      .version(1)
+      .decision(DecisionStamp.hot(1, "node", 1L))
+      .ttl(normalHardTtl, 30_000, normalHardTtl, 30_000)
+      .expiryAt(now + normalHardTtl, now + 30_000)
+      .keyState(KeyState.NORMAL)
+      .build();
+    cache.put("key1", resident);
+    context = new DefaultWorkerContext(cache, null, entryLifecycle, stampClock, List.of());
+
+    handleHot(wireMessage("key1", WorkerType.HOT.code(), 2L));
+
+    CacheEntry promoted = cache.asMap().get("key1");
+    assertThat(promoted).isNotNull();
+    assertThat(promoted.getHardTtlMs()).isEqualTo(normalHardTtl);
+    assertThat(promoted.getHardExpireAtMs())
+      .as("the 24-hour duration survives promotion, not the one-hour hot default")
+      .isGreaterThan(now + 20L * 3_600_000L);
+  }
+
+  /** A permanent per-call TTL survives promotion as permanent. */
+  @Test
+  void handleHot_preservesAPermanentNormalHardTtl() {
+    long now = TimeSource.currentTimeMillis();
+    CacheEntry resident = EntryDraft.blank(null)
+      .value("v")
+      .version(1)
+      .decision(DecisionStamp.hot(1, "node", 1L))
+      .ttl(Long.MAX_VALUE, 30_000, Long.MAX_VALUE, 30_000)
+      .expiryAt(Long.MAX_VALUE, now + 30_000)
+      .keyState(KeyState.NORMAL)
+      .build();
+    cache.put("key1", resident);
+    context = new DefaultWorkerContext(cache, null, entryLifecycle, stampClock, List.of());
+
+    handleHot(wireMessage("key1", WorkerType.HOT.code(), 2L));
+
+    CacheEntry promoted = cache.asMap().get("key1");
+    assertThat(promoted).isNotNull();
+    assertThat(promoted.getHardTtlMs()).isEqualTo(Long.MAX_VALUE);
+    assertThat(promoted.getHardExpireAtMs()).isEqualTo(Long.MAX_VALUE);
   }
 
   /** A fresh loaded value reopens a closed soft window; only the metadata-only fallback keeps it. */
@@ -567,11 +622,12 @@ class DefaultWorkerContextTest {
   }
 
   /**
-   * A loader failure must not reset the resident's deadlines: the fallback value is not fresh,
-   * so extending its soft window would hide the staleness for a whole hot TTL.
+   * A loader failure must not reopen the resident's closed soft window: the fallback value is not
+   * fresh. The hot regime still extends the hard deadline, so the HOT decision is not silently
+   * undone by the old normal deadline.
    */
   @Test
-  void handleHot_loaderFailurePreservesTheResidentDeadlines() {
+  void handleHot_loaderFailurePreservesTheClosedRetryWindowAndExtendsHardDeadline() {
     long now = System.currentTimeMillis();
     long hardExpireAt = now + 10_000L;
     long softExpireAt = now - 1_000L;
@@ -589,8 +645,9 @@ class DefaultWorkerContextTest {
 
     CacheEntry promoted = (CacheEntry) cache.getIfPresent("key1");
     assertThat(promoted.getKeyState()).isEqualTo(KeyState.HOT);
-    assertThat(promoted.getHardExpireAtMs()).isEqualTo(hardExpireAt);
-    assertThat(promoted.getSoftExpireAtMs()).isEqualTo(softExpireAt);
+    assertThat(promoted.getSoftExpireAtMs()).as("a closed retry window stays closed").isEqualTo(softExpireAt);
+    assertThat(promoted.getHardTtlMs()).isEqualTo(3_600_000L);
+    assertThat(promoted.getHardExpireAtMs()).isGreaterThan(hardExpireAt);
   }
 
   /**

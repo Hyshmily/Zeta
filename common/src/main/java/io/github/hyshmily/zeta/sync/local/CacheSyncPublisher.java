@@ -220,16 +220,17 @@ public class CacheSyncPublisher {
    *
    * <p>
    * Not deduplicated (a clear is a one-shot administrative operation with a
-   * single stamp); a publish failure is counted and logged through the plane's
-   * send-failure log.
+   * single stamp); a publish failure is counted and returned so the caller can
+   * aggregate its log line.
    *
    * @param clearStamp the data stamp the clear was allocated at (positive)
+   * @return {@code true} when published or intentionally skipped, {@code false} on a broker failure
    */
-  public void broadcastInvalidateAll(long clearStamp) {
+  public boolean broadcastInvalidateAll(long clearStamp) {
     if (clearStamp <= 0L) {
-      return;
+      return true;
     }
-    publishSync(SyncType.INVALIDATE_ALL, CLEAR_ALL_BYTES, clearStamp);
+    return publishSync(SyncType.INVALIDATE_ALL, CLEAR_ALL_BYTES, clearStamp);
   }
 
   /**
@@ -242,17 +243,18 @@ public class CacheSyncPublisher {
    *
    * <p>
    * Not deduplicated (a clear is a one-shot administrative operation with a
-   * single stamp); a publish failure is counted and logged through the plane's
-   * send-failure log.
+   * single stamp); a publish failure is counted and returned so the caller can
+   * aggregate its log line.
    *
    * @param prefix     the physical key prefix (non-empty)
    * @param clearStamp the data stamp the clear was allocated at (positive)
+   * @return {@code true} when published or intentionally skipped, {@code false} on a broker failure
    */
-  public void broadcastInvalidatePrefix(String prefix, long clearStamp) {
+  public boolean broadcastInvalidatePrefix(String prefix, long clearStamp) {
     if (invalidCacheKey(prefix) || clearStamp <= 0L) {
-      return;
+      return true;
     }
-    publishSync(SyncType.INVALIDATE_PREFIX, prefix.getBytes(StandardCharsets.UTF_8), clearStamp);
+    return publishSync(SyncType.INVALIDATE_PREFIX, prefix.getBytes(StandardCharsets.UTF_8), clearStamp);
   }
 
   /**
@@ -265,16 +267,19 @@ public class CacheSyncPublisher {
    * <p>Entries are filtered at this wire boundary and split into chunks; when one chunk
    * cannot be encoded it degrades to per-key INVALIDATE sends, so no accepted entry is
    * silently lost. Not deduplicated (each entry carries its own stamp and the per-key
-   * receiver guard subsumes dedup); a publish failure is counted and logged through the
-   * plane's send-failure log.
+   * receiver guard subsumes dedup); a publish failure is counted and returned so the caller
+   * can aggregate its log line.
    *
    * @param entries the key/version pairs; {@code null}/empty is a no-op, invalid entries
    *                (null, blank key, non-positive version) are dropped
+   * @return {@code true} when every accepted entry was published or intentionally skipped,
+   *         {@code false} when at least one message failed
    */
-  public void broadcastInvalidateBatch(List<SyncMessage.Entry> entries) {
+  public boolean broadcastInvalidateBatch(List<SyncMessage.Entry> entries) {
     if (entries == null || entries.isEmpty()) {
-      return;
+      return true;
     }
+    boolean published = true;
     List<SyncMessage.Entry> chunk = new ArrayList<>(Math.min(entries.size(), SyncMessage.MAX_BATCH_ENTRIES));
     for (SyncMessage.Entry entry : entries) {
       if (entry == null || invalidCacheKey(entry.key()) || entry.version() <= 0L) {
@@ -282,14 +287,15 @@ public class CacheSyncPublisher {
       }
       chunk.add(entry);
       if (chunk.size() == SyncMessage.MAX_BATCH_ENTRIES) {
-        publishBatchChunk(chunk);
+        published &= publishBatchChunk(chunk);
         // publishBatchChunk encodes and publishes synchronously and keeps no reference.
         chunk.clear();
       }
     }
     if (!chunk.isEmpty()) {
-      publishBatchChunk(chunk);
+      published &= publishBatchChunk(chunk);
     }
+    return published;
   }
 
   /**
@@ -297,16 +303,19 @@ public class CacheSyncPublisher {
    * encoded. The fallback preserves the {@link SyncMessage#encodeBatchBody} contract.
    *
    * @param chunk the non-empty chunk, at most {@link SyncMessage#MAX_BATCH_ENTRIES} entries
+   * @return {@code true} when the chunk or its per-key fallback was published, {@code false}
+   *         when at least one message failed
    */
-  private void publishBatchChunk(List<SyncMessage.Entry> chunk) {
+  private boolean publishBatchChunk(List<SyncMessage.Entry> chunk) {
     byte[] body = SyncMessage.encodeBatchBody(chunk);
     if (body != null) {
-      publishSync(SyncType.INVALIDATE_BATCH, body, 0L);
-      return;
+      return publishSync(SyncType.INVALIDATE_BATCH, body, 0L);
     }
+    boolean published = true;
     for (SyncMessage.Entry entry : chunk) {
-      broadcastInvalidate(entry.key(), entry.version());
+      published &= broadcastInvalidate(entry.key(), entry.version());
     }
+    return published;
   }
 
   /**
@@ -323,12 +332,13 @@ public class CacheSyncPublisher {
    * @param cacheKey the affected cache key; must not be null or empty
    * @param version  the positive {@code dataVersion} at which the value was written
    * @param payload  the serialized value payload from {@link #serializePutPayload}
+   * @return {@code true} when published or intentionally skipped, {@code false} on a broker failure
    */
-  public void broadcastPut(String cacheKey, long version, byte[] payload) {
+  public boolean broadcastPut(String cacheKey, long version, byte[] payload) {
     if (payload == null || payload.length == 0) {
-      return;
+      return true;
     }
-    publishDeduped(cacheKey, SyncType.PUT, version, payload, cacheKey);
+    return publishDeduped(cacheKey, SyncType.PUT, version, payload, cacheKey);
   }
 
   /**
@@ -343,9 +353,10 @@ public class CacheSyncPublisher {
    * @param cacheKey the affected cache key; must not be null or empty
    * @param version  the {@code dataVersion} at which the operation occurred;
    *                 see {@link StampClock#nextStamp()}
+   * @return {@code true} when published or intentionally skipped, {@code false} on a broker failure
    */
-  public void broadcastRefresh(String cacheKey, long version) {
-    sendDeduped(cacheKey, SyncType.REFRESH, version);
+  public boolean broadcastRefresh(String cacheKey, long version) {
+    return sendDeduped(cacheKey, SyncType.REFRESH, version);
   }
 
   /**
@@ -359,9 +370,10 @@ public class CacheSyncPublisher {
    *
    * @param cacheKey the affected cache key; must not be null or empty
    * @param version  the {@code dataVersion} at which the invalidation occurred
+   * @return {@code true} when published or intentionally skipped, {@code false} on a broker failure
    */
-  public void broadcastInvalidate(String cacheKey, long version) {
-    sendDeduped(cacheKey, SyncType.INVALIDATE, version);
+  public boolean broadcastInvalidate(String cacheKey, long version) {
+    return sendDeduped(cacheKey, SyncType.INVALIDATE, version);
   }
 
   /**
@@ -369,8 +381,9 @@ public class CacheSyncPublisher {
    * single-key INVALIDATE/REFRESH send, the value-carrying PUT and the clear family):
    * build the common {@link #newSyncMessageProperties(SyncType) sync properties},
    * stamp the version and — for PUT — the cache-key header, publish on the fanout
-   * exchange, and swallow any publish failure into one WARN — the
-   * documented contract is "failures are logged and do not propagate to the caller".
+   * exchange, and count any publish failure. The failure is returned, not logged at
+   * WARN: the caller owns the batch-level log line, so one broken broker cannot emit
+   * one stack trace per key.
    *
    * <p>{@code RuntimeException} covers {@code AmqpException} and any unchecked
    * failure from a closed/initializing template.
@@ -395,7 +408,7 @@ public class CacheSyncPublisher {
       return true;
     } catch (RuntimeException e) {
       sendFailureCounter.increment();
-      log.warn("Failed to send {} sync message", type, e);
+      log.debug("Failed to send {} sync message", type, e);
       return false;
     }
   }
@@ -419,13 +432,14 @@ public class CacheSyncPublisher {
    * @param cacheKey the affected cache key
    * @param type     the sync message type
    * @param version  the {@code dataVersion} of the operation
+   * @return {@code true} when published or intentionally skipped, {@code false} on a broker failure
    */
-  private void sendDeduped(String cacheKey, SyncType type, long version) {
+  private boolean sendDeduped(String cacheKey, SyncType type, long version) {
     if (invalidCacheKey(cacheKey)) {
       log.debug("Invalid cache key, skip sync: cacheKey={}, type={}", cacheKey, type);
-      return;
+      return true;
     }
-    publishDeduped(cacheKey, type, version, cacheKey.getBytes(StandardCharsets.UTF_8), null);
+    return publishDeduped(cacheKey, type, version, cacheKey.getBytes(StandardCharsets.UTF_8), null);
   }
 
   /**
@@ -443,8 +457,9 @@ public class CacheSyncPublisher {
    * @param version        the positive data stamp
    * @param body           the pre-serialized body
    * @param headerCacheKey the PUT cache-key header, or {@code null}
+   * @return {@code true} when published or intentionally skipped, {@code false} on a broker failure
    */
-  private void publishDeduped(
+  private boolean publishDeduped(
     String cacheKey,
     SyncType type,
     long version,
@@ -452,7 +467,7 @@ public class CacheSyncPublisher {
     @Nullable String headerCacheKey
   ) {
     if (invalidCacheKey(cacheKey) || version <= 0L) {
-      return;
+      return true;
     }
     BroadcastClaim claim = claim(cacheKey, version, type);
     if (claim == null) {
@@ -462,13 +477,14 @@ public class CacheSyncPublisher {
         cacheKey,
         version
       );
-      return;
+      return true;
     }
     if (publishSync(type, body, version, headerCacheKey)) {
       log.debug("Sync sent: type={}, cacheKey={}, version={}", type, cacheKey, version);
-    } else {
-      release(cacheKey, claim);
+      return true;
     }
+    release(cacheKey, claim);
+    return false;
   }
 
   /**
