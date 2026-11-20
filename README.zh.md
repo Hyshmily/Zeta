@@ -189,6 +189,7 @@ zeta:
     enabled: false # Worker-only 节点不上报
   worker:
     enabled: true
+    node-id: worker-1 # 稳定 id；队列与 epoch 文件名必须跨重启保持
     epoch-file: /var/lib/zeta/epoch # 必须能跨重启保留
     detection:
       defaults:

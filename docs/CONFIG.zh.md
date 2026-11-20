@@ -57,15 +57,15 @@ zeta:
     expelled-queue-capacity: 10000
 ```
 
-| 属性                                 | 默认值  | 说明                                                                                                                       |
-| ------------------------------------ | ------- | -------------------------------------------------------------------------------------------------------------------------- |
-| `zeta.local.top-k`                   | `100`   | TopK 集合大小。                                                                                                            |
-| `zeta.local.width`                   | `50000` | Sketch 宽度；创建 Bean 时向上对齐到最近的 2 的幂（默认实际为 65,536），使桶下标走位掩码快速路径。上限 200,000。            |
-| `zeta.local.depth`                   | `5`     | Sketch 深度（行数）。App 只需要快速启发式，较浅即可；权威判断在 Worker。                                                   |
-| `zeta.local.decay`                   | `0.92`  | 计数器衰减因子。                                                                                                           |
-| `zeta.local.min-count`               | `10`    | 进入 TopK 的最低计数。                                                                                                     |
-| `zeta.local.sketch-window-count`     | `4`     | 每个 sketch slot 的滑动窗口数（环形缓冲）。范围 2–10，创建 Bean 时向上对齐到 2 的幂；默认覆盖 4 个衰减周期，减少热点漂移。 |
-| `zeta.local.expelled-queue-capacity` | `10000` | 被挤出 TopK 的 key 的暂存队列容量，防止扩容时无界增长。                                                                    |
+| 属性                                 | 默认值  | 说明                                                                                                                                    |
+| ------------------------------------ | ------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| `zeta.local.top-k`                   | `100`   | TopK 集合大小。                                                                                                                         |
+| `zeta.local.width`                   | `50000` | Sketch 宽度；创建 Bean 时向上对齐到最近的 2 的幂（默认实际为 65,536），使桶下标走位掩码快速路径。上限 200,000。                         |
+| `zeta.local.depth`                   | `5`     | Sketch 深度（行数）。App 只需要快速启发式，较浅即可；权威判断在 Worker。                                                                |
+| `zeta.local.decay`                   | `0.92`  | 碰撞衰减概率的指数底数：每个冲突单位以 `decay^count` 的概率扣减占用者 1 个计数。范围 `(0, 1]`；值越大衰减越快，越小越保护已建立的计数。 |
+| `zeta.local.min-count`               | `10`    | 进入 TopK 的最低计数。                                                                                                                  |
+| `zeta.local.sketch-window-count`     | `4`     | 每个 sketch slot 的滑动窗口数（环形缓冲）。范围 2–10，创建 Bean 时向上对齐到 2 的幂；默认覆盖 4 个衰减周期，减少热点漂移。              |
+| `zeta.local.expelled-queue-capacity` | `10000` | 被挤出 TopK 的 key 的暂存队列容量，防止扩容时无界增长。                                                                                 |
 
 ## 3. L1 缓存与 TTL
 
@@ -85,16 +85,16 @@ zeta:
     ttl-jitter-ratio: 0.05
 ```
 
-| 属性                                      | 默认值              | 说明                                                                  |
-| ----------------------------------------- | ------------------- | --------------------------------------------------------------------- |
-| `zeta.local.cache.max-size`               | `100000`            | 整张 L1 表的最大条目数，所有缓存名共享。                              |
-| `zeta.local.cache.tombstone-maximum-size` | `10000`             | 按 key 的失效墓碑上限，约束大规模失效突发下的内存。                   |
-| `zeta.local.cache.tombstone-ttl-seconds`  | `600`               | 墓碑保留时长。只需覆盖一次在途读/加载；过期后失效前的回填会重新放行。 |
-| `zeta.local.hard-ttl-ms`                  | `300000`（5 分钟）  | 普通 key 的硬 TTL；`0` 表示永久（不做硬过期）。                       |
-| `zeta.local.hot-hard-ttl-ms`              | `3600000`（1 小时） | 热点 key 的硬 TTL；`0` 表示永久。                                     |
-| `zeta.local.soft-ttl-ms`                  | `30000`（30 秒）    | 普通 key 的软 TTL；到期后返回陈旧值并异步刷新；`0` 关闭软过期。       |
-| `zeta.local.hot-soft-ttl-ms`              | `300000`（5 分钟）  | 热点 key 的软 TTL；`0` 关闭软过期。                                   |
-| `zeta.local.ttl-jitter-ratio`             | `0.05`              | 施加到所有 TTL 的随机偏移比例，`0.05` = ±5%；设为 `0` 关闭。          |
+| 属性                                      | 默认值              | 说明                                                                               |
+| ----------------------------------------- | ------------------- | ---------------------------------------------------------------------------------- |
+| `zeta.local.cache.max-size`               | `100000`            | 整张 L1 表的最大条目数，所有缓存名共享；至少为 1。                                 |
+| `zeta.local.cache.tombstone-maximum-size` | `10000`             | 按 key 的失效墓碑上限，约束大规模失效突发下的内存；至少为 1。                      |
+| `zeta.local.cache.tombstone-ttl-seconds`  | `600`               | 墓碑保留时长。只需覆盖一次在途读/加载；过期后失效前的回填会重新放行。至少为 1 秒。 |
+| `zeta.local.hard-ttl-ms`                  | `300000`（5 分钟）  | 普通 key 的硬 TTL；`0` 表示永久（不做硬过期）。                                    |
+| `zeta.local.hot-hard-ttl-ms`              | `3600000`（1 小时） | 热点 key 的硬 TTL；`0` 表示永久。                                                  |
+| `zeta.local.soft-ttl-ms`                  | `30000`（30 秒）    | 普通 key 的软 TTL；到期后返回陈旧值并异步刷新；`0` 关闭软过期。                    |
+| `zeta.local.hot-soft-ttl-ms`              | `300000`（5 分钟）  | 热点 key 的软 TTL；`0` 关闭软过期。                                                |
+| `zeta.local.ttl-jitter-ratio`             | `0.05`              | 施加到所有 TTL 的随机偏移比例，范围 `[0, 1]`；`0.05` = ±5%，设为 `0` 关闭。        |
 
 ## 4. 加载、并发与刷新
 
@@ -152,16 +152,16 @@ zeta:
 
 没有装配 reporter（`zeta.report.enabled=false`、classpath 上没有 AMQP，或 Worker-only 部署）时，共享计数器按 `detect-interval-ms` 把计数直接送入本地 sketch，不经过上报。
 
-| 属性                                      | 默认值                         | 说明                                                                                                                                                                   |
-| ----------------------------------------- | ------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `zeta.report.enabled`                     | `true`                         | 启用 App→Worker 上报聚合；需要 `RabbitTemplate` Bean。                                                                                                                 |
-| `zeta.local.report-exchange`              | `zeta.reportToWorker.exchange` | App 向 Worker 发送报告的 DirectExchange，JSON 报文体。必须与 Worker 侧 `zeta.worker.messaging.report-exchange` 一致。                                                  |
-| `zeta.local.report-interval-ms`           | `50`                           | 潮汐基准/调谐器种子；低于 50ms 实际仍按 50ms 调度。                                                                                                                    |
-| `zeta.local.detect-interval-ms`           | `500`                          | 两次 sketch 摄入之间的最大间隔。到期（或超过 key 上限）的潮汐与累积器一起直接送入 sketch，不再先合并；只有更早的潮汐才合并进累积器。没有 reporter 时它同时是潮汐基准。 |
-| `zeta.local.report-interval-tuning`       | `shadow`                       | `off` / `shadow` / `on`，见上表。                                                                                                                                      |
-| `zeta.local.report-interval-target-batch` | `512`                          | 调谐器的每批目标 key 数；仅 `tuning != off` 时有意义。                                                                                                                 |
-| `zeta.local.report-interval-min-ms`       | `50`                           | 调谐器间隔下界；低于 WaveCounter 的 50ms 节拍下限时实际等效 50ms。                                                                                                     |
-| `zeta.local.report-interval-max-ms`       | `1000`                         | 调谐器间隔上界，也是新热点的首报延迟上界；必须 ≥ `min-ms`。空闲最坏情况为该值的 2 倍。                                                                                 |
+| 属性                                      | 默认值                         | 说明                                                                                                                                                                             |
+| ----------------------------------------- | ------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `zeta.report.enabled`                     | `true`                         | 启用 App→Worker 上报聚合；需要 `RabbitTemplate` Bean。                                                                                                                           |
+| `zeta.local.report-exchange`              | `zeta.reportToWorker.exchange` | App 向 Worker 发送报告的 DirectExchange，JSON 报文体。必须与 Worker 侧 `zeta.worker.messaging.report-exchange` 一致。                                                            |
+| `zeta.local.report-interval-ms`           | `50`                           | 潮汐基准/调谐器种子，最小为 1；低于 50ms 实际仍按 50ms 调度。                                                                                                                    |
+| `zeta.local.detect-interval-ms`           | `500`                          | 两次 sketch 摄入之间的最大间隔，最小为 1。到期（或超过 key 上限）的潮汐与累积器一起直接送入 sketch，不再先合并；只有更早的潮汐才合并进累积器。没有 reporter 时它同时是潮汐基准。 |
+| `zeta.local.report-interval-tuning`       | `shadow`                       | `off` / `shadow` / `on`，见上表。                                                                                                                                                |
+| `zeta.local.report-interval-target-batch` | `512`                          | 调谐器的每批目标 key 数；仅 `tuning != off` 时有意义。                                                                                                                           |
+| `zeta.local.report-interval-min-ms`       | `50`                           | 调谐器间隔下界；低于 WaveCounter 的 50ms 节拍下限时实际等效 50ms。                                                                                                               |
+| `zeta.local.report-interval-max-ms`       | `1000`                         | 调谐器间隔上界，也是新热点的首报延迟上界；必须 ≥ `min-ms`。空闲最坏情况为该值的 2 倍。                                                                                           |
 
 详见 [design decisions: reporting](design-decisions.md#reporting) 与 [design decisions: access counting](design-decisions.md#access-counting)。
 
@@ -312,7 +312,7 @@ zeta:
 | ---------------------------------------------------------- | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `zeta.local.circuit-breaker.enabled`                       | `false` | 启用滑动窗口熔断器。                                                                                                                                                              |
 | `zeta.local.circuit-breaker.window-time-ms`                | `10000` | 滑动窗口时长；窗口由流量推进，没有后台轮转。                                                                                                                                      |
-| `zeta.local.circuit-breaker.window-buckets`                | `10`    | 滑动窗口桶数。                                                                                                                                                                    |
+| `zeta.local.circuit-breaker.window-buckets`                | `10`    | 滑动窗口桶数；必须 <= `window-time-ms`（每桶至少 1ms）。                                                                                                                          |
 | `zeta.local.circuit-breaker.fail-threshold`                | `0.5`   | 失败率阈值（0.0–1.0），超过时打开。                                                                                                                                               |
 | `zeta.local.circuit-breaker.request-volume-threshold`      | `20`    | 评估失败率所需的最小请求数。                                                                                                                                                      |
 | `zeta.local.circuit-breaker.single-test-interval-ms`       | `5000`  | 半开探针间隔；半开周期内探针长时间无结算时强制重置，防止挂死。                                                                                                                    |
@@ -345,6 +345,7 @@ zeta:
   app-name: order
   worker:
     enabled: true
+    node-id: worker-1
     max-tracked-keys: 1000000
     epoch-file: /data/zeta/epoch
     messaging:
@@ -377,6 +378,7 @@ zeta:
 | ---------------------------------------------------- | -------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `zeta.worker.enabled`                                | `false`                                                  | 启用 Worker 模式。                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | `zeta.worker.max-tracked-keys`                       | `1000000`                                                | Worker 同时跟踪的 distinct key 软上限；硬余量保证 OOM 边界有限。达到上限时先回收采样中所有“超过整窗未访问”的窗口，一次采样可为并发准入释放多个名额；执行采样的 key 自身在硬上限之下仍可用硬余量准入，达到硬上限时只能使用采样回收的名额，因此只有硬账本也满且采样未回收名额时才拒绝（计数 + DEBUG 日志）；采样锁被其他线程持有时，只要还能在硬账本之下预留名额就直接准入而不是拒绝——持有者可能正在释放它需要的名额，且该上限本就是近似值。一次完成的采样若未找到可回收窗口，会开启 50 ms 饱和窗口；在此期间达到上限的其他新 key 不再重复采样而直接拒绝，避免抢不到采样锁的并发准入持续绕过上限；若采样结束时账本已低于硬上限（并发清扫释放了名额）则直接准入。已持有 HOT 名额的 Key 重建窗口时同时绕过采样门控与硬余量，因此最多超出 `max-active-hot-keys` 个窗口；软上限之上还有 `max(8, 1%)` 的硬余量，达到后新 key 仍可执行一次无竞争的采样，只有采样未回收名额时才拒绝；采样后仍处于软上限则继续置位 relief 扫描；`0` 表示不限制。内存：每个被跟踪 key 持有 `2 × alignedSlices` 个 long 的翻倍环，加上约 80 B 的对象/map/字符串开销——默认 16 片时约 350–400 B/key，`1000000` 仅窗口表就约 350–400 MB 堆内存；启动时若该估算超过最大堆的一半会打印 WARN。 |
+| `zeta.worker.node-id`                                | `""`（自动）                                             | 稳定的 Worker 节点 ID，用于上报队列名（`zeta.reportToWorker.<app-name>.<node-id>`）和默认 epoch 文件名。解析顺序：本属性、`INSTANCE_ID`、`zeta.local.instance-id`，最后才是每次启动随机生成。随机回退会使 epoch 持久化失效，并且每次重启新建一个 7 天过期的上报队列，因此生产 Worker 应始终配置前三者之一。                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `zeta.worker.epoch-file`                             | `""`（自动 → `${java.io.tmpdir}/zeta-epoch-<workerId>`） | 重启检测的 epoch 文件。每次启动在文件锁保护下自增；必须跨重启保留。文件为单个二进制 `long`（8 字节）；大小不是 8 字节的文件视为不存在，并在下次启动时修复。同目录的 `.lock` 文件承载跨进程锁；新值先写入同目录临时文件再重命名覆盖目标，因此路径必须指向可写父目录中的文件。临时目录被清空会使 epoch 归零，App 将拒绝新实例的决策，直到缓存条目过期。默认文件名会把 id 中的文件系统敏感字符替换为 `_`。                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | `zeta.worker.messaging.report-exchange`              | `zeta.reportToWorker.exchange`                           | App 报告的 DirectExchange，必须与 App 侧 `zeta.local.report-exchange` 一致。                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 | `zeta.worker.messaging.broadcast-exchange`           | `zeta.send.exchange`                                     | HOT/COOL 广播的 DirectExchange，按 `send.<app-name>` 发布；必须与 App 侧 `zeta.worker-listener.exchange-name` 一致。                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |

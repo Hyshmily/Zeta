@@ -83,6 +83,16 @@ properties that no longer exist (Redis, lock, SRE, `shard-count`) and added the 
 `detect-interval-ms`, `node-id`, `put-allowed-packages`, `max-tracked-keys` and `epoch-file` entries.
 Owner: `ZetaProperties`, `WorkerProperties`, `CacheSyncProperties`, `WorkerListenerProperties`.
 
+**Bean Validation constraints match the field's type and the cross-field relation.** Floating-point
+knobs use `@DecimalMin` / `@DecimalMax`; `@Min` / `@Max` do not support `double`, and with
+`spring-boot-starter-validation` on the classpath Hibernate Validator throws
+`UnexpectedTypeException` while binding `ZetaProperties`, so the application fails to start even
+though the default value is valid. Positive integer limits use `@Min(1)`. The circuit breaker's
+`windowTimeMs >= windowBuckets` is an `@AssertTrue` because a per-field range cannot express the
+relation; without it the invalid pair survives binding and crashes at the first
+`SlidingWindowBreaker` construction, long after the operator could connect it to the configuration.
+Owner: `ZetaProperties`.
+
 ---
 
 ## Cache table
@@ -272,11 +282,14 @@ which is a supported Caffeine `Expiry` value.
 
 **A TTL must be representable before it reaches L1.** The packed entry stores a hard/soft duration
 as a unit bit plus a 31-bit magnitude, so the largest finite duration is `2^31 - 1` seconds
-(about 68 years). A value above that but below `Long.MAX_VALUE` is rejected at the option and
-draft boundaries through `CacheEntry.requireEncodableTtl`; otherwise the failure surfaced inside an
-L1 `compute` or a transaction's after-commit hook, after the business side effect had already run.
+(about 68 years). A value above that but below `Long.MAX_VALUE` is rejected at the option, annotation
+and draft boundaries through `CacheEntry.requireEncodableTtl`; otherwise the failure surfaced inside
+an L1 `compute` or a transaction's after-commit hook, after the business side effect had already run.
+The annotation planner folds a constant TTL at bean creation and rejects the out-of-range value
+there; a dynamic expression that evaluates out of range degrades to the configured default instead
+of failing a read; the facade's `ResolvedTtls` validates both axes before it opens a transaction.
 `Long.MAX_VALUE` remains the explicit permanent sentinel. Owner: `GetPolicy.ttlSupplier`,
-`EntryDraft`, `CacheEntry`.
+`CachePlan.Ttl.of`, `DefaultZeta.ResolvedTtls`, `EntryDraft`, `CacheEntry`.
 
 **An expiry deadline saturates; it never wraps.** `TtlPolicy.expireAtFromNow` computes
 `now + max(1, ttl + jitter)` and clamps to `Long.MAX_VALUE` when the jittered duration or the final
@@ -399,8 +412,8 @@ lease outstanding does not acquire the map monitor at all.
 
 **One ticket is the whole refresh lifecycle.** `RefreshTicket` is simultaneously
 the `refreshes` reservation token, the creation-time snapshot
-(`dataVersion`, `DecisionStamp`, key state, hard expiry/TTL) and the
-`whenComplete` callback. Its identity is the ABA guard for the completion-time
+(`dataVersion`, `DecisionStamp`, key state, hard expiry/TTL and the normal hard/soft TTL
+baselines) and the `whenComplete` callback. Its identity is the ABA guard for the completion-time
 removal, and it carries the lease settlement (`NONE`/`GRANTED`/`CAPPED`/
 `CLOSED`/`EXPIRED`) written inside the failure compute. A dedicated outcome
 field stays clear: reusing a snapshot field for the settlement would make the
@@ -423,6 +436,15 @@ invalidation just condemned. A concurrent write, promotion
 or broadcast that granted fresh TTLs is never shortened. Permanent entries are never leased.
 There is no knob — the alternative, hard expiry during an outage, converts a source outage into
 a stampede.
+
+**A refresh that finds its resident logically expired rebuilds it.** The entry can still be in
+Caffeine after its hard deadline (logical expiry precedes the timing wheel's physical removal). The
+apply path treats such an entry as absent and rebuilds from the ticket's snapshot; writing the fresh
+value back with the old, already-past hard deadline made Caffeine evict it on the next maintenance
+pass, so the next read missed again and reloaded. The rebuild also restores the ticket's captured
+normal hard/soft baselines, so a per-call TTL override survives an eviction+refresh instead of
+silently reverting to the configured default. Owner: `DefaultBackgroundRefresher.applyRefreshTask`,
+`RefreshTicket.captureSnapshot`, `DefaultBackgroundRefresher.rebuildEvictedEntry`.
 
 **A clean refresh that returns no value closes the retry window.** A successful background
 lookup that yields `null` (the source deleted the row, or the admission predicate declined the
@@ -962,17 +984,18 @@ fires exactly one terminal `onHotSkipped`: `VERSION_STALE` for the inner DCL gua
 `NO_PROMOTABLE_VALUE` for a tombstone-refused create or an absent/value-less/logically expired
 resident. Owner: `DefaultWorkerContext.settleHot`, `promoteExisting`.
 
-**A loader-failure fallback keeps the resident's deadlines.** When the cluster loader fails or
-returns nothing, the HOT decision promotes the resident L1 value only in metadata; applying the
-hot hard/soft TTLs would reset both deadlines to `now + hot TTL`, making stale data look freshly
-loaded and suppressing its next soft refresh for the whole hot window. The metadata-only rewrite
-therefore leaves the existing durations and expiry timestamps untouched. A deployment with no
-loader is different: the resident is the authoritative source, so its promotion does adopt the
-hot TTLs — unless the resident's soft window is already closed by a peer REFRESH/INVALIDATE. That
-closed window is the reload trigger the no-loader deployment has instead of a value channel;
-reopening it would hide the pending reload for a whole hot TTL. Previously the metadata-only
-branch applied the hot TTLs unconditionally, so a peer-closed soft window was reopened and the
-pending reload was hidden for the whole hot TTL. Owner: `DefaultWorkerContext.promoteExisting`.
+**A HOT promotion extends the entry's own lifetime, never resets it to the global hot default.**
+`promoteExisting` resolves the hot hard/soft TTLs from the entry's normal baselines through
+`resolveHotHardTtl` / `resolveHotSoftTtl`, exactly like local promotion: the configured hot values
+are floors, so a 24-hour or permanent per-call TTL keeps its lifetime. The hard deadline is
+recomputed from that resolved duration; the soft deadline goes through
+`transitionSoftExpireAt`, which leaves an already-closed window in the past so a metadata-only
+promotion can never hide a pending reload. Before this rule the Worker path passed the global hot
+TTLs directly: a 24-hour entry was shortened to the configured one-hour hot TTL on a HOT broadcast,
+and a soft-expired entry with no loader skipped the TTL rewrite entirely and hard-expired on its old
+normal deadline. A loader-failure fallback still keeps its closed soft window; only the hard
+deadline is extended by the hot regime, so stale data never looks freshly loaded. Owner:
+`DefaultWorkerContext.settleHot`, `promoteExisting`.
 
 **The create stamp is the value's stamp, not the decision's, and a fallback cannot create.**
 One slot carries the stamp through both phases of `resolveHot`/`settleHot`: the pre-read stamp for a fresh load,
@@ -1154,6 +1177,17 @@ sketch to a key that is still busy, and that must cost one cycle, not the seat.
 loses its seat (floor 1, so `minCount=0` still expels): below the admission threshold it can
 never re-enter, and keeping the seat starves a better candidate and depresses the O(1)
 fast-reject floor.
+
+**Collision decay is exponential in the occupant's count.** Each incoming unit removes one occupant
+unit with probability `decay^cur`, sampled as `Binomial(delta, decay^cur)` and capped at
+`min(delta, cur)`. A hot slot therefore resists cold churn: at the default `decay=0.92` a
+one-unit collision against a 1,000-count slot has probability `0.92^1000`, effectively zero, while
+a small count still turns over quickly. Before this rule the collision sampled
+`Binomial(cur, decay)` per collision — a constant per-unit survival probability independent of the
+occupant's count. One `delta=1` cold key hitting a 10,000-count slot removed about 8% of the count;
+under a high-cardinality cold scan the count collapsed geometrically and the real hot key was
+evicted from the TopK. The exponential form is the HeavyKeeper protection the sketch exists to
+provide. Owner: `HeavyKeeper.decayCollisionSlot`, `collisionDecays`, `decayProbability`.
 
 **Collision decay distributes its decrement with a carried remainder.** Each window's share is
 `floor((wv * decays + carry) / cur)` and the modulo becomes the next window's carry, so the shares
@@ -2085,6 +2119,15 @@ bean would fail with a definition-override error. The class is now `@AutoConfigu
 auto-configuration exclude filter keeps component scanning from registering it. Owner:
 `WorkerAutoConfiguration`, `WorkerApplication`.
 
+**The Worker's identity is explicit, not ambient.** `zeta.worker.node-id` is resolved before
+`INSTANCE_ID`, `zeta.local.instance-id` and the auto-generated fallback, and it names both the
+report queue (`zeta.reportToWorker.<app-name>.<node-id>`) and the default epoch file. Relying on
+`INSTANCE_ID` alone left the Worker with a random id whenever the deployment did not inject it:
+every restart changed the epoch-file name (so the persisted epoch was lost and Apps treated the
+process as a fresh incarnation) and created another 7-day `x-expires` report queue, accumulating
+orphans. The random fallback still exists for a local run, but it logs a WARN naming the three
+stable sources. Owner: `WorkerProperties.nodeId`, `WorkerAutoConfiguration.workerIdentity`.
+
 **The planes are isolated.** Heartbeats travel on a TopicExchange with ack NONE and a prefetched
 queue; decisions use MANUAL ack with a small prefetch. Different loss semantics must not share a
 queue. The control-plane exchange is declared from the publishing template before that
@@ -2096,12 +2139,24 @@ for the same reason: heartbeat emission runs on a dedicated single-thread `worke
 while `hotKeyScheduler` keeps the periodic sweeps, whose walks over the window table and the HOT
 registry can occupy a thread for tens of milliseconds.
 
+**The control-plane connection is a holder, not a primary `ConnectionFactory`.** The heartbeat
+`CachingConnectionFactory` is wrapped in `ControlPlaneConnectionFactory`, a type that is
+deliberately not a `ConnectionFactory`. A `@Primary` `ConnectionFactory` captured every unqualified
+host injection — Boot's `RabbitTemplate`, `RabbitAdmin`, `@RabbitListener` container factories and
+any application bean — and routed the host's business MQ traffic and queue declarations over the
+heartbeat connection. A business channel stall or broker flow control then blocked the heartbeat
+too, destroying the physical isolation the two factories exist for. The holder cannot join those
+injection points or Boot's `@ConditionalOnSingleCandidate` decision; Zeta's heartbeat template and
+listener container receive it by qualifier and unwrap `connectionFactory()`, and the holder
+delegates `InitializingBean`/`DisposableBean` so the wrapped factory is still initialized and
+destroyed with the context. Owner: `ZetaAmqpAutoConfiguration.ControlPlaneConnectionFactory`.
+
 **A data-plane configuration is gated by a data-plane factory, not by any `ConnectionFactory`.**
-The `@Primary` heartbeat factory is itself a `ConnectionFactory`; a plain
-`@ConditionalOnBean(ConnectionFactory.class)` therefore activates report and sync configurations
-in a control-plane-only context and then fails while resolving the data-plane factory. The
-condition and the resolver share one name lookup that excludes
-`zetaHeartbeatConnectionFactory`. Owner: `ZetaAmqpAutoConfiguration`.
+The control-plane holder is not a `ConnectionFactory`, so a plain
+`@ConditionalOnBean(ConnectionFactory.class)` no longer matches it; the condition and the resolver
+still share one name lookup that excludes the reserved `zetaHeartbeatConnectionFactory` name, which
+keeps a legacy or user-supplied factory under that name out of the data plane. Owner:
+`ZetaAmqpAutoConfiguration`.
 
 **The Worker's decision broadcaster owns a data-plane template.** `WorkerAutoConfiguration` defines
 `zetaWorkerBroadcastRabbitTemplate` over `ZetaAmqpAutoConfiguration.dataPlaneConnectionFactory` and
@@ -2111,9 +2166,9 @@ broadcast template. The previous shape injected `RabbitTemplate` unqualified. Wh
 template existed (report enabled, or sync enabled) the context failed at startup with
 `NoUniqueBeanDefinitionException`; when only the heartbeat template existed, HOT/COOL broadcasts
 shared the control-plane connection, and broker flow control on a burst could block the heartbeat
-channel and make the App evict a healthy Worker from the ring. `@Primary` stays on the heartbeat
-factory for Boot's own template/`RabbitAdmin`; every Zeta data-plane bean resolves its factory
-explicitly. Owner: `WorkerAutoConfiguration`, `ZetaAmqpAutoConfiguration`.
+channel and make the App evict a healthy Worker from the ring. The control-plane factory is a
+holder rather than a type candidate, so Boot's own template and `RabbitAdmin` keep the data-plane
+factory. Owner: `WorkerAutoConfiguration`, `ZetaAmqpAutoConfiguration`.
 
 **Seat conservation and entry identity are the registry's two map invariants.**
 `permits.availablePermits() + hotKeys.size() == capacity` at every quiescent point: a promotion
@@ -3877,6 +3932,17 @@ as soon as its send returns. Chunks are submitted in iteration order, but per-ke
 version-guarded and order-independent. Owner: `BroadcastBuffer.submitSendChunks`,
 `BroadcastBuffer.SendItem`.
 
+**A broker send failure is counted where the batch is sent.** `CacheSyncPublisher.publishSync`
+returns `false` on a broker error instead of logging one WARN per message, and
+`BroadcastBuffer.send` sums the failures and emits one WARN per executor chunk. Before this rule
+the publisher swallowed each exception and logged it with a full stack trace, while the public
+broadcast methods returned `void`; a 1,024-key chunk produced 1,024 WARNs, and
+`BroadcastBuffer.sendFailureCounter` stayed at zero because the catch around the void calls could
+never fire. The `zeta.stall.broadcast_storm.stopped.total` meter therefore missed a real broker
+outage while the log flooded. Invalidation publishes are one message each and log one WARN on
+failure; their volume counter stays in the publisher. Owner: `CacheSyncPublisher.publishSync`,
+`publishDeduped`, `BroadcastBuffer.send`.
+
 **A refused send chunk strands only itself.** `BroadcastBuffer.submitSendChunks` splits the swapped
 snapshot into independent `ArrayList` chunks of at most `SEND_CHUNK_SIZE` entries and submits each
 chunk separately; when the send executor rejects a submission, `submitSendChunk` drops that chunk,
@@ -4324,7 +4390,9 @@ level.
 **A maintenance tick is registered only when its collaborator exists.** The optional references
 are resolved once when the configuration is constructed; absent L1 table, engine or TopK means
 the corresponding `scheduleWithFixedDelay` call is never made, and a present tick never re-tests
-the absence or unpacks a container handle on the scheduler thread. The expelled drain is a
+the absence or unpacks a container handle on the scheduler thread. The returned futures are kept
+and cancelled in `@PreDestroy`, so a host-supplied `hotKeyScheduler` that outlives the context
+cannot keep running against a destroyed cache, reporter or sketch. The expelled drain is a
 memory-protection pass, not an event stream: production calls `clear()` on each queue (no batch
 list, no per-item copy), and only DEBUG drains a bounded sample for the summary line.
 
@@ -5135,14 +5203,16 @@ and swallowed, because the business write already committed and a cache failure 
 into a 500. A pre-invocation removal/clear failure is rethrown, because continuing the body would
 write with a cache that could not be invalidated and widen the dirty-read window. A user
 `CacheFailurePolicy` bean can replace the default; returning normally authorizes the body, throwing
-propagates. One rejection is not a cache-side failure and therefore does not pass through that
-policy: a result-dependent hard TTL under `sync = true` is only knowable after the body, and a
-permanent value is rejected by `PutPolicy.of` there. A constant TTL is rejected at resolution and a
-result-independent dynamic one before the body, so the result-dependent form is the only one that can
-reach this post-body point; swallowing it would tell the caller a write succeeded whose peers could
-never expire the entry, so the `IllegalArgumentException` propagates after the business side effect.
-Owner: `CacheFailurePolicy`, `DefaultCacheFailurePolicy`, `ZetaCacheInterceptor.apply`,
-`CachePlan.Write.policy`, `PutPolicy.requireSyncable`, `ZetaCacheInterceptor.write`.
+propagates. Caller/configuration errors are not cache-side failures and bypass the policy: an
+unencodable TTL, a permanent synced write whose hard TTL resolved from the global default, or a
+Worker-only `ZetaModeException` is rethrown by `ZetaCacheInterceptor.write`. Routing those through
+`DefaultCacheFailurePolicy` logged them at WARN and returned, telling the caller a synced write
+succeeded while the facade refused it. The result-dependent permanent synced TTL is the only
+rejection that can be knowable after the body alone; a constant TTL is rejected at resolution and a
+result-independent dynamic one before the body, so every such rejection surfaces at the point it
+became knowable. Owner: `CacheFailurePolicy`, `DefaultCacheFailurePolicy`,
+`ZetaCacheInterceptor.apply`, `CachePlan.Write.policy`, `PutPolicy.requireSyncable`,
+`ZetaCacheInterceptor.write`.
 
 **The advisor holds only the plan source, never the facade.** `ZetaCacheAdvisor` extends
 `AbstractBeanFactoryPointcutAdvisor` and resolves the advice bean by name when the first advised bean
@@ -5472,12 +5542,16 @@ collectible. Without it, a queue-depth alert disappears exactly when the process
 pressure and the backlog is most likely. Owner: `WorkerAutoConfiguration.workerDetectionMeterBinder`,
 `WorkerDetectionMetrics.bindMeters`.
 
-**Registration is completed after singleton creation.** A `MeterBinder` can be initialized during
-the early reporter/access-counter cycle, before the cache, detector or reporter it reads exists;
-its `ObjectProvider` checks then register nothing and every `zeta.*` series silently disappears.
-A late `SmartInitializingSingleton` re-runs the same idempotent registrations after all singletons
-are ready, and skips a registry that already has a `zeta.*` meter so the normal path does not log
-duplicate-registration warnings. Owner: `ZetaMicrometerAutoConfiguration`.
+**Registration is completed after singleton creation, through the registered binder beans.** A
+`MeterBinder` can be initialized during the early reporter/access-counter cycle, before the cache,
+detector or reporter it reads exists; its `ObjectProvider` checks then register nothing and every
+`zeta.*` series silently disappears. A late `SmartInitializingSingleton` resolves the
+`hotKeyCaffeineMetrics` and `hotKeyCustomMetrics` beans by name and binds those instances again
+after all singletons are ready; Micrometer returns the existing meter for an identical id, so a
+successful early bind is harmless. The previous shape called the `@Bean` factory methods directly
+(bypassing a user override under the same name) and skipped the re-bind whenever any `zeta.*` meter
+already existed, so one early meter — `zeta.version.clock.skew` or `zeta.worker.alive` — silently
+suppressed every late series. Owner: `ZetaMicrometerAutoConfiguration.zetaLateMetrics`.
 
 **A per-rule total is a `LongAdder`, and the Micrometer meter is a side channel.** `RuleCounters`
 holds four adders (`matches`, `promotions`, `cools`, `aborts`) plus three `Counter` handles

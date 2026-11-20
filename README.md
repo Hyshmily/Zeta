@@ -189,6 +189,7 @@ zeta:
     enabled: false # a Worker-only node does not report
   worker:
     enabled: true
+    node-id: worker-1 # stable id; queue + epoch-file names must survive restarts
     epoch-file: /var/lib/zeta/epoch # must survive restarts
     detection:
       defaults:
