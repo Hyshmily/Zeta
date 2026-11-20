@@ -19,6 +19,7 @@ import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hyshmily.zeta.autoconfigure.ZetaAmqpAutoConfiguration;
 import io.github.hyshmily.zeta.autoconfigure.ZetaAppProperties;
+import io.github.hyshmily.zeta.autoconfigure.ZetaProperties;
 import io.github.hyshmily.zeta.constants.ZetaConstants;
 import io.github.hyshmily.zeta.util.NodeIdentity;
 import io.github.hyshmily.zeta.util.executor.PeriodicScheduler;
@@ -51,7 +52,6 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.amqp.core.*;
 import org.springframework.amqp.rabbit.config.SimpleRabbitListenerContainerFactory;
-import org.springframework.amqp.rabbit.connection.ConnectionFactory;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.amqp.support.converter.Jackson2JsonMessageConverter;
 import org.springframework.amqp.support.converter.MessageConverter;
@@ -78,7 +78,7 @@ import org.springframework.context.annotation.Bean;
 @AutoConfiguration(after = ZetaAmqpAutoConfiguration.class)
 @ConditionalOnClass(name = "org.springframework.amqp.rabbit.core.RabbitTemplate")
 @ConditionalOnProperty(prefix = "zeta.worker", name = "enabled", havingValue = "true")
-@EnableConfigurationProperties({ WorkerProperties.class, ZetaAppProperties.class })
+@EnableConfigurationProperties({ WorkerProperties.class, ZetaAppProperties.class, ZetaProperties.class })
 @RequiredArgsConstructor
 @Slf4j
 public class WorkerAutoConfiguration {
@@ -663,21 +663,39 @@ public class WorkerAutoConfiguration {
    * This process's immutable identity: the node id plus the restart-detection epoch, incremented on
    * every start and persisted in {@code zeta.worker.epoch-file}.
    *
-   * <p>{@code INSTANCE_ID} is the deployment-supplied identity (Kubernetes downward API, Nomad
-   * meta, ...); when absent, the shared auto-detected instance id is used.
+   * <p>The node id is resolved once, in order: {@code zeta.worker.node-id}, {@code INSTANCE_ID}
+   * (the deployment-supplied identity: Kubernetes downward API, Nomad meta, ...), then
+   * {@code zeta.local.instance-id}. Only when all three are blank does
+   * {@link NodeIdentity#resolve(String, Integer)} generate a random id; that path is logged at WARN
+   * because the default epoch file name and the report queue name would change on every restart.
    *
+   * @param zetaProperties the shared local properties carrying {@code zeta.local.instance-id}
    * @return the identity every sender stamps
    */
   @Bean
   @ConditionalOnMissingBean
-  public WorkerIdentity workerIdentity() {
-    NodeIdentity nodeIdentity = NodeIdentity.resolve(System.getenv("INSTANCE_ID"), null);
+  public WorkerIdentity workerIdentity(ZetaProperties zetaProperties) {
+    String configured = properties.getNodeId();
+    if (configured == null || configured.isBlank()) {
+      configured = System.getenv("INSTANCE_ID");
+    }
+    if (configured == null || configured.isBlank()) {
+      configured = zetaProperties.getInstanceId();
+    }
+    if (configured == null || configured.isBlank()) {
+      log.warn(
+        "Neither zeta.worker.node-id, INSTANCE_ID nor zeta.local.instance-id is set: the Worker id is generated " +
+          "per start. Epoch persistence is lost and a new report queue is created on every restart; " +
+          "set zeta.worker.node-id (or INSTANCE_ID) to a stable value."
+      );
+    }
+    NodeIdentity nodeIdentity = NodeIdentity.resolve(configured, null);
     // The heartbeat identity and the decision stamp must be the same text; a padded
     // INSTANCE_ID would otherwise enter the health view differently from the decision node.
     String workerId = nodeIdentity.instanceId().trim();
-    String configured = properties.getEpochFile();
-    Path epochFile = configured == null || configured.isBlank() ? null : Path.of(configured);
-    return new WorkerIdentity(workerId, WorkerEpochStore.initEpoch(workerId, epochFile));
+    String epochFile = properties.getEpochFile();
+    Path epochPath = epochFile == null || epochFile.isBlank() ? null : Path.of(epochFile);
+    return new WorkerIdentity(workerId, WorkerEpochStore.initEpoch(workerId, epochPath));
   }
 
   /**
@@ -764,9 +782,9 @@ public class WorkerAutoConfiguration {
   @Bean("zetaHeartbeatRabbitTemplate")
   @ConditionalOnMissingBean(name = "zetaHeartbeatRabbitTemplate")
   public RabbitTemplate heartbeatRabbitTemplate(
-    @Qualifier("zetaHeartbeatConnectionFactory") ConnectionFactory connectionFactory
+    @Qualifier("zetaHeartbeatConnectionFactory") ZetaAmqpAutoConfiguration.ControlPlaneConnectionFactory controlPlane
   ) {
-    RabbitTemplate template = new RabbitTemplate(connectionFactory);
+    RabbitTemplate template = new RabbitTemplate(controlPlane.connectionFactory());
     String exchange = properties.getMessaging().getHeartbeatExchange();
     try {
       template.execute(channel -> {

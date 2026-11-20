@@ -13,6 +13,12 @@
       "defaultValue": 1000000
     },
     {
+      "name": "zeta.worker.node-id",
+      "type": "java.lang.String",
+      "description": "Explicit Worker node id used in report queue names and the default epoch file name. When blank, INSTANCE_ID then zeta.local.instance-id are tried; an auto-generated id is used only when all are blank and a WARN is logged because epoch persistence and queue names then change on every restart.",
+      "defaultValue": ""
+    },
+    {
       "name": "zeta.worker.epoch-file",
       "type": "java.lang.String",
       "description": "File used to persist and increment the Worker epoch across restarts. When empty, ${java.io.tmpdir}/zeta-epoch-<workerId> is used, with filesystem-significant characters in the id replaced by '_'.",

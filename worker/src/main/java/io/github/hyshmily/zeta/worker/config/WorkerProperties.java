@@ -60,6 +60,15 @@ public class WorkerProperties {
   private long maxTrackedKeys = 1_000_000L;
 
   /**
+   * Explicit Worker node id used in report queue names and the default epoch file name. When
+   * blank, {@code INSTANCE_ID} then {@code zeta.local.instance-id} are tried; when all are blank
+   * an id is generated per start, so epoch persistence resets and the previous report queue is
+   * left to expire on its own. Set this (or one of the fallbacks) in every deployment that
+   * restarts.
+   */
+  private String nodeId = "";
+
+  /**
    * Epoch file for restart detection. Must survive restarts: the Worker increments the stored
    * value on every start, and Apps use the epoch to accept decisions from a newer incarnation.
    * Empty means {@code ${java.io.tmpdir}/zeta-epoch-<workerId>} (with filesystem-significant

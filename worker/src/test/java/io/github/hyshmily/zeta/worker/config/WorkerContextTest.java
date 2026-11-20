@@ -19,10 +19,12 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
 
 import io.github.hyshmily.zeta.autoconfigure.ZetaAmqpAutoConfiguration;
+import io.github.hyshmily.zeta.autoconfigure.ZetaProperties;
 import io.github.hyshmily.zeta.reporting.KeyReporter;
 import io.github.hyshmily.zeta.worker.detection.lifecycle.CoolingScheduler;
 import io.github.hyshmily.zeta.worker.dispatch.DecisionDispatcher;
 import io.github.hyshmily.zeta.worker.dispatch.WorkerBroadcaster;
+import io.github.hyshmily.zeta.worker.dispatch.connection.WorkerIdentity;
 import io.github.hyshmily.zeta.worker.dispatch.ingest.ReportConsumer;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
@@ -97,8 +99,9 @@ class WorkerContextTest {
         .getResourceAsStream("META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports")
     ) {
       assertThat(imports).isNotNull();
-      assertThat(new String(imports.readAllBytes(), StandardCharsets.UTF_8))
-        .contains(WorkerAutoConfiguration.class.getName());
+      assertThat(new String(imports.readAllBytes(), StandardCharsets.UTF_8)).contains(
+        WorkerAutoConfiguration.class.getName()
+      );
     }
   }
 
@@ -141,5 +144,21 @@ class WorkerContextTest {
         context.getBean("zetaWorkerBroadcastRabbitTemplate", RabbitTemplate.class).getConnectionFactory()
       ).isSameAs(context.getBean(beanName, ConnectionFactory.class));
     });
+  }
+
+  /**
+   * The configured node id is the queue-name and epoch-file identity. Without it, an unset
+   * {@code INSTANCE_ID} would generate a random id per start and reset epoch persistence.
+   */
+  @Test
+  void workerIdentityUsesTheConfiguredNodeId() {
+    WorkerProperties properties = new WorkerProperties();
+    properties.setNodeId("worker-a");
+    properties.setEpochFile(tempDir.resolve("epoch-worker-a").toString());
+    WorkerAutoConfiguration config = new WorkerAutoConfiguration(properties);
+
+    WorkerIdentity identity = config.workerIdentity(new ZetaProperties());
+
+    assertThat(identity.nodeId()).isEqualTo("worker-a");
   }
 }
