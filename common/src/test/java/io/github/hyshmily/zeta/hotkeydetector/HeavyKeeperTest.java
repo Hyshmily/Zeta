@@ -559,17 +559,38 @@ class HeavyKeeperTest {
   }
 
   /**
-   * The full-displacement lottery win is unaffected: when the sampled decay
-   * consumes the whole slot the newcomer legitimately takes it over, and its
-   * estimate is its own {@code delta} — never the evicted occupant's add.
+   * Equal-size collisions at the least protective decay consume the slot, and the newcomer's
+   * estimate is its own {@code delta} — never the evicted occupant's count.
    */
   @Test
-  void collisionWithFullDisplacement_shouldAdmitStrangerOnItsOwnDelta() {
-    HeavyKeeper hk = new HeavyKeeper(3, 1, 1, 0.0, 1, 100, 3, false);
+  void collisionWithFullDecay_shouldAdmitStrangerOnItsOwnDelta() {
+    HeavyKeeper hk = new HeavyKeeper(3, 1, 1, 1.0, 1, 100, 3, false);
     hk.addDirect("occupant", 4);
-    AddResult result = hk.addDirect("stranger", 2);
+    AddResult result = hk.addDirect("stranger", 4);
     assertThat(result.isHotKey()).isTrue();
-    assertThat(memberCount(hk, "stranger")).isEqualTo(2L);
+    assertThat(memberCount(hk, "stranger")).isEqualTo(4L);
+  }
+
+  /**
+   * A cold scan must not erode an established hot slot. The per-unit decay probability is
+   * {@code decay^count}: at a count of 1000 a single-unit collision is essentially certain to
+   * leave the slot unchanged, so 10,000 cold keys sharing the bucket cannot remove any of the hot
+   * count. A per-unit constant probability would have removed roughly 8% of the count on the
+   * first collision and collapsed it under the scan.
+   */
+  @Test
+  void decayCollision_coldChurnDoesNotErodeAnEstablishedHotSlot() {
+    HeavyKeeper hk = new HeavyKeeper(3, 1, 1, 0.92, 1, 100, 3, false);
+    for (int i = 0; i < 1000; i++) {
+      hk.addDirect("hot", 1);
+    }
+    long before = memberCount(hk, "hot");
+
+    for (int i = 0; i < 10_000; i++) {
+      hk.addDirect("cold-" + i, 1);
+    }
+
+    assertThat(memberCount(hk, "hot")).as("cold one-off collisions must not decay a 1000-count slot").isEqualTo(before);
   }
 
   @Test

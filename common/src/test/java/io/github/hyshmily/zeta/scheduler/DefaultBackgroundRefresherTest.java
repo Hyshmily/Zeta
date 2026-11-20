@@ -127,6 +127,38 @@ class DefaultBackgroundRefresherTest {
   }
 
   /**
+   * An entry can still be in Caffeine after its hard deadline (logical expiry precedes physical
+   * removal). A refresh that finds it must rebuild the entry, not write the fresh value back with
+   * the already-past deadline — otherwise Caffeine evicts it immediately and the next read misses
+   * again. The ticket's normal TTL baselines ride along so a later promotion/demotion sees the
+   * original regime instead of the configured default.
+   */
+  @Test
+  void triggerBackgroundRefresh_logicallyExpiredResident_rebuildsWithFreshDeadlines() {
+    long past = System.currentTimeMillis() - 10_000L;
+    caffeineCache.put(
+      "key",
+      EntryDraft.blank(null)
+        .value("old")
+        .version(1)
+        .ttl(123_456L, 30_000L, 123_456L, 30_000L)
+        .expiryAt(past, past)
+        .keyState(KeyState.NORMAL)
+        .build()
+    );
+
+    refresher.triggerBackgroundRefresh("key", () -> new VersionedValue("fresh", 7L), 30_000);
+
+    CacheEntry rebuilt = caffeineCache.getIfPresent("key");
+    assertThat(rebuilt).isNotNull();
+    assertThat((Object) rebuilt.getValue()).isEqualTo("fresh");
+    assertThat(rebuilt.getDataVersion()).isEqualTo(7L);
+    assertThat(rebuilt.getHardExpireAtMs()).isGreaterThan(System.currentTimeMillis());
+    assertThat(rebuilt.getNormalHardTtlMs()).isEqualTo(123_456L);
+    assertThat(rebuilt.getNormalSoftTtlMs()).isEqualTo(30_000L);
+  }
+
+  /**
    * A refresh task that completes before the {@code refreshes} compute
    * stores it (fast reader, synchronous executor) must not leave a done marker
    * behind: the map is unbounded, so a cold key would otherwise retain the

@@ -47,7 +47,7 @@ import lombok.extern.slf4j.Slf4j;
  *   <li><b>Timestamp (41 bits):</b> milliseconds since {@link StampClock#EPOCH}
  *       (~69 years).</li>
  *   <li><b>Node identity (10 bits):</b> the value
- *       {@link NodeIdentity#getNodeId()} returns — two nodes with distinct ids
+ *       {@link NodeIdentity#nodeId()} returns — two nodes with distinct ids
  *       occupy disjoint low-bit ranges. Nodes that share an id can mint the
  *       same stamp in the same millisecond (both start at sequence 0), so the
  *       id must be unique per instance.</li>

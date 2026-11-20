@@ -130,7 +130,8 @@ public class DefaultBackgroundRefresher implements BackgroundRefresher {
    * {@link #refreshes}, the creation-time snapshot and the {@code whenComplete} callback.
    *
    * <p>The snapshot fields are written once by {@link #captureSnapshot} before
-   * submission and read by the completion path. {@link #leaseOutcome} and
+   * submission and read by the completion path: the data stamp, decision stamp, key state,
+   * hard expiry/duration and the normal hard/soft baselines. {@link #leaseOutcome} and
    * {@link #leasedAtMs} are the settlement written inside the failure compute;
    * a dedicated outcome keeps the snapshot fields immutable for the whole call.
    */
@@ -141,6 +142,8 @@ public class DefaultBackgroundRefresher implements BackgroundRefresher {
     private long dataVersion;
     private long hardExpireAtMs;
     private long hardTtlMs;
+    private long normalHardTtlMs;
+    private long normalSoftTtlMs;
     private long leasedAtMs;
     private KeyState keyState;
     private @Nullable DecisionStamp decision;
@@ -158,6 +161,9 @@ public class DefaultBackgroundRefresher implements BackgroundRefresher {
         keyState = KeyState.NORMAL;
         hardExpireAtMs = Long.MAX_VALUE;
         hardTtlMs = 0L;
+        // -1 is the "no captured baseline" sentinel: a real entry's 0 means disabled.
+        normalHardTtlMs = -1L;
+        normalSoftTtlMs = -1L;
         return;
       }
       dataVersion = raw.getDataVersion();
@@ -165,6 +171,8 @@ public class DefaultBackgroundRefresher implements BackgroundRefresher {
       keyState = raw.getKeyState();
       hardExpireAtMs = raw.getHardExpireAtMs();
       hardTtlMs = raw.getHardTtlMs();
+      normalHardTtlMs = raw.getNormalHardTtlMs();
+      normalSoftTtlMs = raw.getNormalSoftTtlMs();
     }
 
     /**
@@ -750,10 +758,12 @@ public class DefaultBackgroundRefresher implements BackgroundRefresher {
    * Applies a soft-refresh result to the cache under the snapshot guard: the refresh applies
    * unless a newer write landed in flight (the resident stamp is strictly above the ticket's
    * creation-time snapshot), so an ordinary refresh extends the TTLs while a concurrent
-   * writer's fresher value survives (design decisions: version stamps). An absent entry is
-   * rebuilt from the ticket's snapshot; an entry invalidated during the refresh is left
-   * untouched (anti-resurrection, design decisions: invalidation). Values are stored as passed
-   * by the caller (no codec).
+   * writer's fresher value survives (design decisions: version stamps). An absent or logically
+   * expired entry is rebuilt from the ticket's snapshot — writing a fresh value back with an
+   * already-past hard deadline would let Caffeine evict it on the next maintenance pass and send
+   * the next read back to the source. An entry invalidated during the refresh is left untouched
+   * (anti-resurrection, design decisions: invalidation). Values are stored as passed by the
+   * caller (no codec).
    *
    * @param loaded the freshly-loaded value paired with the pre-read {@code dataVersion} stamp
    * @param ticket the refresh whose snapshot and soft TTL apply
@@ -773,7 +783,7 @@ public class DefaultBackgroundRefresher implements BackgroundRefresher {
           return entry;
         }
 
-        if (entry != null) {
+        if (entry != null && !ttlPolicy.isLogicallyExpired(entry)) {
           // Snapshot guard: discard only when a newer write landed while the refresh was in
           // flight. Comparing against the INCOMING stamp would discard every ordinary refresh
           // (entry == incoming with no concurrent write).
@@ -821,31 +831,33 @@ public class DefaultBackgroundRefresher implements BackgroundRefresher {
   }
 
   /**
-   * Rebuild an entry after the snapshot it was snapshotted from was evicted
-   * while the refresh was in flight — the absent-entry branch of
+   * Rebuild an entry after the snapshot it was snapshotted from was evicted or logically
+   * expired while the refresh was in flight — the absent/expired branch of
    * {@link #applyRefreshTask}.
    *
    * <p>The rebuild uses the ticket's OWN hard TTL so a per-call TTL override
    * (stamped on the entry at load time) survives eviction+refresh instead of
    * silently reverting to the configured default; a ticket captured with no
-   * entry present ({@code hardTtlMs = 0}) falls back to the configured default.
+   * entry present ({@code hardTtlMs = 0}, normal baselines {@code -1}) falls back
+   * to the configured defaults. The captured normal baselines are restored as well,
+   * so a later promotion or cool-down still sees the entry's original regime.
    * The snapshot's decision stamp is carried forward and a successful refresh
    * rebuilds a COOL entry as NORMAL (same downgrade as the existing-entry
    * branch).
    */
   private CacheEntry rebuildEvictedEntry(VersionedValue loaded, RefreshTicket ticket, Object value) {
     long hardTtlMs = ttlPolicy.resolveEffectiveHardTtl(ticket.hardTtlMs);
+    long normalHardTtlMs =
+      ticket.normalHardTtlMs >= 0L
+        ? ticket.normalHardTtlMs
+        : ttlPolicy.normalHardBaseline(ttlPolicy.effectiveHardTtlMs());
+    long normalSoftTtlMs = ticket.normalSoftTtlMs >= 0L ? ticket.normalSoftTtlMs : ttlPolicy.effectiveSoftTtlMs();
     // design decisions: version stamps: the rebuilt entry carries the pre-read stamp taken before the
     // refresh load began.
     EntryDraft rebuilt = EntryDraft.blank(ttlPolicy)
       .value(value)
       .version(loaded.dataVersion())
-      .ttl(
-        hardTtlMs,
-        ticket.softTtlMs,
-        ttlPolicy.normalHardBaseline(ttlPolicy.effectiveHardTtlMs()),
-        ttlPolicy.effectiveSoftTtlMs()
-      )
+      .ttl(hardTtlMs, ticket.softTtlMs, normalHardTtlMs, normalSoftTtlMs)
       .keyState(ticket.keyState == KeyState.COOL ? KeyState.NORMAL : ticket.keyState)
       .birthStampSec(TimeSource.monotonicSecondsSinceBoot());
     if (ticket.decision != null) {

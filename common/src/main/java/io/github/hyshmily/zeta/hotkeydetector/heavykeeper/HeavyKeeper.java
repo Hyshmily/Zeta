@@ -37,8 +37,9 @@ import org.springframework.util.Assert;
  * keys.
  *
  * <p>Each key hashes into one bucket per row. A matching fingerprint increments the bucket; a
- * collision is resolved by a strictly larger batch taking the slot over, or by probabilistic
- * decay of the occupant. A per-slot ring of {@link #windowCount} windows is rotated by
+ * collision is resolved by a strictly larger batch taking the slot over, or by an occupant decay
+ * whose per-unit probability is {@code decay^count}, so an established hot count is exponentially
+ * protected from cold churn. A per-slot ring of {@link #windowCount} windows is rotated by
  * {@link #fading()}, so an estimate covers the most recent
  * {@code windowCount × decayInterval}.
  *
@@ -64,33 +65,24 @@ public class HeavyKeeper implements TopK {
   private static final VarHandle SLOT = MethodHandles.arrayElementVarHandle(int[].class);
 
   /**
-   * {@code cur} threshold above which stochastic sampling is replaced by direct
-   * expected-value rounding: the Binomial variance is negligible relative to the
-   * expectation, so the extra random-number generation buys nothing.
+   * Number of precomputed {@code decay^count} probabilities. Below this count the collision path
+   * pays one array read; above it {@link Math#pow} is used, which is rare because the probability
+   * is already negligible for the default decay.
    */
-  private static final long DIRECT_DECAY_THRESHOLD = 1 << 20;
+  private static final int DECAY_TABLE_SIZE = 256;
+
+  /**
+   * Probabilities below this are treated as zero. With {@code delta <= cur} in the collision
+   * branch, the maximum expected decrement is {@code cur * 1e-12}, which is below one for every
+   * {@code int}-bounded count.
+   */
+  private static final double MIN_DECAY_PROBABILITY = 1e-12;
 
   /**
    * Log every Nth "Failed to offer" warning (both offer sites share the counter).
    * A power of two so the rate check is a bitmask AND.
    */
   private static final int EXPELLED_LOG_INTERVAL = 1024;
-
-  /**
-   * Slot-sum threshold above which per-collision decay is capped at
-   * {@code cur * MAX_DECAY_RATIO}, so one large cold batch cannot disproportionately
-   * degrade an established hot slot.
-   */
-  private static final long PROTECTION_THRESHOLD = 16;
-
-  /**
-   * Minimum {@code cur} for the Gaussian batch-decay approximation; below it the
-   * exact {@link #sampleBinomial} sampler is used.
-   */
-  private static final int BATCH_DECAY_THRESHOLD = 64;
-
-  /** Maximum fraction of a hot slot's count decayed by one collision above {@link #PROTECTION_THRESHOLD}. */
-  private static final double MAX_DECAY_RATIO = 0.25;
 
   /**
    * Floor of the {@link #raiseCount} deadband: {@code max(this, cur / 32)} keeps a
@@ -154,8 +146,14 @@ public class HeavyKeeper implements TopK {
   /** Striped lock objects for fine-grained concurrency on sketch slot updates. */
   private final Object[] lockStripes;
 
-  /** Constant per-unit survival probability ({@code decay}) for collision decay. */
-  private final double survivalProb;
+  /**
+   * Base of the exponential collision-decay probability: a colliding unit removes one occupant
+   * unit with probability {@code decay^count}.
+   */
+  private final double decayBase;
+
+  /** Precomputed {@code decayBase^i} for {@code i < DECAY_TABLE_SIZE}. */
+  private final double[] decayPowers;
 
   /**
    * Membership count below which a member is dropped by {@link #decayMembership()}:
@@ -226,7 +224,9 @@ public class HeavyKeeper implements TopK {
    * @param k                     maximum number of hot keys to track
    * @param width                 width of the Count-Min Sketch (number of columns per row)
    * @param depth                 depth of the Count-Min Sketch (number of rows / hash functions)
-   * @param decay                 probabilistic decay factor (0.0–1.0); higher values preserve counts longer
+   * @param decay                 base of the exponential collision-decay probability; a larger
+   *                              value decays faster, a smaller value protects established counts
+   *                              longer
    * @param minCount              minimum count threshold before a key can enter the TopK set
    * @param expelledQueueCapacity capacity of the bounded blocking queue for expelled items
    * @param windowCount           number of time windows per sketch slot (ring buffer depth, at
@@ -278,7 +278,13 @@ public class HeavyKeeper implements TopK {
     this.windowMask = windowCount - 1;
     this.expelBelowCount = Math.max(1, minCount);
 
-    this.survivalProb = decay;
+    this.decayBase = decay;
+    this.decayPowers = new double[DECAY_TABLE_SIZE];
+    double probability = 1.0;
+    for (int i = 0; i < DECAY_TABLE_SIZE; i++) {
+      decayPowers[i] = probability;
+      probability *= decay;
+    }
 
     int totalSlots;
     int tableLength;
@@ -674,50 +680,28 @@ public class HeavyKeeper implements TopK {
   }
 
   /**
-   * Collision-with-different-fingerprint path: sample the survivors from
-   * Binomial({@code cur}, {@code decay}) and either hand the slot over to the incoming
-   * fingerprint (full reset) or proportionally decay every window.
+   * Collision-with-different-fingerprint path: each incoming unit removes one occupant unit with
+   * probability {@code decay^cur}, so an established high count is exponentially unlikely to lose
+   * a unit to a cold collision while a small count still turns over. The sampled decrement is capped
+   * at {@code min(delta, cur)}; when it consumes the slot the incoming fingerprint takes it over,
+   * otherwise every window is proportionally decayed.
    *
    * <p>A collision contributes zero to the caller's {@code maxCount} unless the slot
    * changes hands: a row still owned by another key must not inflate this key's
    * estimate. The occupant's decay is still applied.
    */
-  @SuppressWarnings({ "null", "squid:S2245" })
   private long decayCollisionSlot(int base, int active, int itemFingerprint, long delta, long cur, long maxCount) {
-    ThreadLocalRandom random = ThreadLocalRandom.current();
-    // Constant per-unit survival probability: each of the cur existing units
-    // independently survives the collision with probability decay, so the
-    // number of surviving units is Binomial(cur, decay).
-    double prob = survivalProb;
-
-    long survivals;
-    if (cur > DIRECT_DECAY_THRESHOLD) {
-      survivals = Math.round(cur * prob);
-    } else if (cur > BATCH_DECAY_THRESHOLD) {
-      double expected = cur * prob;
-      double variance = expected * (1.0 - prob);
-      double noise = Math.sqrt(variance) * random.nextGaussian();
-      survivals = Math.round(expected + noise);
-      survivals = Math.max(0, Math.min(survivals, cur));
-    } else {
-      survivals = sampleBinomial(cur, prob, random);
-    }
-    long decays = cur - survivals;
-
-    if (cur > PROTECTION_THRESHOLD) {
-      long maxDecays = Math.max(1, (long) (cur * MAX_DECAY_RATIO));
-      decays = Math.min(decays, maxDecays);
-    }
+    long decays = collisionDecays(cur, delta);
 
     if (decays == 0) {
-      // The survival draw kept every unit: the proportional pass below would compute
+      // The occupant kept every unit: the proportional pass below would compute
       // sub = 0 for every window and write each value back unchanged. Callers reach here
       // with cur > 0, so 0 can never satisfy the full-displacement test.
       return maxCount;
     }
 
     if (decays >= cur) {
-      // Full-displacement lottery win: same handover as the size-aware path.
+      // The incoming units consumed the slot: same handover as the size-aware path.
       return takeoverSlot(base, active, itemFingerprint, delta, maxCount);
     }
     int winBase = base + 2;
@@ -750,6 +734,41 @@ public class HeavyKeeper implements TopK {
     // sharing a slot inherit a hot key's count — a delta=1 collision could
     // admit it to the TopK and evict the real member.
     return maxCount;
+  }
+
+  /**
+   * Number of occupant units one collision removes: each of the {@code delta} incoming units
+   * independently decrements the slot with probability {@code decay^cur}, so the total is
+   * {@code Binomial(delta, decay^cur)} capped at {@code min(delta, cur)}.
+   *
+   * @param cur   the occupant's current slot sum (positive)
+   * @param delta the incoming batch (positive, at most {@code cur} in this path)
+   * @return the decrement, {@code 0..min(delta, cur)}
+   */
+  @SuppressWarnings("squid:S2245")
+  private long collisionDecays(long cur, long delta) {
+    double probability = decayProbability(cur);
+    if (probability <= 0.0) {
+      return 0L;
+    }
+    long decays = probability >= 1.0 ? delta : sampleBinomial(delta, probability, ThreadLocalRandom.current());
+    return Math.min(decays, Math.min(delta, cur));
+  }
+
+  /**
+   * The per-unit collision-decay probability {@code decay^cur}. A precomputed table covers the
+   * small counts where collisions are common; beyond it the probability is either negligible
+   * (treated as zero) or computed directly.
+   *
+   * @param cur the occupant's current slot sum
+   * @return the probability, {@code 0.0..1.0}
+   */
+  private double decayProbability(long cur) {
+    if (cur < DECAY_TABLE_SIZE) {
+      return decayPowers[(int) cur];
+    }
+    double probability = Math.pow(decayBase, cur);
+    return probability < MIN_DECAY_PROBABILITY ? 0.0 : probability;
   }
 
   /**
