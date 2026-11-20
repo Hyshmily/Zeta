@@ -55,6 +55,8 @@ import org.springframework.amqp.rabbit.listener.SimpleMessageListenerContainer;
 import org.springframework.amqp.rabbit.listener.api.ChannelAwareMessageListener;
 import org.springframework.amqp.support.converter.Jackson2JsonMessageConverter;
 import org.springframework.amqp.support.converter.MessageConverter;
+import org.springframework.beans.factory.DisposableBean;
+import org.springframework.beans.factory.InitializingBean;
 import org.springframework.beans.factory.ListableBeanFactory;
 import org.springframework.beans.factory.NoSuchBeanDefinitionException;
 import org.springframework.beans.factory.ObjectProvider;
@@ -182,12 +184,11 @@ public class ZetaAmqpAutoConfiguration {
   /**
    * Resolve the data-plane {@link ConnectionFactory}: Spring Boot's default
    * {@code rabbitConnectionFactory} when present (the standard wiring), else
-   * the user's own factory — the first candidate that is not Zeta's dedicated
-   * control-plane factory. Type-based resolution with an explicit exclusion of
-   * the control-plane factory keeps Zeta's own heartbeat connection from
-   * hijacking the data-plane beans through its {@code @Primary} marker, while
-   * still working when the user names their factory something other than
-   * {@code rabbitConnectionFactory}.
+   * the user's own factory — the first candidate that is not Zeta's reserved
+   * control-plane bean name. The control-plane factory is exposed as a
+   * {@link ControlPlaneConnectionFactory} holder, not a {@code ConnectionFactory}
+   * bean, so it cannot be picked up by this lookup or by any unqualified
+   * host-application injection.
    *
    * <p>Every caller is gated by {@link DataPlaneConnectionFactoryPresent}, so a
    * candidate always exists when this resolver runs.
@@ -527,11 +528,11 @@ public class ZetaAmqpAutoConfiguration {
 
   /**
    * Matches when a DATA-PLANE {@link ConnectionFactory} bean exists — any
-   * candidate except Zeta's own control-plane {@code zetaHeartbeatConnectionFactory}.
-   * A plain {@code @ConditionalOnBean(ConnectionFactory.class)} here would be
-   * satisfied by the heartbeat factory itself (it is already registered whenever
-   * a control-plane feature is enabled), wrongly activating the Worker listener
-   * in contexts that have no data-plane connection at all.
+   * candidate except the reserved {@code zetaHeartbeatConnectionFactory} name.
+   * The control-plane connection is held by {@link ControlPlaneConnectionFactory},
+   * not a {@code ConnectionFactory} bean, so it can never satisfy this
+   * condition; the name exclusion is the defensive boundary for a user-supplied
+   * factory under Zeta's reserved name.
    */
   static class DataPlaneConnectionFactoryPresent implements ConfigurationCondition {
 
@@ -712,13 +713,13 @@ public class ZetaAmqpAutoConfiguration {
     @Bean
     @ConditionalOnMissingBean(name = "hotkeyHeartbeatContainer")
     public SimpleMessageListenerContainer heartbeatContainer(
-      @Qualifier("zetaHeartbeatConnectionFactory") ConnectionFactory connectionFactory,
+      @Qualifier("zetaHeartbeatConnectionFactory") ControlPlaneConnectionFactory controlPlane,
       HealthView healthView,
       Queue hotkeyHeartbeatQueue,
       ZetaAppProperties appProperties,
       ObjectProvider<ConsistentHashRing> ringProvider
     ) {
-      SimpleMessageListenerContainer container = new SimpleMessageListenerContainer(connectionFactory);
+      SimpleMessageListenerContainer container = new SimpleMessageListenerContainer(controlPlane.connectionFactory());
       container.setQueueNames(hotkeyHeartbeatQueue.getName());
       container.setAcknowledgeMode(AcknowledgeMode.NONE);
       container.setConcurrentConsumers(1);
@@ -782,16 +783,19 @@ public class ZetaAmqpAutoConfiguration {
    * {@code spring.rabbitmq.ssl.bundle} is not supported (it requires a Boot-internal factory
    * bean subtype).
    *
+   * <p><b>Holder, not a {@code ConnectionFactory} bean.</b> The factory is exposed through
+   * {@link ControlPlaneConnectionFactory}, so it is never a candidate for a host application's
+   * unqualified {@code ConnectionFactory}, {@code RabbitTemplate}, {@code AmqpAdmin} or
+   * {@code @RabbitListener} container factory. A {@code @Primary} factory would capture all of
+   * them and route the host's business traffic over the heartbeat connection; a plain
+   * {@code ConnectionFactory} bean without {@code @Primary} would still make Spring Boot's
+   * {@code @ConditionalOnSingleCandidate} template back off. Both are avoided by keeping the
+   * holder type distinct and resolving it only through its qualifier inside Zeta.
+   *
    * <p><b>Channel mapping (design decisions: heartbeat and health):</b> this factory carries
    * app heartbeat consumption and worker heartbeat production; Boot's
    * {@code rabbitConnectionFactory} carries report publish/consume, cache-sync
    * publish/consume, worker decision consume and worker HOT/COOL broadcast.
-   *
-   * <p><b>{@code @Primary} is load-bearing.</b> Without it, two non-primary
-   * {@code ConnectionFactory} candidates would make Spring Boot's {@code RabbitTemplate}
-   * ({@code @ConditionalOnSingleCandidate}) silently back off; downstream code injecting
-   * {@code RabbitTemplate} would then resolve to {@code zetaReportRabbitTemplate} and inherit
-   * its JSON message converter — a silent format change for the consumer's own messages.
    *
    * <p><b>Gating:</b> this configuration only activates when a feature that actually consumes
    * the control-plane connection is enabled — the app-side worker listener or worker mode —
@@ -801,11 +805,10 @@ public class ZetaAmqpAutoConfiguration {
   @Conditional(HeartbeatFeatureEnabled.class)
   static class HeartbeatConnectionConfiguration {
 
-    @Primary
     @Bean("zetaHeartbeatConnectionFactory")
     @ConditionalOnMissingBean(name = "zetaHeartbeatConnectionFactory")
     @SuppressWarnings("all")
-    public CachingConnectionFactory heartbeatConnectionFactory(
+    public ControlPlaneConnectionFactory heartbeatConnectionFactory(
       ObjectProvider<RabbitProperties> propertiesProvider,
       ResourceLoader resourceLoader
     ) {
@@ -814,7 +817,7 @@ public class ZetaAmqpAutoConfiguration {
         // Fallback: an unconfigured factory; the connection then uses the
         // driver defaults (localhost:5672). In a normal Boot application the
         // RabbitProperties bean is always present.
-        return new CachingConnectionFactory();
+        return new ControlPlaneConnectionFactory(new CachingConnectionFactory());
       }
       RabbitConnectionFactoryBean factoryBean = new RabbitConnectionFactoryBean();
       new RabbitConnectionFactoryBeanConfigurer(resourceLoader, properties).configure(factoryBean);
@@ -823,10 +826,53 @@ public class ZetaAmqpAutoConfiguration {
         com.rabbitmq.client.ConnectionFactory underlying = factoryBean.getObject();
         Assert.state(underlying != null, "RabbitConnectionFactoryBean produced no ConnectionFactory");
 
-        return new CachingConnectionFactory(underlying);
+        return new ControlPlaneConnectionFactory(new CachingConnectionFactory(underlying));
       } catch (Exception ex) {
         throw new IllegalStateException("Failed to create RabbitConnectionFactory", ex);
       }
+    }
+  }
+
+  /**
+   * Internal holder for the control-plane {@link CachingConnectionFactory}. The holder type is
+   * deliberately not a {@link ConnectionFactory}: a {@code ConnectionFactory} bean would join
+   * every unqualified injection point and Boot's {@code @ConditionalOnSingleCandidate} decision,
+   * sharing the host application's business MQ traffic with the heartbeat connection. Zeta's
+   * heartbeat template and listener container receive this holder by qualifier and unwrap it
+   * through {@link #connectionFactory()}.
+   *
+   * <p>Delegating {@link InitializingBean} and {@link DisposableBean} keeps the wrapped
+   * factory's lifecycle intact even though it is not a bean itself: Spring initializes and
+   * destroys the holder, and the holder delegates both calls to the connection factory it owns.
+   */
+  public static final class ControlPlaneConnectionFactory implements InitializingBean, DisposableBean {
+
+    private final CachingConnectionFactory delegate;
+
+    /**
+     * @param delegate the heartbeat connection factory this holder owns
+     */
+    public ControlPlaneConnectionFactory(CachingConnectionFactory delegate) {
+      this.delegate = delegate;
+    }
+
+    /**
+     * The wrapped connection factory.
+     *
+     * @return the heartbeat {@link CachingConnectionFactory}
+     */
+    public CachingConnectionFactory connectionFactory() {
+      return delegate;
+    }
+
+    @Override
+    public void afterPropertiesSet() {
+      delegate.afterPropertiesSet();
+    }
+
+    @Override
+    public void destroy() {
+      delegate.destroy();
     }
   }
 
@@ -836,7 +882,7 @@ public class ZetaAmqpAutoConfiguration {
    * ({@code zeta.worker-listener.enabled=true}) or worker mode
    * ({@code zeta.worker.enabled=true}). Both run control-plane traffic
    * (heartbeat consumption and production). Report and cache-sync are pure data-plane features and
-   * must not drag in the extra {@code @Primary} connection factory.
+   * must not drag in the extra control-plane connection holder.
    */
   static class HeartbeatFeatureEnabled extends AnyNestedCondition {
 

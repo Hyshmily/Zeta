@@ -50,6 +50,60 @@ class ZetaPropertiesTest {
   }
 
   /**
+   * The default configuration passes Bean Validation. In particular, the floating-point knobs
+   * must use decimal constraints: {@code @Min}/{@code @Max} do not support {@code double}, and
+   * Hibernate Validator would throw {@code UnexpectedTypeException} during binding when the host
+   * application has {@code spring-boot-starter-validation} on the classpath.
+   */
+  @Test
+  void defaultsPassBeanValidation() {
+    assertThat(violationMessages(props())).isEmpty();
+  }
+
+  /** The collision-decay base is a probability: values above 1 are rejected at binding. */
+  @Test
+  void decayAboveOneIsRejected() {
+    ZetaProperties p = props();
+    p.setDecay(1.5);
+
+    assertThat(violationPropertyPaths(p)).contains("decay");
+  }
+
+  /** Every positive integer knob rejects 0 instead of failing later in a constructor. */
+  @Test
+  void positiveIntegerKnobsRejectZero() {
+    ZetaProperties p = props();
+    p.setReportIntervalMs(0);
+    p.setDetectIntervalMs(0);
+    p.getCache().setMaxSize(0);
+    p.getCache().setTombstoneMaximumSize(0);
+    p.getCache().setTombstoneTtlSeconds(0);
+
+    assertThat(violationPropertyPaths(p)).contains(
+      "reportIntervalMs",
+      "detectIntervalMs",
+      "cache.maxSize",
+      "cache.tombstoneMaximumSize",
+      "cache.tombstoneTtlSeconds"
+    );
+  }
+
+  /**
+   * The breaker divides its window into buckets; {@code windowTimeMs < windowBuckets} would
+   * otherwise survive binding and fail at the first {@code SlidingWindowBreaker} construction.
+   */
+  @Test
+  void circuitBreakerWindowGeometryIsValidated() {
+    ZetaProperties p = props();
+    p.getCircuitBreaker().setWindowTimeMs(5);
+    p.getCircuitBreaker().setWindowBuckets(10);
+
+    assertThat(violationMessages(p)).contains(
+      "zeta.local.circuit-breaker.window-time-ms must be >= zeta.local.circuit-breaker.window-buckets"
+    );
+  }
+
+  /**
    * The TTL fields carry both the default and the configured value: Spring's
    * binder overlays a property onto the initialized field, so a second
    * "override" field would only add a branch and make an explicit 0
@@ -164,5 +218,12 @@ class ZetaPropertiesTest {
 
   private static Set<String> violationMessages(ZetaProperties properties) {
     return VALIDATOR.validate(properties).stream().map(ConstraintViolation::getMessage).collect(Collectors.toSet());
+  }
+
+  private static Set<String> violationPropertyPaths(ZetaProperties properties) {
+    return VALIDATOR.validate(properties)
+      .stream()
+      .map(violation -> violation.getPropertyPath().toString())
+      .collect(Collectors.toSet());
   }
 }

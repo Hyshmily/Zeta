@@ -33,6 +33,7 @@ import io.github.hyshmily.zeta.scheduler.BackgroundRefresher;
 import io.github.hyshmily.zeta.sharding.HealthView;
 import io.github.hyshmily.zeta.sync.local.CacheSyncPublisher;
 import io.github.hyshmily.zeta.util.clock.StampClock;
+import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.binder.MeterBinder;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.util.List;
@@ -41,6 +42,7 @@ import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.Semaphore;
 import java.util.function.Consumer;
+import java.util.stream.Stream;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.ObjectProvider;
@@ -94,6 +96,40 @@ class ZetaMicrometerAutoConfigurationTest {
     MeterBinder applicationMeterBinder() {
       return registry -> {};
     }
+  }
+
+  /**
+   * The late binder must run even when an early {@code zeta.*} meter already exists, and it must
+   * rebind the registered bean rather than calling the default factory method, so a user override
+   * under the same bean name is honored.
+   */
+  @Test
+  void zetaLateMetrics_rebindsTheRegisteredBeansRegardlessOfExistingZetaMeters() {
+    registry.counter("zeta.early.sentinel").increment();
+    MeterBinder caffeine = mock(MeterBinder.class);
+    MeterBinder custom = mock(MeterBinder.class);
+    @SuppressWarnings("unchecked")
+    ObjectProvider<MeterRegistry> registries = mock(ObjectProvider.class);
+    when(registries.orderedStream()).thenReturn(Stream.of(registry));
+    ObjectProvider<MeterBinder> caffeineProvider = available(caffeine);
+    ObjectProvider<MeterBinder> customProvider = available(custom);
+
+    config.zetaLateMetrics(registries, caffeineProvider, customProvider).afterSingletonsInstantiated();
+
+    verify(caffeine).bindTo(registry);
+    verify(custom).bindTo(registry);
+  }
+
+  @SuppressWarnings("unchecked")
+  private static ObjectProvider<MeterBinder> available(MeterBinder binder) {
+    ObjectProvider<MeterBinder> provider = mock(ObjectProvider.class);
+    doAnswer(invocation -> {
+      ((Consumer<MeterBinder>) invocation.getArgument(0)).accept(binder);
+      return null;
+    })
+      .when(provider)
+      .ifAvailable(any());
+    return provider;
   }
 
   /**

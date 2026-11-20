@@ -39,6 +39,7 @@ import io.micrometer.core.instrument.binder.cache.CaffeineCacheMetrics;
 import java.util.concurrent.Semaphore;
 import java.util.function.ToLongFunction;
 import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.SmartInitializingSingleton;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
@@ -246,52 +247,34 @@ public class ZetaMicrometerAutoConfiguration {
     };
   }
 
+  /**
+   * Re-binds both registered Zeta {@link MeterBinder} beans once every singleton is ready.
+   *
+   * <p>A binder created during the early reporter/access-counter cycle can be initialized before
+   * the cache, detector or reporter it reads exists, leaving every {@code zeta.*} meter silently
+   * absent. Resolving the two binder beans by their fixed names keeps a user override in the
+   * loop; Micrometer returns the existing meter for an identical id, so a successful early bind
+   * is harmless. The registry is not probed for an existing {@code zeta.*} meter: that probe would
+   * let one early series suppress every unrelated late binder.
+   *
+   * @param registries        every meter registry in the context, in order
+   * @param caffeineMetrics   the registered {@code hotKeyCaffeineMetrics} bean, if present
+   * @param customMetrics     the registered {@code hotKeyCustomMetrics} bean, if present
+   * @return a callback invoked once after singleton instantiation
+   */
   @Bean
   @ConditionalOnMissingBean(name = "zetaLateMetrics")
-  public org.springframework.beans.factory.SmartInitializingSingleton zetaLateMetrics(
+  public SmartInitializingSingleton zetaLateMetrics(
     ObjectProvider<MeterRegistry> registries,
-    ObjectProvider<Cache<String, CacheEntry>> hotLocalCacheProvider,
-    @Qualifier("heavyKeeper") ObjectProvider<TopK> hotKeyDetectorProvider,
-    ObjectProvider<SingleFlight> singleFlightProvider,
-    ObjectProvider<KeyReporter> reporterProvider,
-    ObjectProvider<io.github.hyshmily.zeta.cache.AccessCounter> accessCounterProvider,
-    ObjectProvider<BroadcastBuffer> broadcastBufferProvider,
-    ObjectProvider<BackgroundRefresher> backgroundRefresherProvider,
-    ObjectProvider<StampClock> stampClockProvider,
-    ObjectProvider<CacheSyncPublisher> cacheSyncPublisherProvider,
-    ObjectProvider<HealthView> healthViewProvider,
-    ObjectProvider<CacheSyncListener> syncListenerProvider,
-    ObjectProvider<WorkerListener> workerListenerProvider
+    @Qualifier("hotKeyCaffeineMetrics") ObjectProvider<MeterBinder> caffeineMetrics,
+    @Qualifier("hotKeyCustomMetrics") ObjectProvider<MeterBinder> customMetrics
   ) {
-    // A MeterBinder created during the early reporter/access-counter cycle can be bound
-    // before the components exist, leaving every zeta.* meter silently absent. Re-run the
-    // same idempotent registrations once all singletons are ready; Micrometer returns the
-    // existing meter for an identical id, so the early binding is harmless when it worked.
     return () ->
       registries
         .orderedStream()
         .forEach(registry -> {
-          boolean alreadyBound = registry
-            .getMeters()
-            .stream()
-            .anyMatch(meter -> meter.getId().getName().startsWith("zeta."));
-          if (alreadyBound) {
-            return;
-          }
-          hotKeyCaffeineMetrics(hotLocalCacheProvider).bindTo(registry);
-          hotKeyCustomMetrics(
-            hotKeyDetectorProvider,
-            singleFlightProvider,
-            reporterProvider,
-            accessCounterProvider,
-            broadcastBufferProvider,
-            backgroundRefresherProvider,
-            stampClockProvider,
-            cacheSyncPublisherProvider,
-            healthViewProvider,
-            syncListenerProvider,
-            workerListenerProvider
-          ).bindTo(registry);
+          caffeineMetrics.ifAvailable(binder -> binder.bindTo(registry));
+          customMetrics.ifAvailable(binder -> binder.bindTo(registry));
         });
   }
 

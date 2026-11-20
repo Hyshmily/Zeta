@@ -59,8 +59,13 @@ public class ZetaProperties {
   @Max(10)
   private int depth = 5;
 
-  /** Decay factor for HeavyKeeper counter fading. */
+  /**
+   * Base of the exponential collision-decay probability: a colliding unit removes one occupant
+   * unit with probability {@code decay^count}. A larger value decays faster; a smaller value
+   * protects an established count longer. Range {@code (0.0, 1.0]}.
+   */
   @Positive
+  @DecimalMax("1.0")
   private double decay = 0.92;
 
   /** Minimum access count before a key is considered hot. */
@@ -151,8 +156,8 @@ public class ZetaProperties {
   private long hotSoftTtlMs = 300_000;
 
   /** Jitter ratio (0.0–1.0) applied to TTLs — e.g. 0.1 means ±10% random offset. */
-  @Min(0)
-  @Max(1)
+  @DecimalMin("0.0")
+  @DecimalMax("1.0")
   private double ttlJitterRatio = 0.05;
 
   /**
@@ -187,6 +192,7 @@ public class ZetaProperties {
   private String reportExchange = ZetaConstants.Exchange.REPORT;
 
   /** Interval in ms at which the reporter flushes batches to RabbitMQ. */
+  @Min(1)
   private long reportIntervalMs = 50;
 
   /**
@@ -196,6 +202,7 @@ public class ZetaProperties {
    * elapsed — the detector keeps its own 500 ms rhythm regardless of the
    * (usually faster) report tide. Also the tide base when no reporter is wired.
    */
+  @Min(1)
   private long detectIntervalMs = 500;
 
   /**
@@ -296,6 +303,7 @@ public class ZetaProperties {
     /**
      * Maximum number of entries in the L1 table — the process-wide bound.
      */
+    @Min(1)
     private int maxSize = 100_000;
 
     /**
@@ -304,6 +312,7 @@ public class ZetaProperties {
      * mass-invalidation burst; the tombstone only has to outlive in-flight
      * reads, so the bound is workload-tunable rather than fixed.
      */
+    @Min(1)
     private int tombstoneMaximumSize = 10_000;
 
     /**
@@ -311,6 +320,7 @@ public class ZetaProperties {
      * an in-flight read/load (seconds in practice); past it a pre-invalidation
      * fill becomes admissible again.
      */
+    @Min(1)
     private int tombstoneTtlSeconds = 600;
   }
 
@@ -463,6 +473,21 @@ public class ZetaProperties {
     /** Number of buckets in the sliding window. */
     @Min(1)
     private int windowBuckets = 10;
+
+    /**
+     * Every bucket must span at least one millisecond: {@code windowTimeMs} is divided by
+     * {@code windowBuckets} when the breaker shards are built, and an inverted pair otherwise
+     * fails at the first {@link io.github.hyshmily.zeta.cache.cachesupport.circuitbreaker.SlidingWindowBreaker}
+     * construction instead of at binding time.
+     *
+     * @return whether the window geometry is consistent
+     */
+    @AssertTrue(
+      message = "zeta.local.circuit-breaker.window-time-ms must be >= zeta.local.circuit-breaker.window-buckets"
+    )
+    public boolean isWindowGeometryValid() {
+      return windowTimeMs >= windowBuckets;
+    }
 
     /** Failure rate threshold (0.0–1.0) — opens when exceeded. */
     @DecimalMin("0.0")

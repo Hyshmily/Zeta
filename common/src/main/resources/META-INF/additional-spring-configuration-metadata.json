@@ -33,7 +33,7 @@
     {
       "name": "zeta.local.decay",
       "type": "java.lang.Double",
-      "description": "HeavyKeeper decay factor applied during periodic decay.",
+      "description": "Base of the exponential collision-decay probability: a colliding unit removes one occupant unit with probability decay^count. Range (0.0, 1.0]; larger values decay faster, smaller values protect established counts longer.",
       "defaultValue": 0.92
     },
     {
@@ -45,19 +45,19 @@
     {
       "name": "zeta.local.cache.max-size",
       "type": "java.lang.Integer",
-      "description": "Maximum number of L1 cache entries.",
+      "description": "Maximum number of L1 cache entries; at least 1.",
       "defaultValue": 100000
     },
     {
       "name": "zeta.local.cache.tombstone-maximum-size",
       "type": "java.lang.Integer",
-      "description": "Maximum number of per-key invalidation tombstones kept for the anti-resurrection guard.",
+      "description": "Maximum number of per-key invalidation tombstones kept for the anti-resurrection guard; at least 1.",
       "defaultValue": 10000
     },
     {
       "name": "zeta.local.cache.tombstone-ttl-seconds",
       "type": "java.lang.Integer",
-      "description": "Retention in seconds for per-key invalidation tombstones; only has to outlive in-flight reads.",
+      "description": "Retention in seconds for per-key invalidation tombstones; only has to outlive in-flight reads. At least 1.",
       "defaultValue": 600
     },
     {
@@ -171,13 +171,13 @@
     {
       "name": "zeta.local.report-interval-ms",
       "type": "java.lang.Long",
-      "description": "Interval in milliseconds between periodic report flushes.",
+      "description": "Interval in milliseconds between periodic report flushes; at least 1.",
       "defaultValue": 50
     },
     {
       "name": "zeta.local.detect-interval-ms",
       "type": "java.lang.Long",
-      "description": "Maximum elapsed time in milliseconds between two sketch ingests on the shared access counter; also the access-counter tide base when no reporter is wired.",
+      "description": "Maximum elapsed time in milliseconds between two sketch ingests on the shared access counter; also the access-counter tide base when no reporter is wired. At least 1.",
       "defaultValue": 500
     },
     {
@@ -314,7 +314,7 @@
     {
       "name": "zeta.local.circuit-breaker.window-buckets",
       "type": "java.lang.Integer",
-      "description": "Number of buckets dividing the sliding window.",
+      "description": "Number of buckets dividing the sliding window; must not exceed window-time-ms (each bucket spans at least 1 ms).",
       "defaultValue": 10
     },
     {

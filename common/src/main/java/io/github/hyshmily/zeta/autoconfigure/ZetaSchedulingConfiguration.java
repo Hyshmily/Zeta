@@ -22,9 +22,11 @@ import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.Item;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.TopK;
 import io.github.hyshmily.zeta.util.Internal;
 import jakarta.annotation.PostConstruct;
+import jakarta.annotation.PreDestroy;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import lombok.extern.slf4j.Slf4j;
 import org.jspecify.annotations.Nullable;
@@ -89,6 +91,9 @@ public class ZetaSchedulingConfiguration {
   private final @Nullable HotKeyCache hotKeyCache;
   private final List<TopK> topKInstances;
 
+  /** The scheduled ticks, cancelled explicitly on shutdown. */
+  private final List<ScheduledFuture<?>> futures = new ArrayList<>();
+
   public ZetaSchedulingConfiguration(
     List<TopK> topKInstances,
     ObjectProvider<HotKeyCache> hotKeyCacheProvider,
@@ -138,18 +143,33 @@ public class ZetaSchedulingConfiguration {
    * @param unit     the delay unit
    */
   private void scheduleGuarded(String tickName, Runnable tick, long delay, TimeUnit unit) {
-    scheduler.scheduleWithFixedDelay(
-      () -> {
-        try {
-          tick.run();
-        } catch (Throwable e) {
-          log.error("Scheduled {} failed", tickName, e);
-        }
-      },
-      delay,
-      delay,
-      unit
+    futures.add(
+      scheduler.scheduleWithFixedDelay(
+        () -> {
+          try {
+            tick.run();
+          } catch (Throwable e) {
+            log.error("Scheduled {} failed", tickName, e);
+          }
+        },
+        delay,
+        delay,
+        unit
+      )
     );
+  }
+
+  /**
+   * Cancel the scheduled ticks explicitly. The shared {@code hotKeyScheduler} is normally
+   * destroyed with the context, but a host application may replace it with a longer-lived bean;
+   * the tasks must not keep running against a destroyed cache, reporter or sketch.
+   */
+  @PreDestroy
+  void cancelTasks() {
+    for (ScheduledFuture<?> future : futures) {
+      future.cancel(false);
+    }
+    futures.clear();
   }
 
   /**

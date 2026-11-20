@@ -215,6 +215,9 @@ class ZetaSchedulingConfigurationTest {
   @Test
   void scheduleTasksRegistersOnlyPresentCollaborators() {
     HotKeyCache hotKeyCache = mock(HotKeyCache.class);
+    doReturn(mock(java.util.concurrent.ScheduledFuture.class))
+      .when(scheduler)
+      .scheduleWithFixedDelay(any(Runnable.class), anyLong(), anyLong(), any(TimeUnit.class));
     ZetaSchedulingConfiguration config = new ZetaSchedulingConfiguration(
       List.of(mock(TopK.class)),
       provider(hotKeyCache),
@@ -229,13 +232,41 @@ class ZetaSchedulingConfigurationTest {
   }
 
   /**
+   * A host-replaced scheduler outlives this configuration; the ticks must still be cancelled so
+   * they cannot run against a destroyed cache, reporter or sketch.
+   */
+  @Test
+  void cancelTasksCancelsEveryScheduledTick() {
+    HotKeyCache hotKeyCache = mock(HotKeyCache.class);
+    java.util.concurrent.ScheduledFuture<?> future = mock(java.util.concurrent.ScheduledFuture.class);
+    doReturn(future)
+      .when(scheduler)
+      .scheduleWithFixedDelay(any(Runnable.class), anyLong(), anyLong(), any(TimeUnit.class));
+    ZetaSchedulingConfiguration config = new ZetaSchedulingConfiguration(
+      List.of(mock(TopK.class)),
+      provider(hotKeyCache),
+      scheduler,
+      provider(null)
+    );
+
+    config.scheduleTasks();
+    config.cancelTasks();
+
+    verify(future, times(3)).cancel(false);
+  }
+
+  /**
    * Verifies that the scheduling configuration is active by default when a TopK bean exists.
    */
   @Test
   void configIsActiveByDefaultWhenTopKBeanExists() {
+    ScheduledExecutorService scheduled = mock(ScheduledExecutorService.class);
+    doReturn(mock(java.util.concurrent.ScheduledFuture.class))
+      .when(scheduled)
+      .scheduleWithFixedDelay(any(Runnable.class), anyLong(), anyLong(), any(TimeUnit.class));
     new ApplicationContextRunner()
       .withBean(TopK.class, () -> mock(TopK.class))
-      .withBean("hotKeyScheduler", ScheduledExecutorService.class, () -> mock(ScheduledExecutorService.class))
+      .withBean("hotKeyScheduler", ScheduledExecutorService.class, () -> scheduled)
       .withConfiguration(AutoConfigurations.of(ZetaSchedulingConfiguration.class))
       .run(ctx -> assertThat(ctx).hasSingleBean(ZetaSchedulingConfiguration.class));
   }

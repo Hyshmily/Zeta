@@ -28,21 +28,21 @@ import io.github.hyshmily.zeta.constants.ZetaConstants;
 import io.github.hyshmily.zeta.reporting.KeyReporter;
 import io.github.hyshmily.zeta.reporting.ReportPublisher;
 import io.github.hyshmily.zeta.reporting.impl.KeyReporterImpl;
+import io.github.hyshmily.zeta.sharding.ClusterHealth;
 import io.github.hyshmily.zeta.sharding.ConsistentHashRing;
 import io.github.hyshmily.zeta.sharding.HashRing;
 import io.github.hyshmily.zeta.sharding.HealthView;
-import io.github.hyshmily.zeta.sharding.ClusterHealth;
 import io.github.hyshmily.zeta.sync.local.CacheSyncListener;
 import io.github.hyshmily.zeta.sync.local.CacheSyncProperties;
 import io.github.hyshmily.zeta.sync.local.CacheSyncPublisher;
-import io.github.hyshmily.zeta.sync.local.PutPayloadCodec;
 import io.github.hyshmily.zeta.sync.local.DefaultSyncContext;
+import io.github.hyshmily.zeta.sync.local.PutPayloadCodec;
 import io.github.hyshmily.zeta.sync.local.SyncPolicy;
 import io.github.hyshmily.zeta.sync.worker.DefaultWorkerContext;
-import io.github.hyshmily.zeta.sync.worker.WorkerPolicy;
 import io.github.hyshmily.zeta.sync.worker.WorkerHeartbeatMessage;
 import io.github.hyshmily.zeta.sync.worker.WorkerListener;
 import io.github.hyshmily.zeta.sync.worker.WorkerListenerProperties;
+import io.github.hyshmily.zeta.sync.worker.WorkerPolicy;
 import io.github.hyshmily.zeta.util.clock.StampClock;
 import java.util.concurrent.ScheduledExecutorService;
 import org.junit.jupiter.api.Test;
@@ -183,9 +183,9 @@ class ZetaAmqpAutoConfigurationTest {
   }
 
   /**
-   * Verifies that the dedicated heartbeat {@code @Primary} connection factory is NOT
-   * created when no control-plane feature (worker listener / worker mode) is enabled —
-   * it must not hijack the application's unqualified {@code ConnectionFactory} injections.
+   * Verifies that the dedicated heartbeat connection holder is NOT created when no
+   * control-plane feature (worker listener / worker mode) is enabled — it must not
+   * become a candidate for the application's {@code ConnectionFactory} injections.
    */
   @Test
   void heartbeatConnectionFactoryIsAbsentWhenNoControlPlaneFeatureEnabled() {
@@ -274,10 +274,7 @@ class ZetaAmqpAutoConfigurationTest {
     props.setQueuePrefix("test.sync");
 
     ZetaAmqpAutoConfiguration.SyncConfiguration config = new ZetaAmqpAutoConfiguration.SyncConfiguration();
-    Queue queue = config.hotkeySyncQueue(
-      props,
-      new io.github.hyshmily.zeta.util.NodeIdentity("test-instance", 1L)
-    );
+    Queue queue = config.hotkeySyncQueue(props, new io.github.hyshmily.zeta.util.NodeIdentity("test-instance", 1L));
 
     assertThat(queue).isNotNull();
     assertThat(queue.getName()).isEqualTo("test.sync:test-instance");
@@ -392,10 +389,7 @@ class ZetaAmqpAutoConfigurationTest {
 
     ZetaAmqpAutoConfiguration.WorkerListenerConfiguration config =
       new ZetaAmqpAutoConfiguration.WorkerListenerConfiguration();
-    Queue queue = config.hotkeyWorkerQueue(
-      props,
-      new io.github.hyshmily.zeta.util.NodeIdentity("test-instance", 1L)
-    );
+    Queue queue = config.hotkeyWorkerQueue(props, new io.github.hyshmily.zeta.util.NodeIdentity("test-instance", 1L));
 
     assertThat(queue).isNotNull();
     assertThat(queue.getName()).isEqualTo("test.worker:test-instance");
@@ -547,9 +541,7 @@ class ZetaAmqpAutoConfigurationTest {
   void hotkeyHeartbeatQueueIsCreated() {
     ZetaAmqpAutoConfiguration.WorkerListenerConfiguration config =
       new ZetaAmqpAutoConfiguration.WorkerListenerConfiguration();
-    Queue queue = config.hotkeyHeartbeatQueue(
-      new io.github.hyshmily.zeta.util.NodeIdentity("test-instance", 1L)
-    );
+    Queue queue = config.hotkeyHeartbeatQueue(new io.github.hyshmily.zeta.util.NodeIdentity("test-instance", 1L));
 
     assertThat(queue).isNotNull();
     assertThat(queue.getName()).isEqualTo("zeta.heartbeat:test-instance");
@@ -574,14 +566,15 @@ class ZetaAmqpAutoConfigurationTest {
 
   @Test
   void heartbeatContainerIsCreated() {
-    ConnectionFactory connectionFactory = mock(ConnectionFactory.class);
+    ZetaAmqpAutoConfiguration.ControlPlaneConnectionFactory controlPlane =
+      new ZetaAmqpAutoConfiguration.ControlPlaneConnectionFactory(mock(CachingConnectionFactory.class));
     HealthView healthView = mock(HealthView.class);
     Queue heartbeatQueue = new Queue("zeta.heartbeat:test");
 
     ZetaAmqpAutoConfiguration.WorkerListenerConfiguration config =
       new ZetaAmqpAutoConfiguration.WorkerListenerConfiguration();
     SimpleMessageListenerContainer container = config.heartbeatContainer(
-      connectionFactory,
+      controlPlane,
       healthView,
       heartbeatQueue,
       new ZetaAppProperties(),
@@ -594,7 +587,8 @@ class ZetaAmqpAutoConfigurationTest {
 
   @Test
   void heartbeatContainerRecordsOnlyHeartbeatsFromItsOwnApplication() {
-    ConnectionFactory connectionFactory = mock(ConnectionFactory.class);
+    ZetaAmqpAutoConfiguration.ControlPlaneConnectionFactory controlPlane =
+      new ZetaAmqpAutoConfiguration.ControlPlaneConnectionFactory(mock(CachingConnectionFactory.class));
     HealthView healthView = mock(HealthView.class);
     Queue heartbeatQueue = new Queue("zeta.heartbeat:test");
     ZetaAppProperties appProperties = new ZetaAppProperties();
@@ -603,7 +597,7 @@ class ZetaAmqpAutoConfigurationTest {
     ZetaAmqpAutoConfiguration.WorkerListenerConfiguration config =
       new ZetaAmqpAutoConfiguration.WorkerListenerConfiguration();
     MessageListener listener = config
-      .heartbeatContainer(connectionFactory, healthView, heartbeatQueue, appProperties, mock(ObjectProvider.class))
+      .heartbeatContainer(controlPlane, healthView, heartbeatQueue, appProperties, mock(ObjectProvider.class))
       .getMessageListener();
 
     listener.onMessage(new WorkerHeartbeatMessage(1L, "foreign-worker", 1L, true, "tenant-b").toMessage());
@@ -644,6 +638,19 @@ class ZetaAmqpAutoConfigurationTest {
   // ── HeartbeatConnectionConfiguration ──
 
   /**
+   * Verifies that the heartbeat factory is exposed as a holder, not as a {@link ConnectionFactory}
+   * bean: an unqualified host injection and Boot's {@code @ConditionalOnSingleCandidate} decision
+   * must never resolve to the control-plane connection.
+   */
+  @Test
+  void heartbeatConnectionFactoryIsNotAConnectionFactoryBean() {
+    workerRunner.run(ctx -> {
+      assertThat(ctx).hasBean("zetaHeartbeatConnectionFactory");
+      assertThat(ctx.getBean("zetaHeartbeatConnectionFactory")).isNotInstanceOf(ConnectionFactory.class);
+    });
+  }
+
+  /**
    * Verifies that the dedicated heartbeat connection factory inherits the full
    * {@link RabbitProperties} surface — including SSL (TLS) — via Spring Boot's
    * connection factory configurer, instead of only host/port/credentials.
@@ -661,7 +668,9 @@ class ZetaAmqpAutoConfigurationTest {
 
     ZetaAmqpAutoConfiguration.HeartbeatConnectionConfiguration config =
       new ZetaAmqpAutoConfiguration.HeartbeatConnectionConfiguration();
-    CachingConnectionFactory cf = config.heartbeatConnectionFactory(propsProvider, new DefaultResourceLoader());
+    CachingConnectionFactory cf = config
+      .heartbeatConnectionFactory(propsProvider, new DefaultResourceLoader())
+      .connectionFactory();
 
     assertThat(cf.getRabbitConnectionFactory().isSSL()).isTrue();
     assertThat(cf.getHost()).isEqualTo("broker.example.com");
@@ -682,7 +691,9 @@ class ZetaAmqpAutoConfigurationTest {
 
     ZetaAmqpAutoConfiguration.HeartbeatConnectionConfiguration config =
       new ZetaAmqpAutoConfiguration.HeartbeatConnectionConfiguration();
-    CachingConnectionFactory cf = config.heartbeatConnectionFactory(propsProvider, new DefaultResourceLoader());
+    CachingConnectionFactory cf = config
+      .heartbeatConnectionFactory(propsProvider, new DefaultResourceLoader())
+      .connectionFactory();
 
     assertThat(cf.getRabbitConnectionFactory().isSSL()).isFalse();
     assertThat(cf.getHost()).isEqualTo("localhost");
@@ -700,7 +711,9 @@ class ZetaAmqpAutoConfigurationTest {
 
     ZetaAmqpAutoConfiguration.HeartbeatConnectionConfiguration config =
       new ZetaAmqpAutoConfiguration.HeartbeatConnectionConfiguration();
-    CachingConnectionFactory cf = config.heartbeatConnectionFactory(propsProvider, new DefaultResourceLoader());
+    CachingConnectionFactory cf = config
+      .heartbeatConnectionFactory(propsProvider, new DefaultResourceLoader())
+      .connectionFactory();
 
     assertThat(cf).isNotNull();
     assertThat(cf.getRabbitConnectionFactory().isSSL()).isFalse();
@@ -730,10 +743,9 @@ class ZetaAmqpAutoConfigurationTest {
   }
 
   /**
-   * A control-plane-only context must not activate any data-plane configuration:
-   * the heartbeat factory is itself a {@link ConnectionFactory}, so plain
-   * type-based conditions would match it and then fail while resolving the
-   * data-plane factory.
+   * A control-plane-only context must not activate any data-plane configuration. The
+   * control-plane holder is not a {@link ConnectionFactory}, and the reserved-name
+   * exclusion keeps a legacy factory under that name out of the data-plane lookup.
    */
   @Test
   void controlPlaneOnlyFactoryDoesNotActivateDataPlaneConfigurations() {
