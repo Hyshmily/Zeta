@@ -15,6 +15,7 @@
  */
 package io.github.hyshmily.zeta.annotation;
 
+import io.github.hyshmily.zeta.Zeta;
 import io.github.hyshmily.zeta.util.Internal;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;

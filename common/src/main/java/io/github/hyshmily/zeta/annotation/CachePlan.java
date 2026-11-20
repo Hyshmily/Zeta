@@ -24,6 +24,7 @@ import io.github.hyshmily.zeta.cache.cachesupport.policy.GetPolicy;
 import io.github.hyshmily.zeta.cache.cachesupport.policy.InvalidatePolicy;
 import io.github.hyshmily.zeta.cache.cachesupport.policy.PutPolicy;
 import io.github.hyshmily.zeta.cache.cachesupport.policy.StalePolicy;
+import io.github.hyshmily.zeta.cache.cachesupport.raw.CacheEntry;
 import java.lang.reflect.Array;
 import java.lang.reflect.Method;
 import java.math.BigDecimal;
@@ -636,9 +637,10 @@ sealed interface CachePlan {
    * bits and a negative fold would otherwise silently degrade a 30-day TTL to the default. A
    * floating-point literal is rejected: milliseconds are discrete, and accepting
    * {@code 1e3} or {@code NaN} only buys precision hazards. A literal outside the {@code long}
-   * range fails resolution with a range error. Anything else is SpEL compiled once and evaluated
-   * lazily; {@code resultDependent} marks an expression that must wait for the body. A parse
-   * failure or a constant expression that fails to evaluate fails resolution; only a runtime
+   * range fails resolution with a range error, and a constant outside the packed entry's encodable
+   * range fails resolution instead of the first miss. Anything else is SpEL compiled once and
+   * evaluated lazily; {@code resultDependent} marks an expression that must wait for the body. A
+   * parse failure or a constant expression that fails to evaluate fails resolution; only a runtime
    * evaluation of a dynamic expression degrades to the configured default, including a
    * floating-point result, so a broken attribute can never fail a read.
    */
@@ -687,7 +689,7 @@ sealed interface CachePlan {
       }
       if (isInteger(literal)) {
         try {
-          return Constant.of(Math.max(0L, Long.parseLong(literal)));
+          return constant(role, Math.max(0L, Long.parseLong(literal)), literal, method);
         } catch (NumberFormatException overflow) {
           throw new IllegalStateException(
             role + " literal '" + literal + "' on " + method + " exceeds the long range",
@@ -713,9 +715,30 @@ sealed interface CachePlan {
               "); check for 32-bit integer overflow and write a long literal such as 2592000000L"
           );
         }
-        return Constant.of(clampTtl(number));
+        return constant(role, clampTtl(number), literal, method);
       }
       return new Dynamic(role, compiled, method, resultAllowed && compiled.referencesResult());
+    }
+
+    /**
+     * Validate and fold one constant TTL at resolution. A duration the packed entry cannot store
+     * would otherwise fail at the first miss or after the transaction committed; the constant is
+     * knowable at plan time, so it fails bean creation instead.
+     *
+     * @param role    the attribute name ({@code hardTtl}/{@code softTtl})
+     * @param millis  the folded duration
+     * @param literal the configured text, for the error message
+     * @param method  the annotated method
+     * @return the constant TTL
+     * @throws IllegalStateException when the duration is outside the encodable range
+     */
+    private static Constant constant(String role, long millis, String literal, Method method) {
+      try {
+        CacheEntry.requireEncodableTtl(millis, role);
+      } catch (IllegalArgumentException e) {
+        throw new IllegalStateException(role + " '" + literal + "' on " + method + " is out of range: " + millis, e);
+      }
+      return Constant.of(millis);
     }
 
     /** Whether a numeric TTL result is a floating-point value, which milliseconds cannot represent. */
@@ -787,7 +810,14 @@ sealed interface CachePlan {
             log.debug("[Zeta] {} evaluated to a floating-point value for {}; using the default TTL", role, method);
             return 0L;
           }
-          return clampTtl(value);
+          long millis = clampTtl(value);
+          try {
+            CacheEntry.requireEncodableTtl(millis, role);
+            return millis;
+          } catch (IllegalArgumentException e) {
+            log.debug("[Zeta] {} evaluated out of range for {}; using the default TTL", role, method);
+            return 0L;
+          }
         } catch (RuntimeException e) {
           log.debug("[Zeta] {} evaluation failed for {}: {}", role, method, e.toString());
           return 0L;

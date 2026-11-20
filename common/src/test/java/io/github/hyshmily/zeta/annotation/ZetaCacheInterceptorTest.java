@@ -22,10 +22,12 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 import io.github.hyshmily.zeta.Zeta;
@@ -3457,6 +3459,50 @@ class ZetaCacheInterceptorTest {
     verify(zeta, never()).put(anyString(), any(), any(PutPolicy.class));
   }
 
+  static class SyncedWriter {
+
+    @ZetaPut(cache = "users", key = "#p0", sync = true)
+    public String save(String id) {
+      return "v-" + id;
+    }
+  }
+
+  /**
+   * A configuration rejection from the facade is not a cache-engine failure: routing it through
+   * {@link CacheFailurePolicy} logs it at WARN and returns, telling the caller a synced write
+   * succeeded while the facade refused it (for example, the global hard TTL resolved to permanent).
+   */
+  @Test
+  @DisplayName("a synced write's configuration rejection propagates without reaching the failure policy")
+  void syncedWriteConfigurationFailurePropagates() {
+    doThrow(new IllegalArgumentException("A permanent entry cannot be synced"))
+      .when(zeta)
+      .put(anyString(), any(), any(PutPolicy.class));
+    CacheFailurePolicy policy = mock(CacheFailurePolicy.class);
+    interceptor = new ZetaCacheInterceptor(zeta, resolver, policy);
+
+    assertThatThrownBy(() -> proxy(new SyncedWriter()).save("u1"))
+      .isInstanceOf(IllegalArgumentException.class)
+      .hasMessageContaining("permanent entry cannot be synced");
+    verifyNoInteractions(policy);
+  }
+
+  /** A Worker-only deployment is a mode error, not a cache-engine failure. */
+  @Test
+  @DisplayName("a Worker-only mode rejection propagates without reaching the failure policy")
+  void workerOnlyModeFailurePropagates() {
+    doThrow(new io.github.hyshmily.zeta.exception.ZetaModeException("put", "Worker-only mode", "App-mode cache"))
+      .when(zeta)
+      .put(anyString(), any(), any(PutPolicy.class));
+    CacheFailurePolicy policy = mock(CacheFailurePolicy.class);
+    interceptor = new ZetaCacheInterceptor(zeta, resolver, policy);
+
+    assertThatThrownBy(() -> proxy(new SyncedWriter()).save("u1")).isInstanceOf(
+      io.github.hyshmily.zeta.exception.ZetaModeException.class
+    );
+    verifyNoInteractions(policy);
+  }
+
   static class MutableEntity {
 
     String id;
@@ -3503,6 +3549,20 @@ class ZetaCacheInterceptorTest {
     assertRejectedAtStartup(() -> proxy(new HugeTtlReader()), "hardTtl", "exceeds the long range");
   }
 
+  static class UnencodableTtlReader {
+
+    @ZetaCached(cache = "users", key = "#p0", hardTtl = "3000000000000")
+    public String load(String id) {
+      return id;
+    }
+  }
+
+  @Test
+  @DisplayName("a constant TTL above the packed entry range fails resolution, not the first miss")
+  void unencodableConstantTtlFailsResolution() {
+    assertRejectedAtStartup(() -> proxy(new UnencodableTtlReader()), "hardTtl", "out of range");
+  }
+
   static class NumberTtlReader {
 
     @ZetaCached(cache = "users", key = "#p0", hardTtl = "#p1")
@@ -3544,6 +3604,17 @@ class ZetaCacheInterceptorTest {
 
     missRunsBody();
     service.load("float", 1500.5f);
+    assertThat(lastOptions.hardTtlMs().getAsLong()).isZero();
+  }
+
+  @Test
+  @DisplayName("a dynamic TTL above the packed entry range degrades to the default")
+  void dynamicUnencodableTtlDegradesToDefault() {
+    NumberTtlReader service = proxy(new NumberTtlReader());
+
+    missRunsBody();
+    service.load("huge", 3_000_000_000_000L);
+
     assertThat(lastOptions.hardTtlMs().getAsLong()).isZero();
   }
 

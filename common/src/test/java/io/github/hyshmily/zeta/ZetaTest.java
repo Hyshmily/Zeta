@@ -442,6 +442,20 @@ class ZetaTest {
     assertThatThrownBy(() -> zeta.putAll(Map.of(), negative)).isInstanceOf(IllegalArgumentException.class);
   }
 
+  /**
+   * A duration above the packed-entry maximum but below the permanent sentinel is not encodable.
+   * Validating it here fails before a transaction's after-commit hook, not after the business
+   * write committed.
+   */
+  @Test
+  void putAll_emptyWithAnUnencodableDynamicTtl_shouldStillReject() {
+    PutPolicy unencodable = new PutPolicy(() -> 3_000_000_000_000L, () -> 0L, false);
+
+    assertThatThrownBy(() -> zeta.putAll(Map.of(), unencodable))
+      .isInstanceOf(IllegalArgumentException.class)
+      .hasMessageContaining("out of range");
+  }
+
   @Test
   void putAll_emptyWithAnUnsyncablePermanentDefault_shouldStillReject() {
     when(hotKeyCache.resolveSyncableHardTtl(anyLong())).thenReturn(Long.MAX_VALUE);

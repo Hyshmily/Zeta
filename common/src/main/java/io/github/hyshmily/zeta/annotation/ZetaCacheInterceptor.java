@@ -23,6 +23,7 @@ import io.github.hyshmily.zeta.annotation.support.ZetaEvaluationContext;
 import io.github.hyshmily.zeta.cache.cachesupport.loader.CacheLoader;
 import io.github.hyshmily.zeta.cache.cachesupport.policy.GetPolicy;
 import io.github.hyshmily.zeta.cache.cachesupport.policy.PutPolicy;
+import io.github.hyshmily.zeta.exception.ZetaModeException;
 import io.github.hyshmily.zeta.util.Internal;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.VarHandle;
@@ -39,7 +40,6 @@ import org.jspecify.annotations.Nullable;
 import org.springframework.aop.ProxyMethodInvocation;
 import org.springframework.aop.TargetSource;
 import org.springframework.aop.framework.Advised;
-import org.springframework.core.BridgeMethodResolver;
 import org.springframework.core.BridgeMethodResolver;
 
 /**
@@ -119,6 +119,7 @@ public final class ZetaCacheInterceptor implements MethodInterceptor {
   }
 
   @Override
+  @SuppressWarnings("all")
   public Object invoke(@NonNull MethodInvocation invocation) throws Throwable {
     if (bypassesRefreshReentry(invocation)) {
       return invocation.proceed();
@@ -208,6 +209,7 @@ public final class ZetaCacheInterceptor implements MethodInterceptor {
    * the body has already produced its side effect, so a null key is a no-op
    * rather than a failure.
    */
+  @SuppressWarnings("all")
   private Object write(
     MethodInvocation invocation,
     CachePlan.Write plan,
@@ -250,6 +252,12 @@ public final class ZetaCacheInterceptor implements MethodInterceptor {
     PutPolicy policy = plan.policy(preflightHardMs, post);
     try {
       zeta.put(key, value, policy);
+    } catch (IllegalArgumentException | ZetaModeException e) {
+      // A caller or configuration error, not a cache-engine failure: an unencodable TTL, a
+      // permanent synced write whose hard TTL resolved from the global default, or a
+      // Worker-only deployment. The failure policy would log it at WARN and return, telling the
+      // caller the write succeeded when the facade refused it.
+      throw e;
     } catch (RuntimeException e) {
       failurePolicy.onFailure(new CacheFailure(CacheVerb.PUT, plan.cache(), List.of(key), value, e, false));
     }

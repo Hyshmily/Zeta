@@ -65,7 +65,7 @@ import org.springframework.util.ClassUtils;
  * {@link #bindResult}, and a bound {@code null} is still a bound result. A write
  * that already built the pre-body context binds the result on it instead of
  * allocating a second context, and a read loader caches the invocation thread's
- * context until {@link #release()} clears it, so its key, TTL suppliers and
+ * context until the read returns, so its key, TTL suppliers and
  * {@code unless} share one instance; the phases never overlap. Nothing is shared
  * with a refresh thread or a call that already returned, so a TTL supplier or an
  * {@code unless} evaluated by the engine can never observe another evaluation's

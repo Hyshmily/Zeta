@@ -15,6 +15,8 @@
  */
 package io.github.hyshmily.zeta;
 
+import static io.github.hyshmily.zeta.cache.CacheKeysPolicy.validKeys;
+
 import com.github.benmanes.caffeine.cache.Cache;
 import io.github.hyshmily.zeta.cache.HotKeyCache;
 import io.github.hyshmily.zeta.cache.cachesupport.loader.CacheLoader;
@@ -27,15 +29,12 @@ import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.Item;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.TopK;
 import io.github.hyshmily.zeta.model.ZetaCacheStats;
 import io.github.hyshmily.zeta.util.Internal;
-import org.jspecify.annotations.Nullable;
-import org.springframework.util.Assert;
-
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.function.Function;
 import java.util.function.Supplier;
-
-import static io.github.hyshmily.zeta.cache.CacheKeysPolicy.validKeys;
+import org.jspecify.annotations.Nullable;
+import org.springframework.util.Assert;
 
 /**
  * Default implementation of the {@link Zeta} facade — the sole public API
@@ -485,8 +484,7 @@ public class DefaultZeta implements Zeta {
   }
 
   /**
-   * Static TTL values resolved exactly once per call, with the shared
-   * non-negative guard.
+   * Static TTL values resolved exactly once per call, with the shared encodability guard.
    */
   private record ResolvedTtls(long hardMs, long softMs) {
     /** The all-default resolution: no TTL override on either axis. */
@@ -506,8 +504,8 @@ public class DefaultZeta implements Zeta {
     }
 
     private static ResolvedTtls of(long hardMs, long softMs) {
-      Assert.isTrue(hardMs >= 0, "hardTtlMs must not be negative");
-      Assert.isTrue(softMs >= 0, "softTtlMs must not be negative");
+      CacheEntry.requireEncodableTtl(hardMs, "hardTtlMs");
+      CacheEntry.requireEncodableTtl(softMs, "softTtlMs");
       return new ResolvedTtls(hardMs, softMs);
     }
   }
