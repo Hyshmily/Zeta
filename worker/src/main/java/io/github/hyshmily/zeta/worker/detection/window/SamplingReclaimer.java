@@ -424,16 +424,15 @@ public final class SamplingReclaimer<V> {
   private boolean reject(String key) {
     requestRelief();
     rejectedNewKeys.increment();
-    if (!log.isDebugEnabled()) {
-      return false;
-    }
-    log.debug(
+    if (log.isDebugEnabled()) {
+      log.debug(
       "New key rejected in {}: tracked-keys cap reached (maxTrackedKeys={}, cumulativeRejected={}, key={})",
       componentName,
       maxTrackedKeys,
       rejectedNewKeys.sum(),
       key
     );
+    }
     return false;
   }
 

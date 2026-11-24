@@ -219,11 +219,16 @@ public class RuleResolver {
    * thread-safe. It is also the match cache's loader, so a resolution allocates
    * no per-call
    * function.
+   *
+   * <p>The match cache exists only when a non-{@code EXACT} rule can match by pattern. A
+   * default-only rule set (and one whose remaining rules are all {@code EXACT}) resolves every key
+   * to the same binding, so a cache would only pay a hash lookup and retain up to
+   * {@code 4 * maxActiveHotKeys} key strings to answer a constant.
    */
   public static final class Snapshot implements Function<String, RuleBinding> {
 
     private final Map<String, RuleBinding> bindingsById;
-    private final Cache<String, RuleBinding> matchCache;
+    private final @Nullable Cache<String, RuleBinding> matchCache;
     private final Map<String, RuleBinding> exactRules;
     private final List<RuleBinding> bindings;
     private final RuleBinding[] scanBindings;
@@ -242,7 +247,7 @@ public class RuleResolver {
       this.defaultBinding = this.bindings.get(0);
       this.scanBindings = buildScanBindings(this.bindings);
       this.exactRules = buildExactRules(ruleSet, this.bindingsById);
-      this.matchCache = Caffeine.newBuilder().maximumSize(cacheSize).build();
+      this.matchCache = this.scanBindings.length == 0 ? null : Caffeine.newBuilder().maximumSize(cacheSize).build();
     }
 
     /**
@@ -303,7 +308,8 @@ public class RuleResolver {
       if (windowSum < ruleSet.minHotCount()) {
         return null;
       }
-      return eligible(matchCache.get(key, this), windowSum);
+      RuleBinding binding = matchCache == null ? defaultBinding : matchCache.get(key, this);
+      return eligible(binding, windowSum);
     }
 
     @Nullable

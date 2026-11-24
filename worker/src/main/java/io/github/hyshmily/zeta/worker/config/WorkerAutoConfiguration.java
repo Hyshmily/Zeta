@@ -66,6 +66,7 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.SmartLifecycle;
 import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
 
 /**
  * Auto-configuration for the standalone hot-key Worker.
@@ -699,31 +700,40 @@ public class WorkerAutoConfiguration {
   }
 
   /**
-   * Actuator endpoint for the detection plane.
-   *
-   * <p>Declared explicitly because {@code @Endpoint} is not a stereotype. The explicit bean name
-   * keeps it distinct from the App-side {@code ZetaEndpoint} bean. The shipped
-   * {@code application.yml} exposes only {@code health}; an operator opts in by adding
-   * {@code hotkeyworker} to the web exposure include and mapping its path.
-   *
-   * @param rules    the rule resolver
-   * @param window   the effective window geometry
-   * @param registry the HOT set
-   * @param cooling  the cool-down scheduler
-   * @param detector the window table
-   * @return a new {@link HotKeyEndpoint}
+   * Actuator support, isolated in its own configuration so the optional dependency is never
+   * referenced from a top-level {@code @Bean} signature. A missing Actuator classpath or an AOT
+   * scan therefore never links {@link HotKeyEndpoint}.
    */
-  @Bean("hotKeyWorkerEndpoint")
-  @ConditionalOnMissingBean
+  @Configuration(proxyBeanMethods = false)
   @ConditionalOnClass(name = "org.springframework.boot.actuate.endpoint.annotation.Endpoint")
-  public HotKeyEndpoint hotKeyEndpoint(
-    RuleResolver rules,
-    WindowGeometry window,
-    HotKeyRegistry registry,
-    CoolingScheduler cooling,
-    SlidingWindowDetector detector
-  ) {
-    return new HotKeyEndpoint(rules, window, registry, cooling, detector);
+  static class ActuatorConfiguration {
+
+    /**
+     * Actuator endpoint for the detection plane.
+     *
+     * <p>Declared explicitly because {@code @Endpoint} is not a stereotype. The explicit bean name
+     * keeps it distinct from the App-side {@code ZetaEndpoint} bean. The shipped
+     * {@code application.yml} exposes only {@code health}; an operator opts in by adding
+     * {@code hotkeyworker} to the web exposure include and mapping its path.
+     *
+     * @param rules    the rule resolver
+     * @param window   the effective window geometry
+     * @param registry the HOT set
+     * @param cooling  the cool-down scheduler
+     * @param detector the window table
+     * @return a new {@link HotKeyEndpoint}
+     */
+    @Bean("hotKeyWorkerEndpoint")
+    @ConditionalOnMissingBean
+    public HotKeyEndpoint hotKeyEndpoint(
+      RuleResolver rules,
+      WindowGeometry window,
+      HotKeyRegistry registry,
+      CoolingScheduler cooling,
+      SlidingWindowDetector detector
+    ) {
+      return new HotKeyEndpoint(rules, window, registry, cooling, detector);
+    }
   }
 
   /**
@@ -760,6 +770,8 @@ public class WorkerAutoConfiguration {
     factory.setPrefetchCount(properties.getReportConsumer().getPrefetchCount());
     factory.setAcknowledgeMode(AcknowledgeMode.AUTO);
     factory.setDefaultRequeueRejected(false);
+    // A broker restart or a temporarily missing queue must not stop the report consumer forever.
+    factory.setMissingQueuesFatal(false);
     return factory;
   }
 

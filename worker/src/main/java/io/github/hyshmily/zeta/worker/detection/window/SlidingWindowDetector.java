@@ -304,6 +304,11 @@ public class SlidingWindowDetector {
         }
         if (ahead == 0) {
           base = count(current);
+          if (base == Integer.MAX_VALUE) {
+            // The slice is already saturated: the packed word would be identical, and the CAS would
+            // only make every consumer contend for the same cache line to write it back.
+            return;
+          }
         }
       }
       int next = base >= Integer.MAX_VALUE - delta ? Integer.MAX_VALUE : base + delta;

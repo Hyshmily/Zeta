@@ -15,85 +15,68 @@
  */
 package io.github.hyshmily.zeta.worker.detection.rule;
 
-import java.util.Comparator;
-import java.util.regex.Pattern;
 import org.jspecify.annotations.NonNull;
+import org.jspecify.annotations.Nullable;
+
+import java.util.Comparator;
+import java.util.Objects;
+import java.util.regex.Pattern;
 
 /**
- * One detection rule, with its QPS thresholds already converted to window
- * counts.
+ * One hot-key detection rule with its QPS thresholds pre-converted into window counts.
  *
- * <p>
- * The cool-down policy is flattened into the rule: {@code coolCount == 0}
- * encodes
- * {@code COOL_FOR_EXPIRE} and stores its lifetime in {@code checkIntervalMs};
- * {@code coolCount > 0}
- * encodes {@code COOL_FOR_LOW_QPS} and stores the dwell duration in
- * {@code lowQpsForMs}. The
- * configuration gate rejects the fields a strategy does not use, so the
- * sentinel cannot be produced
- * by a valid YAML. The runtime therefore reads primitive fields instead of
- * dispatching through a
- * policy object.
+ * <p><b>Flattened cool-down encoding.</b> {@code coolCount == 0} encodes {@code COOL_FOR_EXPIRE}
+ * with its fixed HOT lifetime stored in {@code checkIntervalMs}; {@code coolCount > 0} encodes
+ * {@code COOL_FOR_LOW_QPS} with its dwell duration in {@code lowQpsForMs} and re-check cadence in
+ * {@code checkIntervalMs}. Because the configuration gate rejects fields unused by the active
+ * strategy, the runtime reads primitive fields directly instead of dispatching through a policy
+ * object.
  *
- * <p>
- * A key is bound to the rule that promoted it for the rest of its HOT life:
- * cooling reads the
- * entry's captured binding and never the current {@link RuleSet}, so replacing
- * the rule set cannot
- * change the bar an already-hot key is measured against (its cool-down still
- * completes against the
- * rule that promoted it).
+ * <p><b>Immutable binding.</b> A promoted key binds to the rule that promoted it for its entire
+ * HOT lifetime; cooling always reads the captured binding rather than the live {@link RuleSet},
+ * so rule-set reloads never shift the cool-down bar of an already-hot key.
  *
- * @param id              stable identifier used in metrics tags and the
- *                        endpoint; unique within a set
- * @param type            matcher kind
- * @param pattern         exact key, prefix, or regex source
- * @param priority        higher wins; the primary sort key, so a regex rule can
- *                        outrank an exact one
- * @param order           configuration order, the final tiebreak
- * @param hotCount        window-count threshold that promotes
- *                        ({@code ceil(hotQps * W / 1000)})
- * @param coolCount       window-count ceiling of the LOW_QPS band; {@code 0}
- *                        encodes COOL_FOR_EXPIRE
- * @param lowQpsForMs     how long the key must stay below {@code coolCount};
- *                        {@code 0} for EXPIRE
- * @param checkIntervalMs LOW_QPS re-check period; for EXPIRE, the HOT lifetime
- *                        ({@code cool-after})
- * @param regex           the compiled {@code pattern} for
- *                        {@link MatchType#REGEX} (compiled here
- *                        when {@code null}), otherwise {@code null}
+ * @param id              stable rule identifier used in metric tags and endpoints; unique per set
+ * @param type            key matcher kind
+ * @param pattern         exact key, bare namespace name, prefix, or regex source
+ * @param priority        higher value wins; primary sort key (allows regex to outrank exact rules)
+ * @param order           declaration order used as the final tiebreaker
+ * @param hotCount        window-count threshold that promotes ({@code ceil(hotQps * W / 1000)})
+ * @param coolCount       window-count ceiling of the LOW_QPS band; {@code 0} encodes COOL_FOR_EXPIRE
+ * @param lowQpsForMs     dwell duration below {@code coolCount} before cooling; {@code 0} for EXPIRE
+ * @param checkIntervalMs LOW_QPS re-check period, or the fixed HOT lifetime for EXPIRE
+ * @param regex           compiled {@code pattern} for {@link MatchType#REGEX} (compiled in the
+ *                        constructor when {@code null}), or {@code null} for non-regex matchers
  */
 public record HotKeyRule(
-    String id,
-    MatchType type,
-    String pattern,
-    int priority,
-    int order,
-    long hotCount,
-    long coolCount,
-    long lowQpsForMs,
-    long checkIntervalMs,
-    Pattern regex) implements Comparable<HotKeyRule> {
+  String id,
+  MatchType type,
+  String pattern,
+  int priority,
+  int order,
+  long hotCount,
+  long coolCount,
+  long lowQpsForMs,
+  long checkIntervalMs,
+  @Nullable Pattern regex
+) implements Comparable<HotKeyRule> {
   /**
-   * The full rule order: priority descending, then match specificity, then
-   * pattern length
-   * descending, then configuration order.
+   * Precedence order: priority descending, match specificity ascending, pattern length descending,
+   * then configuration declaration order ascending.
    */
   private static final Comparator<HotKeyRule> ORDER = Comparator.comparingInt(HotKeyRule::priority)
-      .reversed()
-      .thenComparingInt(rule -> rule.type().specificity())
-      .thenComparing(Comparator.comparingInt((HotKeyRule rule) -> rule.pattern().length()).reversed())
-      .thenComparingInt(HotKeyRule::order);
+    .reversed()
+    .thenComparingInt(rule -> rule.type().specificity())
+    .thenComparing(Comparator.comparingInt((HotKeyRule rule) -> rule.pattern().length()).reversed())
+    .thenComparingInt(HotKeyRule::order);
 
   /**
-   * Compact constructor: enforces the fields every rule needs, the flattened
-   * cool-down encoding and
-   * compiles the regex once.
+   * Validates required fields, enforces the flattened cool-down invariants, and compiles
+   * {@link MatchType#REGEX} patterns once when not pre-compiled by the caller.
    *
-   * @throws IllegalArgumentException when a required field is missing, the
-   *                                  cool-down encoding is
-   *                                  inconsistent, or the regex does not compile
+   * @throws IllegalArgumentException if any required field is missing/invalid, the cool-down
+   *                                  encoding is inconsistent, a {@link MatchType#NAMESPACE}
+   *                                  pattern contains delimiters, or the regex fails to compile
    */
   public HotKeyRule {
     if (id == null || id.isBlank()) {
@@ -105,32 +88,40 @@ public record HotKeyRule(
     if (type == null) {
       throw new IllegalArgumentException("rule '" + id + "' has no match type");
     }
-    if (hotCount < 1) {
+    if (
+      type == MatchType.NAMESPACE && (pattern.isBlank() || pattern.indexOf(':') >= 0 || pattern.indexOf('\u0000') >= 0)
+    ) {
+      throw new IllegalArgumentException(
+        "rule '" +
+          id +
+          "' has a NAMESPACE pattern that is not a bare cache name; " +
+          "a NAMESPACE pattern is the bare cache name, without ':' or the namespace delimiter"
+      );
+    }
+    if (hotCount < 1L) {
       throw new IllegalArgumentException("rule '" + id + "' must promote on at least one access");
     }
-    if (coolCount < 0) {
+    if (coolCount < 0L) {
       throw new IllegalArgumentException("rule '" + id + "' has a negative cool count");
     }
-    if (lowQpsForMs < 0) {
+    if (lowQpsForMs < 0L) {
       throw new IllegalArgumentException("rule '" + id + "' has a negative low-QPS duration");
     }
-    if (checkIntervalMs < 1) {
+    if (checkIntervalMs < 1L) {
       throw new IllegalArgumentException("rule '" + id + "' has a non-positive cool check interval");
     }
-    if (coolCount == 0 && lowQpsForMs != 0) {
+    if (coolCount == 0L && lowQpsForMs != 0L) {
       throw new IllegalArgumentException("rule '" + id + "' encodes COOL_FOR_EXPIRE but carries a low-QPS duration");
     }
     switch (type) {
       case REGEX -> {
-        // A caller that already compiled the pattern (the configuration validator)
-        // hands it over so
-        // the expression is parsed once; the null case keeps the record usable on its
-        // own.
+        // Reuse a pre-compiled Pattern from configuration validation when supplied; compile here
+        // otherwise so the record remains self-contained.
         if (regex == null) {
           regex = Pattern.compile(pattern);
         }
       }
-      case EXACT, PREFIX -> {
+      case EXACT, NAMESPACE, PREFIX -> {
         if (regex != null) {
           throw new IllegalArgumentException("rule '" + id + "' carries a compiled regex for a non-regex match");
         }
@@ -138,144 +129,111 @@ public record HotKeyRule(
     }
   }
 
-  /**
-   * Tests one key against this rule.
-   *
-   * @param key the cache key
-   * @return {@code true} when the rule selects the key
-   */
+  /** Tests whether {@code key} is selected by this rule. */
   public boolean matches(String key) {
     return type.matches(pattern, regex, key);
   }
 
-  /**
-   * @return whether the rule cools on a fixed lifetime instead of a low-QPS dwell
-   */
+  /** Returns {@code true} if {@code windowSum} meets or exceeds {@link #hotCount()}. */
+  public boolean eligible(long windowSum) {
+    return windowSum >= hotCount;
+  }
+
+  /** Returns {@code true} if this rule cools on a fixed lifetime rather than a low-QPS dwell. */
   public boolean isExpire() {
     return coolCount == 0L;
   }
 
   /**
-   * The first check instant for a newly promoted entry. Both strategies are the
-   * same arithmetic:
-   * LOW_QPS waits one re-check interval, EXPIRE waits its configured lifetime.
+   * Computes the first cool-down check deadline for a newly promoted entry: one re-check interval
+   * for {@code COOL_FOR_LOW_QPS}, or the fixed HOT lifetime for {@code COOL_FOR_EXPIRE}.
    *
-   * @param nowMs the promotion instant, monotonic milliseconds
-   * @return the deadline, monotonic milliseconds
+   * @param nowMs promotion timestamp in monotonic milliseconds
+   * @return deadline in monotonic milliseconds, saturated at {@link Long#MAX_VALUE}
    */
   public long firstDue(long nowMs) {
     return saturatedAdd(nowMs, checkIntervalMs);
   }
 
   /**
-   * Whether a window sum clears this rule's promotion threshold.
+   * Computes the next re-check deadline for a {@code COOL_FOR_LOW_QPS} entry still below its band:
+   * the earlier of the next periodic check and the dwell expiry deadline, both saturated to
+   * prevent wrap-around into the past.
    *
-   * @param windowSum the reported window sum
-   * @return {@code true} when the rule is eligible
-   */
-  public boolean eligible(long windowSum) {
-    return windowSum >= hotCount;
-  }
-
-  /**
-   * The next re-check instant for a LOW_QPS entry that is still below its band:
-   * the earlier of the
-   * next periodic check and the cool deadline. Both sums saturate instead of
-   * wrapping a very large
-   * configured duration into a past instant, which would re-arm the wheel
-   * immediately and spin.
-   *
-   * @param nowMs      the current monotonic sample
-   * @param belowSince the instant the entry first dropped below the band
-   * @return the next deadline, monotonic milliseconds
+   * @param nowMs      current monotonic timestamp in milliseconds
+   * @param belowSince monotonic timestamp when the entry first dropped below {@link #coolCount()}
+   * @return next deadline in monotonic milliseconds
    */
   public long nextDue(long nowMs, long belowSince) {
     return Math.min(saturatedAdd(nowMs, checkIntervalMs), saturatedAdd(belowSince, lowQpsForMs));
   }
 
   /**
-   * The cool-down parameters in canonical form, as they participate in
-   * {@link #definition()} and
-   * therefore in the rule-set fingerprint: {@code expire:<checkIntervalMs>} for
-   * {@code COOL_FOR_EXPIRE},
-   * {@code low_qps:<coolCount>:<lowQpsForMs>:<checkIntervalMs>} for
-   * {@code COOL_FOR_LOW_QPS}.
-   *
-   * @return the canonical cool-down text
+   * Returns the canonical cool-down parameter summary used in {@link #definition()}:
+   * {@code expire:<checkIntervalMs>} or
+   * {@code low_qps:<coolCount>:<lowQpsForMs>:<checkIntervalMs>}.
    */
   public String describeCool() {
     return isExpire()
-        ? "expire:" + checkIntervalMs
-        : "low_qps:" + coolCount + ":" + lowQpsForMs + ":" + checkIntervalMs;
+      ? "expire:" + checkIntervalMs
+      : "low_qps:" + coolCount + ":" + lowQpsForMs + ":" + checkIntervalMs;
   }
 
   /**
-   * The canonical text of every parameter that decides this rule's behaviour:
-   * identity, matcher,
-   * priority, promotion threshold and cool-down encoding. {@code order} is
-   * deliberately excluded —
-   * it is only the final precedence tiebreak, and the snapshot's ordered rule
-   * list already reflects
-   * it; a {@link RuleBinding} is rebuilt from the rule instance and therefore
-   * carries the current
-   * order without making the fingerprint depend on it.
-   *
-   * <p>
-   * {@link RuleSet} fingerprints this text. Every string field is
-   * length-prefixed, so an
-   * operator-supplied {@code id} or {@code pattern} containing a delimiter cannot
-   * make two
-   * different rules produce the same definition. {@link RuleResolver} rebuilds a
-   * binding for every
-   * published rule, so this text is only the fingerprint's canonical form, not a
-   * comparison key.
-   *
-   * @return the canonical text, without a trailing newline
+   * Returns the length-prefixed canonical fingerprint text of all behavioural parameters
+   * (excluding {@code order}, which is already encoded by the ordered list in {@link RuleSet}).
    */
   String definition() {
     return String.join(
-        "|",
-        id.length() + ":" + id,
-        type.name(),
-        pattern.length() + ":" + pattern,
-        Integer.toString(priority),
-        Long.toString(hotCount),
-        describeCool());
+      "|",
+      id.length() + ":" + id,
+      type.name(),
+      pattern.length() + ":" + pattern,
+      Integer.toString(priority),
+      Long.toString(hotCount),
+      describeCool()
+    );
   }
 
   /**
-   * Two rules are equal when every behavioural field and the configuration order
-   * match. The
-   * compiled {@link #regex} is deliberately excluded: it is fully determined by
-   * {@code type} and
-   * {@code pattern}, and {@link Pattern} uses identity equality, so including it
-   * would make two
-   * identically configured regex rules compare unequal. Comparing the fields
-   * directly keeps
-   * equality allocation-free; {@link #definition()} is only the fingerprint's
-   * canonical text.
-   *
-   * @param other the object to compare with
-   * @return {@code true} when both rules carry the same fields and order
+   * Adds a non-negative duration to a monotonic instant, saturating at {@link Long#MAX_VALUE}
+   * instead of wrapping into the past.
+   */
+  static long saturatedAdd(long instant, long positiveMs) {
+    long sum = instant + positiveMs;
+    return sum < instant ? Long.MAX_VALUE : sum;
+  }
+
+  /** Compares rules by {@link #ORDER}. */
+  @Override
+  public int compareTo(@NonNull HotKeyRule other) {
+    Objects.requireNonNull(other, "other must not be null");
+    return ORDER.compare(this, other);
+  }
+
+  /**
+   * Compares all behavioural fields and {@link #order()}, deliberately excluding {@link #regex()}
+   * because {@link Pattern} uses reference equality and is fully determined by {@code type} and
+   * {@code pattern}.
    */
   @Override
-  public boolean equals(Object other) {
-    return (this == other ||
-        (other instanceof HotKeyRule that &&
-            priority == that.priority &&
-            order == that.order &&
-            hotCount == that.hotCount &&
-            coolCount == that.coolCount &&
-            lowQpsForMs == that.lowQpsForMs &&
-            checkIntervalMs == that.checkIntervalMs &&
-            type == that.type &&
-            id.equals(that.id) &&
-            pattern.equals(that.pattern)));
+  public boolean equals(@Nullable Object other) {
+    return (
+      this == other ||
+      (other instanceof HotKeyRule that &&
+        priority == that.priority &&
+        order == that.order &&
+        hotCount == that.hotCount &&
+        coolCount == that.coolCount &&
+        lowQpsForMs == that.lowQpsForMs &&
+        checkIntervalMs == that.checkIntervalMs &&
+        type == that.type &&
+        id.equals(that.id) &&
+        pattern.equals(that.pattern))
+    );
   }
 
-  /**
-   * @return a hash consistent with {@link #equals(Object)}
-   */
+  /** Computes a hash code consistent with {@link #equals(Object)}, excluding {@link #regex()}. */
   @Override
   public int hashCode() {
     int result = id.hashCode();
@@ -288,24 +246,5 @@ public record HotKeyRule(
     result = 31 * result + Long.hashCode(lowQpsForMs);
     result = 31 * result + Long.hashCode(checkIntervalMs);
     return result;
-  }
-
-  /**
-   * Adds a positive duration to a monotonic instant, saturating at
-   * {@link Long#MAX_VALUE} instead
-   * of wrapping into the past.
-   *
-   * @param instant    the monotonic instant
-   * @param positiveMs the positive duration in milliseconds
-   * @return the sum, or {@link Long#MAX_VALUE} when it would overflow
-   */
-  static long saturatedAdd(long instant, long positiveMs) {
-    long sum = instant + positiveMs;
-    return sum < instant ? Long.MAX_VALUE : sum;
-  }
-
-  @Override
-  public int compareTo(@NonNull HotKeyRule other) {
-    return ORDER.compare(this, other);
   }
 }

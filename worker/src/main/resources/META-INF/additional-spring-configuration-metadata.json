@@ -57,7 +57,7 @@
     {
       "name": "zeta.worker.report-consumer.prefetch-count",
       "type": "java.lang.Integer",
-      "description": "Unacknowledged messages allowed per report consumer.",
+      "description": "Unacknowledged messages allowed per report consumer, between 1 and 65535 (AMQP 0-9-1 basicQos).",
       "defaultValue": 50
     },
     {

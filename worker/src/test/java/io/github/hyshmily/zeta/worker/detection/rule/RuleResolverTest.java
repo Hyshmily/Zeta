@@ -22,6 +22,7 @@ import io.github.hyshmily.zeta.worker.metrics.WorkerDetectionMetrics;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.util.List;
+import java.util.regex.Pattern;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -309,5 +310,71 @@ class RuleResolverTest {
     assertThat(gate.binding("k").matches()).as("a below-threshold report is not a match").isZero();
     assertThat(gate.resolveIfEligible("k1", 100).rule()).isSameAs(prefix);
     assertThat(gate.binding("k").matches()).isEqualTo(1);
+  }
+
+  @Test
+  void namespaceMatchesTheAnnotationNamespaceAndItsColonForm() {
+    HotKeyRule namespace = new HotKeyRule("ns", MatchType.NAMESPACE, "users", 0, 0, 5, 0L, 0L, 60_000L, null);
+
+    assertThat(namespace.matches("users:42")).as("a colon-delimited key is inside the namespace").isTrue();
+    assertThat(namespace.matches("users\u0000[J:42]")).as("an annotation key carries U+0000 after the name").isTrue();
+    assertThat(namespace.matches("users_profile:42")).as("a sibling namespace is not inside it").isFalse();
+    assertThat(namespace.matches("users")).as("the bare namespace is not a key inside it").isFalse();
+    assertThat(namespace.matches("usersX")).as("the key needs a delimiter after the name").isFalse();
+  }
+
+  @Test
+  void exactAndPrefixStillSelectTheirOwnKeys() {
+    HotKeyRule exact = new HotKeyRule("exact", MatchType.EXACT, "users:42", 0, 0, 5, 0L, 0L, 60_000L, null);
+    HotKeyRule prefix = new HotKeyRule("prefix", MatchType.PREFIX, "users", 0, 1, 5, 0L, 0L, 60_000L, null);
+
+    assertThat(exact.matches("users:42")).isTrue();
+    assertThat(exact.matches("users:420")).isFalse();
+    assertThat(prefix.matches("users:42")).isTrue();
+    assertThat(prefix.matches("users")).isTrue();
+    assertThat(prefix.matches("users_profile:42")).as("a bare prefix still spans siblings").isTrue();
+  }
+
+  /**
+   * At equal priority the namespace sits between the exact key and the prefix: the exact rule owns
+   * its key, the namespace owns the rest of the namespace, and the prefix covers the sibling that
+   * the namespace deliberately excludes.
+   */
+  @Test
+  void namespaceSitsBetweenExactAndPrefixAtEqualPriority() {
+    HotKeyRule exact = new HotKeyRule("exact", MatchType.EXACT, "users:42", 0, 0, 5, 0L, 0L, 60_000L, null);
+    HotKeyRule namespace = new HotKeyRule("namespace", MatchType.NAMESPACE, "users", 0, 1, 5, 0L, 0L, 60_000L, null);
+    HotKeyRule prefix = new HotKeyRule("prefix", MatchType.PREFIX, "users", 0, 2, 5, 0L, 0L, 60_000L, null);
+    HotKeyRule regex = new HotKeyRule("regex", MatchType.REGEX, "users.*", 0, 3, 5, 0L, 0L, 60_000L, null);
+    RuleSet set = RuleSet.of(List.of(regex, prefix, namespace, exact), defaults);
+
+    assertThat(set.rules()).extracting(HotKeyRule::id).containsExactly("exact", "namespace", "prefix", "regex");
+    assertThat(set.resolve("users:42").id()).isEqualTo("exact");
+    assertThat(set.resolve("users:43").id()).isEqualTo("namespace");
+    assertThat(set.resolve("users_profile:42").id()).isEqualTo("prefix");
+  }
+
+  @Test
+  void aNamespacePatternMustBeTheBareCacheName() {
+    assertThatThrownBy(() -> new HotKeyRule("ns", MatchType.NAMESPACE, "users:", 0, 0, 5, 0L, 0L, 60_000L, null))
+      .isInstanceOf(IllegalArgumentException.class)
+      .hasMessageContaining("ns")
+      .hasMessageContaining("bare cache name");
+
+    assertThatThrownBy(() ->
+      new HotKeyRule("ns", MatchType.NAMESPACE, "users\u0000[J]", 0, 0, 5, 0L, 0L, 60_000L, null)
+    )
+      .isInstanceOf(IllegalArgumentException.class)
+      .hasMessageContaining("bare cache name");
+
+    assertThatThrownBy(() -> new HotKeyRule("ns", MatchType.NAMESPACE, "  ", 0, 0, 5, 0L, 0L, 60_000L, null))
+      .isInstanceOf(IllegalArgumentException.class)
+      .hasMessageContaining("bare cache name");
+
+    assertThatThrownBy(() ->
+      new HotKeyRule("ns", MatchType.NAMESPACE, "users", 0, 0, 5, 0L, 0L, 60_000L, Pattern.compile("users"))
+    )
+      .isInstanceOf(IllegalArgumentException.class)
+      .hasMessageContaining("non-regex");
   }
 }

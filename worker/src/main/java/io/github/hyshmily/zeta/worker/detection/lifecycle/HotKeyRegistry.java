@@ -246,10 +246,19 @@ public class HotKeyRegistry {
    * undone by a stale failure; the promotion is recorded as aborted, keeping
    * {@code promotions == cools + aborted + active} checkable.
    *
+   * <p>The lock-free pre-check is exact, not a heuristic: decision versions are monotonic, an entry's
+   * version is final, and a version's insert is visible to the delivery path before any abort of that
+   * version can be observed, so a version that is not current can never become current again — the
+   * same argument {@code TimerWheel.deschedule} relies on. Most delivery-path aborts are no-ops for a
+   * superseded or already-cooled key, and those no longer take the stripe lock.
+   *
    * @param key     the cache key
    * @param version the decision version of the promotion to undo
    */
   public void abort(String key, long version) {
+    if (!isCurrent(key, version)) {
+      return;
+    }
     int hash = spread(key);
     ReentrantLock lock = stripe(hash);
     lock.lock();

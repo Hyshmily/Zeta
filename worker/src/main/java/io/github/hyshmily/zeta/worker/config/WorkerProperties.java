@@ -148,7 +148,8 @@ public class WorkerProperties {
     @Min(1)
     private int concurrentConsumers = 8;
 
-    @Min(0)
+    @Min(1)
+    @Max(65_535)
     private int prefetchCount = 50;
 
     /**

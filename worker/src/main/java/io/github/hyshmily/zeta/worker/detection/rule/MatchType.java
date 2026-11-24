@@ -23,16 +23,23 @@ import java.util.regex.Pattern;
  * <p>
  * Specificity is also the second sort key of a {@link RuleSet} (after
  * {@code priority}):
- * an exact rule outranks a prefix rule, which outranks a regex rule at the same
- * priority.
+ * an exact rule outranks a namespace rule, which outranks a prefix rule, which
+ * outranks a regex rule at the same priority.
  */
 public enum MatchType {
   /** {@code key.equals(pattern)}. */
   EXACT(0),
+  /**
+   * Keys inside the annotation namespace: {@code pattern} followed by a
+   * {@code ':'} or the U+0000 namespace delimiter. A key that merely starts
+   * with the same characters — the sibling {@code users_profile:42} for the
+   * pattern {@code users} — does not match.
+   */
+  NAMESPACE(1),
   /** {@code key.startsWith(pattern)}. */
-  PREFIX(1),
+  PREFIX(2),
   /** {@code pattern.matcher(key).matches()} — a whole-key match. */
-  REGEX(2);
+  REGEX(3);
 
   private final int specificity;
 
@@ -60,6 +67,14 @@ public enum MatchType {
   public boolean matches(String pattern, Pattern regex, String key) {
     return switch (this) {
       case EXACT -> key.equals(pattern);
+      case NAMESPACE -> {
+        int len = pattern.length();
+        if (key.length() <= len || !key.startsWith(pattern)) {
+          yield false;
+        }
+        char sep = key.charAt(len);
+        yield sep == ':' || sep == '\u0000';
+      }
       case PREFIX -> key.startsWith(pattern);
       case REGEX -> regex.matcher(key).matches();
     };

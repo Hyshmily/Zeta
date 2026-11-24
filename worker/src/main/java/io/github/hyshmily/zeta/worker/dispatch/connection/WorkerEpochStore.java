@@ -168,8 +168,9 @@ public final class WorkerEpochStore {
 
   /**
    * Replaces the epoch file atomically with one long: write and force a same-directory temporary
-   * file, then rename it over the target. A crash during the write leaves the target untouched
-   * instead of producing an eight-byte file with mixed old and new bytes.
+   * file, rename it over the target, then force the parent directory entry. A crash during the
+   * write leaves the target untouched instead of producing an eight-byte file with mixed old and
+   * new bytes.
    *
    * @param path  the epoch file
    * @param epoch the value to store
@@ -197,6 +198,7 @@ public final class WorkerEpochStore {
         log.warn("Atomic epoch-file replacement is unsupported for {}; the rename was not atomic", path);
       }
       replaced = true;
+      syncDirectory(parent);
     } finally {
       if (!replaced) {
         try {
@@ -205,6 +207,22 @@ public final class WorkerEpochStore {
           log.debug("Failed to delete temporary epoch file {}", temp, e);
         }
       }
+    }
+  }
+
+  /**
+   * Forces the parent directory entry after the atomic rename, so a power loss cannot leave the
+   * directory metadata pointing at the replaced file's old inode. Platforms that cannot open a
+   * directory as a channel (Windows) or do not support directory fsync report a warning and keep
+   * the value that was just written.
+   *
+   * @param directory the directory containing the epoch file
+   */
+  private static void syncDirectory(Path directory) {
+    try (FileChannel channel = FileChannel.open(directory, StandardOpenOption.READ)) {
+      channel.force(true);
+    } catch (IOException | UnsupportedOperationException e) {
+      log.warn("Could not fsync epoch directory {}; a power loss may lose the latest epoch", directory, e);
     }
   }
 

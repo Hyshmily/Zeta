@@ -288,7 +288,11 @@ final class TimerWheel {
           if (delta <= 0L) {
             break;
           }
-          cascade(level, previous >>> SHIFT[level], delta);
+          // A zero word means every bucket on the level is an empty sentinel: the cascade could only
+          // clear bits that are already clear, while still walking up to buckets.length slots.
+          if (occupied[level] != 0L) {
+            cascade(level, previous >>> SHIFT[level], delta);
+          }
         }
       }
       splicePending();

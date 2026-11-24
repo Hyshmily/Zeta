@@ -20,11 +20,12 @@ import io.github.hyshmily.zeta.util.TimeSource;
 import io.github.hyshmily.zeta.util.executor.ZetaThreadFactory;
 import io.github.hyshmily.zeta.worker.dispatch.DecisionDispatcher;
 import jakarta.annotation.PreDestroy;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.context.SmartLifecycle;
+
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
-import lombok.extern.slf4j.Slf4j;
-import org.springframework.context.SmartLifecycle;
 
 /**
  * Drives the cool-down checks: one thread per striped wheel, each advancing its wheel, draining the
@@ -141,14 +142,6 @@ public class CoolingScheduler implements SmartLifecycle {
     }
   }
 
-  /**
-   * Stops the threads at context shutdown. Never throws.
-   *
-   * <p>
-   * The joins share one deadline, so the teardown wait is bounded by one second regardless of the
-   * wheel count. An interrupt during shutdown is recorded and the remaining threads are still
-   * joined; returning early would leave later wheels advancing during context teardown.
-   */
   /**
    * The advancing threads are started by the constructor, so the lifecycle start has nothing to do.
    * Implemented so {@link #stop()} runs before singleton destruction; the dispatcher's final drain

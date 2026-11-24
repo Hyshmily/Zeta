@@ -357,6 +357,10 @@ public record DetectionSettings(
         errors.add("rule '" + id + "' has a blank match.key");
         return null;
       }
+      if (type == MatchType.NAMESPACE && (pattern.indexOf(':') >= 0 || pattern.indexOf('\u0000') >= 0)) {
+        errors.add("rule '" + id + "'.match.key must be the bare namespace without ':' or U+0000");
+        return null;
+      }
 
       if (hotQps < 1) {
         errors.add("rule '" + id + "'.hot-qps must be >= 1");

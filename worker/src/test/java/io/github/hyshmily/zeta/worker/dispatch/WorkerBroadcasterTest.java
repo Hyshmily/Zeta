@@ -25,8 +25,8 @@ import static org.mockito.Mockito.*;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import io.github.hyshmily.zeta.constants.ZetaConstants;
+import io.github.hyshmily.zeta.model.DecisionKind;
 import io.github.hyshmily.zeta.model.ZetaDecision;
-import io.github.hyshmily.zeta.sync.worker.WorkerType;
 import io.github.hyshmily.zeta.worker.dispatch.connection.WorkerIdentity;
 import io.github.hyshmily.zeta.worker.metrics.WorkerDetectionMetrics;
 import java.util.List;
@@ -81,7 +81,7 @@ class WorkerBroadcasterTest {
     verify(rabbitTemplate).send(eq(BROADCAST), eq(PREFIX_DECISION + "testApp"), messageCaptor.capture());
     Message sent = messageCaptor.getValue();
     assertThat(new String(sent.getBody())).isEqualTo("myKey");
-    assertThat(sent.getMessageProperties().getHeaders().get(HEADER_TYPE)).isEqualTo(WorkerType.HOT.code());
+    assertThat(sent.getMessageProperties().getHeaders().get(HEADER_TYPE)).isEqualTo(DecisionKind.HOT.code());
     assertThat(sent.getMessageProperties().getHeaders().get(HEADER_APP_NAME)).isEqualTo("testApp");
     assertThat((Long) sent.getMessageProperties().getHeaders().get(HEADER_VERSION)).isPositive();
   }
@@ -95,7 +95,7 @@ class WorkerBroadcasterTest {
     verify(rabbitTemplate).send(eq(BROADCAST), eq(PREFIX_DECISION + "testApp"), messageCaptor.capture());
     Message sent = messageCaptor.getValue();
     assertThat(new String(sent.getBody())).isEqualTo("myKey");
-    assertThat(sent.getMessageProperties().getHeaders().get(HEADER_TYPE)).isEqualTo(WorkerType.COOL.code());
+    assertThat(sent.getMessageProperties().getHeaders().get(HEADER_TYPE)).isEqualTo(DecisionKind.COOL.code());
     assertThat(sent.getMessageProperties().getHeaders().get(HEADER_APP_NAME)).isEqualTo("testApp");
     assertThat((Long) sent.getMessageProperties().getHeaders().get(HEADER_VERSION)).isPositive();
   }
@@ -211,7 +211,7 @@ class WorkerBroadcasterTest {
     verify(rabbitTemplate, times(1)).send(any(), any(), messageCaptor.capture());
     Message sent = messageCaptor.getValue();
     assertThat(sent.getMessageProperties().getHeaders().get(HEADER_VERSION)).isEqualTo(5L);
-    assertThat(sent.getMessageProperties().getHeaders().get(HEADER_TYPE)).isEqualTo(WorkerType.HOT.code());
+    assertThat(sent.getMessageProperties().getHeaders().get(HEADER_TYPE)).isEqualTo(DecisionKind.HOT.code());
   }
 
   /**
@@ -233,10 +233,10 @@ class WorkerBroadcasterTest {
 
     verify(rabbitTemplate, times(2)).send(any(), any(), messageCaptor.capture());
     assertThat(messageCaptor.getAllValues().get(0).getMessageProperties().getHeaders().get(HEADER_TYPE)).isEqualTo(
-      WorkerType.HOT.code()
+      DecisionKind.HOT.code()
     );
     assertThat(messageCaptor.getAllValues().get(1).getMessageProperties().getHeaders().get(HEADER_TYPE)).isEqualTo(
-      WorkerType.COOL.code()
+      DecisionKind.COOL.code()
     );
   }
 
@@ -260,10 +260,10 @@ class WorkerBroadcasterTest {
     verify(rabbitTemplate, times(2)).send(any(), any(), messageCaptor.capture());
     assertThat(messageCaptor.getAllValues()).hasSize(2);
     assertThat(messageCaptor.getAllValues().get(0).getMessageProperties().getHeaders().get(HEADER_TYPE)).isEqualTo(
-      WorkerType.COOL.code()
+      DecisionKind.COOL.code()
     );
     assertThat(messageCaptor.getAllValues().get(1).getMessageProperties().getHeaders().get(HEADER_TYPE)).isEqualTo(
-      WorkerType.HOT.code()
+      DecisionKind.HOT.code()
     );
   }
 

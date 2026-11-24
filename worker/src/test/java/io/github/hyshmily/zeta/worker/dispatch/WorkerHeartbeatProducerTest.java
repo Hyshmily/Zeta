@@ -18,6 +18,7 @@ package io.github.hyshmily.zeta.worker.dispatch;
 import static io.github.hyshmily.zeta.constants.ZetaConstants.Amqp.HEADER_APP_NAME;
 import static io.github.hyshmily.zeta.constants.ZetaConstants.Amqp.HEADER_HEARTBEAT_EPOCH;
 import static io.github.hyshmily.zeta.constants.ZetaConstants.Amqp.HEADER_HEARTBEAT_READY;
+import static io.github.hyshmily.zeta.constants.ZetaConstants.Amqp.HEADER_NODE_ID;
 import static io.github.hyshmily.zeta.constants.ZetaConstants.Routing.KEY_HEARTBEAT;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
@@ -72,7 +73,8 @@ class WorkerHeartbeatProducerTest {
     assertThat(message.getMessageProperties().getHeaders().get(HEADER_HEARTBEAT_EPOCH)).isEqualTo(7L);
     assertThat(message.getMessageProperties().getHeaders().get(HEADER_HEARTBEAT_READY)).isEqualTo(true);
     assertThat(message.getMessageProperties().getHeaders().get(HEADER_APP_NAME)).isEqualTo("tenant-a");
-    assertThat(new String(message.getBody())).isEqualTo("worker-1");
+    assertThat(message.getMessageProperties().getHeaders().get(HEADER_NODE_ID)).isEqualTo("worker-1");
+    assertThat(message.getBody()).as("the node id travels only in HEADER_NODE_ID").isEmpty();
   }
 
   /**

@@ -92,7 +92,7 @@ public class HotKeyEndpoint {
    * @return the diagnostic document
    */
   @ReadOperation
-  public Map<String, Object> info(@Nullable String key) {
+  public Map<String, Object> info(@org.springframework.lang.Nullable String key) {
     return key == null ? summary() : keyState(key);
   }
 

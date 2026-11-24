@@ -21,8 +21,8 @@ import static io.github.hyshmily.zeta.constants.ZetaConstants.Routing.PREFIX_DEC
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import com.github.benmanes.caffeine.cache.Expiry;
+import io.github.hyshmily.zeta.model.DecisionKind;
 import io.github.hyshmily.zeta.model.ZetaDecision;
-import io.github.hyshmily.zeta.sync.worker.WorkerType;
 import io.github.hyshmily.zeta.util.TimeSource;
 import io.github.hyshmily.zeta.worker.dispatch.connection.WorkerIdentity;
 import io.github.hyshmily.zeta.worker.metrics.WorkerDetectionMetrics;
@@ -30,6 +30,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.TimeUnit;
+import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 import org.jspecify.annotations.NonNull;
 import org.jspecify.annotations.Nullable;
@@ -67,10 +68,6 @@ import org.springframework.amqp.rabbit.core.RabbitTemplate;
  */
 @Slf4j
 public class WorkerBroadcaster {
-
-  public WorkerIdentity getIdentity() {
-    return identity;
-  }
 
   /**
    * What happened to one decision at the funnel. The dispatcher consumes a token only for
@@ -146,11 +143,17 @@ public class WorkerBroadcaster {
      * Advances the version watermark without asserting a new wire state. Called for an elided
      * decision, which never touched the broker.
      *
-     * @param version the new watermark
+     * <p>A debounced HOT is a real re-promotion that only the 100 ms window kept off the wire: the
+     * Worker holds an active HOT seat again, so the long retention has to come back even when an
+     * expired COOL cleared it a moment earlier. A same-version replay must not resurrect it — that
+     * decides nothing new about the key.
+     *
+     * @param version   the new watermark
+     * @param retainHot whether this elision re-establishes the long HOT retention
      * @return a copy with the wire state and debounce anchor unchanged
      */
-    AcceptedDecision advance(long version) {
-      return new AcceptedDecision(sentAtMs, version, flags);
+    AcceptedDecision advance(long version, boolean retainHot) {
+      return new AcceptedDecision(sentAtMs, version, retainHot ? flags | HOT_RETENTION_BIT : flags);
     }
 
     /**
@@ -280,6 +283,7 @@ public class WorkerBroadcaster {
    * lets receivers detect a Worker restart; the node id scopes cross-Worker version tracking in
    * {@code VersionGuard}.
    */
+  @Getter
   private final WorkerIdentity identity;
 
   /** Precomputed {@code send.<appName>}; the value is fixed for the lifetime of the bean. */
@@ -475,7 +479,9 @@ public class WorkerBroadcaster {
       }
       case ELIDED -> {
         AcceptedDecision record = Objects.requireNonNull(prev, "elision requires a predecessor");
-        accepted.put(decision.cacheKey(), record.advance(decision.decisionVersion()));
+        boolean retainHot =
+          decision.type() == ZetaDecision.DecisionType.HOT && decision.decisionVersion() > record.version();
+        accepted.put(decision.cacheKey(), record.advance(decision.decisionVersion(), retainHot));
         metrics.countElidedDecision(decision.type());
       }
       case SUPERSEDED -> metrics.countSupersededDecision(decision.type());
@@ -521,15 +527,15 @@ public class WorkerBroadcaster {
   }
 
   private static String messageType(ZetaDecision.DecisionType type) {
-    return type == ZetaDecision.DecisionType.HOT ? WorkerType.HOT.code() : WorkerType.COOL.code();
+    return type == ZetaDecision.DecisionType.HOT ? DecisionKind.HOT.code() : DecisionKind.COOL.code();
   }
 
   /**
    * Common publish helper for HOT/COOL decisions.
    *
    * @param cacheKey the key the decision is about
-   * @param type     the message type ({@link WorkerType#HOT} or
-   *                 {@link WorkerType#COOL})
+   * @param type     the message type ({@link DecisionKind#HOT} or
+   *                 {@link DecisionKind#COOL})
    * @param version  the monotonically increasing decision version for ordering
    */
   private void publish(String cacheKey, String type, long version) {
