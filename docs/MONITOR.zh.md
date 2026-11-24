@@ -74,7 +74,7 @@ APP=http://localhost:8080
 # 完整快照
 curl -s "$APP/actuator/hotkey" | jq
 
-# 限制 TopK 与 staleDebt 列表长度
+# 限制 TopK 列表长度
 curl -s "$APP/actuator/hotkey?limit=20" | jq
 
 # 只投影告警或看板使用的信号
@@ -86,7 +86,7 @@ curl -s "$APP/actuator/hotkey" \
          reportDropped: .local.reportQueueFullCount}'
 ```
 
-`limit` 限制 `topK` 与 `staleDebt`。默认 `100`；小于 `1` 的值返回 **400 Bad Request**（属于调用方错误，不做静默钳制），`topK` 最多 1000 条，`staleDebt` 最多返回 100 条。
+`limit` 限制 `topK`。默认 `100`；小于 `1` 的值返回 **400 Bad Request**（属于调用方错误，不做静默钳制），`topK` 最多 1000 条。
 
 ### 2.2 响应结构
 
@@ -106,7 +106,6 @@ curl -s "$APP/actuator/hotkey" \
     "reportPublishFailedCount": 0,
     "reportPendingKeys": 0, // 访问计数器中缓冲的 key 数
     "refreshPoolAvailable": 100,
-    "staleDebt": { "k1": 95000 }, // key -> 当前租约开始至今的毫秒数
     "versionClockSkewMillis": 12,
   },
   "worker": {
@@ -156,7 +155,6 @@ curl -s "$APP/actuator/hotkey" \
 | 字段                     | 含义                                                                                                                          | CONFIG                              |
 | ------------------------ | ----------------------------------------------------------------------------------------------------------------------------- | ----------------------------------- |
 | `refreshPoolAvailable`   | 后台刷新限流器的可用许可数。`0` 表示软过期刷新正在线程池中排队。                                                              | [§4](CONFIG.zh.md#4-加载并发与刷新) |
-| `staleDebt`              | 当前被租约持有的 key，按最旧优先（最多 100 条）：key → 当前租约开始至今的毫秒数。它是"有界陈旧"的审计面。                     | [§4](CONFIG.zh.md#4-加载并发与刷新) |
 | `versionClockSkewMillis` | 最新已知时间戳（本地 stamp clock 或观测到的对端时间戳，含被拒绝的离群值）领先本地物理时间的毫秒数。持续增长说明存在时钟漂移。 | [§1](CONFIG.zh.md#1-部署)           |
 
 **Worker：集群健康与决策隔离**
@@ -187,7 +185,7 @@ curl -s "$APP/actuator/hotkey" \
 | `local.cacheSize` / `local.inFlightSize`                             | 存在 L1 缓存 / SingleFlight                                                         |
 | `local.reportQueueDepth`、`reportQueueFullCount`                     | Reporter 已接线（`zeta.report.enabled=true`、classpath 中有 RabbitMQ、非纯 Worker） |
 | `local.reportPendingKeys`                                            | 存在共享访问计数器（否则回退到 Reporter）                                           |
-| `local.refreshPoolAvailable`、`staleDebt`                            | 存在后台刷新器                                                                      |
+| `local.refreshPoolAvailable`                                         | 存在后台刷新器                                                                      |
 | `worker.health`、`worker.msSinceLastAnyHeartbeat`                    | 存在 `HealthView`（始终存在；在应用侧才有意义）                                     |
 | `worker.foreignAppDrops`、`lastForeignApp`、`coolDispatchRejections` | `zeta.worker-listener.enabled=true`                                                 |
 | `sync.*`                                                             | `zeta.sync.enabled=true`，且同步监听器或默认决策处理器已接线                        |
@@ -345,7 +343,7 @@ Zeta 的 L1 始终启用 `recordStats()`；自定义缓存 Bean 若未开启，�
 | 指标                                        | 类型            | 标签         | 含义                                                   |
 | ------------------------------------------- | --------------- | ------------ | ------------------------------------------------------ |
 | `zeta.topk.size`                            | Gauge           | `type=local` | 当前本地 TopK 大小                                     |
-| `zeta.topk.total`                           | Gauge           | `type=local` | 本地 sketch 衰减后的追踪访问量（流量下降时会回落）     |
+| `zeta.topk.count`                           | Gauge           | `type=local` | 本地 sketch 衰减后的追踪访问量（流量下降时会回落）     |
 | `zeta.expelled.queue.size`                  | Gauge           | —            | 被逐出 TopK 的 key 暂存队列积压                        |
 | `zeta.singleflight.inflight`                | Gauge           | —            | 正在执行的加载器数（不是去重表大小）                   |
 | `zeta.stall.source_degraded.stopped`        | Gauge           | —            | 熔断器打开时为 `1`（加载快速失败；读取可返回软过期值） |
@@ -369,15 +367,13 @@ Zeta 的 L1 始终启用 `recordStats()`；自定义缓存 Bean 若未开启，�
 
 ### 5.5 刷新、版本与同步
 
-| 指标                                       | 类型            | 含义                                                                                         |
-| ------------------------------------------ | --------------- | -------------------------------------------------------------------------------------------- |
-| `zeta.expire.refresh.available`            | Gauge           | 后台刷新限流器可用许可数                                                                     |
-| `zeta.expire.refresh.failure.leased.total` | FunctionCounter | 获准续租的刷新失败累计数（陈旧值仍可服务）                                                   |
-| `zeta.expire.refresh.lease.debt.keys`      | Gauge           | 当前被租约持有的 key 数（`staleDebt` 大小）                                                  |
-| `zeta.version.clock.skew`                  | Gauge           | 最新已知版本戳（本地戳时钟，或 60 秒保留窗口内被拒收的对端戳）领先本地物理时间的毫秒数       |
-| `zeta.sync.send.failed.total`              | FunctionCounter | 同步面发布失败累计数；与 `zeta.sync.invalidate.dropped.total` 配合覆盖发布前的线程池拒绝     |
-| `zeta.sync.dispatch.rejected.total`        | FunctionCounter | 被有序调度器拒绝、并由消费者线程无 Hook 兜底应用的同步消息数；持续增长说明调度器饱和         |
-| `zeta.sync.nodeid.collision.total`         | FunctionCounter | 与本节点共享 `dataVersion` node id 的对端同步消息数；持续增长应显式配置 `zeta.local.node-id` |
+| 指标                                | 类型            | 含义                                                                                         |
+| ----------------------------------- | --------------- | -------------------------------------------------------------------------------------------- |
+| `zeta.expire.refresh.available`     | Gauge           | 后台刷新限流器可用许可数                                                                     |
+| `zeta.version.clock.skew`           | Gauge           | 最新已知版本戳（本地戳时钟，或 60 秒保留窗口内被拒收的对端戳）领先本地物理时间的毫秒数       |
+| `zeta.sync.send.failed.total`       | FunctionCounter | 同步面发布失败累计数；与 `zeta.sync.invalidate.dropped.total` 配合覆盖发布前的线程池拒绝     |
+| `zeta.sync.dispatch.rejected.total` | FunctionCounter | 被有序调度器拒绝、并由消费者线程无 Hook 兜底应用的同步消息数；持续增长说明调度器饱和         |
+| `zeta.sync.nodeid.collision.total`  | FunctionCounter | 与本节点共享 `dataVersion` node id 的对端同步消息数；持续增长应显式配置 `zeta.local.node-id` |
 
 ### 5.6 Worker 集群与决策面
 

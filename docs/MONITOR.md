@@ -82,7 +82,7 @@ APP=http://localhost:8080
 # Full snapshot
 curl -s "$APP/actuator/hotkey" | jq
 
-# Cap the TopK and staleDebt lists
+# Cap the TopK list
 curl -s "$APP/actuator/hotkey?limit=20" | jq
 
 # Project only the signals used by an alert or dashboard
@@ -94,9 +94,8 @@ curl -s "$APP/actuator/hotkey" \
          reportDropped: .local.reportQueueFullCount}'
 ```
 
-`limit` caps `topK` and `staleDebt`. The default is `100`; a value below `1` is rejected with
-**400 Bad Request** (it is a caller error, not a clamp), `topK` is capped at 1000, and `staleDebt`
-never returns more than 100 entries.
+`limit` caps `topK`. The default is `100`; a value below `1` is rejected with **400 Bad Request**
+(it is a caller error, not a clamp), and `topK` is capped at 1000.
 
 ### 2.2 Response shape
 
@@ -117,7 +116,6 @@ their component is absent (see §2.4).
     "reportPublishFailedCount": 0,
     "reportPendingKeys": 0, // keys buffered in the access counter
     "refreshPoolAvailable": 100,
-    "staleDebt": { "k1": 95000 }, // key -> ms since its lease episode began
     "versionClockSkewMillis": 12,
   },
   "worker": {
@@ -167,7 +165,6 @@ their component is absent (see §2.4).
 | Field                    | Meaning                                                                                                                                                                     | CONFIG                                            |
 | ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------- |
 | `refreshPoolAvailable`   | Available permits of the background-refresh limiter. `0` means soft-expiry refreshes are queued behind the pool.                                                            | [§4](CONFIG.md#4-loading-concurrency-and-refresh) |
-| `staleDebt`              | Currently leased keys, oldest first (max 100): key → milliseconds since the current lease episode began. This is the audit surface for bounded staleness.                   | [§4](CONFIG.md#4-loading-concurrency-and-refresh) |
 | `versionClockSkewMillis` | How far the newest known stamp (local stamp clock or an observed peer stamp, refused outliers included) leads local physical time. Persistent growth points at clock drift. | [§1](CONFIG.md#1-deployment-identity)             |
 
 **Worker: cluster health and decision isolation**
@@ -198,7 +195,7 @@ their component is absent (see §2.4).
 | `local.cacheSize` / `local.inFlightSize`                             | L1 cache / SingleFlight exists                                                             |
 | `local.reportQueueDepth`, `reportQueueFullCount`                     | Reporter is wired (`zeta.report.enabled=true`, RabbitMQ on the classpath, not Worker-only) |
 | `local.reportPendingKeys`                                            | Shared access counter exists (reporter fallback otherwise)                                 |
-| `local.refreshPoolAvailable`, `staleDebt`                            | Background refresher exists                                                                |
+| `local.refreshPoolAvailable`                                         | Background refresher exists                                                                |
 | `worker.health`, `worker.msSinceLastAnyHeartbeat`                    | `HealthView` exists (always; meaningful on an App)                                         |
 | `worker.foreignAppDrops`, `lastForeignApp`, `coolDispatchRejections` | `zeta.worker-listener.enabled=true`                                                        |
 | `sync.*`                                                             | `zeta.sync.enabled=true` and the sync listener or default decision handler is wired        |
@@ -376,7 +373,7 @@ Caffeine metrics use Micrometer's standard `cache.*` namespace, tagged `cache=ze
 | Meter                                       | Type            | Tags         | Meaning                                                                                      |
 | ------------------------------------------- | --------------- | ------------ | -------------------------------------------------------------------------------------------- |
 | `zeta.topk.size`                            | Gauge           | `type=local` | Current local TopK size                                                                      |
-| `zeta.topk.total`                           | Gauge           | `type=local` | Decay-adjusted tracked access volume (moves down as traffic subsides)                        |
+| `zeta.topk.count`                           | Gauge           | `type=local` | Decay-adjusted tracked access volume (moves down as traffic subsides)                        |
 | `zeta.expelled.queue.size`                  | Gauge           | —            | Keys waiting in the expelled-key staging queue                                               |
 | `zeta.singleflight.inflight`                | Gauge           | —            | Loader suppliers currently executing (not the dedup table size)                              |
 | `zeta.stall.source_degraded.stopped`        | Gauge           | —            | `1` while the circuit breaker is open (loads fast-fail; reads may serve soft-expired values) |
@@ -400,15 +397,13 @@ Caffeine metrics use Micrometer's standard `cache.*` namespace, tagged `cache=ze
 
 ### 5.5 Refresh, version and sync
 
-| Meter                                      | Type            | Meaning                                                                                                                                        |
-| ------------------------------------------ | --------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| `zeta.expire.refresh.available`            | Gauge           | Available background-refresh limiter permits                                                                                                   |
-| `zeta.expire.refresh.failure.leased.total` | FunctionCounter | Cumulative refresh failures granted a lease (the stale value stayed servable)                                                                  |
-| `zeta.expire.refresh.lease.debt.keys`      | Gauge           | Keys currently leased (the `staleDebt` size)                                                                                                   |
-| `zeta.version.clock.skew`                  | Gauge           | How far the newest known stamp — local stamp clock, or a refused peer stamp within the 60s retention window — leads local physical time, in ms |
-| `zeta.sync.send.failed.total`              | FunctionCounter | Cumulative sync-plane publish failures; pair with `zeta.sync.invalidate.dropped.total` for executor rejections before publish                  |
-| `zeta.sync.dispatch.rejected.total`        | FunctionCounter | Sync messages the ordered dispatcher refused and the no-hook consumer-thread fallback applied; persistent growth means dispatcher saturation   |
-| `zeta.sync.nodeid.collision.total`         | FunctionCounter | Inbound sync messages from a peer sharing this node's `dataVersion` node id; persistent growth calls for explicit `zeta.local.node-id` values  |
+| Meter                               | Type            | Meaning                                                                                                                                        |
+| ----------------------------------- | --------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| `zeta.expire.refresh.available`     | Gauge           | Available background-refresh limiter permits                                                                                                   |
+| `zeta.version.clock.skew`           | Gauge           | How far the newest known stamp — local stamp clock, or a refused peer stamp within the 60s retention window — leads local physical time, in ms |
+| `zeta.sync.send.failed.total`       | FunctionCounter | Cumulative sync-plane publish failures; pair with `zeta.sync.invalidate.dropped.total` for executor rejections before publish                  |
+| `zeta.sync.dispatch.rejected.total` | FunctionCounter | Sync messages the ordered dispatcher refused and the no-hook consumer-thread fallback applied; persistent growth means dispatcher saturation   |
+| `zeta.sync.nodeid.collision.total`  | FunctionCounter | Inbound sync messages from a peer sharing this node's `dataVersion` node id; persistent growth calls for explicit `zeta.local.node-id` values  |
 
 ### 5.6 Worker detection plane
 

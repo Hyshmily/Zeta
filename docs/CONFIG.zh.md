@@ -69,7 +69,7 @@ zeta:
 
 ## 3. L1 缓存与 TTL
 
-所有缓存名共用一张 Caffeine 表，`cache.max-size` 是整张表的进程级上限。条目分普通与热点两套 TTL：硬 TTL 到期由 Caffeine 驱逐，软 TTL 到期后返回陈旧值并在后台刷新（stale-while-revalidate）。TTL 默认带 ±5% 随机抖动，避免同一时刻集中失效。
+所有缓存名共用一张 Caffeine 表，`cache.max-size` 是整张表的进程级上限。条目只有一套 TTL 声明：硬 TTL 到期由 Caffeine 驱逐，软 TTL 到期后返回陈旧值并在后台刷新（stale-while-revalidate）。TTL 默认带 ±5% 随机抖动，避免同一时刻集中失效。
 
 ```yaml
 zeta:
@@ -78,27 +78,48 @@ zeta:
       max-size: 100000
       tombstone-maximum-size: 10000
       tombstone-ttl-seconds: 600
-    hard-ttl-ms: 300000 # 普通 key：5 分钟
-    soft-ttl-ms: 30000 # 普通 key：30 秒
-    hot-hard-ttl-ms: 3600000 # 热点 key：1 小时
-    hot-soft-ttl-ms: 300000 # 热点 key：5 分钟
+    hard-ttl-ms: 300000 # 5 分钟
+    soft-ttl-ms: 0 # 默认关闭后台软刷新
     ttl-jitter-ratio: 0.05
+    key-format: TYPED
+    warm:
+      enabled: true
+      max-cluster-leases: 50000
+      cool-tombstone-ms: 60000
+      prewarm:
+        trigger: OFF
+        jitter-ms: 50
+      keep-warm:
+        trigger: OFF
+        max-tasks: 100000
+        min-window-ms: 2000
+        lead-max-ms: 30000
 ```
 
-| 属性                                      | 默认值              | 说明                                                                               |
-| ----------------------------------------- | ------------------- | ---------------------------------------------------------------------------------- |
-| `zeta.local.cache.max-size`               | `100000`            | 整张 L1 表的最大条目数，所有缓存名共享；至少为 1。                                 |
-| `zeta.local.cache.tombstone-maximum-size` | `10000`             | 按 key 的失效墓碑上限，约束大规模失效突发下的内存；至少为 1。                      |
-| `zeta.local.cache.tombstone-ttl-seconds`  | `600`               | 墓碑保留时长。只需覆盖一次在途读/加载；过期后失效前的回填会重新放行。至少为 1 秒。 |
-| `zeta.local.hard-ttl-ms`                  | `300000`（5 分钟）  | 普通 key 的硬 TTL；`0` 表示永久（不做硬过期）。                                    |
-| `zeta.local.hot-hard-ttl-ms`              | `3600000`（1 小时） | 热点 key 的硬 TTL；`0` 表示永久。                                                  |
-| `zeta.local.soft-ttl-ms`                  | `30000`（30 秒）    | 普通 key 的软 TTL；到期后返回陈旧值并异步刷新；`0` 关闭软过期。                    |
-| `zeta.local.hot-soft-ttl-ms`              | `300000`（5 分钟）  | 热点 key 的软 TTL；`0` 关闭软过期。                                                |
-| `zeta.local.ttl-jitter-ratio`             | `0.05`              | 施加到所有 TTL 的随机偏移比例，范围 `[0, 1]`；`0.05` = ±5%，设为 `0` 关闭。        |
+| 属性                                      | 默认值             | 说明                                                                                                                                     |
+| ----------------------------------------- | ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `zeta.local.cache.max-size`               | `100000`           | 整张 L1 表的最大条目数，所有缓存名共享；至少为 1。                                                                                       |
+| `zeta.local.cache.tombstone-maximum-size` | `10000`            | 按 key 的失效墓碑上限，约束大规模失效突发下的内存；至少为 1。                                                                            |
+| `zeta.local.cache.tombstone-ttl-seconds`  | `600`              | 墓碑保留时长。只需覆盖一次在途读/加载；过期后失效前的回填会重新放行。至少为 1 秒。                                                       |
+| `zeta.local.hard-ttl-ms`                  | `300000`（5 分钟） | 硬 TTL。`0` 与 `-1` 都表示内置默认值（`300000`），**不再表示永久**；永久请写 `Long.MAX_VALUE`。                                          |
+| `zeta.local.soft-ttl-ms`                  | `0`（关闭）        | 软 TTL（stale-while-revalidate）。默认关闭：后台刷新会在调用方上下文之外执行 loader。`0`/`-1` 关闭，`Long.MAX_VALUE` 永不过期。          |
+| `zeta.local.ttl-jitter-ratio`             | `0.05`             | 单向随机偏移 `[0, 1]`：最多提前 5%，绝不延后。`0` 关闭。                                                                                 |
+| `zeta.local.key-format`                   | `TYPED`            | `TYPED`（带类型标签、防碰撞）或 `PLAIN`（`cache:value`，一个命名空间只允许一种标量 key 类型）。方法声明了自己的 cache 时不继承类级格式。 |
+| `zeta.local.warm.enabled`                 | `true`             | 预热与续鲜的总开关。                                                                                                                     |
+| `zeta.local.warm.max-cluster-leases`      | `50000`            | 集群租约/墓碑记录上限。                                                                                                                  |
+| `zeta.local.warm.cool-tombstone-ms`       | `60000`            | COOL 墓碑保留时长，用于拒绝版本更低的迟到 HOT。                                                                                          |
+| `zeta.local.warm.prewarm.trigger`         | `OFF`              | `OFF` / `LOCAL` / `CLUSTER` / `ANY`：哪种热度信号可以预热缺值条目。命名空间必须显式开启；注册 loader 不等于开启预热。                    |
+| `zeta.local.warm.prewarm.jitter-ms`       | `50`               | 收到同一 HOT 广播的节点之间的随机延迟，防止同时回源。                                                                                    |
+| `zeta.local.warm.keep-warm.trigger`       | `OFF`              | 续鲜触发。与 `soft-ttl-ms` 正交：只有硬 TTL 的命名空间也可以续鲜，有软窗口但未显式开启的仍为 `OFF`。                                     |
+| `zeta.local.warm.keep-warm.max-tasks`     | `100000`           | 最多排期的续鲜任务数，超出丢弃。                                                                                                         |
+| `zeta.local.warm.keep-warm.min-window-ms` | `2000`             | 小于该窗口的 TTL 不做后台续鲜。                                                                                                          |
+| `zeta.local.warm.keep-warm.lead-max-ms`   | `30000`            | 到期前最大提前量；实际提前量同时受剩余窗口四分之一的上限约束。                                                                           |
+| `zeta.local.warm.overrides.caches`        | `{}`               | 按注解缓存名覆盖触发器的运维开关；每个值可设置 `prewarm` 和/或 `keepWarm` 为 `OFF`/`LOCAL`/`CLUSTER`/`ANY`。未知名称会导致启动失败。     |
+| `zeta.local.warm.overrides.prefixes`      | `{}`               | 按编程式 key 前缀覆盖触发器的运维开关；前缀为精确匹配，未知前缀会导致启动失败。                                                          |
 
 ## 4. 加载、并发与刷新
 
-读未命中时，`SingleFlight` 会把同一 key 的并发加载合并成一次执行；`in-flight-timeout-seconds` 限制单次加载的执行时间（排队等待不计入）。加载与后台刷新共用同一个有界线程池，`refresh-max-pools` 再用信号量限制并发刷新数。
+读未命中时，`SingleFlight` 会把同一 key 的并发加载合并成一次执行；`in-flight-timeout-seconds` 限制单次加载的执行时间（排队等待不计入）。加载与后台刷新共用同一个有界线程池，`refresh-max-pools` 再用信号量限制并发刷新数，`refresh-timeout-ms` 限制单次刷新的执行时长。
 
 ```yaml
 zeta:
@@ -110,19 +131,33 @@ zeta:
     executor-max-pool-size: 32
     executor-queue-capacity: 2000
     executor-rejection: abort
-    refresh-max-pools: 0 # 0 = executor-max-pool-size / 2
+    load-executor-core-pool-size: 0 # 0 = 继承 executor-core-pool-size
+    load-executor-max-pool-size: 0 # 0 = 继承 executor-max-pool-size
+    load-executor-queue-capacity: 0 # 0 = 继承 executor-queue-capacity
+    send-executor-core-pool-size: 0 # 0 = 继承 executor-core-pool-size
+    send-executor-max-pool-size: 0 # 0 = 继承 executor-max-pool-size
+    send-executor-queue-capacity: 0 # 0 = 继承 executor-queue-capacity
+    refresh-max-pools: 0 # 0 = 有效加载池上限 / 2
+    refresh-timeout-ms: 30000
 ```
 
-| 属性                                   | 默认值      | 说明                                                                                                                                                                                                                                                                |
-| -------------------------------------- | ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `zeta.local.in-flight-max-size`        | `50000`     | SingleFlight 去重条目的最大数量。                                                                                                                                                                                                                                   |
-| `zeta.local.in-flight-ttl-seconds`     | `5`         | 去重条目 TTL，必须大于最慢的远端数据源响应。                                                                                                                                                                                                                        |
-| `zeta.local.in-flight-timeout-seconds` | `3`         | 单次加载执行超时。超时按 `LoadStatus.SUPPRESSED_TIMEOUT` 抑制；有硬有效陈旧值则降级返回，否则抛 `ZetaSuppressedException`（design decisions: read path）。去重保留期为 `max(in-flight-ttl-seconds, timeout + 1)`。                                                  |
-| `zeta.local.executor-core-pool-size`   | `8`         | 加载线程池核心大小。                                                                                                                                                                                                                                                |
-| `zeta.local.executor-max-pool-size`    | `32`        | 加载线程池最大大小；必须大于或等于 `executor-core-pool-size`。                                                                                                                                                                                                      |
-| `zeta.local.executor-queue-capacity`   | `2000`      | 加载线程池队列容量。                                                                                                                                                                                                                                                |
-| `zeta.local.executor-rejection`        | `abort`     | 队列与最大线程池都满时的策略：`abort` 抛拒绝异常，`caller-runs` 在提交线程执行。**仅刷新扇出池生效**——加载池与发送池始终 abort。加载池拒绝会转为 `LoadStatus.SUPPRESSED_EXECUTOR`；有硬有效陈旧值则降级返回，否则抛 `ZetaSuppressedException`，绝不会按 miss 处理。 |
-| `zeta.local.refresh-max-pools`         | `0`（自动） | 软过期后台刷新的最大并发数。`0` 取 `executor-max-pool-size` 的一半（至少 1）；刷新与读 miss 共用线程池，因此大于池大小的值会被收敛到 `executor-max-pool-size`。                                                                                                     |
+| 属性                                      | 默认值      | 说明                                                                                                                                                                                                                                                                |
+| ----------------------------------------- | ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `zeta.local.in-flight-max-size`           | `50000`     | SingleFlight 去重条目的最大数量。                                                                                                                                                                                                                                   |
+| `zeta.local.in-flight-ttl-seconds`        | `5`         | 去重条目 TTL，必须大于最慢的远端数据源响应。                                                                                                                                                                                                                        |
+| `zeta.local.in-flight-timeout-seconds`    | `3`         | 单次加载执行超时。超时按 `LoadStatus.SUPPRESSED_TIMEOUT` 抑制；有硬有效陈旧值则降级返回，否则抛 `ZetaSuppressedException`（design decisions: read path）。去重保留期为 `max(in-flight-ttl-seconds, timeout + 1)`。                                                  |
+| `zeta.local.executor-core-pool-size`      | `8`         | 刷新扇出池与两个专用池共用的默认核心大小。                                                                                                                                                                                                                          |
+| `zeta.local.executor-max-pool-size`       | `32`        | 共用默认最大大小；必须大于或等于 `executor-core-pool-size`。                                                                                                                                                                                                        |
+| `zeta.local.executor-queue-capacity`      | `2000`      | 共用默认队列容量。                                                                                                                                                                                                                                                  |
+| `zeta.local.executor-rejection`           | `abort`     | 队列与最大线程池都满时的策略：`abort` 抛拒绝异常，`caller-runs` 在提交线程执行。**仅刷新扇出池生效**——加载池与发送池始终 abort。加载池拒绝会转为 `LoadStatus.SUPPRESSED_EXECUTOR`；有硬有效陈旧值则降级返回，否则抛 `ZetaSuppressedException`，绝不会按 miss 处理。 |
+| `zeta.local.load-executor-core-pool-size` | `0`（继承） | 可中断加载池核心大小。`0` 继承 `executor-core-pool-size`；调大慢数据源的加载池不会连带放大发送池。                                                                                                                                                                  |
+| `zeta.local.load-executor-max-pool-size`  | `0`（继承） | 可中断加载池最大大小。`0` 继承 `executor-max-pool-size`；有效值必须大于或等于有效核心大小。                                                                                                                                                                         |
+| `zeta.local.load-executor-queue-capacity` | `0`（继承） | 可中断加载池队列容量。`0` 继承 `executor-queue-capacity`。                                                                                                                                                                                                          |
+| `zeta.local.send-executor-core-pool-size` | `0`（继承） | 广播发送池核心大小。`0` 继承 `executor-core-pool-size`。                                                                                                                                                                                                            |
+| `zeta.local.send-executor-max-pool-size`  | `0`（继承） | 广播发送池最大大小。`0` 继承 `executor-max-pool-size`；有效值必须大于或等于有效核心大小。                                                                                                                                                                           |
+| `zeta.local.send-executor-queue-capacity` | `0`（继承） | 广播发送池队列容量。`0` 继承 `executor-queue-capacity`。                                                                                                                                                                                                            |
+| `zeta.local.refresh-max-pools`            | `0`（自动） | 软过期后台刷新的最大并发数。`0` 取有效加载池上限的一半（至少 1）；刷新与读 miss 共用加载池，因此大于池大小的值会被收敛到有效加载池上限。                                                                                                                            |
+| `zeta.local.refresh-timeout-ms`           | `30000`     | 单次后台软刷新或硬续期的执行预算。刷新许可与该 key 的去重位会在整个预算期内占用，因此应小于应用声明的最短硬 TTL；否则一次卡死的数据源会让该 key 在整整一个 TTL 内无法刷新。                                                                                         |
 
 ## 5. 上报节拍
 
@@ -154,7 +189,7 @@ zeta:
 
 | 属性                                      | 默认值                         | 说明                                                                                                                                                                             |
 | ----------------------------------------- | ------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `zeta.report.enabled`                     | `true`                         | 启用 App→Worker 上报聚合；需要 `RabbitTemplate` Bean。                                                                                                                           |
+| `zeta.report.enabled`                     | `true`                         | 启用 App→Worker 上报聚合，走数据面连接工厂；上报模板由 Zeta 自建。                                                                                                               |
 | `zeta.local.report-exchange`              | `zeta.reportToWorker.exchange` | App 向 Worker 发送报告的 DirectExchange，JSON 报文体。必须与 Worker 侧 `zeta.worker.messaging.report-exchange` 一致。                                                            |
 | `zeta.local.report-interval-ms`           | `50`                           | 潮汐基准/调谐器种子，最小为 1；低于 50ms 实际仍按 50ms 调度。                                                                                                                    |
 | `zeta.local.detect-interval-ms`           | `500`                          | 两次 sketch 摄入之间的最大间隔，最小为 1。到期（或超过 key 上限）的潮汐与累积器一起直接送入 sketch，不再先合并；只有更早的潮汐才合并进累积器。没有 reporter 时它同时是潮汐基准。 |
@@ -187,6 +222,8 @@ zeta:
 
 App 通过 `worker-listener` 消费 Worker 的 HOT/COOL 决策，同时消费心跳来维护 `HealthView`。后者决定报告路由到哪个 Worker，也决定 Worker 集群是否仍握有 TTL 权威、还是本地 TopK 必须接管。心跳在 AMQP `appName` 头中携带发送方的 `zeta.app-name`；App 丢弃 `appName` 头与本地不一致的心跳，因此共享 broker 不会把其他应用的 Worker 放进本租户的哈希环。升级前 Worker 的心跳没有 `appName` 头，为滚动升级兼容仍会处理。
 
+每实例心跳队列是非持久且 auto-delete 的，因此每次控制面连接建立时都会重新声明；仅控制面重连时不能依赖数据面的 `RabbitAdmin`。专用心跳连接会通过 Boot 的 `CachingConnectionFactoryConfigurer` 继承 `spring.rabbitmq.addresses` 与 `address-shuffle-mode`，故障转移行为与数据面一致。
+
 ```yaml
 zeta:
   local:
@@ -204,10 +241,10 @@ zeta:
     exchange-name: zeta.send.exchange
     queue-prefix: zeta.worker
     auto-startup: true
-    jitter-ms: 0
+    jitter-ms: 50
     concurrent-consumers: 2
     scheduler-pool-size: 4
-    prefetch-count: 5
+    prefetch-count: 100
     max-pending-units: 200000
 ```
 
@@ -219,10 +256,10 @@ zeta:
 | `zeta.worker-listener.exchange-name`        | `zeta.send.exchange` | 接收 HOT/COOL 的 DirectExchange，实例队列按 `send.<app-name>` 绑定；必须与 Worker 的 `zeta.worker.messaging.broadcast-exchange` 一致。心跳使用单独的 `zeta.local.heartbeat.exchange-name`。 |
 | `zeta.worker-listener.queue-prefix`         | `zeta.worker`        | 实例级监听队列前缀；最终队列名为 `{prefix}:{instanceId}`。                                                                                                                                  |
 | `zeta.worker-listener.auto-startup`         | `true`               | 监听容器是否随应用启动。                                                                                                                                                                    |
-| `zeta.worker-listener.jitter-ms`            | `0`                  | 应用广播前的随机抖动；`0` 表示收到即应用。                                                                                                                                                  |
+| `zeta.worker-listener.jitter-ms`            | `50`                 | 应用 HOT 广播前的随机抖动，把冷预热分散到集群各实例；`0` 表示收到即应用。COOL 属于控制消息，不参与抖动。                                                                                    |
 | `zeta.worker-listener.concurrent-consumers` | `2`                  | 决策队列的并发消费者数。                                                                                                                                                                    |
 | `zeta.worker-listener.scheduler-pool-size`  | `4`                  | 执行抖动延迟任务的调度线程池最小值；实际为 `max(this, concurrent-consumers × 2)`。                                                                                                          |
-| `zeta.worker-listener.prefetch-count`       | `5`                  | 每个消费者的 AMQP 预取数。                                                                                                                                                                  |
+| `zeta.worker-listener.prefetch-count`       | `100`                | 每个消费者的 AMQP 预取数。决策在 O(1) 入队后即 ACK，因此该窗口限制的是在途工作量而非处理时间。                                                                                              |
 | `zeta.worker-listener.max-pending-units`    | `200000`             | 决策调度器的全局待处理上限（加权单位，必须 `>= 1`）；超限丢弃（fire-and-forget，条目最终靠硬 TTL 或下一次状态转换收敛）。                                                                   |
 
 ### 心跳与存活判定
@@ -246,7 +283,9 @@ zeta:
 
 `zeta.sync.*` 控制实例之间的写传播。开启后，`put(..., PutPolicy.synced())`、`refresh(..., sync = true)`、`invalidate` 和 `clearAll` 会把 PUT / REFRESH / INVALIDATE 消息广播到同一 `app-name` 的其他实例。同步是最终一致的：丢消息时对端会一直保留旧值，直到条目硬 TTL 到期。
 
-同步写入的**生效**硬 TTL 若为永久，会在进入缓存前被拒绝：对端只能通过硬 TTL 淘汰该条目，否则会永久保留陈旧值。这包括未做单次覆盖且 `zeta.local.hard-ttl-ms: 0` 的配置，以及默认的 `@ZetaPut(sync = true)`。`refresh(key, loader)` 与 `refreshAll(loaders)` 默认仅本地写；传入 `sync = true` 才会广播。refresh 继承驻留条目自身的 TTL 策略，因此永久 TTL 检查作用于该解析后的基线（key 不存在时则作用于配置默认值）——即使批次为空。
+同步写入的**生效**硬 TTL 若为永久，会在进入缓存前被拒绝：对端只能通过硬 TTL 淘汰该条目，否则会永久保留陈旧值。这包括未做单次覆盖且 `zeta.local.hard-ttl-ms: 9223372036854775807`（永久）的配置，以及默认的 `@ZetaPut(sync = true)`。`refresh(key, loader)` 与 `refreshAll(loaders)` 默认仅本地写；传入 `sync = true` 才会广播。refresh 继承驻留条目自身的 TTL 策略，因此永久 TTL 检查作用于该解析后的基线（key 不存在时则作用于配置默认值）——即使批次为空。
+
+对端**没有驻留条目**时，消息不一定能凭空创建条目。带值 PUT 需要命名空间有静态 TTL 基线：声明为动态 TTL，或同一命名空间的方法声明不一致时，对端拒绝猜测生命周期，把 PUT 降级为带版本的 INVALIDATE（发送方自己的副本不受影响）。缺失 key 的 REFRESH 只有在命名空间 `prewarm` 触发器接受该 key 时才会冷加载，否则同样降级为带版本 INVALIDATE。已有驻留条目不受这两条限制——它继续使用自身已存储的时长。
 
 ```yaml
 zeta:
@@ -264,7 +303,7 @@ zeta:
     jitter-ms: 50
     concurrent-consumers: 3
     scheduler-pool-size: 4
-    prefetch-count: 5
+    prefetch-count: 32
     max-pending-units: 50000
     auto-startup: true
 ```
@@ -280,11 +319,11 @@ zeta:
 | `zeta.sync.queue-prefix`         | `zeta.sync`          | 实例队列前缀；完整名称 `{prefix}:{instanceId}`。                                                                                                                                                                                                                                                                                                            |
 | `zeta.sync.dedup-window-seconds` | `10`                 | 发送侧去重窗口：REFRESH/INVALIDATE/PUT 若不能压过该 key 最近一次记录的版本，就不再发送。                                                                                                                                                                                                                                                                    |
 | `zeta.sync.dedup-max-size`       | `10000`              | 去重缓存最大条目数。                                                                                                                                                                                                                                                                                                                                        |
-| `zeta.sync.jitter-ms`            | `50`                 | 广播后某个 key 首次同步派发前的随机停驻上限，把对端回源分散到不同实例，避免惊群。                                                                                                                                                                                                                                                                           |
+| `zeta.sync.jitter-ms`            | `50`                 | 广播后某个 key 首次同步派发前的随机停驻上限，把对端回源分散到不同实例，避免惊群。只有 REFRESH 需要停驻；回源本身在专用的对端刷新线程池执行。                                                                                                                                                                                                                |
 | `zeta.sync.concurrent-consumers` | `3`                  | 同步队列消费者并发数。                                                                                                                                                                                                                                                                                                                                      |
-| `zeta.sync.scheduler-pool-size`  | `4`                  | 同步 jitter 延迟调度线程池大小。                                                                                                                                                                                                                                                                                                                            |
-| `zeta.sync.prefetch-count`       | `5`                  | 每个同步消费者的 AMQP 预取数。                                                                                                                                                                                                                                                                                                                              |
-| `zeta.sync.max-pending-units`    | `50000`              | 同步调度器全局待处理上限（加权单位，约 1KB 载荷/单位，必须 `>= 1`）；超限直接丢弃，消息已 ack，下一次写入会重发。                                                                                                                                                                                                                                           |
+| `zeta.sync.scheduler-pool-size`  | `4`                  | 有序同步派发线程池大小。只执行 O(1) 的 INVALIDATE/PUT/CLEAR 与启动抖动停驻；对端 REFRESH 回源在专用的 `peerRefreshExecutor` 执行。                                                                                                                                                                                                                          |
+| `zeta.sync.prefetch-count`       | `32`                 | 每个同步消费者的 AMQP 预取数。投递在 O(1) 入队后即 ACK，该窗口只限制在途工作量；因单条投递可能携带 `put-max-bytes` 大小的负载，取值比 Worker 监听器小。                                                                                                                                                                                                     |
+| `zeta.sync.max-pending-units`    | `50000`              | 同步调度器全局待处理上限（加权单位，约 1KB 载荷/单位，必须 `>= 1`）；超限直接丢弃，消息已 ack，下一次写入会重发。单键与 clear INVALIDATE 属于控制消息，不受该预算限制。                                                                                                                                                                                     |
 | `zeta.sync.auto-startup`         | `true`               | 同步监听容器是否随应用启动。                                                                                                                                                                                                                                                                                                                                |
 
 ## 9. 熔断器
@@ -384,7 +423,7 @@ zeta:
 | `zeta.worker.messaging.broadcast-exchange`           | `zeta.send.exchange`                                     | HOT/COOL 广播的 DirectExchange，按 `send.<app-name>` 发布；必须与 App 侧 `zeta.worker-listener.exchange-name` 一致。                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | `zeta.worker.messaging.heartbeat-exchange`           | `zeta.heartbeat.exchange`                                | 心跳 TopicExchange，必须与 App 侧 `zeta.local.heartbeat.exchange-name` 一致。                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
 | `zeta.worker.report-consumer.concurrent-consumers`   | `8`                                                      | 上报队列并发消费者数，最小 1。                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
-| `zeta.worker.report-consumer.prefetch-count`         | `50`                                                     | 每个消费者的预取数，平衡吞吐与内存。                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `zeta.worker.report-consumer.prefetch-count`         | `50`                                                     | 每个消费者的预取数，取值 1..65535（AMQP 0-9-1 `basicQos` 范围）；越界在启动期即被拒绝，而不是静默退化。                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | `zeta.worker.report-consumer.staleness-threshold-ms` | `0`                                                      | 消费端陈旧过滤；`0` 表示关闭，改由队列 `x-message-ttl` 兜底。开启时只丢弃正向年龄超过阈值的报告，负年龄（上报端时钟超前）始终放行。                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | `zeta.worker.report-queue.max-length`                | `10000`                                                  | 每个分片上报队列的最大消息数；超出后 broker 丢弃最旧消息（`drop-head`），保留最新统计信号。                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `zeta.worker.report-queue.message-ttl-ms`            | `60000`                                                  | 队列内单条消息的 TTL；超时由 broker 丢弃。                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
@@ -475,19 +514,17 @@ zeta:
 刷新速率超出单通道最窄预算（`min(max-hot-broadcasts-per-second, max-cool-broadcasts-per-second)`）——每次刷新
 分别消耗一条 HOT 和一条 COOL 配额。
 
-## 12. 调度与内置周期
+## 12. 调度
 
-`zeta.scheduling.enabled` 是 App 侧内部定时任务的总开关。关闭后，HeavyKeeper 衰减、挤出队列清空、TopK 准入提升排空和 L1 过期清理都会停止；事件驱动的 NORMAL→HOT 提升也会停止，但加载和写入时命中 TopK 仍会直接标记 HOT。
+Zeta 使用一个共享调度线程池执行周期任务——sketch 衰减、挤出队列清空和保留期清理。任务不会重叠；异常经
+`ZetaExceptionHandler` 上报后继续下一次调度。后台续鲜有独立的开启方式（`zeta.local.warm.*`），未声明触发器的部署不会为续鲜占用调度槽位。
 
 ```yaml
 zeta:
-  scheduling:
-    enabled: true
   local:
     scheduler-pool-size: 8 # 共享调度器线程池
 ```
 
 | 属性                             | 默认值 | 说明                                                                                                                                           |
 | -------------------------------- | ------ | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| `zeta.scheduling.enabled`        | `true` | 内部定时任务总开关。                                                                                                                           |
 | `zeta.local.scheduler-pool-size` | `8`    | Zeta 共享调度器线程池大小。任务不会重叠；异常经 `ZetaExceptionHandler` 上报后继续下一次调度。Worker 控制面使用独立单线程调度器，不受此项影响。 |

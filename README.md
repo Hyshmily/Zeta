@@ -15,37 +15,41 @@
 
 [**中文**](README.zh.md)
 
-Zeta is a lightweight distributed cache and cache-warming framework for Spring Boot. Keys need no pre-registration: it handles hot-key discovery, decision, warming and graceful degradation. A sudden hotspot gets a cluster-wide, eventually consistent cache at minimal cost.
+Zeta is a local-first, multi-instance caching and real-time hot-key management framework for Spring Boot. Requiring no external coordination stores such as Redis or ZooKeeper, it relies solely on message broadcasting to deliver end-to-end hot-key detection, prewarming and keep-warm renewal, versioned multi-instance synchronization, and graceful degradation at minimal overhead—with zero per-key pre-registration.
 
 > [!NOTE]
 >
 > Zeta 1.2.0 is coming soon.
 
-## Local and cluster detection
+## How it works
+
+### Local and cluster detection
 
 ```java
 private final Zeta zeta;
 
-// tag the key inside the shared namespace
-zeta.tag("product:123");
+// read-through: an L1 hit returns immediately; a miss coalesces through SingleFlight and counts as an access
+User user = zeta.get("user:123", () -> userRepository.findById(123L));
 
-// or tag a batch with explicit weights
+// record hot-key access only (no L1 read/write; for external caches or detection-only deployments)
+zeta.tag("product:123");
 zeta.tagAll(Map.of("product:123", 3L, "product:456", 1L));
 
-// read it
-zeta.peek("product:123");
+// pure in-memory peek: no load, no access count, no reporting side effect
+Product cached = zeta.peek("product:123");
 ```
 
-- **Local layer (on by default):** every instance runs a HeavyKeeper TopK sketch. As soon as a key enters the TopK set, its L1 Caffeine TTL is extended automatically — no Worker feedback required. An L1 miss coalesces concurrent requests; a soft-expired entry serves the stale value while refreshing in the background.
-- **Cluster layer (optional):** per-instance counts are reported to RabbitMQ and evaluated by a Worker cluster. The Worker keeps a sliding window per key and compares its sum with the governing rule's `hotCount`/`coolCount` (regex, prefix or exact rules, precedence-ordered); a matching exact rule decides on its own threshold, everything else is gated by the promotion floor. HOT/COOL decisions are broadcast back to every App instance.
+- **Local layer (on by default):** every instance runs a HeavyKeeper Top-K sketch. A key that enters the Top-K set becomes **local-hot**: it is its own evidence for background keep-warm renewal and it is reported as heat for observability. Local heat never rewrites the TTL the caller declared. An L1 miss coalesces concurrent requests; a soft-expired entry serves the stale value while refreshing in the background.
+- **Cluster layer (optional):** per-instance counts reach RabbitMQ through the consistent-hash ring and are evaluated by a Worker cluster. The Worker keeps a sliding window per key and compares its sum with the governing rule's `hotCount` / `coolCount` (`EXACT` / `PREFIX` / `REGEX`, precedence-ordered; a matching exact rule decides on its own threshold, everything else is gated by the promotion floor). HOT/COOL decisions are broadcast back to every instance of that application through a direct exchange. They install or revoke a **cluster heat lease** — permission to spend an opt-in prewarm or renewal — and never rewrite a cache entry or its TTL.
 
 ## Multi-node cache coherence
 
-Much like a primary/replica database syncing writes through a log-replication protocol, Zeta propagates cache changes between application instances over a RabbitMQ publish-subscribe channel.
+Much like a primary/replica database syncing writes through a log-replication protocol, Zeta propagates cache changes between application instances over a RabbitMQ publish-subscribe channel:
 
-Whenever an instance performs a cluster-synced write (`put(key, value, PutPolicy.synced())`) or an invalidation, each node's local, lock-free `StampClock` assigns a `dataVersion` per key and broadcasts the result to every peer. A synced write carries the serialized value, so a peer compares versions and applies it directly, with no read-back to the source: one send converges the whole cluster, including instances that hold no related key at all.
-
-Version comparison delivers eventual consistency without paying for a consensus protocol such as Paxos or Raft.
+- a cluster-synced write (`put(key, value, PutPolicy.synced())`) or an invalidation allocates a monotonic `dataVersion` from the node-local lock-free `StampClock`;
+- `BroadcastBuffer` coalesces write fan-out inside a short deferral window and cancels buffered writes for older versions before an `INVALIDATE` leaves (causal cancellation);
+- a synced write carries the serialized value (oversized or non-serializable values degrade to `REFRESH`); peers reduce each key's batch in order through `KeyDispatcher`, compare versions and apply directly with no read-back — one broadcast converges the whole cluster;
+- version comparison, invalidation tombstones and hard TTLs deliver eventual consistency without the cost of Paxos or Raft.
 
 Benchmarks (`HotHitBenchmark`, Intel Ultra 9 285H, JDK 26):
 
@@ -78,10 +82,15 @@ zeta:
     min-count: 10 # minimum accesses to enter the TopK
     cache:
       max-size: 100000 # process-wide L1 ceiling
-    hard-ttl-ms: 300000 # normal key: Caffeine eviction
-    soft-ttl-ms: 30000 # normal key: stale-while-revalidate
-    hot-hard-ttl-ms: 3600000 # Local-Hot key
-    hot-soft-ttl-ms: 300000 # Local-Hot key
+    hard-ttl-ms: 300000 # Caffeine eviction (Long.MAX_VALUE = permanent)
+    soft-ttl-ms: 0 # background refresh off by default (-1 also disables it)
+    key-format: TYPED # TYPED (collision-safe) | PLAIN (cache:value, one scalar type)
+    warm:
+      enabled: true # global kill switch for warming
+      prewarm:
+        trigger: OFF # OFF | LOCAL | CLUSTER | ANY; a namespace must opt in
+      keep-warm:
+        trigger: OFF # independent of soft-ttl; a namespace must opt in
 ```
 
 Add `spring-boot-starter-actuator` to expose the endpoints:
@@ -266,310 +275,475 @@ Zeta ships no data-access client; every value enters L1 through the loader you s
 | `boolean isCacheable(V v)` | whether a value the engine obtained on the loader's behalf may be written to L1 | `true`   |
 
 ```java
-// reader — the convenience form: anything non-null is cached
-User a = zeta.get("user:1", () -> repo.findUser(1));
-
-// loader — the same call plus an admission decision
-CacheLoader<String, User> loader = new CacheLoader<>() {
+CacheLoader<String, User> userLoader = new CacheLoader<>() {
   @Override
   public User load(String key) {
-    return repo.findUser(key);
+    // Foreground miss: with callerRunsLoader = true this runs on the caller's thread and sees
+    // its transaction and security context.
+    return userRepository.findByKey(key);
   }
 
   @Override
-  public boolean isCacheable(User v) {
-    return !v.isPlaceholder();
+  public User reload(String key) {
+    // Background refresh / prewarm / peer REFRESH: never on the original call stack, so it must
+    // be stateless and thread-safe. Returning null means "keep the current entry", which keeps
+    // serving until its hardTtl expires instead of turning a servable value into a miss.
+    return userReadOnlyRepository.findSnapshotByKey(key);
+  }
+
+  @Override
+  public boolean isCacheable(User value) {
+    // Admission before the L1 write: false still returns the value to the caller but stores
+    // nothing; a peer PUT value goes through the same rule. null is never cached and never
+    // reaches this method. Do not block on I/O here.
+    return !value.isPlaceholder() && value.isActive();
   }
 };
 
-User b = zeta.get("user:1", loader);
+User user = zeta.get("user:1", userLoader);
 ```
 
-| Consumer                                   | Uses it to                                                 | Without it                                                                                         |
-| ------------------------------------------ | ---------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
-| `WorkerListener` → `DefaultWorkerContext`  | load the authoritative value before promoting a key to HOT | promotes what L1 already holds; the HOT is skipped when no entry is usable (`NO_PROMOTABLE_VALUE`) |
-| `CacheSyncListener` → `DefaultSyncContext` | reload after a peer `REFRESH`                              | degrades to a local invalidation — the next read goes back through your reader                     |
-| the same context's value-carrying `PUT`    | validate the value carried on the wire with `isCacheable`  | no loader, no validation: the carried value is applied as-is                                       |
+| Consumer                                                    | Uses it to                                                | Without it                                                                     |
+| ----------------------------------------------------------- | --------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| `HotKeyHandler` prewarm (`prewarmIfAbsent` / `prewarmWith`) | load a missing entry on a valid HOT lease                 | no prewarm; the HOT only reaches business `onHot`                              |
+| `CacheSyncListener` → `DefaultSyncContext`                  | reload after a peer `REFRESH`                             | degrades to a local invalidation — the next read goes back through your reader |
+| the same context's value-carrying `PUT`                     | validate the value carried on the wire with `isCacheable` | no loader, no validation: the carried value is applied as-is                   |
 
-**Custom per-entry TTL**
+### Programmatic registration
 
-Zeta uses **differentiated TTLs**: hot keys and normal keys each have their own defaults.
-
-| Key state | Hard TTL (Caffeine eviction) | Soft TTL (stale-while-revalidate) |
-| --------- | ---------------------------- | --------------------------------- |
-| Normal    | `hard-ttl-ms` (5 min)        | `soft-ttl-ms` (30 s)              |
-| Hot       | `hot-hard-ttl-ms` (1 h)      | `hot-soft-ttl-ms` (5 min)         |
-
-> [!NOTE]
-> **Cache-avalanche protection:** `TtlPolicy` applies a uniformly random offset to every expiry timestamp through its internal `computeTtlJitter()` (±5% by default). A 5-minute hard TTL actually expires between 4.75 and 5.25 minutes. Controlled by `zeta.local.ttl-jitter-ratio` (a ratio, `0.05` = ±5% by default, `0` disables it).
-
-## Worker listener
-
-**Observe broadcast decisions through hooks**
-
-Implement `WorkerDecisionHook` or `SyncHook` to observe how broadcasts are applied, without touching the core logic:
+Beyond annotations, `ZetaWarmConfigurer` registers a namespace's loader and its prewarm/keep-warm
+triggers at startup; the registry freezes after every configurer has run and accepts no further
+registrations.
 
 ```java
-@Bean
-public WorkerDecisionHook myMonitorHook() {
-  return new WorkerDecisionHook() {
-    @Override
-    public void afterHotPromotion(WorkerDecision decision, CacheEntry entry) {
-      metrics.counter("hot.promotion").increment();
-    }
+@Configuration
+public class WarmConfiguration {
 
-    @Override
-    public void onHotSkipped(WorkerDecision decision, HotSkipReason reason) {
-      log.warn("HOT skipped {}: {}", decision.cacheKey(), reason);
-    }
-  };
+  @Bean
+  ZetaWarmConfigurer warmConfig(UserRepository userRepo, QuoteFeed quoteFeed, GenericSource fallbackSource) {
+    return (registry) -> {
+      // Typed namespace: the framework decodes the physical key into the namespace's key type,
+      // so the loader receives a Long.
+      registry
+        .namespace("users", Long.class)
+        .format(KeyFormat.PLAIN) // omitted: inherit the annotation's format or the global default; a conflict fails startup
+        .cacheLoader(
+          new CacheLoader<Long, User>() {
+            @Override
+            public User load(Long id) {
+              return userRepo.findById(id);
+            }
+
+            @Override
+            public boolean isCacheable(User user) {
+              return user.isActive();
+            }
+          }
+        )
+        .prewarm(HeatTrigger.CLUSTER) // OFF | LOCAL | CLUSTER | ANY
+        .keepWarm(HeatTrigger.ANY) // independent of softTtl; opt in explicitly
+        .register();
+
+      // Raw namespace: the loader handles the complete physical key, for a PLAIN namespace with
+      // several key shapes or a custom parse.
+      registry
+        .namespaceRaw("quotes")
+        .format(KeyFormat.PLAIN)
+        .loader((physicalKey) -> quoteFeed.snapshot(physicalKey.substring("quotes:".length())))
+        .prewarm(HeatTrigger.ANY)
+        .keepWarm(HeatTrigger.CLUSTER)
+        .register();
+
+      // Fallback loader: only for keys that belong to no registered namespace (dynamic tenant prefixes).
+      registry.fallbackLoader((physicalKey) -> fallbackSource.load(physicalKey));
+    };
+  }
 }
 ```
 
-| Hook                 | Method               | Fires when                                                                                                                                                       |
-| -------------------- | -------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `WorkerDecisionHook` | `afterHotPromotion`  | a key is promoted to HOT (extended TTL)                                                                                                                          |
-| `WorkerDecisionHook` | `afterCoolDowngrade` | a key returns to the normal TTL                                                                                                                                  |
-| `WorkerDecisionHook` | `onHotSkipped`       | a HOT decision is skipped (`VERSION_STALE`, `NO_PROMOTABLE_VALUE`, `POLICY_REJECTED`, `POLICY_FAILED`)                                                           |
-| `WorkerDecisionHook` | `onCoolSkipped`      | a COOL decision is skipped (`VERSION_STALE`, `NOT_FOUND_OR_EXPIRED`, `GHOST_COOL`, `COVERED_BY_NEWER_DECISION`, `POLICY_REJECTED`, `POLICY_FAILED`)              |
-| `SyncHook`           | `afterValueApplied`  | a peer `REFRESH` read-back or a value-carrying `PUT` was written                                                                                                 |
-| `SyncHook`           | `afterValueDegraded` | a value event was applied as a local invalidation (no value or policy declined; the reason is the value-side cause)                                              |
-| `SyncHook`           | `afterInvalidate`    | a peer `INVALIDATE` was applied                                                                                                                                  |
-| `SyncHook`           | `afterClear`         | a granted clear batch completed its one sweep                                                                                                                    |
-| `SyncHook`           | `onSkipped`          | an event produced no effect (`VERSION_STALE`, `INVALIDATION_TOMBSTONE`, `VALUE_NOT_FOUND`, `PAYLOAD_UNREADABLE`, `COVERED_BY_NEWER_EVENT`, `POLICY_REJECTED`, …) |
+| Declaration                 | The loader receives     | Use it for                                           |
+| --------------------------- | ----------------------- | ---------------------------------------------------- |
+| `.namespace(name, K.class)` | the decoded logical key | one reversible key type (scalars, UUID)              |
+| `.namespaceRaw(name)`       | the full physical key   | PLAIN namespaces with several shapes, custom parses  |
+| `.fallbackLoader(loader)`   | the full physical key   | namespaces that are never registered (tenant prefix) |
 
-**Replace the default broadcast handling**
+`.loader(Function)` and `.cacheLoader(CacheLoader)` are alternatives: the first supplies values only,
+the second also owns `reload` and `isCacheable`. A namespace has at most one loader; a second
+registration, or a `format` that conflicts with the annotation declaration, fails startup instead of
+overwriting.
 
-```java
-@Bean
-@ConditionalOnMissingBean(WorkerPolicy.class)
-public WorkerPolicy myPolicy() {
-  return new WorkerPolicy() {
-    @Override
-    public HotAction hot(WorkerDecision decision, HotValue value, EntryView current) {
-      // current is the L1 snapshot at policy time; replace the value with HotValue.supplied(value, positiveVersion).
-      return myPolicy(value.value()) ? new HotAction.Promote(value) : new HotAction.Skip(HotSkipReason.POLICY_REJECTED);
-    }
+## Broadcast listener and extensions
 
-    @Override
-    public CoolAction cool(WorkerDecision decision, EntryView current) {
-      return myCoolPolicy(decision, current) ? CoolAction.DOWNGRADE : CoolAction.REJECT;
-    }
-  };
-}
+### Observe heat decisions and sync events
 
-@Bean
-public SyncPolicy mySyncPolicy() {
-  return new SyncPolicy() {
-    @Override
-    public SyncAdmission admit(SyncEvent event, EntryView current) {
-      return tenantAllows(event) ? SyncAdmission.PROCEED : SyncAdmission.SKIP;
-    }
-
-    @Override
-    public SyncValueAction settle(SyncEvent event, Object value, EntryView current) {
-      return new SyncValueAction.Apply(redact(value));
-    }
-  };
-}
-```
-
-| Interface      | Methods                                                                                                            | Framework owns                                                                                    |
-| -------------- | ------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------- |
-| `WorkerPolicy` | `hot(WorkerDecision, HotValue, EntryView)`, `cool(WorkerDecision, EntryView)` — defaults run the standard pipeline | per-key dispatch, `resolveHot`/`settleHot`/`settleCool`, version/tombstone guards, terminal hooks |
-| `SyncPolicy`   | `admit(SyncEvent, EntryView)`, `settle(SyncEvent, Object, EntryView)`                                              | batch reduction, version/tombstone/clear guards, value decode/load, one terminal hook per event   |
-
-**Admission examples**
-
-`admit` runs once for a key batch's effective event (covered messages report `COVERED_BY_NEWER_EVENT` without reaching it) and once per clear; the stale/tombstone pre-check runs first.
-
-| `SyncAdmission`    | PUT / REFRESH                                                   | INVALIDATE                    | INVALIDATE_ALL / INVALIDATE_PREFIX            |
-| ------------------ | --------------------------------------------------------------- | ----------------------------- | --------------------------------------------- |
-| `PROCEED`          | decode/load, then `settle`                                      | evict at the event version    | record the watermark + one coalesced sweep    |
-| `INVALIDATE_LOCAL` | skip decode/load; local invalidation (`DEGRADED_TO_INVALIDATE`) | redundant (`POLICY_FAILED`)   | treated as `PROCEED` (already sweeps locally) |
-| `SKIP`             | untouched (`POLICY_REJECTED`)                                   | untouched (`POLICY_REJECTED`) | drop this clear (`POLICY_REJECTED`)           |
-
-A clear is prefix-based (`prefix() == null` = table-wide) and always passes `current == null`; a refused or failed clear drops out of the batch alone. An exception or `null` result settles as `POLICY_FAILED`, and every path fires exactly one terminal `SyncHook`.
-
-**(1) One namespace**
+`HotKeyListener` and `SyncHook` are registered as `@Bean`s and may coexist; a failing callback is
+isolated and logged, and never interrupts the per-key ordered dispatcher.
 
 ```java
-private static final String USERS = "users\u0000"; // namespace + delimiter
+@Configuration
+public class ZetaObserverConfiguration {
 
-@Bean
-public SyncPolicy usersOnlyPolicy() {
-  return new SyncPolicy() {
-    @Override
-    public SyncAdmission admit(SyncEvent event, EntryView current) {
-      // A clear carries a prefix, not a key, and always arrives with current == null.
-      if (event instanceof SyncEvent.ClearEvent clear) {
-        return clear.prefix() == null || clear.prefix().startsWith(USERS) || USERS.startsWith(clear.prefix())
-          ? SyncAdmission.PROCEED
-          : SyncAdmission.SKIP;
-      }
-      return ((SyncEvent.KeyEvent) event).cacheKey().startsWith(USERS) ? SyncAdmission.PROCEED : SyncAdmission.SKIP;
-    }
-  };
-}
-```
-
-**(2) Value path → invalidation**
-
-```java
-private static final String ORDERS = "orders\u0000";
-
-@Bean
-public SyncPolicy localSourcePolicy() {
-  return new SyncPolicy() {
-    @Override
-    public SyncAdmission admit(SyncEvent event, EntryView current) {
-      // Orders are re-read from this instance's own store, so a peer value must not
-      // be written; the stale copy still has to go. INVALIDATE_LOCAL is valid only
-      // for PUT/REFRESH — on an INVALIDATE it settles as POLICY_FAILED.
-      boolean valueBearing = event.type() == SyncType.PUT || event.type() == SyncType.REFRESH;
-      return valueBearing && ((SyncEvent.KeyEvent) event).cacheKey().startsWith(ORDERS)
-        ? SyncAdmission.INVALIDATE_LOCAL
-        : SyncAdmission.PROCEED;
-    }
-  };
-}
-```
-
-**(3) After resolution**
-
-`settle` runs only for a decoded PUT or loaded REFRESH. An unresolvable value never reaches it; it degrades to a versioned invalidation (`PAYLOAD_UNREADABLE`, `VALUE_NOT_FOUND`, `VALUE_DECLINED_BY_LOADER`).
-
-```java
-@Bean
-public SyncPolicy curatedValuePolicy() {
-  return new SyncPolicy() {
-    @Override
-    public SyncValueAction settle(SyncEvent event, Object value, EntryView current) {
-      if (value instanceof User user) {
-        if (user.deletedAt() != null) {
-          return SyncValueAction.INVALIDATE; // never cache a soft-deleted row
-        }
-        if (!user.isComplete()) {
-          return SyncValueAction.SKIP; // keep the resident until its own TTL
+  // Heat leases: the whole lifecycle a Worker grants and revokes.
+  @Bean
+  public HotKeyListener heatLifecycleMonitor(MeterRegistry metrics) {
+    return new HotKeyListener() {
+      @Override
+      public void onHot(WorkerDecision decision, boolean newlyHot) {
+        // newlyHot == false is a repeat broadcast that renews the same lease.
+        if (newlyHot) {
+          metrics.counter("zeta.hot.granted", "worker", decision.stamp().decisionNodeId()).increment();
         }
       }
-      return new SyncValueAction.Apply(maskSecrets(value));
-    }
-  };
+
+      @Override
+      public void onCool(HeatLease lease, HeatLease.EndReason reason) {
+        // Every terminal reason: a COOL decision, a dead/restarted Worker, table eviction, expiry.
+        metrics.counter("zeta.hot.ended", "reason", reason.name()).increment();
+      }
+
+      @Override
+      public void onHotSkipped(WorkerDecision decision, DecisionSkipReason reason) {
+        log.debug("HOT skipped key={} reason={}", decision.cacheKey(), reason);
+      }
+
+      @Override
+      public void onCoolSkipped(WorkerDecision decision, DecisionSkipReason reason) {
+        log.debug("COOL skipped key={} reason={}", decision.cacheKey(), reason);
+      }
+    };
+  }
+
+  // Sync terminal state: every event handled by the dispatcher reaches exactly one of the five.
+  @Bean
+  public SyncHook syncAuditHook(MeterRegistry metrics) {
+    return new SyncHook() {
+      @Override
+      public void afterValueApplied(SyncEvent event, EntryView entry) {
+        metrics.counter("zeta.sync.applied", "type", event.type().name()).increment();
+      }
+
+      @Override
+      public void afterValueDegraded(SyncEvent event, SyncSkipReason reason) {
+        metrics.counter("zeta.sync.degraded", "reason", reason.name()).increment();
+      }
+
+      @Override
+      public void afterInvalidate(SyncEvent event) {
+        metrics.counter("zeta.sync.invalidated").increment();
+      }
+
+      @Override
+      public void afterClear(List<SyncEvent> clears, int affectedEntries) {
+        // A granted clear batch completes its one coalesced sweep and calls back once.
+        log.info("Sync clear applied: batches={}, removed={}", clears.size(), affectedEntries);
+      }
+
+      @Override
+      public void onSkipped(SyncEvent event, SyncSkipReason reason) {
+        metrics.counter("zeta.sync.skipped", "reason", reason.name()).increment();
+      }
+    };
+  }
 }
 ```
 
-| `SyncValueAction` | Effect                                                                                              |
-| ----------------- | --------------------------------------------------------------------------------------------------- |
-| `Apply(value)`    | written at the event version after the guards and `isCacheable` re-check; a declined value degrades |
-| `Invalidate()`    | drop the value; versioned local invalidation (`DEGRADED_TO_INVALIDATE`)                             |
-| `Skip()`          | resident untouched (`POLICY_REJECTED`)                                                              |
+| Listener         | Method                            | Fires when                                                                                                                                                                                                                               |
+| ---------------- | --------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `HotKeyListener` | `onHot(decision, newlyHot)`       | a valid HOT lease was granted (`newlyHot` is false for a repeat broadcast)                                                                                                                                                               |
+| `HotKeyListener` | `onCool(lease, reason)`           | a live HOT lease ended: `COOL`, `INCARNATION_DEAD`, `EVICTED`, `EXPIRED`                                                                                                                                                                 |
+| `HotKeyListener` | `onHotSkipped(decision, reason)`  | a HOT was refused (`VERSION_STALE`, `COVERED_BY_NEWER_DECISION`)                                                                                                                                                                         |
+| `HotKeyListener` | `onCoolSkipped(decision, reason)` | a COOL was refused (`VERSION_STALE`, `GHOST_COOL`, `COVERED_BY_NEWER_DECISION`)                                                                                                                                                          |
+| `SyncHook`       | `afterValueApplied`               | a peer `REFRESH` read-back or a value-carrying `PUT` was written                                                                                                                                                                         |
+| `SyncHook`       | `afterValueDegraded`              | a value event was applied as a local invalidation (`VALUE_NOT_FOUND`, `PAYLOAD_UNREADABLE`, `VALUE_DECLINED_BY_LOADER`, `DEGRADED_TO_INVALIDATE`, `ABSENT_NOT_PREWARMABLE`, `TTL_NOT_PREWARMABLE`, `REFRESH_REJECTED`, `REFRESH_FAILED`) |
+| `SyncHook`       | `afterInvalidate`                 | a peer `INVALIDATE` was applied                                                                                                                                                                                                          |
+| `SyncHook`       | `afterClear`                      | a granted clear batch completed its one coalesced sweep                                                                                                                                                                                  |
+| `SyncHook`       | `onSkipped`                       | an event produced no effect (`VERSION_STALE`, `INVALIDATION_TOMBSTONE`, `COVERED_BY_NEWER_EVENT`, `POLICY_REJECTED`, `POLICY_FAILED`)                                                                                                    |
+
+### Replace the default heat action and sync policy
+
+Expose a `HotKeyHandler` bean to change what a decision does with the data plane, and a `SyncPolicy`
+bean to customize peer-sync admission; autoconfiguration backs off with `@ConditionalOnMissingBean`,
+and the first bean wins.
+
+```java
+@Configuration
+public class ZetaStrategyConfiguration {
+
+  private static final String FLASH_NAMESPACE = "flash";
+  private static final String USERS_TYPED = "users\u0000"; // physical prefix of a TYPED namespace
+  private static final String ORDERS_TYPED = "orders\u0000";
+
+  // Runs on the per-key ordered dispatch thread: never block on I/O here.
+  @Bean
+  public HotKeyHandler customHotKeyHandler(FlashSaleLoader flashSaleLoader) {
+    return new HotKeyHandler() {
+      @Override
+      public void onHot(HotKeyContext context) {
+        if (!context.isNewlyHot()) {
+          return; // a repeat HOT for the same lease does nothing
+        }
+        // namespace() answers the bare name for both the TYPED and the PLAIN encoding.
+        if (FLASH_NAMESPACE.equals(context.namespace())) {
+          if (context.hasLiveEntry()) {
+            context.armKeepWarm(); // a live entry starts its renewal cycle
+          } else {
+            // Prewarm with an explicit stateless loader: skips the namespace prewarm trigger and
+            // still obeys the static TTL.
+            context.prewarmWith(flashSaleLoader);
+          }
+          return;
+        }
+        // Default behaviour: prewarm an absent entry through the namespace policy, or arm keep-warm
+        // for a live entry whose trigger matches.
+        HotKeyHandler.super.onHot(context);
+      }
+      // onCool needs no override: the default drops a renewal task whose keep-warm trigger no
+      // longer accepts the key, and a COOL never evicts an entry or rewrites a TTL.
+    };
+  }
+
+  @Bean
+  public SyncPolicy customSyncPolicy() {
+    return new SyncPolicy() {
+      @Override
+      public SyncAdmission admit(SyncEvent event, @Nullable EntryView current) {
+        // A clear event: current is always null, and prefix() == null means the whole table.
+        if (event.isClear()) {
+          String prefix = event.prefix();
+          return prefix == null || prefix.startsWith(USERS_TYPED) || USERS_TYPED.startsWith(prefix)
+            ? SyncAdmission.PROCEED
+            : SyncAdmission.SKIP;
+        }
+
+        String key = event.key();
+        // Turn the value path into a local invalidation: orders are reloaded from this node's own
+        // store, so a peer value is refused but the stale copy must go. On an INVALIDATE the same
+        // answer is just PROCEED, so the rule is safe to apply to every operation of the namespace.
+        if (event.isValue() && key != null && key.startsWith(ORDERS_TYPED)) {
+          return SyncAdmission.INVALIDATE_LOCAL;
+        }
+        return key != null && key.startsWith(USERS_TYPED) ? SyncAdmission.PROCEED : SyncAdmission.SKIP;
+      }
+
+      @Override
+      public SyncValueAction settle(SyncEvent event, Object resolvedValue, @Nullable EntryView current) {
+        // Called only after a PUT decoded or a REFRESH read back; the framework still re-checks the
+        // version, the tombstone and isCacheable before writing.
+        if (resolvedValue instanceof User user) {
+          if (user.deletedAt() != null) {
+            return SyncValueAction.INVALIDATE; // a soft delete degrades to a versioned local invalidation
+          }
+          if (!user.isComplete() && EntryView.isLive(current)) {
+            return SyncValueAction.SKIP; // keep the complete live copy
+          }
+          return SyncValueAction.apply(user.masked());
+        }
+        return new SyncValueAction.Apply(resolvedValue);
+      }
+    };
+  }
+}
+```
+
+| Interface       | Methods                                                               | The framework owns                                                                         |
+| --------------- | --------------------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
+| `HotKeyHandler` | `onHot(HotKeyContext)`, `onCool(HotKeyContext)`                       | lease ordering, the prewarm guard, one listener call per applied decision                  |
+| `SyncPolicy`    | `admit(SyncEvent, EntryView)`, `settle(SyncEvent, Object, EntryView)` | batch reduction, version/tombstone/clear guards, decode/read-back, one hook call per event |
+
+`admit` runs once per key batch on the effective event (covered messages are reported as `COVERED_BY_NEWER_EVENT`), and once per clear; the expiry/tombstone pre-check runs before the policy.
+
+| `SyncAdmission`    | PUT / REFRESH                                                        | INVALIDATE                               | INVALIDATE_ALL / INVALIDATE_PREFIX            |
+| ------------------ | -------------------------------------------------------------------- | ---------------------------------------- | --------------------------------------------- |
+| `PROCEED`          | decode/read back, then `settle`                                      | evict at the event version               | record the watermark + one coalesced sweep    |
+| `INVALIDATE_LOCAL` | skip decode/read back; local invalidation (`DEGRADED_TO_INVALIDATE`) | treated as `PROCEED` (already a removal) | treated as `PROCEED` (already a local sweep)  |
+| `SKIP`             | entry unchanged (`POLICY_REJECTED`)                                  | entry unchanged (`POLICY_REJECTED`)      | this clear joins no sweep (`POLICY_REJECTED`) |
+
+A clear is prefix-based (`prefix() == null` means table-wide) and its `current` is always `null`; a refused or failed clear only skips itself. A policy that throws or returns `null` settles as `POLICY_FAILED`, and every path reaches exactly one `SyncHook` callback.
+
+| `SyncValueAction` | Effect                                                                                                        |
+| ----------------- | ------------------------------------------------------------------------------------------------------------- |
+| `Apply(value)`    | write at the event version after re-checking the guards and `isCacheable`; a refusal degrades to invalidation |
+| `Invalidate()`    | drop the value and invalidate locally at the event version (`DEGRADED_TO_INVALIDATE`)                         |
+| `Skip()`          | leave the resident entry unchanged (`POLICY_REJECTED`)                                                        |
 
 ## Facade API
 
-Inject the `Zeta` bean for programmatic access: `get`, `put`, `invalidate` and their batch forms, `refresh` / `refreshAll`, plus the `detector()` and `unsafe()` views. TTLs, sync scope and deployment-mode behaviour are covered in [CONFIG.md](docs/CONFIG.md).
+The `Zeta` bean exposes `get` / `put` / `invalidate` / `refresh` and their batch forms, plus the `stats()`, `detector()` and `unsafe()` diagnostic views. Full documentation is indexed by topic:
+
+- **Reads, writes, invalidation, refresh, TTLs, sync scope and deployment modes:** [CONFIG.md](docs/CONFIG.md)
+- **Actuator endpoints, statistics and metrics:** [MONITOR.md](docs/MONITOR.md)
+- **Declarative API:** [Annotations](#annotations) below
+- **Extension points and callbacks:** [Broadcast listener and extensions](#broadcast-listener-and-extensions) below
 
 ## Annotations
 
-| Annotation        | Target       | Effect                                                                                                                                                                                              |
-| ----------------- | ------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `@ZetaCached`     | M, A         | Read-through: a hit skips the body; a miss runs it once and caches the non-`null` result. `condition` bypasses the cache before the key is resolved; `Optional<T>` stores the domain value.         |
-| `@ZetaPut`        | M, A         | Write-through: runs the body, then caches the non-`null` result. `condition` skips the write before the key; `Optional<T>` stores the domain value; a `#result` key resolves after the body.        |
-| `@ZetaInvalidate` | M, A, repeat | Removes entries after the body by default (condition and key may read `#result`); `beforeInvocation = true` removes first. `eachKey` expands a collection/array, `allEntries` clears the namespace. |
+| Annotation        | Target       | Effect                                                                                                                                                                                |
+| ----------------- | ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `@ZetaCached`     | M, A         | Read-through: a hit skips the body, a miss runs it once and caches a non-`null` result. `condition` bypasses the cache before the key; `Optional<T>` stores the value.                |
+| `@ZetaPut`        | M, A         | Write-through: runs the body, then caches a non-`null` result. `condition` skips the write before the key; `Optional<T>` stores the value; a `#result` key resolves after.            |
+| `@ZetaInvalidate` | M, A, repeat | Removes after the body by default (`condition`/`key` may read `#result`); `beforeInvocation = true` removes first. `eachKey` expands a collection, `allEntries` clears one namespace. |
 
-`M` = method, `A` = annotation type. `@ZetaConfig` supplies the class-level `cache`/TTL defaults, merged attribute by attribute from the nearest declaration (so a subclass may override only its TTL and inherit the namespace); a method value wins.
+`M` = method, `A` = annotation type.
+
+### `@ZetaConfig`
+
+Class-level defaults for `cache`, TTLs and triggers, merged attribute by attribute from the nearest
+declaration: a subclass may override only `hardTtl` and inherit the parent's namespace, and a non-blank
+method attribute wins.
+
+```java
+// Class-level defaults.
+@ZetaConfig(
+  cache = "products",
+  hardTtl = "300000",
+  softTtl = "15000",
+  prewarm = HeatTrigger.Option.CLUSTER,
+  keepWarm = HeatTrigger.Option.ANY,
+  keyFormat = KeyFormat.Option.PLAIN // applies only to methods that inherit this class's cache
+)
+public abstract class BaseProductService {}
+
+// The subclass overrides hardTtl only; cache / softTtl / prewarm / keepWarm / keyFormat are inherited.
+@ZetaConfig(hardTtl = "600000")
+@Service
+public class DetailedProductService extends BaseProductService {
+
+  // Non-blank wins: "0" falls back to the global default and "-1" disables the soft window;
+  // neither inherits the class value.
+  @ZetaCached(key = "#id", hardTtl = "0", softTtl = "-1")
+  public Optional<Product> findRaw(Long id) {
+    return productRepository.findById(id); // Optional.empty() is never cached
+  }
+}
+```
+
+A method that names a different `cache` inherits neither this class's `keyFormat` nor its TTLs: those
+defaults belong to another namespace.
+
+### Composed annotations
+
+```java
+@Target(ElementType.METHOD)
+@Retention(RetentionPolicy.RUNTIME)
+@ZetaCached(cache = "dict", hardTtl = "3600000", softTtl = "-1")
+public @interface DictCached {
+  @AliasFor(annotation = ZetaCached.class, attribute = "key")
+  String key() default "";
+}
+```
+
+`@AliasFor` is equivalent to writing the attribute directly, and composed annotations stack.
 
 ### `@ZetaCached`
 
 ```java
-// 1. Default key and configuration placeholders (basic read)
+// 1. Default composite key and configuration placeholders
 @Service
-public class ProductService {
+public class CatalogService {
 
-  // cache supports ${...} placeholders (with defaults), substituted once at method resolution
-  // key omitted: a composite key is generated from the canonical encoding of (categoryId, page, size)
-  @ZetaCached(cache = "${app.cache.catalog-namespace:catalog}")
-  public PageResult<Product> listProducts(Long categoryId, int page, int size) {
-    return productRepository.findByCategory(categoryId, page, size);
+  // cache / hardTtl / softTtl all accept ${...} placeholders resolved once at startup (defaults allowed)
+  // Omitting key encodes every argument with the DefaultKey rules (typed, sets sorted, arrays by content)
+  @ZetaCached(cache = "${app.cache.catalog:catalog}", hardTtl = "${app.cache.catalog-ttl:120000}")
+  public PageResult<Product> listProducts(Long categoryId, Set<String> tags, int page) {
+    return productRepository.findByCategory(categoryId, tags, page);
+  }
+
+  // #root.methodName, @beanName.method(...) and the positional aliases #p0/#a0 are all available
+  @ZetaCached(cache = "catalog_views", key = "#root.methodName + ':' + @tenantContext.current() + ':' + #p0")
+  public ProductView view(Long productId) {
+    return productRepository.findView(productId);
   }
 }
 
-// 2. Soft expiry plus a dynamic TTL (stale-while-revalidate)
+// 2. Soft expiry and a dynamic TTL (stale-while-revalidate)
 @Service
-public class RankingService {
+public class OrderReadService {
 
-  // VIP and normal users get separate rankings: VIP 120 s, normal 60 s (milliseconds)
-  // softTtl=10s: once soft-expired the old ranking is served immediately while a single
-  // background task recomputes it
-  // The background refresh invokes the method body directly, bypassing transaction and security
-  // interceptors; do not set softTtl on methods that depend on request-scoped state
-  @ZetaCached(
-    cache = "rankings",
-    key = "#region + ':' + #isVip",
-    softTtl = "10000",
-    hardTtl = "#isVip ? 120000 : 60000"
-  )
-  public RankList getTopRankings(String region, boolean isVip) {
-    return rankingCalculator.calculateTop100(region, isVip);
+  // softTtl = 10s: a stale hit serves immediately while exactly one background recompute runs
+  // hardTtl is an expression: evaluated only on a miss or a refresh, never on a plain hit
+  // A background refresh invokes the method reflectively, outside the cache advice chain, so do not
+  // configure softTtl on a method that depends on request state or the caller's transaction.
+  @ZetaCached(cache = "orders", key = "#orderId", softTtl = "10000", hardTtl = "#isVip ? 120000 : 60000")
+  public Order getOrder(String orderId, boolean isVip) {
+    return orderRepository.findById(orderId);
   }
 }
 
-// 3. Conditional veto after the read (unless)
+// 3. Bypass before the read and veto after it
 @Service
-public class OrderService {
+public class OrderGuardService {
 
-  // condition runs before the key: a null id bypasses the cache instead of failing the default key
-  // unless is evaluated after the body returns: #result is the unwrapped domain value; when true the
-  // value is still returned to the caller but not written to the cache
-  // A null return is never cached anyway; PENDING orders are additionally vetoed by unless, so
-  // the next read goes through to the database again
+  // condition runs before the key: a null orderId runs the body (no L1 probe, no null-key failure)
+  // unless runs after a non-null return; #result is the unwrapped domain value, and true returns it
+  // without storing. A null return is never cached, so #result == null needs no check here.
   @ZetaCached(
     cache = "orders",
     key = "#orderId",
-    condition = "#orderId != null",
-    unless = "#result == null || #result.status == 'PENDING'"
+    condition = "#orderId != null && !#bypass",
+    unless = "#result.status == 'PENDING'"
   )
-  public Order getOrder(String orderId) {
+  public Order getOrder(String orderId, boolean bypass) {
     return orderRepository.findById(orderId);
+  }
+}
+
+// 4. PLAIN format plus the namespace's self-registered background loader (at most one)
+@ZetaConfig(cache = "products", keyFormat = KeyFormat.Option.PLAIN)
+@Service
+public class ProductWarmReadService {
+
+  // selfWarmLoader = true binds this method as the "products" background loader at startup.
+  // Constraints: a reversible key (no-arg constant, one scalar, default scalars), no condition,
+  // unless may read only #result, and prewarm requires a static TTL.
+  @ZetaCached(
+    key = "#id",
+    prewarm = HeatTrigger.Option.CLUSTER,
+    keepWarm = HeatTrigger.Option.ANY,
+    selfWarmLoader = true
+  )
+  public Product getProduct(Long id) {
+    return productRepository.findById(id).orElse(null);
   }
 }
 ```
 
-An `Optional<User>` read stores `User` and rewraps the hit; `Optional.empty()` is never cached. A composed annotation with `@ZetaCached` and `@AliasFor` is resolved like a direct one, and a class-level `@ZetaConfig` supplies the `cache`/TTL defaults.
+The same namespace may bind its loader through [programmatic registration](#programmatic-registration)
+instead; only one of the two may exist.
 
 ### `@ZetaPut`
 
 ```java
-// 4. Write back a generated primary key after insert (@ZetaPut + #result)
+// 5. Write back the generated key, then decide the TTL and the veto from the result
 @Service
-public class AccountService {
+public class AccountWriteService {
 
-  // A key that reads #result (here) resolves after the body returns, so it can read the
-  // database-generated id through #result.id; a key that does not read #result resolves before
-  // the body and cannot fail after the transaction commits. A result-dependent key that resolves
-  // to null (for example a generated id that is absent) skips the write; the returned value is
-  // still served to the caller. TTLs are evaluated when the write
-  // happens; a synced dynamic hard TTL is pre-checked before the body for the permanent+sync rule.
-  // sync = true (the default): the written value is broadcast to peers over the messaging channel,
-  // and peers apply it directly without reading back from the source
-  @ZetaPut(cache = "accounts", key = "#result.id", hardTtl = "3600000")
+  // A key that reads #result resolves after the body, so #result.id sees the generated key.
+  // unless == true skips the write and still returns; a null #result.id skips it too.
+  // sync = true (default) broadcasts the value to peers; in that mode hardTtl must not resolve to Long.MAX_VALUE.
+  @ZetaPut(
+    cache = "accounts",
+    key = "#result.id",
+    unless = "#result.status != 'ACTIVE'",
+    hardTtl = "#result.isVip() ? 3600000 : 600000",
+    softTtl = "30000"
+  )
   public Account createAccount(AccountDraft draft) {
     Account account = new Account(draft.getUsername(), draft.getEmail());
-    accountRepository.insert(account); // account.id is populated on return
+    accountRepository.insert(account); // account.id is filled in by the time this returns
     return account;
   }
-}
 
-// 5. Local-only write (no cluster broadcast)
-@Service
-public class SessionService {
-
-  // sync = false: only this node's L1 is updated and no sync message is sent; peers keep their
-  // own copy until hardTtl expires
-  // condition runs before the key: a null token skips the write without failing the default key
-  // Optional<UserSession> would store UserSession; an empty Optional writes nothing
-  @ZetaPut(cache = "user_sessions", key = "#token", condition = "#token != null", sync = false, hardTtl = "1800000")
-  public UserSession refreshLocalSession(String token) {
+  // 6. Local-only write: sync = false sends no broadcast and permits a permanent entry.
+  // condition runs before the body; Optional<UserSession> stores the UserSession, an empty Optional stores nothing.
+  @ZetaPut(
+    cache = "user_sessions",
+    key = "#token",
+    condition = "#token != null",
+    sync = false,
+    hardTtl = "1800000",
+    softTtl = "-1"
+  )
+  public Optional<UserSession> refreshLocalSession(String token) {
     return sessionClient.fetchRemoteSession(token);
   }
 }
@@ -578,39 +752,50 @@ public class SessionService {
 ### `@ZetaInvalidate`
 
 ```java
-// 6. Invalidate before the method runs (pre-invocation @ZetaInvalidate)
+// 7. Before-invocation removal, batch expansion, whole-namespace clear
 @Service
-public class InventoryService {
+public class InventoryWriteService {
 
-  // Default is post-invocation: the cache is left untouched when the method throws.
-  // beforeInvocation = true removes before the body, where the key cannot use #result
-  // scope = BOTH (the default): remove the local copy and tell remote nodes to remove theirs too
+  // beforeInvocation = true removes before the body and is not deferred to afterCommit;
+  // neither key nor condition may read #result in that phase.
   @ZetaInvalidate(cache = "inventory", key = "#skuId", beforeInvocation = true, scope = InvalidatePolicy.Scope.BOTH)
   public void deductStock(Long skuId, int quantity) {
     inventoryRepository.decrease(skuId, quantity);
   }
 
-  // eachKey expands an array/Iterable into one removal per id; allEntries = true clears one namespace
-  @ZetaInvalidate(cache = "inventory", key = "#skuIds", eachKey = true)
+  // eachKey = true expands an array or Iterable into one physical key each (max 1024 per call, key required)
+  @ZetaInvalidate(cache = "inventory", key = "#skuIds", eachKey = true, condition = "#skuIds != null")
   public void deleteAll(long[] skuIds) {
     inventoryRepository.deleteAll(skuIds);
   }
+
+  // allEntries = true clears the whole namespace; mutually exclusive with key / eachKey
+  @ZetaInvalidate(cache = "inventory", allEntries = true)
+  public void rebuildInventory() {
+    inventoryRepository.rebuild();
+  }
 }
 
-// 7. Clear only the remote copies (@ZetaInvalidate with an explicit scope)
+// 8. Repeatable annotations, post-body #result navigation, remote-only removal
 @Service
-public class BroadcastService {
+public class ConfigWriteService {
 
-  // scope = REMOTE: this node already refreshed through another path (such as binlog replay), so
-  // only peers need to drop their copies
-  // Post-invocation by default, so the key may use #result; write "#result?.id" when the body may
-  // return null (a null key skips this removal), while a fallback expression such as
-  // "#result != null ? #result.id : #fallbackId" still runs
-  // @ZetaInvalidate is repeatable: the same write can drop a second namespace, and each declaration
-  // has its own key/condition/policy
-  @ZetaInvalidate(cache = "config", key = "#result.configKey", scope = InvalidatePolicy.Scope.REMOTE)
-  @ZetaInvalidate(cache = "config_index", key = "#result.configKey", scope = InvalidatePolicy.Scope.REMOTE)
-  public ConfigItem updateRemoteCluster(ConfigUpdateForm form) {
+  // Each @ZetaInvalidate owns its cache / key / condition / scope.
+  // After-body (default): a throwing body keeps the entry; #result?.key tolerates a null return
+  // (a null resolved key skips that removal silently).
+  // scope = REMOTE: this node is already updated, only peers must drop their copy.
+  @ZetaInvalidate(
+    cache = "config",
+    key = "#result?.configKey",
+    condition = "#result != null && #result.published",
+    scope = InvalidatePolicy.Scope.REMOTE
+  )
+  @ZetaInvalidate(
+    cache = "config_by_group",
+    key = "#result != null ? #result.groupCode : #form.groupCode",
+    scope = InvalidatePolicy.Scope.BOTH
+  )
+  public ConfigItem updateConfig(ConfigUpdateForm form) {
     return configRepository.update(form);
   }
 }
