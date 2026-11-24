@@ -88,6 +88,8 @@ public class ZetaActuatorAutoConfiguration {
    * in the endpoint response rather than null-pointer errors.
    *
    * @param hotKeyDetectorProvider      provider for the app-side TopK detector (may be absent)
+   * @param defaultTopKProvider        the framework's {@code heavyKeeper} bean, the fallback when
+   *                                   several TopK beans make the unqualified provider ambiguous
    * @param hotLocalCacheProvider       provider for the L1 Caffeine cache (may be absent)
    * @param singleFlightProvider        provider for the SingleFlight dedup layer (may be absent)
    * @param hotKeyReporterProvider      provider for the HotKey reporter (may be absent)
@@ -106,7 +108,8 @@ public class ZetaActuatorAutoConfiguration {
   @SuppressWarnings("SpringJavaInjectionPointsAutowiringInspection")
   @ConditionalOnMissingBean
   public ZetaEndpoint hotKeyEndpoint(
-    @Qualifier("heavyKeeper") ObjectProvider<TopK> hotKeyDetectorProvider,
+    ObjectProvider<TopK> hotKeyDetectorProvider,
+    @Qualifier("heavyKeeper") ObjectProvider<TopK> defaultTopKProvider,
     ObjectProvider<Cache<String, CacheEntry>> hotLocalCacheProvider,
     ObjectProvider<SingleFlight> singleFlightProvider,
     ObjectProvider<KeyReporter> hotKeyReporterProvider,
@@ -120,7 +123,7 @@ public class ZetaActuatorAutoConfiguration {
   ) {
     return ZetaEndpoint.builder()
       .identity(identity)
-      .hotKeyDetector(hotKeyDetectorProvider.getIfAvailable())
+      .hotKeyDetector(hotKeyDetectorProvider.getIfUnique(defaultTopKProvider::getIfAvailable))
       .caffeineCache(hotLocalCacheProvider.getIfAvailable())
       .singleFlight(singleFlightProvider.getIfAvailable())
       .hotKeyReporter(hotKeyReporterProvider.getIfAvailable())

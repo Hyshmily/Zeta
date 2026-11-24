@@ -24,13 +24,13 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import io.github.hyshmily.zeta.Zeta;
-import io.github.hyshmily.zeta.annotation.CacheFailurePolicy;
 import io.github.hyshmily.zeta.annotation.ZetaCacheAdvisor;
 import io.github.hyshmily.zeta.annotation.ZetaCacheInterceptor;
 import io.github.hyshmily.zeta.annotation.ZetaCached;
 import io.github.hyshmily.zeta.cache.HotKeyCache;
 import io.github.hyshmily.zeta.cache.cachesupport.loader.CacheLoader;
 import io.github.hyshmily.zeta.cache.cachesupport.policy.GetPolicy;
+import io.github.hyshmily.zeta.policy.NamespacePolicyRegistry;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -61,20 +61,6 @@ class ZetaAnnotationAutoConfigurationTest {
         assertThat(context.containsBean(AopConfigUtils.AUTO_PROXY_CREATOR_BEAN_NAME)).isTrue();
         ZetaCacheInterceptor interceptor = context.getBean(ZetaCacheInterceptor.class);
         assertThat(context.getBean(ZetaCacheAdvisor.class).getAdvice()).isSameAs(interceptor);
-      });
-  }
-
-  @Test
-  @DisplayName("a user CacheFailurePolicy bean replaces the default")
-  void customFailurePolicyWins() {
-    CacheFailurePolicy custom = failure -> {};
-    runner
-      .withBean(Zeta.class, () -> mock(Zeta.class))
-      .withBean(HotKeyCache.class, () -> mock(HotKeyCache.class))
-      .withBean(CacheFailurePolicy.class, () -> custom)
-      .run(context -> {
-        assertThat(context).hasSingleBean(CacheFailurePolicy.class);
-        assertThat(context.getBean(CacheFailurePolicy.class)).isSameAs(custom);
       });
   }
 
@@ -154,6 +140,45 @@ class ZetaAnnotationAutoConfigurationTest {
     AnnotatedService annotatedService() {
       return new AnnotatedService();
     }
+  }
+
+  static class ContractService {
+
+    @ZetaCached(cache = "contracts", key = "#p0", hardTtl = "60000")
+    public String load(String id) {
+      return "value-" + id;
+    }
+  }
+
+  @Configuration(proxyBeanMethods = false)
+  static class ContractConfiguration {
+
+    @Bean
+    ContractService contractService() {
+      return new ContractService();
+    }
+  }
+
+  @Test
+  @DisplayName("an annotated read publishes its contract under the physical namespace prefix")
+  void annotatedReadPublishesThePhysicalNamespaceContract() {
+    Zeta zeta = mock(Zeta.class);
+    when(zeta.get(anyString(), any(CacheLoader.class), any(GetPolicy.class))).thenAnswer(invocation -> {
+      CacheLoader<String, Object> loader = invocation.getArgument(1);
+      return loader.load(invocation.getArgument(0));
+    });
+    NamespacePolicyRegistry contracts = new NamespacePolicyRegistry(new ZetaProperties(), null);
+
+    runner
+      .withBean(Zeta.class, () -> zeta)
+      .withBean(HotKeyCache.class, () -> mock(HotKeyCache.class))
+      .withBean(NamespacePolicyRegistry.class, () -> contracts)
+      .withUserConfiguration(ContractConfiguration.class)
+      .run(context -> {
+        context.getBean(ContractService.class).load("9");
+        assertThat(contracts.resolveTtl("contracts\u0000anything").hardTtlMs()).isEqualTo(60_000L);
+        assertThat(contracts.resolveTtl("contracts\u0000anything").dynamicTtl()).isFalse();
+      });
   }
 
   @Test

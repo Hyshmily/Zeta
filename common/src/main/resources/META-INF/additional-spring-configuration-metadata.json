@@ -1,12 +1,6 @@
 {
   "properties": [
     {
-      "name": "zeta.scheduling.enabled",
-      "type": "java.lang.Boolean",
-      "description": "Enable periodic TopK decay, expelled-key drain, and TopK-admission promotion scheduling.",
-      "defaultValue": true
-    },
-    {
       "name": "zeta.report.enabled",
       "type": "java.lang.Boolean",
       "description": "Enable app-to-Worker report aggregation and publishing via AMQP.",
@@ -103,6 +97,42 @@
       "defaultValue": 2000
     },
     {
+      "name": "zeta.local.load-executor-core-pool-size",
+      "type": "java.lang.Integer",
+      "description": "Core pool size for the interruptible load pool; 0 inherits executor-core-pool-size.",
+      "defaultValue": 0
+    },
+    {
+      "name": "zeta.local.load-executor-max-pool-size",
+      "type": "java.lang.Integer",
+      "description": "Maximum pool size for the interruptible load pool; 0 inherits executor-max-pool-size, and the effective value must be >= the effective core size.",
+      "defaultValue": 0
+    },
+    {
+      "name": "zeta.local.load-executor-queue-capacity",
+      "type": "java.lang.Integer",
+      "description": "Queue capacity for the interruptible load pool; 0 inherits executor-queue-capacity.",
+      "defaultValue": 0
+    },
+    {
+      "name": "zeta.local.send-executor-core-pool-size",
+      "type": "java.lang.Integer",
+      "description": "Core pool size for the broadcast-send pool; 0 inherits executor-core-pool-size.",
+      "defaultValue": 0
+    },
+    {
+      "name": "zeta.local.send-executor-max-pool-size",
+      "type": "java.lang.Integer",
+      "description": "Maximum pool size for the broadcast-send pool; 0 inherits executor-max-pool-size, and the effective value must be >= the effective core size.",
+      "defaultValue": 0
+    },
+    {
+      "name": "zeta.local.send-executor-queue-capacity",
+      "type": "java.lang.Integer",
+      "description": "Queue capacity for the broadcast-send pool; 0 inherits executor-queue-capacity.",
+      "defaultValue": 0
+    },
+    {
       "name": "zeta.local.executor-rejection",
       "type": "io.github.hyshmily.zeta.autoconfigure.ZetaProperties$ExecutorRejection",
       "description": "Rejection policy when the executor queue and max pool are saturated: abort throws RejectedExecutionException, caller-runs runs the task on the submitting thread. Only the refresh fan-out pool honors caller-runs; the load and send pools always abort, and a load-pool rejection is a suppressed read, never a miss.",
@@ -123,38 +153,92 @@
     {
       "name": "zeta.local.hard-ttl-ms",
       "type": "java.lang.Long",
-      "description": "Hard TTL in milliseconds for normal keys; 0 means permanent (no hard expiry).",
+      "description": "Hard TTL in milliseconds for normal keys. 0 and -1 mean the built-in default (300000); Long.MAX_VALUE means permanent (no hard expiry).",
       "defaultValue": 300000
-    },
-    {
-      "name": "zeta.local.hot-hard-ttl-ms",
-      "type": "java.lang.Long",
-      "description": "Hard TTL in milliseconds for hot keys; 0 means permanent (no hard expiry).",
-      "defaultValue": 3600000
     },
     {
       "name": "zeta.local.soft-ttl-ms",
       "type": "java.lang.Long",
-      "description": "Soft TTL in milliseconds for normal keys; 0 disables soft expiry.",
-      "defaultValue": 30000
-    },
-    {
-      "name": "zeta.local.hot-soft-ttl-ms",
-      "type": "java.lang.Long",
-      "description": "Soft TTL in milliseconds for hot keys; 0 disables soft expiry.",
-      "defaultValue": 300000
+      "description": "Soft TTL in milliseconds. 0 and -1 disable background refresh (the default); Long.MAX_VALUE never goes stale.",
+      "defaultValue": 0
     },
     {
       "name": "zeta.local.ttl-jitter-ratio",
       "type": "java.lang.Double",
-      "description": "Jitter ratio (0.0-1.0) applied to TTLs e.g. 0.05 means +/- 5% random offset.",
+      "description": "One-sided jitter ratio (0.0-1.0) applied to TTLs; 0.05 means up to 5% earlier, never later.",
       "defaultValue": 0.05
+    },
+    {
+      "name": "zeta.local.key-format",
+      "type": "io.github.hyshmily.zeta.policy.KeyFormat",
+      "description": "Physical key format for annotation namespaces that do not declare one: TYPED (type-tagged, collision-safe) or PLAIN (namespace:value, one scalar key type per namespace).",
+      "defaultValue": "TYPED"
+    },
+    {
+      "name": "zeta.local.warm.enabled",
+      "type": "java.lang.Boolean",
+      "description": "Global kill switch for prewarm and keep-warm.",
+      "defaultValue": true
+    },
+    {
+      "name": "zeta.local.warm.max-cluster-leases",
+      "type": "java.lang.Integer",
+      "description": "Upper bound on cluster heat lease and COOL tombstone records.",
+      "defaultValue": 50000
+    },
+    {
+      "name": "zeta.local.warm.cool-tombstone-ms",
+      "type": "java.lang.Long",
+      "description": "How long a COOL tombstone stays to reject a late lower-version HOT.",
+      "defaultValue": 60000
+    },
+    {
+      "name": "zeta.local.warm.prewarm.trigger",
+      "type": "io.github.hyshmily.zeta.policy.HeatTrigger",
+      "description": "Which heat signal may prewarm a missing entry. A namespace must opt in; registering a loader does not enable prewarm.",
+      "defaultValue": "OFF"
+    },
+    {
+      "name": "zeta.local.warm.prewarm.jitter-ms",
+      "type": "java.lang.Long",
+      "description": "Random delay that staggers nodes receiving the same HOT broadcast.",
+      "defaultValue": 50
+    },
+    {
+      "name": "zeta.local.warm.keep-warm.trigger",
+      "type": "io.github.hyshmily.zeta.policy.HeatTrigger",
+      "description": "Renewal trigger. Independent of the soft TTL; a namespace must opt in.",
+      "defaultValue": "OFF"
+    },
+    {
+      "name": "zeta.local.warm.keep-warm.max-tasks",
+      "type": "java.lang.Integer",
+      "description": "Maximum scheduled background renewals.",
+      "defaultValue": 100000
+    },
+    {
+      "name": "zeta.local.warm.keep-warm.min-window-ms",
+      "type": "java.lang.Long",
+      "description": "TTL windows shorter than this are not renewed in the background.",
+      "defaultValue": 2000
+    },
+    {
+      "name": "zeta.local.warm.keep-warm.lead-max-ms",
+      "type": "java.lang.Long",
+      "description": "Maximum lead time before a renewal deadline; the effective lead is also capped at a quarter of the remaining window.",
+      "defaultValue": 30000
     },
     {
       "name": "zeta.local.refresh-max-pools",
       "type": "java.lang.Integer",
-      "description": "Maximum number of concurrent background refreshes for soft-expired cache entries. 0 (default) derives half of executor-max-pool-size; refreshes share that pool with read-miss loads, so a value above the pool size is clamped to executor-max-pool-size.",
+      "description": "Maximum number of concurrent background refreshes for soft-expired cache entries. 0 (default) derives half of the effective load-pool max size; refreshes share that pool with read-miss loads, so a value above the pool size is clamped to it.",
       "defaultValue": 0
+    },
+    {
+      "name": "zeta.local.refresh-timeout-ms",
+      "type": "java.lang.Long",
+      "description": "Execution budget of one background soft refresh or hard renewal. The refresh permit and the key's dedup slot stay reserved for the whole budget, so keep it below the shortest hard TTL the application declares.",
+      "defaultValue": 30000
     },
     {
       "name": "zeta.app-name",
@@ -429,7 +513,7 @@
       "name": "zeta.sync.prefetch-count",
       "type": "java.lang.Integer",
       "description": "AMQP prefetch count for the sync listener.",
-      "defaultValue": 5
+      "defaultValue": 32
     },
     {
       "name": "zeta.worker-listener.enabled",
@@ -458,8 +542,8 @@
     {
       "name": "zeta.worker-listener.jitter-ms",
       "type": "java.lang.Integer",
-      "description": "Maximum random jitter in ms before applying Worker broadcasts. 0 = immediate.",
-      "defaultValue": 0
+      "description": "Maximum random jitter in ms before applying a HOT Worker broadcast. 0 = immediate.",
+      "defaultValue": 50
     },
     {
       "name": "zeta.worker-listener.concurrent-consumers",
@@ -477,7 +561,7 @@
       "name": "zeta.worker-listener.prefetch-count",
       "type": "java.lang.Integer",
       "description": "AMQP prefetch count for the Worker listener.",
-      "defaultValue": 5
+      "defaultValue": 100
     },
     {
       "name": "zeta.worker-listener.max-pending-units",

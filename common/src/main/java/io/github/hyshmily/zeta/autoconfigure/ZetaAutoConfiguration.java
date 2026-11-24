@@ -20,24 +20,31 @@ import static io.github.hyshmily.zeta.util.TimeSource.currentTimeMillis;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import com.github.benmanes.caffeine.cache.Expiry;
+import io.github.hyshmily.zeta.annotation.support.NamespaceKeys;
 import io.github.hyshmily.zeta.cache.AccessCounter;
 import io.github.hyshmily.zeta.cache.BroadcastBuffer;
 import io.github.hyshmily.zeta.cache.HotKeyCache;
 import io.github.hyshmily.zeta.cache.cachesupport.circuitbreaker.CircuitBreakerRegistry;
 import io.github.hyshmily.zeta.cache.cachesupport.lifecycle.EntryLifecycle;
 import io.github.hyshmily.zeta.cache.cachesupport.lifecycle.EntryLifecycleImpl;
+import io.github.hyshmily.zeta.cache.cachesupport.loader.CacheLoader;
 import io.github.hyshmily.zeta.cache.cachesupport.loader.singleflight.LoadFlights;
 import io.github.hyshmily.zeta.cache.cachesupport.loader.singleflight.SingleFlight;
 import io.github.hyshmily.zeta.cache.cachesupport.raw.CacheEntry;
 import io.github.hyshmily.zeta.constants.ZetaConstants;
+import io.github.hyshmily.zeta.heat.HeatDirectory;
+import io.github.hyshmily.zeta.heat.HeatView;
 import io.github.hyshmily.zeta.hotkeydetector.HotKeyDetector;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.HeavyKeeper;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.TopK;
+import io.github.hyshmily.zeta.policy.NamespacePolicyRegistry;
+import io.github.hyshmily.zeta.policy.NamespacePolicyRegistry.WarmLoaderBinder;
+import io.github.hyshmily.zeta.policy.ZetaWarmConfigurer;
+import io.github.hyshmily.zeta.reporting.CadenceTunable;
 import io.github.hyshmily.zeta.reporting.KeyReporter;
-import io.github.hyshmily.zeta.reporting.impl.KeyReporterImpl;
 import io.github.hyshmily.zeta.scheduler.BackgroundRefresher;
 import io.github.hyshmily.zeta.scheduler.DefaultBackgroundRefresher;
-import io.github.hyshmily.zeta.sharding.HealthView;
+import io.github.hyshmily.zeta.scheduler.KeepWarm;
 import io.github.hyshmily.zeta.sync.local.CacheSyncProperties;
 import io.github.hyshmily.zeta.sync.local.CacheSyncPublisher;
 import io.github.hyshmily.zeta.util.Internal;
@@ -77,6 +84,9 @@ public class ZetaAutoConfiguration {
   /** Thread-name prefix for the interruptible load pool, local to this assembly. */
   private static final String PREFIX_LOAD = "zeta-load";
 
+  /** Thread-name prefix for the peer-REFRESH load pool, local to this assembly. */
+  private static final String PREFIX_PEER_REFRESH = "zeta-peer-refresh";
+
   /** Thread-name prefix for the broadcast send pool (design decisions: buffering and ordering). */
   private static final String PREFIX_SEND = "zeta-send";
 
@@ -107,7 +117,7 @@ public class ZetaAutoConfiguration {
    * Report a refresh bound the executor cannot honour.
    *
    * <p>The refresh semaphore and the read-miss loads share one pool, so a
-   * permit count above {@code executor-max-pool-size} is unreachable: the pool,
+   * permit count above the effective load-pool maximum is unreachable: the pool,
    * not the semaphore, is the real bound. {@link ZetaProperties#effectiveRefreshMaxPools()}
    * clamps it; this startup check keeps the clamping visible even when the
    * application replaces the refresher bean.
@@ -115,12 +125,12 @@ public class ZetaAutoConfiguration {
   @PostConstruct
   void warnIfRefreshLimitExceedsPool() {
     int limit = properties.getRefreshMaxPools();
-    int max = properties.getExecutorMaxPoolSize();
+    int max = properties.effectiveLoadMaxPoolSize();
     if (limit > max) {
       log.warn(
-        "zeta.local.refresh-max-pools={} exceeds executor-max-pool-size={}: the limit is clamped to the pool size. " +
+        "zeta.local.refresh-max-pools={} exceeds the load pool's max size {}: the limit is clamped to the pool. " +
           "Background refreshes share the pool with read-miss loads, so a higher limit bounds nothing; lower the " +
-          "limit to leave headroom or raise the pool.",
+          "limit to leave headroom or raise zeta.local.load-executor-max-pool-size.",
         limit,
         max
       );
@@ -170,8 +180,8 @@ public class ZetaAutoConfiguration {
    * {@link ZetaSchedulingConfiguration}.
    *
    * <p>This bean is the {@code @Qualifier("hotKeyDetector")} target for
-   * injection into {@link HotKeyCache}, {@link AccessCounter} and local
-   * promotion.
+   * injection into {@link HeatView}, {@link AccessCounter} and the keep-warm
+   * admission sink.
    *
    * @param heavyKeeper the HeavyKeeper TopK instance (never {@code null})
    * @return a new HotKeyDetector instance
@@ -222,8 +232,8 @@ public class ZetaAutoConfiguration {
     );
     // The design decisions: reporting feed-loop tuner stays with the reporter but its computed
     // interval applies to the counter's tide (design decisions: access counting) — wire the seam.
-    if (reporter instanceof KeyReporterImpl impl) {
-      impl.setCadenceAdjuster(counter::adjustDeliverIntervalMs);
+    if (reporter instanceof CadenceTunable tunable) {
+      tunable.setCadenceAdjuster(counter::adjustDeliverIntervalMs);
     }
     return counter;
   }
@@ -281,29 +291,56 @@ public class ZetaAutoConfiguration {
   }
 
   /**
-   * Create the entry lifecycle manager: TOCTOU invalidation guards,
-   * Decision-Validity demotion and the single draft factory.
+   * Create the per-namespace TTL and warming policy registry.
    *
-   * @param hotLocalCache     the L1 Caffeine cache (never {@code null})
-   * @param properties        the HotKey configuration properties (never {@code null})
-   * @param clusterHealthView the cluster health view for decision validity (never {@code null})
+   * <p>The annotation layer registers each resolved method's baselines and heat triggers here;
+   * the prewarm and keep-warm paths read them back. TTLs stay single-owned by the declaration
+   * layers, and a namespace whose methods disagree becomes non-prewarmable rather than guessing.
+   *
+   * @param properties             the HotKey configuration properties (never {@code null})
+   * @param clusterLoaderProvider  the optional deployment-wide warmable loader
+   * @return a new policy registry
+   */
+  @Bean
+  @ConditionalOnMissingBean
+  public NamespacePolicyRegistry namespacePolicyRegistry(
+    ZetaProperties properties,
+    ObjectProvider<CacheLoader<String, Object>> clusterLoaderProvider
+  ) {
+    return new NamespacePolicyRegistry(properties, clusterLoaderProvider.getIfAvailable());
+  }
+
+  /**
+   * Create the plan-time namespace format registry. It owns only each namespace's key format and
+   * locked PLAIN type; loaders and triggers stay in the warm registry, so a plan can be built
+   * while a bean is proxied without instantiating a user configurer.
+   *
+   * @param properties the HotKey configuration properties (never {@code null})
+   * @return a new format registry
+   */
+  @Bean
+  @ConditionalOnMissingBean
+  public NamespaceKeys namespaceKeys(ZetaProperties properties) {
+    return new NamespaceKeys(properties.getKeyFormat());
+  }
+
+  /**
+   * Create the entry lifecycle manager: TOCTOU invalidation guards and the single draft factory.
+   *
+   * @param hotLocalCache the L1 Caffeine cache (never {@code null})
+   * @param properties    the HotKey configuration properties (never {@code null})
    * @return a new EntryLifecycleImpl instance
    */
   @Bean
   @ConditionalOnMissingBean
-  @SuppressWarnings("SpringJavaInjectionPointsAutowiringInspection")
-  public EntryLifecycle entryLifecycle(
-    Cache<String, CacheEntry> hotLocalCache,
-    ZetaProperties properties,
-    HealthView clusterHealthView
-  ) {
-    return new EntryLifecycleImpl(hotLocalCache, properties, clusterHealthView);
+  public EntryLifecycle entryLifecycle(Cache<String, CacheEntry> hotLocalCache, ZetaProperties properties) {
+    return new EntryLifecycleImpl(hotLocalCache, properties);
   }
 
   /**
    * Create the background soft-expire refresh executor: per-key dedup, a
-   * global refresh limiter, timeout protection, and lease-on-failure
-   * degradation. Shares the entry lifecycle, so an in-flight refresh is
+   * global refresh limiter, timeout protection, and a closed retry window on
+   * failure. Shares the entry lifecycle, so an in-flight refresh is
    * refused by the same invalidation tombstones as every other fill.
    *
    * @param hotLocalCache     the L1 Caffeine cache (never {@code null})
@@ -316,7 +353,6 @@ public class ZetaAutoConfiguration {
    */
   @Bean
   @ConditionalOnMissingBean
-  @SuppressWarnings("SpringJavaInjectionPointsAutowiringInspection")
   public BackgroundRefresher backgroundRefresher(
     Cache<String, CacheEntry> hotLocalCache,
     @Qualifier("interruptibleLoadExecutor") Executor loadExecutor,
@@ -327,7 +363,8 @@ public class ZetaAutoConfiguration {
       hotLocalCache,
       loadExecutor,
       entryLifecycle,
-      properties.effectiveRefreshMaxPools()
+      properties.effectiveRefreshMaxPools(),
+      properties.getRefreshTimeoutMs()
     );
   }
 
@@ -354,7 +391,14 @@ public class ZetaAutoConfiguration {
   @Bean(name = "hotKeyExecutor", destroyMethod = "shutdownNow")
   @ConditionalOnMissingBean(name = "hotKeyExecutor")
   public Executor hotKeyExecutor(ZetaProperties properties) {
-    return newPool(properties, ZetaConstants.Threads.PREFIX_KEY, Saturation.CALLER_RUNS_OK);
+    return newPool(
+      properties,
+      ZetaConstants.Threads.PREFIX_KEY,
+      Saturation.CALLER_RUNS_OK,
+      properties.getExecutorCorePoolSize(),
+      properties.getExecutorMaxPoolSize(),
+      properties.getExecutorQueueCapacity()
+    );
   }
 
   /**
@@ -377,7 +421,40 @@ public class ZetaAutoConfiguration {
   @Bean(name = "interruptibleLoadExecutor", destroyMethod = "shutdownNow")
   @ConditionalOnMissingBean(name = "interruptibleLoadExecutor")
   public Executor interruptibleLoadExecutor(ZetaProperties properties) {
-    return newPool(properties, PREFIX_LOAD, Saturation.FORCE_ABORT);
+    return newPool(
+      properties,
+      PREFIX_LOAD,
+      Saturation.FORCE_ABORT,
+      properties.effectiveLoadCorePoolSize(),
+      properties.effectiveLoadMaxPoolSize(),
+      properties.effectiveLoadQueueCapacity()
+    );
+  }
+
+  /**
+   * Create the executor for blocking peer REFRESH loads.
+   *
+   * <p>A peer REFRESH is background work triggered by another instance, not by a local caller.
+   * Sharing the interruptible load pool let a REFRESH burst park the read-miss SingleFlight loads
+   * and the local renewal behind it. The pool is bounded and aborts on saturation; the sync
+   * context turns that rejection into a versioned local invalidation instead of blocking the
+   * dispatcher. Its concurrency reuses the refresh limiter's bound.
+   *
+   * @param properties the HotKey configuration properties (never {@code null})
+   * @return a bounded executor reserved for peer refresh loads
+   */
+  @Bean(name = "peerRefreshExecutor", destroyMethod = "shutdownNow")
+  @ConditionalOnMissingBean(name = "peerRefreshExecutor")
+  public Executor peerRefreshExecutor(ZetaProperties properties) {
+    int concurrency = Math.max(1, properties.effectiveRefreshMaxPools());
+    return newPool(
+      properties,
+      PREFIX_PEER_REFRESH,
+      Saturation.FORCE_ABORT,
+      concurrency,
+      concurrency,
+      properties.effectiveLoadQueueCapacity()
+    );
   }
 
   /**
@@ -390,13 +467,31 @@ public class ZetaAutoConfiguration {
    * stalled commit. Buffered sends are network I/O with their own failure mode
    * and must not share a pool with cache writes or loads.
    *
-   * @param properties the HotKey configuration properties (never {@code null})
+   * <p>Shutdown drains for a bounded window before forcing the pool down, so a
+   * broadcast submitted after a committed transaction is not discarded by an
+   * immediate {@code shutdownNow()}.
+   *
+   * @param properties             the HotKey configuration properties (never {@code null})
+   * @param syncPublisherProvider optional sync publisher used only to order bean destruction
    * @return a configured {@link ElasticThreadPool} reserved for broadcast sends
    */
-  @Bean(name = "zetaSendExecutor", destroyMethod = "shutdownNow")
+  @Bean(name = "zetaSendExecutor", destroyMethod = "shutdownGracefully")
   @ConditionalOnMissingBean(name = "zetaSendExecutor")
-  public Executor zetaSendExecutor(ZetaProperties properties) {
-    return newPool(properties, PREFIX_SEND, Saturation.FORCE_ABORT);
+  public Executor zetaSendExecutor(
+    ZetaProperties properties,
+    ObjectProvider<CacheSyncPublisher> syncPublisherProvider
+  ) {
+    // Destruction edge only: the pool must outlive the publisher it sends through, so it is
+    // destroyed first and a queued broadcast is flushed before the Rabbit connection closes.
+    syncPublisherProvider.getIfAvailable();
+    return newPool(
+      properties,
+      PREFIX_SEND,
+      Saturation.FORCE_ABORT,
+      properties.effectiveSendCorePoolSize(),
+      properties.effectiveSendMaxPoolSize(),
+      properties.effectiveSendQueueCapacity()
+    );
   }
 
   /**
@@ -437,12 +532,22 @@ public class ZetaAutoConfiguration {
    * {@code CachingConnectionFactory} associates channels with platform threads,
    * so unbounded concurrency causes channel-open timeouts.
    *
-   * @param properties   the HotKey configuration properties (never {@code null})
-   * @param threadPrefix the thread-name prefix identifying the pool's domain
-   * @param saturation   whether this pool may honor {@code CALLER_RUNS}
+   * @param properties    the HotKey configuration properties (never {@code null})
+   * @param threadPrefix  the thread-name prefix identifying the pool's domain
+   * @param saturation    whether this pool may honor {@code CALLER_RUNS}
+   * @param corePoolSize  the pool's core size
+   * @param maxPoolSize   the pool's maximum size
+   * @param queueCapacity the pool's queue capacity
    * @return a configured {@link ElasticThreadPool}
    */
-  private ElasticThreadPool newPool(ZetaProperties properties, String threadPrefix, Saturation saturation) {
+  private ElasticThreadPool newPool(
+    ZetaProperties properties,
+    String threadPrefix,
+    Saturation saturation,
+    int corePoolSize,
+    int maxPoolSize,
+    int queueCapacity
+  ) {
     boolean callerRuns =
       saturation == Saturation.CALLER_RUNS_OK &&
       properties.getExecutorRejection() == ZetaProperties.ExecutorRejection.CALLER_RUNS;
@@ -463,11 +568,11 @@ public class ZetaAutoConfiguration {
           throw new RejectedExecutionException("HotKey executor queue full: " + threadPrefix);
         };
     var executor = new ElasticThreadPool(
-      properties.getExecutorCorePoolSize(),
-      properties.getExecutorMaxPoolSize(),
+      corePoolSize,
+      maxPoolSize,
       60L,
       TimeUnit.SECONDS,
-      properties.getExecutorQueueCapacity(),
+      queueCapacity,
       new ZetaThreadFactory(threadPrefix),
       rejectionHandler
     );
@@ -499,45 +604,137 @@ public class ZetaAutoConfiguration {
   }
 
   /**
+   * Create the combined heat view over the cluster lease table and the local detector.
+   *
+   * @param heatDirectoryProvider the cluster lease table
+   * @param hotKeyDetector        the local TopK detector
+   * @return the heat view
+   */
+  @Bean
+  @ConditionalOnMissingBean
+  public HeatView heatView(
+    ObjectProvider<HeatDirectory> heatDirectoryProvider,
+    @Qualifier("hotKeyDetector") HotKeyDetector hotKeyDetector
+  ) {
+    return new HeatView(heatDirectoryProvider.getIfAvailable(), hotKeyDetector);
+  }
+
+  /**
    * Create the {@link HotKeyCache}.
    *
-   * @param hotKeyDetector            the app-side TopK detector (never {@code null})
-   * @param hotLocalCache             the L1 Caffeine cache (never {@code null})
-   * @param singleFlight              the deduplication layer (never {@code null})
-   * @param entryLifecycle            the entry lifecycle manager for TTL control (never {@code null})
-   * @param backgroundRefresher       the background soft-expire refresh coordinator (never {@code null})
-   * @param accessCounter             the shared read-path counter (never {@code null})
-   * @param broadcastBuffer           the sync-plane send outlet (never {@code null})
-   * @param properties                the Zeta configuration properties (never {@code null})
-   * @param clusterHealthView         the shared cluster health view (never {@code null})
-   * @param stampClock                the node-local data-stamp clock (never {@code null})
+   * @param hotLocalCache       the L1 Caffeine cache (never {@code null})
+   * @param singleFlight        the deduplication layer (never {@code null})
+   * @param entryLifecycle      the entry lifecycle manager (never {@code null})
+   * @param backgroundRefresher the background refresh coordinator (never {@code null})
+   * @param accessCounter       the shared read-path counter (never {@code null})
+   * @param broadcastBuffer     the sync-plane send outlet (never {@code null})
+   * @param stampClock          the node-local data-stamp clock (never {@code null})
    * @return a new HotKeyCache instance with node-local stamping
    */
   @Bean
   @ConditionalOnMissingBean
   @SuppressWarnings("SpringJavaInjectionPointsAutowiringInspection")
   public HotKeyCache hotKeyCache(
-    @Qualifier("hotKeyDetector") HotKeyDetector hotKeyDetector,
     Cache<String, CacheEntry> hotLocalCache,
     SingleFlight singleFlight,
     EntryLifecycle entryLifecycle,
     BackgroundRefresher backgroundRefresher,
     AccessCounter accessCounter,
     BroadcastBuffer broadcastBuffer,
-    ZetaProperties properties,
-    HealthView clusterHealthView,
     StampClock stampClock
   ) {
     return new HotKeyCache(
-      hotKeyDetector,
       hotLocalCache,
       singleFlight,
       entryLifecycle,
       backgroundRefresher,
       accessCounter,
       broadcastBuffer,
+      stampClock
+    );
+  }
+
+  /**
+   * Create the local hard-renewal scheduler. {@link WarmRegistryFinalizer} installs its signals
+   * after every singleton exists and the registry is frozen, so replacing or omitting this bean
+   * leaves the other components untouched.
+   *
+   * @param hotLocalCache the L1 table
+   * @param heatView      the heat query
+   * @param policies      the namespace policy registry
+   * @param refresher     the shared refresh executor
+   * @param hotKeyScheduler the shared scheduler
+   * @param stampClock    the data-stamp clock
+   * @param entryLifecycle the entry lifecycle owning the shared TTL arithmetic
+   * @param properties    the live configuration
+   * @return the renewal scheduler
+   */
+  @Bean
+  @ConditionalOnMissingBean
+  @SuppressWarnings("SpringJavaInjectionPointsAutowiringInspection")
+  public KeepWarm keepWarm(
+    Cache<String, CacheEntry> hotLocalCache,
+    HeatView heatView,
+    NamespacePolicyRegistry policies,
+    BackgroundRefresher refresher,
+    @Qualifier("hotKeyScheduler") ScheduledExecutorService hotKeyScheduler,
+    StampClock stampClock,
+    EntryLifecycle entryLifecycle,
+    ZetaProperties properties
+  ) {
+    return new KeepWarm(
+      hotLocalCache,
+      heatView,
+      policies,
+      refresher,
+      hotKeyScheduler,
       stampClock,
-      clusterHealthView
+      entryLifecycle.ttlPolicy(),
+      properties
+    );
+  }
+
+  /**
+   * Collect every warming declaration after all singletons exist, freeze the registry, and then
+   * attach the renewal scheduler.
+   *
+   * <p>It lives here, in the app-side configuration, rather than in the annotation module, so a
+   * programmatic deployment without Spring AOP still runs its {@link ZetaWarmConfigurer} beans and
+   * the same validation and freeze. The scheduler is injected rather than provided as a separate
+   * lifecycle bean: two unordered {@link org.springframework.beans.factory.SmartInitializingSingleton}s
+   * would let the scheduler observe the registry before it was frozen.
+   *
+   * @param policies      the namespace warming registry
+   * @param keys          the plan-time key-format registry
+   * @param configurers   the user configurers
+   * @param binders       the annotation layer's warm-spec binders, when that layer is present
+   * @param hotKeyCache   the L1 engine
+   * @param accessCounter the shared read counter
+   * @param hotKeyDetector the local detector
+   * @param keepWarm      the renewal scheduler, when present
+   * @return the finalizer
+   */
+  @Bean
+  @ConditionalOnMissingBean
+  public WarmRegistryFinalizer warmRegistryFinalizer(
+    NamespacePolicyRegistry policies,
+    NamespaceKeys keys,
+    ObjectProvider<ZetaWarmConfigurer> configurers,
+    ObjectProvider<WarmLoaderBinder> binders,
+    HotKeyCache hotKeyCache,
+    AccessCounter accessCounter,
+    @Qualifier("hotKeyDetector") HotKeyDetector hotKeyDetector,
+    ObjectProvider<KeepWarm> keepWarm
+  ) {
+    return new WarmRegistryFinalizer(
+      policies,
+      keys,
+      configurers,
+      binders,
+      hotKeyCache,
+      accessCounter,
+      hotKeyDetector,
+      keepWarm
     );
   }
 
@@ -571,21 +768,6 @@ public class ZetaAutoConfiguration {
   @Bean
   @ConditionalOnMissingBean
   public Cache<String, CacheEntry> hotLocalCache(
-    ZetaProperties properties,
-    ObjectProvider<ZetaCacheCustomizer> customizerProvider
-  ) {
-    return buildL1Table(properties, customizerProvider);
-  }
-
-  /**
-   * Build the one L1 table with Zeta's capacity, stats and variable-expiry
-   * configuration.
-   *
-   * @param properties         the HotKey configuration properties
-   * @param customizerProvider ordered provider of application customizers
-   * @return a configured table
-   */
-  private Cache<String, CacheEntry> buildL1Table(
     ZetaProperties properties,
     ObjectProvider<ZetaCacheCustomizer> customizerProvider
   ) {

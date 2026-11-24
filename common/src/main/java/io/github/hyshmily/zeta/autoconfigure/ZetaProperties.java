@@ -15,7 +15,10 @@
  */
 package io.github.hyshmily.zeta.autoconfigure;
 
+import io.github.hyshmily.zeta.cache.cachesupport.raw.CacheEntry;
 import io.github.hyshmily.zeta.constants.ZetaConstants;
+import io.github.hyshmily.zeta.policy.HeatTrigger;
+import io.github.hyshmily.zeta.policy.KeyFormat;
 import io.github.hyshmily.zeta.util.clock.MonotonicStampClock;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.*;
@@ -30,8 +33,8 @@ import org.springframework.validation.annotation.Validated;
  *
  * <p>Groups: TopK algorithm parameters (capacity, sketch width/depth,
  * decay, minimum count), L1 Caffeine cache limits, SingleFlight
- * deduplication settings, executor thread pool, TTL overrides (hard
- * and soft, for normal and hot keys), reporting cadence and queueing.
+ * deduplication settings, executor thread pool, TTL defaults (hard and
+ * soft), background warming, reporting cadence and queueing.
  *
  * <p>The concrete configuration bean is consumed directly by the cache core,
  * the circuit breaker and the endpoint. TTL, refresh and breaker reads are live;
@@ -43,7 +46,21 @@ import org.springframework.validation.annotation.Validated;
 @ConfigurationProperties(prefix = "zeta.local")
 public class ZetaProperties {
 
+  /**
+   * Built-in hard TTL for normal keys. A non-positive {@code zeta.local.hard-ttl-ms} resolves to
+   * this value; {@link Long#MAX_VALUE} is the permanent opt-in.
+   */
+  public static final long DEFAULT_HARD_TTL_MS = 300_000L;
+
   private static final int CACHED_PROCESSORS = Runtime.getRuntime().availableProcessors();
+
+  /**
+   * Physical key format for annotation namespaces that do not declare one. {@code TYPED} keeps
+   * the type-tagged, collision-safe encoding; {@code PLAIN} produces {@code namespace:value} and
+   * is available only to single-scalar namespaces.
+   */
+  @NotNull
+  private KeyFormat keyFormat = KeyFormat.TYPED;
 
   /** Number of top hot keys to track. */
   @Min(1)
@@ -84,17 +101,110 @@ public class ZetaProperties {
   @Min(1)
   private int inFlightTimeoutSeconds = 3;
 
-  /** Core pool size for the HotKey async executor. */
+  /** Shared default core pool size for the refresh fan-out and both dedicated pools. */
   @Min(1)
   private int executorCorePoolSize = 8;
 
-  /** Maximum pool size for the HotKey async executor. */
+  /** Shared default maximum pool size for the refresh fan-out and both dedicated pools. */
   @Min(1)
   private int executorMaxPoolSize = 32;
 
-  /** Queue capacity for the HotKey async executor before rejection. */
+  /** Shared default queue capacity for the refresh fan-out and both dedicated pools. */
   @Min(1)
   private int executorQueueCapacity = 2000;
+
+  /**
+   * Core size of the interruptible load pool; {@code 0} inherits
+   * {@link #executorCorePoolSize}. A slow data source can widen this pool without
+   * resizing the broadcast-send pool.
+   */
+  @Min(0)
+  private int loadExecutorCorePoolSize;
+
+  /** Core size of the broadcast-send pool; {@code 0} inherits {@link #executorCorePoolSize}. */
+  @Min(0)
+  private int sendExecutorCorePoolSize;
+
+  /** Maximum size of the interruptible load pool; {@code 0} inherits {@link #executorMaxPoolSize}. */
+  @Min(0)
+  private int loadExecutorMaxPoolSize;
+
+  /** Maximum size of the broadcast-send pool; {@code 0} inherits {@link #executorMaxPoolSize}. */
+  @Min(0)
+  private int sendExecutorMaxPoolSize;
+
+  /** Queue capacity of the interruptible load pool; {@code 0} inherits {@link #executorQueueCapacity}. */
+  @Min(0)
+  private int loadExecutorQueueCapacity;
+
+  /** Queue capacity of the broadcast-send pool; {@code 0} inherits {@link #executorQueueCapacity}. */
+  @Min(0)
+  private int sendExecutorQueueCapacity;
+
+  /**
+   * The effective load-pool core size: the load-specific value when set, otherwise
+   * the shared default.
+   *
+   * @return the configured or inherited core size
+   */
+  public int effectiveLoadCorePoolSize() {
+    return fallback(loadExecutorCorePoolSize, executorCorePoolSize);
+  }
+
+  /**
+   * The effective load-pool maximum size: the load-specific value when set,
+   * otherwise the shared default.
+   *
+   * @return the configured or inherited maximum size
+   */
+  public int effectiveLoadMaxPoolSize() {
+    return fallback(loadExecutorMaxPoolSize, executorMaxPoolSize);
+  }
+
+  /**
+   * The effective load-pool queue capacity: the load-specific value when set,
+   * otherwise the shared default.
+   *
+   * @return the configured or inherited queue capacity
+   */
+  public int effectiveLoadQueueCapacity() {
+    return fallback(loadExecutorQueueCapacity, executorQueueCapacity);
+  }
+
+  /**
+   * The effective send-pool core size: the send-specific value when set, otherwise
+   * the shared default.
+   *
+   * @return the configured or inherited core size
+   */
+  public int effectiveSendCorePoolSize() {
+    return fallback(sendExecutorCorePoolSize, executorCorePoolSize);
+  }
+
+  /**
+   * The effective send-pool maximum size: the send-specific value when set,
+   * otherwise the shared default.
+   *
+   * @return the configured or inherited maximum size
+   */
+  public int effectiveSendMaxPoolSize() {
+    return fallback(sendExecutorMaxPoolSize, executorMaxPoolSize);
+  }
+
+  /**
+   * The effective send-pool queue capacity: the send-specific value when set,
+   * otherwise the shared default.
+   *
+   * @return the configured or inherited queue capacity
+   */
+  public int effectiveSendQueueCapacity() {
+    return fallback(sendExecutorQueueCapacity, executorQueueCapacity);
+  }
+
+  /** A positive override wins; otherwise the shared default applies. */
+  private static int fallback(int value, int defaultValue) {
+    return value > 0 ? value : defaultValue;
+  }
 
   /**
    * Rejection policy when a pool's queue and max size are saturated (design decisions: api surface).
@@ -115,6 +225,21 @@ public class ZetaProperties {
   @AssertTrue(message = "zeta.local.executor-max-pool-size must be >= zeta.local.executor-core-pool-size")
   public boolean isExecutorPoolSizeValid() {
     return executorMaxPoolSize >= executorCorePoolSize;
+  }
+
+  /**
+   * Each pool must be able to grow to its own effective maximum.
+   *
+   * @return whether both effective maximums are at least their effective core sizes
+   */
+  @AssertTrue(
+    message = "the effective load and send executor max pool sizes must be >= their effective core pool sizes"
+  )
+  public boolean isDedicatedPoolSizeValid() {
+    return (
+      effectiveLoadMaxPoolSize() >= effectiveLoadCorePoolSize() &&
+      effectiveSendMaxPoolSize() >= effectiveSendCorePoolSize()
+    );
   }
 
   /** Rejection policy options for the HotKey async executor. */
@@ -139,21 +264,29 @@ public class ZetaProperties {
   @Max(10)
   private int sketchWindowCount = 4;
 
-  /** Hard TTL (ms) for normal keys. {@code 0} means permanent (no hard expiry). */
-  @Min(0)
-  private long hardTtlMs = 300_000;
+  /**
+   * Hard TTL (ms) for normal keys: {@code 0} and {@code -1} mean "the built-in default"
+   * ({@link #DEFAULT_HARD_TTL_MS}), and {@link Long#MAX_VALUE} means permanent (no hard expiry).
+   * A hard TTL has no "off" state, so neither {@code 0} nor {@code -1} can disable it.
+   *
+   * <p>One TTL vocabulary everywhere: {@code 0}/{@code -1} inherit, every positive value is used
+   * exactly as written, {@link Long#MAX_VALUE} never expires.
+   */
+  @Min(-1)
+  private long hardTtlMs = DEFAULT_HARD_TTL_MS;
 
-  /** Hard TTL (ms) for hot keys. {@code 0} means permanent (no hard expiry). */
-  @Min(0)
-  private long hotHardTtlMs = 3_600_000;
-
-  /** Soft TTL (ms) for normal keys. {@code 0} disables soft expiry. */
-  @Min(0)
-  private long softTtlMs = 30_000;
-
-  /** Soft TTL (ms) for hot keys. {@code 0} disables soft expiry. */
-  @Min(0)
-  private long hotSoftTtlMs = 300_000;
+  /**
+   * Soft TTL (ms) for normal keys: {@code 0} and {@code -1} mean "no background refresh", which is
+   * the built-in default; a positive value is the soft window, and {@link Long#MAX_VALUE} means an
+   * entry never becomes stale.
+   *
+   * <p>Off by default because a background refresh runs the loader outside the caller's context —
+   * for an annotated read that is a reflective call without the transaction, security or MDC of
+   * the invocation that missed. A method whose body depends on request-scoped state must not be
+   * given a soft TTL; enabling it globally is an explicit deployment decision.
+   */
+  @Min(-1)
+  private long softTtlMs = 0;
 
   /** Jitter ratio (0.0–1.0) applied to TTLs — e.g. 0.1 means ±10% random offset. */
   @DecimalMin("0.0")
@@ -161,15 +294,72 @@ public class ZetaProperties {
   private double ttlJitterRatio = 0.05;
 
   /**
+   * The resolved normal hard TTL. This getter is the single place a non-positive configuration
+   * becomes the built-in default, so every consumer reads a duration it can act on: positive, or
+   * {@link Long#MAX_VALUE} for permanent.
+   *
+   * @return the normal hard TTL in milliseconds, always positive
+   */
+  public long getHardTtlMs() {
+    return hardTtlMs > 0L ? hardTtlMs : DEFAULT_HARD_TTL_MS;
+  }
+
+  /**
+   * The resolved normal soft TTL. Non-positive means "no soft window", which is the built-in
+   * default.
+   *
+   * @return the normal soft TTL in milliseconds, {@code 0} when disabled
+   */
+  public long getSoftTtlMs() {
+    return softTtlMs > 0L ? softTtlMs : 0L;
+  }
+
+  /**
+   * {@code zeta.local.hard-ttl-ms} must be a duration the packed entry model can store.
+   *
+   * <p>The four TTL properties are bound at startup but only reach
+   * {@link io.github.hyshmily.zeta.cache.cachesupport.raw.CacheEntry} on the first write, so an
+   * out-of-range value would otherwise start cleanly and fail on a request thread with an
+   * {@link IllegalArgumentException}. Validating here fails the context instead.
+   *
+   * @return whether the value is {@code -1} (inherit), in {@code [0, TTL_MAX_MS]}, or
+   *         {@link Long#MAX_VALUE} (permanent)
+   */
+  @AssertTrue(
+    message = "zeta.local.hard-ttl-ms must be -1 or 0 (inherit), a duration up to 2147483647000 ms, or Long.MAX_VALUE (permanent)"
+  )
+  public boolean isHardTtlEncodable() {
+    return isDeclaredTtlEncodable(hardTtlMs);
+  }
+
+  /**
+   * {@code zeta.local.soft-ttl-ms} must be a duration the packed entry model can store.
+   *
+   * @return whether the value is {@code -1} (inherit), in {@code [0, TTL_MAX_MS]}, or
+   *         {@link Long#MAX_VALUE} (never stale)
+   */
+  @AssertTrue(
+    message = "zeta.local.soft-ttl-ms must be -1 or 0 (inherit), a duration up to 2147483647000 ms, or Long.MAX_VALUE (never stale)"
+  )
+  public boolean isSoftTtlEncodable() {
+    return isDeclaredTtlEncodable(softTtlMs);
+  }
+
+  /** One TTL property against the entry model's range, with {@code -1} = inherit allowed. */
+  private static boolean isDeclaredTtlEncodable(long ttlMs) {
+    return ttlMs == -1L || CacheEntry.isEncodableTtl(ttlMs);
+  }
+
+  /**
    * Maximum number of concurrent background refreshes for soft-expiry
    * management.
    *
    * <p>{@code 0} (the default) derives the bound from
-   * {@link #executorMaxPoolSize} as half the pool, at least 1. Background
+   * {@link #effectiveLoadMaxPoolSize()} as half the pool, at least 1. Background
    * refreshes share {@code interruptibleLoadExecutor} with read-miss loads, so
    * the semaphore must stay below the pool size or it stops bounding anything:
    * a limit above the pool lets refreshes occupy every thread and park reads in
-   * the queue. A positive value is clamped to {@link #executorMaxPoolSize}; a
+   * the queue. A positive value is clamped to the effective load-pool maximum; a
    * configured value above it is logged at startup.
    */
   @Min(0)
@@ -177,16 +367,25 @@ public class ZetaProperties {
 
   /**
    * Effective background-refresh concurrency bound: the configured value when
-   * positive, otherwise half of {@link #executorMaxPoolSize} (at least 1),
-   * clamped to {@link #executorMaxPoolSize} — the shared pool is the real bound.
+   * positive, otherwise half of {@link #effectiveLoadMaxPoolSize()} (at least 1),
+   * clamped to the effective load-pool maximum — that pool is the real bound.
    *
    * @return the effective refresh permit count, always {@code >= 1} and
-   *         {@code <= executorMaxPoolSize}
+   *         {@code <= effectiveLoadMaxPoolSize()}
    */
   public int effectiveRefreshMaxPools() {
-    int maximum = refreshMaxPools > 0 ? refreshMaxPools : Math.max(1, executorMaxPoolSize / 2);
-    return Math.min(maximum, executorMaxPoolSize);
+    int loadMax = effectiveLoadMaxPoolSize();
+    int maximum = refreshMaxPools > 0 ? refreshMaxPools : Math.max(1, loadMax / 2);
+    return Math.min(maximum, loadMax);
   }
+
+  /**
+   * Execution budget of one background soft refresh or hard renewal. The refresh permit and the
+   * key's dedup slot are held for the whole budget, so a stuck source blocks that key's next
+   * refresh for this long; keep it below the shortest hard TTL the application declares.
+   */
+  @Min(1)
+  private long refreshTimeoutMs = 30_000L;
 
   /** Exchange name for app-to-Worker reportToWorker routing. */
   private String reportExchange = ZetaConstants.Exchange.REPORT;
@@ -555,4 +754,101 @@ public class ZetaProperties {
   /** Circuit breaker configuration. */
   @Valid
   private CircuitBreaker circuitBreaker = new CircuitBreaker();
+
+  /**
+   * Background warming configuration: whether the framework may spend a background load on a
+   * key, and under which heat signal.
+   */
+  @Data
+  public static class Warm {
+
+    /** Global kill switch for prewarm and keep-warm. */
+    private boolean enabled = true;
+
+    /** Upper bound on cluster lease records retained by {@code HeatDirectory}. */
+    @Min(1)
+    private int maxClusterLeases = 50_000;
+
+    /**
+     * Retention of a COOL tombstone. It must outlive the Worker's in-flight decision window so a
+     * late HOT below the tombstone's version cannot resurrect the lease.
+     */
+    @Min(1_000)
+    private long coolTombstoneMs = 60_000;
+
+    /** Prewarm a missing entry when the configured heat signal fires. */
+    @Valid
+    private Prewarm prewarm = new Prewarm();
+
+    /** Renew a resident entry before its soft or hard deadline. */
+    @Valid
+    private KeepWarm keepWarm = new KeepWarm();
+
+    /** Operator trigger overrides, keyed by annotation cache name or programmatic prefix. */
+    @Valid
+    private Overrides overrides = new Overrides();
+
+    /** Cold-load configuration. */
+    @Data
+    public static class Prewarm {
+
+      /** Which signal may prewarm. {@code OFF}: a namespace must opt in explicitly. */
+      @NotNull
+      private HeatTrigger trigger = HeatTrigger.OFF;
+
+      /** Maximum random delay before a prewarm, staggering nodes that receive one broadcast. */
+      @Min(0)
+      private long jitterMs = 50;
+    }
+
+    /** Resident-renewal configuration. */
+    @Data
+    public static class KeepWarm {
+
+      /**
+       * Which signal may renew a resident entry. {@code OFF}: registering a loader does not opt a
+       * namespace into spending background loads; the namespace must set the trigger explicitly.
+       */
+      @NotNull
+      private HeatTrigger trigger = HeatTrigger.OFF;
+
+      /** Upper bound on scheduled warm tasks; excess admissions are dropped. */
+      @Min(1)
+      private int maxTasks = 100_000;
+
+      /** TTL windows shorter than this are not worth a background renewal. */
+      @Min(1)
+      private long minWindowMs = 2_000;
+
+      /** Maximum lead time before the deadline. */
+      @Min(1)
+      private long leadMaxMs = 30_000;
+    }
+
+    /** Operator overrides. Only triggers are overridable; TTLs and loaders stay single-owned. */
+    @Data
+    public static class Overrides {
+
+      /** Annotation cache name to trigger override. */
+      private java.util.Map<String, TriggerOverride> caches = new java.util.LinkedHashMap<>();
+
+      /** Programmatic key prefix to trigger override. */
+      private java.util.Map<String, TriggerOverride> prefixes = new java.util.LinkedHashMap<>();
+    }
+
+    /** One namespace's trigger override; a null field leaves the declared value in place. */
+    @Data
+    public static class TriggerOverride {
+
+      /** Prewarm trigger override, or {@code null} to keep the declaration. */
+      private HeatTrigger prewarm;
+
+      /** Keep-warm trigger override, or {@code null} to keep the declaration. */
+      private HeatTrigger keepWarm;
+    }
+  }
+
+  /** Background warming configuration. */
+  @Valid
+  private Warm warm = new Warm();
 }

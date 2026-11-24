@@ -16,6 +16,7 @@
 package io.github.hyshmily.zeta.autoconfigure;
 
 import com.github.benmanes.caffeine.cache.Cache;
+import io.github.hyshmily.zeta.cache.AccessCounter;
 import io.github.hyshmily.zeta.cache.BroadcastBuffer;
 import io.github.hyshmily.zeta.cache.cachesupport.loader.singleflight.SingleFlight;
 import io.github.hyshmily.zeta.cache.cachesupport.raw.CacheEntry;
@@ -36,6 +37,10 @@ import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.binder.MeterBinder;
 import io.micrometer.core.instrument.binder.cache.CaffeineCacheMetrics;
+import io.micrometer.core.instrument.composite.CompositeMeterRegistry;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
 import java.util.concurrent.Semaphore;
 import java.util.function.ToLongFunction;
 import org.springframework.beans.factory.ObjectProvider;
@@ -44,6 +49,7 @@ import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 
@@ -65,15 +71,25 @@ import org.springframework.context.annotation.Bean;
  * skips the corresponding meter registration via {@link ObjectProvider}, mirroring the same
  * null-safe approach used by {@link ZetaEndpoint}. Monotonic totals are registered as
  * {@link FunctionCounter}s so they carry counter semantics (and a {@code _total} suffix) in
- * every registry; live and decaying values — including {@code zeta.topk.total}, which falls
+ * every registry; live and decaying values — including {@code zeta.topk.count}, which falls
  * with the sketch's decay — are gauges.
  *
  * <p>Thread-safe: Micrometer's {@link MeterRegistry} is thread-safe; meter supplier lambdas
  * delegate to thread-safe component methods.
+ *
+ * <p><b>App-side only.</b> The configuration is off in Worker mode
+ * ({@code zeta.worker.enabled=true}): every component it reads — the local TopK, the L1 cache,
+ * SingleFlight, the reporter, the sync plane — belongs to the application side, and the Worker's
+ * own meters are bound by {@code WorkerAutoConfiguration.workerDetectionMeterBinder}. Without the
+ * condition a Worker deployment that happens to contain one TopK-typed bean would publish it under
+ * {@code type=local}.
  */
 @Internal
-@AutoConfiguration(after = ZetaAutoConfiguration.class)
+@AutoConfiguration(
+  after = { ZetaAutoConfiguration.class, ZetaFacadeAutoConfiguration.class, ZetaAmqpAutoConfiguration.class }
+)
 @ConditionalOnClass(name = "io.micrometer.core.instrument.binder.MeterBinder")
+@ConditionalOnProperty(prefix = "zeta.worker", name = "enabled", havingValue = "false", matchIfMissing = true)
 @EnableConfigurationProperties(ZetaProperties.class)
 public class ZetaMicrometerAutoConfiguration {
 
@@ -111,7 +127,7 @@ public class ZetaMicrometerAutoConfiguration {
    *   <caption>Registered meters</caption>
    *   <tr><th>Metric name</th><th>Source</th><th>Tags</th></tr>
    *   <tr><td>{@code zeta.topk.size}</td><td>TopK current ranking size</td><td>type=local</td></tr>
-   *   <tr><td>{@code zeta.topk.total}</td><td>TopK total requests tracked</td><td>type=local</td></tr>
+   *   <tr><td>{@code zeta.topk.count}</td><td>TopK total requests tracked</td><td>type=local</td></tr>
    *   <tr><td>{@code zeta.expelled.queue.size}</td><td>Expelled queue backlog</td><td>&mdash;</td></tr>
    *   <tr><td>{@code zeta.singleflight.inflight}</td><td>Loader suppliers currently executing</td><td>&mdash;</td></tr>
    *   <tr><td>{@code zeta.reporter.queue.depth}</td><td>Reporter queue backlog</td><td>&mdash;</td></tr>
@@ -130,10 +146,6 @@ public class ZetaMicrometerAutoConfiguration {
    *   <tr><td>{@code zeta.stall.*}</td><td>Stall causes that have no other series &mdash; see
    *       {@link #registerStallMeters}</td><td>&mdash;</td></tr>
    *   <tr><td>{@code zeta.expire.refresh.available}</td><td>Available refresh limiter permits</td><td>&mdash;</td></tr>
-   *   <tr><td>{@code zeta.expire.refresh.failure.leased.total}</td><td>Cumulative refresh failures granted a
-   *       lease (the stale entry stays servable)</td><td>&mdash;</td></tr>
-   *   <tr><td>{@code zeta.expire.refresh.lease.debt.keys}</td><td>Keys currently holding a failure
-   *       lease</td><td>&mdash;</td></tr>
    *   <tr><td>{@code zeta.version.clock.skew}</td><td>Observed clock lead of the data-stamp clock, in milliseconds</td><td>&mdash;</td></tr>
    *   <tr><td>{@code zeta.worker.alive}</td><td>Whether the heartbeat view passes the cluster gate</td><td>&mdash;</td></tr>
    *   <tr><td>{@code zeta.sync.send.failed.total}</td><td>Cumulative sync-plane publish failures (broker errors)</td><td>&mdash;</td></tr>
@@ -148,6 +160,8 @@ public class ZetaMicrometerAutoConfiguration {
    * already exposes the number instead of a mirror of it.
    *
    * @param hotKeyDetectorProvider      provider for the app-side TopK (may be absent)
+   * @param defaultTopKProvider        the framework's {@code heavyKeeper} bean, the fallback when
+   *                                   several TopK beans make the unqualified provider ambiguous
    * @param singleFlightProvider        provider for the SingleFlight dedup layer (may be absent)
    * @param reporterProvider            provider for the HotKey reporter (may be absent)
    * @param accessCounterProvider       provider for the shared access counter (may be absent)
@@ -163,7 +177,8 @@ public class ZetaMicrometerAutoConfiguration {
   @Bean
   @ConditionalOnMissingBean(name = "hotKeyCustomMetrics")
   public MeterBinder hotKeyCustomMetrics(
-    @Qualifier("heavyKeeper") ObjectProvider<TopK> hotKeyDetectorProvider,
+    ObjectProvider<TopK> hotKeyDetectorProvider,
+    @Qualifier("heavyKeeper") ObjectProvider<TopK> defaultTopKProvider,
     ObjectProvider<SingleFlight> singleFlightProvider,
     ObjectProvider<KeyReporter> reporterProvider,
     ObjectProvider<io.github.hyshmily.zeta.cache.AccessCounter> accessCounterProvider,
@@ -176,15 +191,16 @@ public class ZetaMicrometerAutoConfiguration {
     ObjectProvider<WorkerListener> workerListenerProvider
   ) {
     return registry -> {
-      hotKeyDetectorProvider.ifAvailable(detector -> registerLocalTopKMeters(detector, registry));
+      TopK detector = hotKeyDetectorProvider.getIfUnique(defaultTopKProvider::getIfAvailable);
+      registerLocalTopKMeters(detector, registry);
       singleFlightProvider.ifAvailable(sf ->
-        Gauge.builder("zeta.singleflight.inflight", sf, s -> (double) s.estimatedInFlightSize()).register(registry)
+        gauge(registry, "zeta.singleflight.inflight", sf, SingleFlight::estimatedInFlightSize)
       );
       reporterProvider.ifAvailable(r -> registerReporterMeters(r, registry));
       // design decisions: access counting: the counting reservoir lives on the shared access counter —
       // its pending-keys gauge replaces the reporter-owned one.
       accessCounterProvider.ifAvailable(counter ->
-        Gauge.builder("zeta.reporter.pending.keys", counter, c -> (double) c.pendingKeyCount()).register(registry)
+        gauge(registry, "zeta.reporter.pending.keys", counter, AccessCounter::pendingKeyCount)
       );
       // Stall-cause meters: each (cause, state ≠ normal) pair is its own
       // meter — the healthy/normal state registers nothing (the RocksDB
@@ -192,59 +208,69 @@ public class ZetaMicrometerAutoConfiguration {
       // causes (that failure mode does not exist in this deployment).
       registerStallMeters(registry, singleFlightProvider, broadcastBufferProvider);
       cacheSyncPublisherProvider.ifAvailable(csp ->
-        FunctionCounter.builder("zeta.sync.send.failed.total", csp, p -> (double) p.sendFailures()).register(registry)
+        counter(registry, "zeta.sync.send.failed.total", csp, CacheSyncPublisher::sendFailures)
       );
       backgroundRefresherProvider.ifAvailable(refresher -> {
         var limiter = refresher.getRefreshLimiter();
         if (limiter != null) {
-          Gauge.builder("zeta.expire.refresh.available", limiter, Semaphore::availablePermits).register(registry);
+          gauge(registry, "zeta.expire.refresh.available", limiter, Semaphore::availablePermits);
         }
-        // Lease-on-failure observability (design decisions: expiry and refresh follow-up):
-        // granted leases and the current debt. No refusal-reason counter is registered —
-        // a refusal is the absence of a grant, so "leased total flat while failures rise"
-        // already says a refusal happened, and no dashboard action differs between the
-        // classifier and the staleness cap.
-        FunctionCounter.builder("zeta.expire.refresh.failure.leased.total", refresher, r ->
-          (double) r.getRefreshFailureLeased()
-        ).register(registry);
-        Gauge.builder("zeta.expire.refresh.lease.debt.keys", refresher, r -> (double) r.leasedKeyCount()).register(
-          registry
-        );
       });
       stampClockProvider.ifAvailable(clock ->
-        Gauge.builder("zeta.version.clock.skew", clock, c -> (double) c.skewMillis()).register(registry)
+        gauge(registry, "zeta.version.clock.skew", clock, StampClock::skewMillis)
       );
       healthViewProvider.ifAvailable(hv ->
-        Gauge.builder("zeta.worker.alive", hv, v -> v.isClusterHealthy() ? 1.0 : 0.0).register(registry)
+        gauge(registry, "zeta.worker.alive", hv, v -> v.isClusterHealthy() ? 1L : 0L)
       );
       // Decision-plane saturation: a COOL the ordered dispatcher refused is
       // re-applied inline on the consumer thread (never silently lost); the
       // counter is the signal that the dispatcher saturated.
       workerListenerProvider.ifAvailable(wl -> {
-        FunctionCounter.builder("zeta.worker.decision.cool.rejected.total", wl, w ->
-          (double) w.coolDispatchRejections()
-        ).register(registry);
+        counter(registry, "zeta.worker.decision.cool.rejected.total", wl, WorkerListener::coolDispatchRejections);
         // Epoch-rollback skip (VersionGuard is a static utility — no bean):
         // persistent skips after a Worker restart mean the epoch file was lost
         // and the new incarnation is muted until the resident entries expire.
         // Surfaced only alongside a decision listener — no listener, no
         // decisions to skip.
-        FunctionCounter.builder("zeta.worker.decision.epoch.regress.skip.total", VersionGuard.class, ignored ->
-          (double) VersionGuard.epochRegressSkips()
-        ).register(registry);
+        counter(registry, "zeta.worker.decision.epoch.regress.skip.total", VersionGuard.class, ignored ->
+          VersionGuard.epochRegressSkips()
+        );
       });
       // Sync-plane saturation and identity diagnostics: a dispatcher refusal is applied by
       // the no-hook fallback (never silently lost), and a shared node id means two instances
       // can mint equal stamps and skip each other's writes until the next ms/TTL.
       syncListenerProvider.ifAvailable(sl -> {
-        FunctionCounter.builder("zeta.sync.dispatch.rejected.total", sl, s ->
-          (double) s.syncDispatchRejections()
-        ).register(registry);
-        FunctionCounter.builder("zeta.sync.nodeid.collision.total", sl, s -> (double) s.nodeIdCollisions()).register(
-          registry
-        );
+        counter(registry, "zeta.sync.dispatch.rejected.total", sl, CacheSyncListener::syncDispatchRejections);
+        counter(registry, "zeta.sync.nodeid.collision.total", sl, CacheSyncListener::nodeIdCollisions);
       });
     };
+  }
+
+  /**
+   * Register one live-value gauge reading a {@code long}. The cast to Micrometer's {@code double}
+   * lives here, so every meter site names only its component and its accessor.
+   *
+   * @param registry the meter registry
+   * @param name     the meter name
+   * @param target   the object the gauge reads
+   * @param value    the accessor
+   * @param <T>      the target type
+   */
+  private static <T> void gauge(MeterRegistry registry, String name, T target, ToLongFunction<T> value) {
+    Gauge.builder(name, target, t -> (double) value.applyAsLong(t)).register(registry);
+  }
+
+  /**
+   * Register one monotonic counter reading a {@code long}.
+   *
+   * @param registry the meter registry
+   * @param name     the meter name
+   * @param target   the object the counter reads
+   * @param value    the accessor
+   * @param <T>      the target type
+   */
+  private static <T> void counter(MeterRegistry registry, String name, T target, ToLongFunction<T> value) {
+    FunctionCounter.builder(name, target, t -> (double) value.applyAsLong(t)).register(registry);
   }
 
   /**
@@ -257,25 +283,38 @@ public class ZetaMicrometerAutoConfiguration {
    * is harmless. The registry is not probed for an existing {@code zeta.*} meter: that probe would
    * let one early series suppress every unrelated late binder.
    *
-   * @param registries        every meter registry in the context, in order
-   * @param caffeineMetrics   the registered {@code hotKeyCaffeineMetrics} bean, if present
-   * @param customMetrics     the registered {@code hotKeyCustomMetrics} bean, if present
+   * <p>A registry already owned by a {@link CompositeMeterRegistry} is skipped: the composite
+   * forwards every binding to its children, so binding each child directly would duplicate the
+   * whole binder set. A child that is not registered with a composite bean is bound on its own.
+   *
+   * @param registriesProvider every meter registry in the context, in order
+   * @param caffeineMetrics    the registered {@code hotKeyCaffeineMetrics} bean, if present
+   * @param customMetrics      the registered {@code hotKeyCustomMetrics} bean, if present
    * @return a callback invoked once after singleton instantiation
    */
   @Bean
   @ConditionalOnMissingBean(name = "zetaLateMetrics")
   public SmartInitializingSingleton zetaLateMetrics(
-    ObjectProvider<MeterRegistry> registries,
+    ObjectProvider<MeterRegistry> registriesProvider,
     @Qualifier("hotKeyCaffeineMetrics") ObjectProvider<MeterBinder> caffeineMetrics,
     @Qualifier("hotKeyCustomMetrics") ObjectProvider<MeterBinder> customMetrics
   ) {
-    return () ->
-      registries
-        .orderedStream()
-        .forEach(registry -> {
-          caffeineMetrics.ifAvailable(binder -> binder.bindTo(registry));
-          customMetrics.ifAvailable(binder -> binder.bindTo(registry));
-        });
+    return () -> {
+      List<MeterRegistry> registries = registriesProvider.orderedStream().toList();
+      Set<MeterRegistry> compositeChildren = new HashSet<>();
+      for (MeterRegistry registry : registries) {
+        if (registry instanceof CompositeMeterRegistry composite) {
+          compositeChildren.addAll(composite.getRegistries());
+        }
+      }
+      for (MeterRegistry registry : registries) {
+        if (compositeChildren.contains(registry)) {
+          continue;
+        }
+        caffeineMetrics.ifAvailable(binder -> binder.bindTo(registry));
+        customMetrics.ifAvailable(binder -> binder.bindTo(registry));
+      }
+    };
   }
 
   /**
@@ -289,10 +328,12 @@ public class ZetaMicrometerAutoConfiguration {
     Gauge.builder("zeta.topk.size", detector, t -> (double) t.estimatedSize())
       .tag("type", "local")
       .register(registry);
-    Gauge.builder("zeta.topk.total", detector, t -> (double) t.total())
+    // Not ".total": Prometheus Client 1.x strips a reserved suffix from a gauge name, which would
+    // silently rename the series to zeta_topk.
+    Gauge.builder("zeta.topk.count", detector, t -> (double) t.total())
       .tag("type", "local")
       .register(registry);
-    Gauge.builder("zeta.expelled.queue.size", detector, t -> (double) t.expelled().size()).register(registry);
+    gauge(registry, "zeta.expelled.queue.size", detector, t -> t.expelled().size());
   }
 
   /**
@@ -329,9 +370,9 @@ public class ZetaMicrometerAutoConfiguration {
     // shows the trajectory it WOULD apply — the deploy-first observation window.
     ReportFeedLoop loop = reporter.feedLoop();
     if (loop != null) {
-      Gauge.builder("zeta.reporter.feedloop.interval", loop, ReportFeedLoop::intervalMs).register(registry);
-      Gauge.builder("zeta.reporter.feedloop.score", loop, ReportFeedLoop::lastScoreBp).register(registry);
-      Gauge.builder("zeta.reporter.feedloop.batch", loop, ReportFeedLoop::projectedBatchSize).register(registry);
+      gauge(registry, "zeta.reporter.feedloop.interval", loop, ReportFeedLoop::intervalMs);
+      gauge(registry, "zeta.reporter.feedloop.score", loop, ReportFeedLoop::lastScoreBp);
+      gauge(registry, "zeta.reporter.feedloop.batch", loop, ReportFeedLoop::projectedBatchSize);
     }
   }
 
@@ -376,18 +417,12 @@ public class ZetaMicrometerAutoConfiguration {
     ObjectProvider<BroadcastBuffer> broadcastBufferProvider
   ) {
     broadcastBufferProvider.ifAvailable(bb -> {
-      FunctionCounter.builder("zeta.stall.broadcast_storm.stopped.total", bb, b ->
-        (double) (b.sendFailures() + b.saturationDrops())
-      ).register(registry);
-      FunctionCounter.builder("zeta.sync.invalidate.dropped.total", bb, b -> (double) b.invalidatesDropped()).register(
-        registry
-      );
+      counter(registry, "zeta.stall.broadcast_storm.stopped.total", bb, b -> b.sendFailures() + b.saturationDrops());
+      counter(registry, "zeta.sync.invalidate.dropped.total", bb, BroadcastBuffer::invalidatesDropped);
     });
     singleFlightProvider.ifAvailable(sf -> {
-      Gauge.builder("zeta.stall.source_degraded.stopped", sf, s -> s.isBreakerOpen() ? 1.0 : 0.0).register(registry);
-      FunctionCounter.builder("zeta.stall.source_degraded.timeouts.total", sf, s ->
-        (double) s.loadTimeoutCount()
-      ).register(registry);
+      gauge(registry, "zeta.stall.source_degraded.stopped", sf, s -> s.isBreakerOpen() ? 1L : 0L);
+      counter(registry, "zeta.stall.source_degraded.timeouts.total", sf, SingleFlight::loadTimeoutCount);
     });
   }
 }

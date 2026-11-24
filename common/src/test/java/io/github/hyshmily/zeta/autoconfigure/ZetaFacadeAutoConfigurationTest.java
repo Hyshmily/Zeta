@@ -20,10 +20,13 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 import io.github.hyshmily.zeta.DefaultZeta;
 import io.github.hyshmily.zeta.Zeta;
 import io.github.hyshmily.zeta.cache.HotKeyCache;
+import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.HeavyKeeper;
+import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.Item;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.TopK;
 import io.github.hyshmily.zeta.sharding.HealthView;
 import io.github.hyshmily.zeta.sync.worker.WorkerHeartbeatMessage;
@@ -81,6 +84,23 @@ class ZetaFacadeAutoConfigurationTest {
         // One observed alive Worker meets the derived threshold but not the configured one.
         assertThat(view.isClusterHealthy()).isFalse();
       });
+  }
+
+  /**
+   * A custom {@link HeavyKeeper} under a non-default bean name replaces the auto-configured
+   * sketch, and the facade must still see it by type.
+   */
+  @Test
+  void customHeavyKeeperWithADifferentBeanNameIsUsedByTheFacade() {
+    HeavyKeeper custom = mock(HeavyKeeper.class);
+    when(custom.listTopN(1)).thenReturn(List.of(new Item("hot", 2L)));
+
+    new ApplicationContextRunner()
+      .withBean("customHeavyKeeper", HeavyKeeper.class, () -> custom)
+      .withConfiguration(AutoConfigurations.of(ZetaFacadeAutoConfiguration.class, ZetaAutoConfiguration.class))
+      .run(ctx ->
+        assertThat(ctx.getBean(Zeta.class).detector().localTopKeys(1)).extracting(Item::key).containsExactly("hot")
+      );
   }
 
   /**

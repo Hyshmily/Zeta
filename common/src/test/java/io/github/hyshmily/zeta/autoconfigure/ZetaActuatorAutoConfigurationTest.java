@@ -16,6 +16,7 @@
 package io.github.hyshmily.zeta.autoconfigure;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -45,6 +46,7 @@ import org.springframework.boot.actuate.endpoint.annotation.Endpoint;
 import org.springframework.boot.actuate.endpoint.annotation.ReadOperation;
 import org.springframework.boot.actuate.endpoint.annotation.Selector;
 import org.springframework.boot.actuate.endpoint.annotation.WriteOperation;
+import org.springframework.boot.actuate.endpoint.web.annotation.WebEndpoint;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 
@@ -81,6 +83,7 @@ class ZetaActuatorAutoConfigurationTest {
     KeyReporter reporter = mock(KeyReporter.class);
 
     ObjectProvider<TopK> detectorProvider = mock(ObjectProvider.class);
+    ObjectProvider<TopK> defaultTopKProvider = mock(ObjectProvider.class);
     ObjectProvider<Cache<String, CacheEntry>> cacheProvider = mock(ObjectProvider.class);
     ObjectProvider<SingleFlight> sfProvider = mock(ObjectProvider.class);
     ObjectProvider<KeyReporter> reporterProvider = mock(ObjectProvider.class);
@@ -90,7 +93,7 @@ class ZetaActuatorAutoConfigurationTest {
     ObjectProvider<CacheSyncListener> syncListenerProvider = mock(ObjectProvider.class);
     ObjectProvider<WorkerListener> workerListenerProvider = mock(ObjectProvider.class);
 
-    doReturn(hotKeyDetector).when(detectorProvider).getIfAvailable();
+    doReturn(hotKeyDetector).when(detectorProvider).getIfUnique(any());
     doReturn(localCache).when(cacheProvider).getIfAvailable();
     doReturn(singleFlight).when(sfProvider).getIfAvailable();
     doReturn(reporter).when(reporterProvider).getIfAvailable();
@@ -100,6 +103,7 @@ class ZetaActuatorAutoConfigurationTest {
     ZetaActuatorAutoConfiguration config = new ZetaActuatorAutoConfiguration();
     ZetaEndpoint endpoint = config.hotKeyEndpoint(
       detectorProvider,
+      defaultTopKProvider,
       cacheProvider,
       sfProvider,
       reporterProvider,
@@ -121,6 +125,7 @@ class ZetaActuatorAutoConfigurationTest {
   @Test
   void hotKeyEndpointHandlesMissingDependenciesAsNull() {
     ObjectProvider<TopK> detectorProvider = mock(ObjectProvider.class);
+    ObjectProvider<TopK> defaultTopKProvider = mock(ObjectProvider.class);
     ObjectProvider<Cache<String, CacheEntry>> cacheProvider = mock(ObjectProvider.class);
     ObjectProvider<SingleFlight> sfProvider = mock(ObjectProvider.class);
     ObjectProvider<KeyReporter> reporterProvider = mock(ObjectProvider.class);
@@ -130,7 +135,7 @@ class ZetaActuatorAutoConfigurationTest {
     ObjectProvider<CacheSyncListener> syncListenerProvider = mock(ObjectProvider.class);
     ObjectProvider<WorkerListener> workerListenerProvider = mock(ObjectProvider.class);
 
-    doReturn(null).when(detectorProvider).getIfAvailable();
+    doReturn(null).when(detectorProvider).getIfUnique(any());
     doReturn(null).when(cacheProvider).getIfAvailable();
     doReturn(null).when(sfProvider).getIfAvailable();
     doReturn(null).when(reporterProvider).getIfAvailable();
@@ -140,6 +145,7 @@ class ZetaActuatorAutoConfigurationTest {
     ZetaActuatorAutoConfiguration config = new ZetaActuatorAutoConfiguration();
     ZetaEndpoint endpoint = config.hotKeyEndpoint(
       detectorProvider,
+      defaultTopKProvider,
       cacheProvider,
       sfProvider,
       reporterProvider,
@@ -188,6 +194,7 @@ class ZetaActuatorAutoConfigurationTest {
   void hotKeyEndpointAcceptsOnlyAppTopK() {
     TopK hotKeyDetector = mock(TopK.class);
     ObjectProvider<TopK> detectorProvider = mock(ObjectProvider.class);
+    ObjectProvider<TopK> defaultTopKProvider = mock(ObjectProvider.class);
     ObjectProvider<Cache<String, CacheEntry>> cacheProvider = mock(ObjectProvider.class);
     ObjectProvider<SingleFlight> sfProvider = mock(ObjectProvider.class);
     ObjectProvider<KeyReporter> reporterProvider = mock(ObjectProvider.class);
@@ -197,7 +204,7 @@ class ZetaActuatorAutoConfigurationTest {
     ObjectProvider<CacheSyncListener> syncListenerProvider = mock(ObjectProvider.class);
     ObjectProvider<WorkerListener> workerListenerProvider = mock(ObjectProvider.class);
 
-    doReturn(hotKeyDetector).when(detectorProvider).getIfAvailable();
+    doReturn(hotKeyDetector).when(detectorProvider).getIfUnique(any());
     doReturn(null).when(cacheProvider).getIfAvailable();
     doReturn(null).when(sfProvider).getIfAvailable();
     doReturn(null).when(reporterProvider).getIfAvailable();
@@ -207,6 +214,7 @@ class ZetaActuatorAutoConfigurationTest {
     ZetaActuatorAutoConfiguration config = new ZetaActuatorAutoConfiguration();
     ZetaEndpoint endpoint = config.hotKeyEndpoint(
       detectorProvider,
+      defaultTopKProvider,
       cacheProvider,
       sfProvider,
       reporterProvider,
@@ -236,15 +244,15 @@ class ZetaActuatorAutoConfigurationTest {
   }
 
   /**
-   * Pins the management-plane migration: both diagnostics endpoints must
-   * be standard Actuator {@link Endpoint}s (port, exposure, and roles honored
-   * via {@code management.*}) — never plain MVC controllers on the
-   * application port — with stable ids and operation shapes.
+   * Pins the management-plane migration: the diagnostics endpoints stay Actuator endpoints (port,
+   * exposure, and roles honored via {@code management.*}) — never plain MVC controllers on the
+   * application port — with stable ids and operation shapes. The ring endpoint is web-only because
+   * it reports HTTP status codes without referencing {@code spring-web}.
    */
   @Test
   void endpointsAreActuatorEndpointsWithStableIdsAndOperations() throws Exception {
     assertThat(ZetaEndpoint.class.getAnnotation(Endpoint.class).id()).isEqualTo("hotkey");
-    assertThat(RingEndpoint.class.getAnnotation(Endpoint.class).id()).isEqualTo("hotkeyring");
+    assertThat(RingEndpoint.class.getAnnotation(WebEndpoint.class).id()).isEqualTo("hotkeyring");
 
     assertThat(ZetaEndpoint.class.getMethod("hotKeyInfo", Integer.class)).satisfies(m ->
       assertThat(m.getAnnotation(ReadOperation.class)).isNotNull()

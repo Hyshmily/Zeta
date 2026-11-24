@@ -16,15 +16,21 @@
 package io.github.hyshmily.zeta.autoconfigure;
 
 import io.github.hyshmily.zeta.Zeta;
-import io.github.hyshmily.zeta.annotation.CacheFailurePolicy;
+import io.github.hyshmily.zeta.annotation.AnnotatedWarmLoaderBinder;
 import io.github.hyshmily.zeta.annotation.PlanResolver;
 import io.github.hyshmily.zeta.annotation.ZetaCacheAdvisor;
 import io.github.hyshmily.zeta.annotation.ZetaCacheInterceptor;
+import io.github.hyshmily.zeta.annotation.support.NamespaceKeys;
 import io.github.hyshmily.zeta.cache.HotKeyCache;
+import io.github.hyshmily.zeta.policy.NamespacePolicyRegistry;
+import io.github.hyshmily.zeta.policy.NamespacePolicyRegistry.WarmLoaderBinder;
 import io.github.hyshmily.zeta.util.Internal;
 import org.aopalliance.intercept.MethodInterceptor;
+import org.jspecify.annotations.NonNull;
 import org.springframework.aop.config.AopConfigUtils;
 import org.springframework.beans.factory.BeanFactory;
+import org.springframework.beans.factory.ListableBeanFactory;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.config.BeanDefinition;
 import org.springframework.beans.factory.support.BeanDefinitionRegistry;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
@@ -32,7 +38,6 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.context.annotation.Bean;
-import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Import;
 import org.springframework.context.annotation.ImportBeanDefinitionRegistrar;
 import org.springframework.context.annotation.Lazy;
@@ -69,34 +74,57 @@ import org.springframework.core.type.AnnotationMetadata;
 @AutoConfiguration(after = { ZetaFacadeAutoConfiguration.class, ZetaAutoConfiguration.class })
 @ConditionalOnClass(MethodInterceptor.class)
 @ConditionalOnBean({ HotKeyCache.class, Zeta.class })
-@Configuration(proxyBeanMethods = false)
 @Import(ZetaAnnotationAutoConfiguration.ProxyCreatorRegistrar.class)
 public class ZetaAnnotationAutoConfiguration {
 
   /**
-   * Create the lightweight plan source. It depends only on the bean factory:
-   * no cache engine, no facade, no scheduler.
+   * Create the lightweight plan source. It depends only on the bean factory: the two registries
+   * arrive as suppliers and are resolved by the first plan that needs them.
+   *
+   * <p>Resolving a plan also publishes the method's namespace contract, so registration happens
+   * exactly when the annotated bean is proxied — before any Worker decision can arrive for its
+   * keys. The indirection is load-bearing: this bean and {@link ZetaCacheAdvisor} are
+   * infrastructure, and the advisor is created while the auto-proxy creator initializes, before
+   * BeanPostProcessors are registered. Resolving the registries here would instantiate the engine,
+   * its properties, the namespace keys and the user's cluster loader ahead of their
+   * post-processing.
    *
    * @param beanFactory the bean factory backing {@code @beanName} SpEL and
    *                    {@code ${...}} attribute placeholders
+   * @param contracts   supplies the namespace contract registry, absent only in a deployment
+   *                    without an L1 engine
+   * @param keys        supplies the plan-time format registry
    * @return the plan resolver
    */
   @Bean
   @Role(BeanDefinition.ROLE_INFRASTRUCTURE)
   @ConditionalOnMissingBean
-  public PlanResolver zetaPlanResolver(BeanFactory beanFactory) {
-    return new PlanResolver(beanFactory);
+  public static PlanResolver zetaPlanResolver(
+    BeanFactory beanFactory,
+    ObjectProvider<NamespacePolicyRegistry> contracts,
+    ObjectProvider<NamespaceKeys> keys
+  ) {
+    return new PlanResolver(beanFactory, contracts::getIfAvailable, keys::getIfAvailable);
   }
 
   /**
-   * Create the default cache-side failure policy. A user bean replaces it.
+   * Bind every {@code selfWarmLoader} method to its bean. The finalizer runs this after all
+   * singletons exist, so the plan built at proxy time can be paired with the target object.
    *
-   * @return the default policy
+   * @param beanFactory the bean factory that owns the target beans
+   * @param resolver    the plan resolver holding the warmed method specs
+   * @param policies    the namespace warming registry
+   * @return the binder
    */
   @Bean
   @ConditionalOnMissingBean
-  public CacheFailurePolicy zetaCacheFailurePolicy() {
-    return CacheFailurePolicy.defaults();
+  @ConditionalOnBean(NamespacePolicyRegistry.class)
+  public WarmLoaderBinder annotatedWarmLoaderBinder(
+    ListableBeanFactory beanFactory,
+    PlanResolver resolver,
+    NamespacePolicyRegistry policies
+  ) {
+    return new AnnotatedWarmLoaderBinder(beanFactory, resolver, policies);
   }
 
   /**
@@ -105,15 +133,14 @@ public class ZetaAnnotationAutoConfiguration {
    * and the {@link Zeta} facade it needs — runs when the first advised bean is
    * proxied, not while BeanPostProcessors are being registered.
    *
-   * @param zeta        the facade every verb goes through
-   * @param resolver    the plan source shared with the advisor
-   * @param failurePolicy the cache-side failure policy
+   * @param zeta     the facade every verb goes through
+   * @param resolver the plan source shared with the advisor
    * @return the interceptor
    */
   @Bean(name = ZetaCacheAdvisor.INTERCEPTOR_BEAN_NAME)
   @Lazy
-  public ZetaCacheInterceptor zetaCacheInterceptor(Zeta zeta, PlanResolver resolver, CacheFailurePolicy failurePolicy) {
-    return new ZetaCacheInterceptor(zeta, resolver, failurePolicy);
+  public ZetaCacheInterceptor zetaCacheInterceptor(Zeta zeta, PlanResolver resolver) {
+    return new ZetaCacheInterceptor(zeta, resolver);
   }
 
   /**
@@ -144,7 +171,10 @@ public class ZetaAnnotationAutoConfiguration {
   static final class ProxyCreatorRegistrar implements ImportBeanDefinitionRegistrar {
 
     @Override
-    public void registerBeanDefinitions(AnnotationMetadata importingClassMetadata, BeanDefinitionRegistry registry) {
+    public void registerBeanDefinitions(
+      @NonNull AnnotationMetadata importingClassMetadata,
+      @NonNull BeanDefinitionRegistry registry
+    ) {
       AopConfigUtils.registerAutoProxyCreatorIfNecessary(registry);
     }
   }

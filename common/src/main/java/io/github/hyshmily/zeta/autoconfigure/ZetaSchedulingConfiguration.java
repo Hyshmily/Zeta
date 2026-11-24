@@ -16,8 +16,8 @@
 package io.github.hyshmily.zeta.autoconfigure;
 
 import com.github.benmanes.caffeine.cache.Cache;
-import io.github.hyshmily.zeta.cache.HotKeyCache;
 import io.github.hyshmily.zeta.cache.cachesupport.raw.CacheEntry;
+import io.github.hyshmily.zeta.exception.ZetaExceptionHandler;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.Item;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.TopK;
 import io.github.hyshmily.zeta.util.Internal;
@@ -39,11 +39,11 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 /**
  * Scheduled tasks for periodic TopK maintenance.
  *
- * <p>Handles decaying (fading) the HeavyKeeper counters, draining
- * expelled hot-key entries, promoting TopK-admitted keys off the read path,
- * and periodically running the L1 cache maintenance so expired entries are
- * physically reclaimed even when the cache is idle (Segcache-style eager
- * expiration).  Uses {@link List List&#60;TopK&#62;} injection
+ * <p>Handles decaying (fading) the HeavyKeeper counters, draining expelled
+ * hot-key entries, and periodically running the L1 cache maintenance so expired
+ * entries are physically reclaimed even when the cache is idle (Segcache-style
+ * eager expiration). Local renewal scheduling belongs to {@code KeepWarm}, not to
+ * this maintenance class. Uses {@link List List&#60;TopK&#62;} injection
  * so every registered TopK implementation is maintained — the app-side
  * {@code HotKeyDetector} is not a {@code TopK} bean, so the sketch is decayed
  * exactly once per tick even when a custom implementation is registered
@@ -52,9 +52,9 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
  * maintained by the Worker's scheduling.)
  *
  * <p>A tick is registered only when its collaborator exists: no L1 table means
- * no cleanup tick, no engine means no promotion tick. The optional
- * collaborators are resolved once at construction, so a registered tick never
- * unpacks a container handle or tests the same absence again.
+ * no cleanup tick. The optional collaborators are resolved once at construction,
+ * so a registered tick never unpacks a container handle or tests the same absence
+ * again.
  *
  * <p>Tasks are submitted directly to the shared {@code hotKeyScheduler} via
  * {@link ScheduledExecutorService#scheduleWithFixedDelay}, so HotKey's
@@ -71,9 +71,6 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 @Slf4j
 public class ZetaSchedulingConfiguration {
 
-  /** Interval between TopK-admission promotion drains (sub-second keeps promotion near-immediate). */
-  private static final long ADMISSION_DRAIN_INTERVAL_MILLIS = 500;
-
   /** Interval between HeavyKeeper decay passes (fixed-delay per instance). */
   private static final long HOT_KEY_DECAY_INTERVAL_SECONDS = 20;
 
@@ -88,7 +85,6 @@ public class ZetaSchedulingConfiguration {
 
   private final @Nullable Cache<String, CacheEntry> l1Cache;
   private final ScheduledExecutorService scheduler;
-  private final @Nullable HotKeyCache hotKeyCache;
   private final List<TopK> topKInstances;
 
   /** The scheduled ticks, cancelled explicitly on shutdown. */
@@ -96,65 +92,50 @@ public class ZetaSchedulingConfiguration {
 
   public ZetaSchedulingConfiguration(
     List<TopK> topKInstances,
-    ObjectProvider<HotKeyCache> hotKeyCacheProvider,
     @Qualifier("hotKeyScheduler") ScheduledExecutorService scheduler,
     ObjectProvider<Cache<String, CacheEntry>> l1CacheProvider
   ) {
     this.scheduler = scheduler;
     this.topKInstances = topKInstances;
     this.l1Cache = l1CacheProvider.getIfAvailable();
-    this.hotKeyCache = hotKeyCacheProvider.getIfAvailable();
   }
 
   @PostConstruct
   void scheduleTasks() {
     if (!topKInstances.isEmpty()) {
-      scheduleGuarded("cleanHotKeys", this::cleanHotKeys, HOT_KEY_DECAY_INTERVAL_SECONDS, TimeUnit.SECONDS);
-      scheduleGuarded("drainExpelled", this::drainExpelled, EXPEL_DRAIN_INTERVAL_SECONDS, TimeUnit.SECONDS);
+      scheduleGuarded("cleanHotKeys", this::cleanHotKeys, HOT_KEY_DECAY_INTERVAL_SECONDS);
+      scheduleGuarded("drainExpelled", this::drainExpelled, EXPEL_DRAIN_INTERVAL_SECONDS);
     }
     if (l1Cache != null) {
-      scheduleGuarded(
-        "cleanUpExpiredEntries",
-        this::cleanUpExpiredEntries,
-        L1_CLEANUP_INTERVAL_SECONDS,
-        TimeUnit.SECONDS
-      );
-    }
-    if (hotKeyCache != null) {
-      scheduleGuarded(
-        "promoteAdmittedKeys",
-        this::promoteAdmittedKeys,
-        ADMISSION_DRAIN_INTERVAL_MILLIS,
-        TimeUnit.MILLISECONDS
-      );
+      scheduleGuarded("cleanUpExpiredEntries", this::cleanUpExpiredEntries, L1_CLEANUP_INTERVAL_SECONDS);
     }
   }
 
   /**
-   * Register one scheduler tick behind a single failure guard. The
-   * {@code hotKeyScheduler} is a safe scheduled executor whose wrapper already
-   * routes a throwable through the exception-handler chain; this guard keeps a
-   * substituted plain executor from silently losing the cadence and names the
-   * tick in the ERROR — one owner so every tick has the same failure shape.
+   * Register one scheduler tick behind a single failure guard. A failing tick is reported through
+   * {@link ZetaExceptionHandler} — the same chain every Zeta executor uses — and never escapes the
+   * scheduler thread: on the shared {@link io.github.hyshmily.zeta.util.executor.PeriodicScheduler}
+   * the cadence survives by contract, and a substituted plain executor would otherwise silently
+   * lose the tick. Routing through the handler keeps one failure policy for the whole engine
+   * instead of a private ERROR line here.
    *
-   * @param tickName the tick's name (for the ERROR line)
+   * @param tickName the tick's name (for the handler context)
    * @param tick     the tick body
    * @param delay    the fixed delay between runs
-   * @param unit     the delay unit
    */
-  private void scheduleGuarded(String tickName, Runnable tick, long delay, TimeUnit unit) {
+  private void scheduleGuarded(String tickName, Runnable tick, long delay) {
     futures.add(
       scheduler.scheduleWithFixedDelay(
         () -> {
           try {
             tick.run();
           } catch (Throwable e) {
-            log.error("Scheduled {} failed", tickName, e);
+            ZetaExceptionHandler.handleException("Scheduled " + tickName + " failed", e);
           }
         },
         delay,
         delay,
-        unit
+        TimeUnit.SECONDS
       )
     );
   }
@@ -170,18 +151,6 @@ public class ZetaSchedulingConfiguration {
       future.cancel(false);
     }
     futures.clear();
-  }
-
-  /**
-   * Drain TopK admission events off the read path. Detection enqueues a key
-   * when it newly enters the TopK set; this tick rewrites the resident entry
-   * to HOT. The delay bounds the promotion lag to roughly one tick.
-   */
-  void promoteAdmittedKeys() {
-    int promoted = hotKeyCache.promoteAdmitted();
-    if (promoted > 0) {
-      log.debug("Promoted {} admitted hot key(s) to HOT", promoted);
-    }
   }
 
   /**

@@ -24,8 +24,8 @@ import io.github.hyshmily.zeta.cache.cachesupport.raw.CacheEntry;
  * convention (cf. {@code Jackson2ObjectMapperBuilderCustomizer}).
  *
  * <p>Declaring one or more {@code ZetaCacheCustomizer} beans lets applications
- * tune the L1 cache (add a {@code removalListener}, set a {@code scheduler} or
- * {@code executor}, adjust capacity) <b>without</b> replacing the whole
+ * add orthogonal wiring (a {@code removalListener}, a {@code scheduler} or
+ * {@code executor}, a {@code ticker}) <b>without</b> replacing the whole
  * {@code Cache<String, CacheEntry>} bean — a replacement that would otherwise have
  * to re-implement Zeta's {@code hardExpireAtMs}-driven {@code Expiry} and stats
  * recording by hand.

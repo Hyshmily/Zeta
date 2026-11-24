@@ -18,6 +18,7 @@ package io.github.hyshmily.zeta.autoconfigure;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import io.github.hyshmily.zeta.constants.ZetaConstants;
+import io.github.hyshmily.zeta.policy.HeatTrigger;
 import jakarta.validation.ConstraintViolation;
 import jakarta.validation.Validation;
 import jakarta.validation.Validator;
@@ -113,9 +114,10 @@ class ZetaPropertiesTest {
   void ttlFieldsCarryDefaultsDirectly() {
     ZetaProperties p = props();
     assertThat(p.getHardTtlMs()).isEqualTo(300_000L);
-    assertThat(p.getHotHardTtlMs()).isEqualTo(3_600_000L);
-    assertThat(p.getSoftTtlMs()).isEqualTo(30_000L);
-    assertThat(p.getHotSoftTtlMs()).isEqualTo(300_000L);
+    assertThat(p.getSoftTtlMs()).isZero();
+    assertThat(p.getWarm().getPrewarm().getTrigger()).isEqualTo(HeatTrigger.OFF);
+    assertThat(p.getWarm().getKeepWarm().getTrigger()).isEqualTo(HeatTrigger.OFF);
+    assertThat(p.getKeyFormat()).isEqualTo(io.github.hyshmily.zeta.policy.KeyFormat.TYPED);
   }
 
   /**
@@ -155,7 +157,7 @@ class ZetaPropertiesTest {
    * value is clamped, and the default stays half the pool.
    */
   @Test
-  void effectiveRefreshMaxPoolsClampsToTheExecutorPool() {
+  void effectiveRefreshMaxPoolsClampsToTheEffectiveLoadPool() {
     ZetaProperties p = props();
     p.setExecutorMaxPoolSize(16);
     p.setRefreshMaxPools(64);
@@ -164,6 +166,39 @@ class ZetaPropertiesTest {
 
     p.setRefreshMaxPools(0);
     assertThat(p.effectiveRefreshMaxPools()).isEqualTo(8);
+
+    p.setLoadExecutorMaxPoolSize(10);
+    p.setRefreshMaxPools(0);
+    assertThat(p.effectiveRefreshMaxPools()).isEqualTo(5);
+  }
+
+  @Test
+  void dedicatedExecutorSizesInheritTheSharedDefaults() {
+    ZetaProperties p = props();
+    p.setExecutorCorePoolSize(4);
+    p.setExecutorMaxPoolSize(12);
+    p.setExecutorQueueCapacity(100);
+
+    assertThat(p.effectiveLoadCorePoolSize()).isEqualTo(4);
+    assertThat(p.effectiveLoadMaxPoolSize()).isEqualTo(12);
+    assertThat(p.effectiveLoadQueueCapacity()).isEqualTo(100);
+    assertThat(p.effectiveSendCorePoolSize()).isEqualTo(4);
+    assertThat(p.effectiveSendMaxPoolSize()).isEqualTo(12);
+    assertThat(p.effectiveSendQueueCapacity()).isEqualTo(100);
+
+    p.setLoadExecutorCorePoolSize(2);
+    p.setLoadExecutorMaxPoolSize(6);
+    p.setLoadExecutorQueueCapacity(50);
+    p.setSendExecutorCorePoolSize(1);
+    p.setSendExecutorMaxPoolSize(3);
+    p.setSendExecutorQueueCapacity(20);
+
+    assertThat(p.effectiveLoadCorePoolSize()).isEqualTo(2);
+    assertThat(p.effectiveLoadMaxPoolSize()).isEqualTo(6);
+    assertThat(p.effectiveLoadQueueCapacity()).isEqualTo(50);
+    assertThat(p.effectiveSendCorePoolSize()).isEqualTo(1);
+    assertThat(p.effectiveSendMaxPoolSize()).isEqualTo(3);
+    assertThat(p.effectiveSendQueueCapacity()).isEqualTo(20);
   }
 
   /**
@@ -179,6 +214,18 @@ class ZetaPropertiesTest {
 
     assertThat(violationMessages(p)).contains(
       "zeta.local.executor-max-pool-size must be >= zeta.local.executor-core-pool-size"
+    );
+  }
+
+  @Test
+  void dedicatedPoolSizeValidationRejectsAnEffectiveCoreAboveMax() {
+    ZetaProperties p = props();
+    p.setExecutorCorePoolSize(16);
+    p.setExecutorMaxPoolSize(32);
+    p.setLoadExecutorMaxPoolSize(8);
+
+    assertThat(violationMessages(p)).contains(
+      "the effective load and send executor max pool sizes must be >= their effective core pool sizes"
     );
   }
 

@@ -169,6 +169,28 @@ class ZetaAutoConfigurationTest {
   }
 
   @Test
+  void loadAndSendPoolsCanBeSizedIndependently() {
+    runner
+      .withPropertyValues(
+        "zeta.local.executor-core-pool-size=4",
+        "zeta.local.executor-max-pool-size=12",
+        "zeta.local.load-executor-core-pool-size=2",
+        "zeta.local.load-executor-max-pool-size=6",
+        "zeta.local.send-executor-core-pool-size=1",
+        "zeta.local.send-executor-max-pool-size=3"
+      )
+      .run(ctx -> {
+        ThreadPoolExecutor load = (ThreadPoolExecutor) ctx.getBean("interruptibleLoadExecutor");
+        ThreadPoolExecutor send = (ThreadPoolExecutor) ctx.getBean("zetaSendExecutor");
+
+        assertThat(load.getCorePoolSize()).isEqualTo(2);
+        assertThat(load.getMaximumPoolSize()).isEqualTo(6);
+        assertThat(send.getCorePoolSize()).isEqualTo(1);
+        assertThat(send.getMaximumPoolSize()).isEqualTo(3);
+      });
+  }
+
+  @Test
   void abortIsTheDefaultOnEveryPool() {
     runner.run(ctx -> {
       assertAborts(ctx, "hotKeyExecutor");

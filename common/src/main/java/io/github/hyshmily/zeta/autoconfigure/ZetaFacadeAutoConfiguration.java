@@ -17,10 +17,13 @@ package io.github.hyshmily.zeta.autoconfigure;
 
 import io.github.hyshmily.zeta.DefaultZeta;
 import io.github.hyshmily.zeta.Zeta;
+import io.github.hyshmily.zeta.annotation.support.NamespaceKeys;
 import io.github.hyshmily.zeta.cache.HotKeyCache;
 import io.github.hyshmily.zeta.constants.ZetaConstants;
 import io.github.hyshmily.zeta.endpoint.ZetaEndpoint;
+import io.github.hyshmily.zeta.heat.HeatView;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.TopK;
+import io.github.hyshmily.zeta.policy.NamespacePolicyRegistry;
 import io.github.hyshmily.zeta.reporting.KeyReporter;
 import io.github.hyshmily.zeta.sharding.ClusterHealth;
 import io.github.hyshmily.zeta.sharding.HealthView;
@@ -164,14 +167,13 @@ public class ZetaFacadeAutoConfiguration {
    * @return a new {@link ClusterHealth}
    */
   static ClusterHealth defaultHealthView(ZetaProperties properties) {
-    ClusterHealth view = new ClusterHealth(
+    return new ClusterHealth(
       properties.getHeartbeat().getTimeoutMs(),
       ClusterHealth.DEFAULT_HEALTH_CACHE_TTL_MS,
       properties.getHeartbeat().isAdaptiveTimeout(),
-      properties.getHeartbeat().getAdaptiveFloorMs()
+      properties.getHeartbeat().getAdaptiveFloorMs(),
+      properties.getHeartbeat().getMinAliveWorkers()
     );
-    view.setMinAliveWorkers(properties.getHeartbeat().getMinAliveWorkers());
-    return view;
   }
 
   /**
@@ -206,6 +208,8 @@ public class ZetaFacadeAutoConfiguration {
    *
    * @param hotKeyCacheProvider     provider for the HotKeyCache (app-only or coexistence mode)
    * @param appTopKProvider         provider for the app-side TopK detector
+   * @param defaultTopKProvider     the framework's {@code heavyKeeper} bean, the fallback when
+   *                                several TopK beans make the unqualified provider ambiguous
    * @param refreshExecutorProvider provider for the dedicated refresh pool used by the
    *                                bulk refresh fan-out (absent in minimal contexts); the
    *                                pool is shared and never shut down here
@@ -216,13 +220,20 @@ public class ZetaFacadeAutoConfiguration {
   @SuppressWarnings("SpringJavaInjectionPointsAutowiringInspection")
   public Zeta hotKey(
     ObjectProvider<HotKeyCache> hotKeyCacheProvider,
-    @Qualifier("heavyKeeper") ObjectProvider<TopK> appTopKProvider,
-    @Qualifier("hotKeyExecutor") ObjectProvider<Executor> refreshExecutorProvider
+    ObjectProvider<TopK> appTopKProvider,
+    @Qualifier("heavyKeeper") ObjectProvider<TopK> defaultTopKProvider,
+    @Qualifier("hotKeyExecutor") ObjectProvider<Executor> refreshExecutorProvider,
+    ObjectProvider<NamespacePolicyRegistry> policyProvider,
+    ObjectProvider<NamespaceKeys> namespaceKeysProvider,
+    ObjectProvider<HeatView> heatViewProvider
   ) {
     return new DefaultZeta(
       hotKeyCacheProvider.getIfAvailable(),
-      appTopKProvider.getIfAvailable(),
-      refreshExecutorProvider.getIfAvailable()
+      appTopKProvider.getIfUnique(defaultTopKProvider::getIfAvailable),
+      refreshExecutorProvider.getIfAvailable(),
+      policyProvider.getIfAvailable(),
+      namespaceKeysProvider.getIfAvailable(),
+      heatViewProvider.getIfAvailable()
     );
   }
 }

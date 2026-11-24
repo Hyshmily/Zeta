@@ -195,6 +195,7 @@ class ZetaMicrometerAutoConfigurationTest {
 
     MeterBinder binder = config.hotKeyCustomMetrics(
       providerThatReturns(detector),
+      providerThatReturns(null),
       providerThatReturns(sf),
       providerThatReturns(reporter),
       providerThatReturns(accessCounter),
@@ -209,7 +210,7 @@ class ZetaMicrometerAutoConfigurationTest {
     binder.bindTo(registry);
 
     assertGaugeValue("zeta.topk.size", "type", "local", 5.0);
-    assertGaugeValue("zeta.topk.total", "type", "local", 100.0);
+    assertGaugeValue("zeta.topk.count", "type", "local", 100.0);
     assertGaugeExists("zeta.expelled.queue.size");
     assertGaugeValue("zeta.singleflight.inflight", 2.0);
     assertGaugeValue("zeta.reporter.queue.depth", 10.0);
@@ -251,6 +252,7 @@ class ZetaMicrometerAutoConfigurationTest {
       providerThatReturns(null),
       providerThatReturns(null),
       providerThatReturns(null),
+      providerThatReturns(null),
       providerThatReturns(null)
     );
     binder.bindTo(registry);
@@ -268,6 +270,7 @@ class ZetaMicrometerAutoConfigurationTest {
     when(reporter.dispatcherStats()).thenReturn(null);
 
     MeterBinder binder = config.hotKeyCustomMetrics(
+      providerThatReturns(null),
       providerThatReturns(null),
       providerThatReturns(null),
       providerThatReturns(reporter),
@@ -302,6 +305,7 @@ class ZetaMicrometerAutoConfigurationTest {
       providerThatReturns(null),
       providerThatReturns(null),
       providerThatReturns(null),
+      providerThatReturns(null),
       providerThatReturns(backgroundRefresher),
       providerThatReturns(null),
       providerThatReturns(null),
@@ -312,11 +316,7 @@ class ZetaMicrometerAutoConfigurationTest {
     binder.bindTo(registry);
 
     assertThat(registry.find("zeta.expire.refresh.available").gauge()).isNull();
-    // Lease counters live on the refresher seam itself (not the limiter), so
-    // they register even when the limiter is absent.
-    assertThat(registry.find("zeta.expire.refresh.failure.leased.total").functionCounter()).isNotNull();
-    assertThat(registry.find("zeta.expire.refresh.lease.debt.keys").gauge()).isNotNull();
-    assertThat(registry.getMeters()).hasSize(2);
+    assertThat(registry.getMeters()).isEmpty();
   }
 
   /**
@@ -330,6 +330,7 @@ class ZetaMicrometerAutoConfigurationTest {
 
     MeterBinder binder = config.hotKeyCustomMetrics(
       providerThatReturns(detector),
+      providerThatReturns(null),
       providerThatReturns(sf),
       providerThatReturns(null),
       providerThatReturns(null),
@@ -344,7 +345,7 @@ class ZetaMicrometerAutoConfigurationTest {
     binder.bindTo(registry);
 
     assertGaugeValue("zeta.topk.size", "type", "local", 3.0);
-    assertGaugeValue("zeta.topk.total", "type", "local", 50.0);
+    assertGaugeValue("zeta.topk.count", "type", "local", 50.0);
     assertGaugeExists("zeta.expelled.queue.size");
     assertGaugeValue("zeta.singleflight.inflight", 1.0);
 
@@ -365,6 +366,15 @@ class ZetaMicrometerAutoConfigurationTest {
     })
       .when(provider)
       .ifAvailable(any());
+    doAnswer(invocation -> {
+      if (value != null) {
+        ((Consumer<T>) invocation.getArgument(0)).accept(value);
+      }
+      return null;
+    })
+      .when(provider)
+      .ifUnique(any());
+    doReturn(value).when(provider).getIfUnique(any());
     return provider;
   }
 

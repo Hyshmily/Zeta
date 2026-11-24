@@ -20,15 +20,25 @@ import static io.github.hyshmily.zeta.constants.ZetaConstants.Routing.KEY_HEARTB
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.github.benmanes.caffeine.cache.Cache;
+import com.rabbitmq.client.Channel;
+import io.github.hyshmily.zeta.cache.HotKeyCache;
 import io.github.hyshmily.zeta.cache.cachesupport.lifecycle.EntryLifecycle;
+import io.github.hyshmily.zeta.cache.cachesupport.lifecycle.TtlPolicy;
 import io.github.hyshmily.zeta.cache.cachesupport.loader.CacheLoader;
 import io.github.hyshmily.zeta.cache.cachesupport.loader.singleflight.SingleFlight;
 import io.github.hyshmily.zeta.cache.cachesupport.raw.CacheEntry;
 import io.github.hyshmily.zeta.constants.ZetaConstants;
+import io.github.hyshmily.zeta.heat.HeatDirectory;
+import io.github.hyshmily.zeta.heat.HeatView;
+import io.github.hyshmily.zeta.heat.HotKeyContextFactory;
+import io.github.hyshmily.zeta.heat.HotKeyHandler;
+import io.github.hyshmily.zeta.heat.HotKeyListener;
+import io.github.hyshmily.zeta.policy.NamespacePolicyRegistry;
 import io.github.hyshmily.zeta.reporting.KeyReporter;
 import io.github.hyshmily.zeta.reporting.ReportPublisher;
 import io.github.hyshmily.zeta.reporting.impl.KeyReporterImpl;
 import io.github.hyshmily.zeta.reporting.impl.ReportFeedLoop;
+import io.github.hyshmily.zeta.scheduler.KeepWarm;
 import io.github.hyshmily.zeta.sharding.ConsistentHashRing;
 import io.github.hyshmily.zeta.sharding.HashRing;
 import io.github.hyshmily.zeta.sharding.HealthView;
@@ -41,13 +51,20 @@ import io.github.hyshmily.zeta.util.amqp.AmqpMessageReader.AppIsolationFilter;
 import io.github.hyshmily.zeta.util.clock.StampClock;
 import io.github.hyshmily.zeta.util.executor.ZetaThreadFactory;
 import jakarta.annotation.PostConstruct;
+import java.io.IOException;
+import java.util.List;
+import java.util.concurrent.Executor;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledThreadPoolExecutor;
+import java.util.concurrent.TimeoutException;
 import lombok.extern.slf4j.Slf4j;
 import org.jspecify.annotations.NonNull;
 import org.jspecify.annotations.Nullable;
+import org.springframework.amqp.AmqpException;
 import org.springframework.amqp.core.*;
 import org.springframework.amqp.rabbit.connection.CachingConnectionFactory;
+import org.springframework.amqp.rabbit.connection.Connection;
 import org.springframework.amqp.rabbit.connection.ConnectionFactory;
 import org.springframework.amqp.rabbit.connection.RabbitConnectionFactoryBean;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
@@ -63,6 +80,8 @@ import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.config.ConfigurableListableBeanFactory;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
+import org.springframework.boot.autoconfigure.amqp.CachingConnectionFactoryConfigurer;
+import org.springframework.boot.autoconfigure.amqp.ConnectionFactoryCustomizer;
 import org.springframework.boot.autoconfigure.amqp.RabbitConnectionFactoryBeanConfigurer;
 import org.springframework.boot.autoconfigure.amqp.RabbitProperties;
 import org.springframework.boot.autoconfigure.condition.*;
@@ -99,11 +118,15 @@ import org.springframework.util.Assert;
 @Slf4j
 public class ZetaAmqpAutoConfiguration {
 
-  /** Bean name of Zeta's dedicated control-plane (heartbeat) connection factory. */
-  private static final String CONTROL_PLANE_CONNECTION_FACTORY_BEAN = "zetaHeartbeatConnectionFactory";
-
   /** Bean name of Spring Boot's default (data-plane) RabbitMQ connection factory. */
   private static final String DATA_PLANE_CONNECTION_FACTORY_BEAN = "rabbitConnectionFactory";
+
+  /**
+   * Queue-name prefix of the per-instance heartbeat queue. Unique per instance, non-durable and
+   * auto-delete: the broker drops it when the control-plane consumer disconnects, and the
+   * reconnect listener declares it again.
+   */
+  private static final String HEARTBEAT_QUEUE_PREFIX = "zeta.heartbeat:";
 
   private final ZetaAppProperties appProperties;
 
@@ -150,10 +173,14 @@ public class ZetaAmqpAutoConfiguration {
    */
   private static ScheduledExecutorService newJitterScheduler(AmqpConsumerProperties properties, String component) {
     int poolSize = Math.max(properties.getSchedulerPoolSize(), properties.getConcurrentConsumers() * 2);
-    return Executors.newScheduledThreadPool(
+    ScheduledThreadPoolExecutor scheduler = new ScheduledThreadPoolExecutor(
       poolSize,
       new ZetaThreadFactory(ZetaConstants.Threads.PREFIX_SCHEDULER + "-" + component + "-")
     );
+    // A delayed follow-up parked before shutdown must not run against a closed container.
+    scheduler.setExecuteExistingDelayedTasksAfterShutdownPolicy(false);
+    scheduler.setRemoveOnCancelPolicy(true);
+    return scheduler;
   }
 
   /**
@@ -178,54 +205,125 @@ public class ZetaAmqpAutoConfiguration {
     container.setErrorHandler(t -> log.warn(uncaughtWarnMessage, t));
     container.setAutoStartup(properties.isAutoStartup());
     container.setMessageListener(listener);
+    // A broker restart or an operator-deleted queue must not stop the listener permanently; the
+    // container retries the declaration on the next connection.
+    container.setMissingQueuesFatal(false);
     return container;
   }
 
   /**
-   * Resolve the data-plane {@link ConnectionFactory}: Spring Boot's default
-   * {@code rabbitConnectionFactory} when present (the standard wiring), else
-   * the user's own factory — the first candidate that is not Zeta's reserved
-   * control-plane bean name. The control-plane factory is exposed as a
-   * {@link ControlPlaneConnectionFactory} holder, not a {@code ConnectionFactory}
-   * bean, so it cannot be picked up by this lookup or by any unqualified
-   * host-application injection.
+   * Declare the heartbeat topology on every control-plane connection. The queue is non-durable
+   * and auto-delete, so the broker removes it when the last consumer disconnects; the data-plane
+   * {@code RabbitAdmin} only redeclares on a data-plane connection event and cannot repair a
+   * control-plane reconnect. A dedicated connection listener, not a second {@code RabbitAdmin}
+   * bean: Boot's admin is conditional on a missing {@code AmqpAdmin}, so exposing another one
+   * would disable the data-plane declarations. The listener runs on every control-plane
+   * connection and declares the same topology idempotently.
    *
-   * <p>Every caller is gated by {@link DataPlaneConnectionFactoryPresent}, so a
-   * candidate always exists when this resolver runs.
+   * @param factory  the control-plane connection factory
+   * @param exchange the heartbeat exchange
+   * @param queue    the per-instance heartbeat queue
+   * @param binding  the heartbeat binding
    */
-  public static ConnectionFactory dataPlaneConnectionFactory(ListableBeanFactory beanFactory) {
-    String beanName = findDataPlaneConnectionFactoryBeanName(beanFactory);
-    if (beanName == null) {
-      throw new NoSuchBeanDefinitionException(ConnectionFactory.class);
-    }
-    return beanFactory.getBean(beanName, ConnectionFactory.class);
+  private static void declareOnControlPlane(
+    CachingConnectionFactory factory,
+    TopicExchange exchange,
+    Queue queue,
+    Binding binding
+  ) {
+    factory.addConnectionListener(connection -> {
+      try (Channel channel = connection.createChannel(false)) {
+        declareHeartbeatTopology(channel, exchange, queue, binding);
+      } catch (IOException | TimeoutException e) {
+        throw new AmqpException("Failed to declare the heartbeat topology on the control-plane connection", e);
+      }
+    });
   }
 
   /**
-   * The bean name shared by the resolver and the condition: Boot's default name
-   * first, otherwise the first non-control-plane candidate.
+   * Declares the heartbeat exchange, queue and binding on one open channel.
+   *
+   * @param channel  the channel to declare on
+   * @param exchange the heartbeat exchange
+   * @param queue    the per-instance heartbeat queue
+   * @param binding  the heartbeat binding
+   * @throws IOException      if the channel fails
+   * @throws TimeoutException if the broker does not answer the declaration
    */
-  private static @Nullable String findDataPlaneConnectionFactoryBeanName(ListableBeanFactory beanFactory) {
+  private static void declareHeartbeatTopology(Channel channel, TopicExchange exchange, Queue queue, Binding binding)
+    throws IOException, TimeoutException {
+    channel.exchangeDeclare(
+      exchange.getName(),
+      exchange.getType(),
+      exchange.isDurable(),
+      exchange.isAutoDelete(),
+      exchange.isInternal(),
+      exchange.getArguments()
+    );
+    channel.queueDeclare(
+      queue.getName(),
+      queue.isDurable(),
+      queue.isExclusive(),
+      queue.isAutoDelete(),
+      queue.getArguments()
+    );
+    // The heartbeat topology binds the per-instance queue; there is no exchange-to-exchange
+    // hop on this plane.
+    channel.queueBind(binding.getDestination(), binding.getExchange(), binding.getRoutingKey(), binding.getArguments());
+  }
+
+  /**
+   * Declares the heartbeat topology on a fresh control-plane connection, used by the listener
+   * container's redeclaration hook after a channel-level failure.
+   *
+   * @param factory  the control-plane connection factory
+   * @param exchange the heartbeat exchange
+   * @param queue    the per-instance heartbeat queue
+   * @param binding  the heartbeat binding
+   * @throws IOException      if the connection or channel fails
+   * @throws TimeoutException if the broker does not answer
+   */
+  private static void declareHeartbeatTopology(
+    CachingConnectionFactory factory,
+    TopicExchange exchange,
+    Queue queue,
+    Binding binding
+  ) throws IOException, TimeoutException {
+    Connection connection = factory.createConnection();
+    try (connection; Channel channel = connection.createChannel(false)) {
+      declareHeartbeatTopology(channel, exchange, queue, binding);
+    }
+  }
+
+  /**
+   * Resolve the data-plane {@link ConnectionFactory}: Spring Boot's default
+   * {@code rabbitConnectionFactory} when present (the standard wiring), else the first registered
+   * candidate. The control-plane factory is exposed as a {@link ControlPlaneConnectionFactory}
+   * holder, not a {@code ConnectionFactory} bean, so it cannot be picked up by this lookup or by
+   * any unqualified host-application injection.
+   *
+   * <p>Every caller is gated by {@code @ConditionalOnBean(ConnectionFactory.class)}, so a
+   * candidate always exists when this resolver runs.
+   */
+  public static ConnectionFactory dataPlaneConnectionFactory(ListableBeanFactory beanFactory) {
     if (beanFactory.containsBean(DATA_PLANE_CONNECTION_FACTORY_BEAN)) {
-      return DATA_PLANE_CONNECTION_FACTORY_BEAN;
+      return beanFactory.getBean(DATA_PLANE_CONNECTION_FACTORY_BEAN, ConnectionFactory.class);
     }
-    for (String name : beanFactory.getBeanNamesForType(ConnectionFactory.class)) {
-      if (!CONTROL_PLANE_CONNECTION_FACTORY_BEAN.equals(name)) {
-        return name;
-      }
+    String[] names = beanFactory.getBeanNamesForType(ConnectionFactory.class, true, false);
+    if (names.length == 0) {
+      throw new NoSuchBeanDefinitionException(ConnectionFactory.class);
     }
-    return null;
+    return beanFactory.getBean(names[0], ConnectionFactory.class);
   }
 
   /**
    * Inner configuration for app-to-Worker reportToWorker routing via DirectExchange.
    * Creates the exchange, message converter, dedicated template, publisher, ring,
    * and reporter; the reporter owns its flush timer and consumer pool.
-   * Active by default when a {@link RabbitTemplate} bean is present.
+   * Active by default when a data-plane {@link ConnectionFactory} is present.
    */
-  @Configuration
-  @ConditionalOnBean(RabbitTemplate.class)
-  @Conditional(DataPlaneConnectionFactoryPresent.class)
+  @Configuration(proxyBeanMethods = false)
+  @ConditionalOnBean(ConnectionFactory.class)
   @ConditionalOnProperty(prefix = "zeta.report", name = "enabled", havingValue = "true", matchIfMissing = true)
   @ConditionalOnProperty(prefix = "zeta.worker", name = "enabled", havingValue = "false", matchIfMissing = true)
   static class ReportConfiguration {
@@ -315,29 +413,28 @@ public class ZetaAmqpAutoConfiguration {
       ConsistentHashRing ring,
       HealthView clusterHealthView
     ) {
-      KeyReporterImpl reporter = new KeyReporterImpl(
+      ReportFeedLoop feedLoop = null;
+      // The tuner is wired only when configured; shadow mode computes the trajectory for the
+      // gauges and applies nothing.
+      if (properties.getReportIntervalTuning() != ZetaProperties.ReportIntervalTuning.OFF) {
+        feedLoop = new ReportFeedLoop(
+          ReportFeedLoop.Mode.valueOf(properties.getReportIntervalTuning().name()),
+          properties.getReportIntervalTargetBatch(),
+          properties.getReportIntervalMinMs(),
+          properties.getReportIntervalMaxMs(),
+          properties.getReportIntervalMs()
+        );
+      }
+      return new KeyReporterImpl(
         reportPublisher,
         appProperties.getAppName(),
         properties.getQueueCapacity(),
         properties.getQueueOfferTimeoutMs(),
         properties.effectiveConsumerCount(),
         ring,
-        clusterHealthView
+        clusterHealthView,
+        feedLoop
       );
-      // The tuner is wired only when configured; shadow mode computes the trajectory for the
-      // gauges and applies nothing.
-      if (properties.getReportIntervalTuning() != ZetaProperties.ReportIntervalTuning.OFF) {
-        reporter.setIntervalFeedLoop(
-          new ReportFeedLoop(
-            ReportFeedLoop.Mode.valueOf(properties.getReportIntervalTuning().name()),
-            properties.getReportIntervalTargetBatch(),
-            properties.getReportIntervalMinMs(),
-            properties.getReportIntervalMaxMs(),
-            properties.getReportIntervalMs()
-          )
-        );
-      }
-      return reporter;
     }
   }
 
@@ -347,9 +444,10 @@ public class ZetaAmqpAutoConfiguration {
    * sync listener, and a dedicated scheduled executor.
    * Requires {@code zeta.sync.enabled=true}.
    */
-  @Configuration
-  @Conditional(DataPlaneConnectionFactoryPresent.class)
+  @Configuration(proxyBeanMethods = false)
+  @ConditionalOnBean(ConnectionFactory.class)
   @ConditionalOnProperty(prefix = "zeta.sync", name = "enabled", havingValue = "true")
+  @ConditionalOnProperty(prefix = "zeta.worker", name = "enabled", havingValue = "false", matchIfMissing = true)
   static class SyncConfiguration {
 
     /**
@@ -375,7 +473,10 @@ public class ZetaAmqpAutoConfiguration {
      * Bind the per-instance queue to the sync exchange.
      */
     @Bean
-    public Binding hotkeySyncBinding(Queue hotkeySyncQueue, FanoutExchange hotkeySyncExchange) {
+    public Binding hotkeySyncBinding(
+      @Qualifier("hotkeySyncQueue") Queue hotkeySyncQueue,
+      @Qualifier("hotkeySyncExchange") FanoutExchange hotkeySyncExchange
+    ) {
       return BindingBuilder.bind(hotkeySyncQueue).to(hotkeySyncExchange);
     }
 
@@ -420,10 +521,10 @@ public class ZetaAmqpAutoConfiguration {
     }
 
     /**
-     * Dedicated scheduler for jitter-delayed cache-update tasks received from
-     * peer instances. Isolated from {@code hotKeyScheduler} so that synchronous
-     * cluster-loader reads performed by {@code handleRefresh} can never delay
-     * the 50 ms report tide.
+     * Dedicated scheduler for the ordered cache-update dispatchers. Isolated from
+     * {@code hotKeyScheduler} so peer traffic can never delay the 50 ms report tide. Peer REFRESH
+     * loads run on the dedicated peer-refresh executor, so this pool only runs O(1) ordering and
+     * control work.
      *
      * <p>Pool size is the larger of {@code zeta.sync.scheduler-pool-size}
      * (default 4) and {@code zeta.sync.concurrent-consumers × 2}.
@@ -454,7 +555,11 @@ public class ZetaAmqpAutoConfiguration {
       ObjectProvider<SyncHook> syncHookProvider,
       ObjectProvider<PutPayloadCodec> putPayloadCodecProvider,
       @Qualifier("hotKeySyncScheduler") ScheduledExecutorService syncScheduler,
-      ObjectProvider<StampClock> stampClockProvider
+      @Qualifier("peerRefreshExecutor") Executor refreshExecutor,
+      ObjectProvider<StampClock> stampClockProvider,
+      ObjectProvider<HeatView> heatViewProvider,
+      ObjectProvider<KeepWarm> warmProvider,
+      NamespacePolicyRegistry policies
     ) {
       return new DefaultSyncContext(
         hotLocalCache,
@@ -464,7 +569,11 @@ public class ZetaAmqpAutoConfiguration {
         singleFlightProvider.getIfAvailable(),
         putPayloadCodecProvider.getIfAvailable(),
         syncScheduler,
-        stampClockProvider.getIfAvailable()
+        refreshExecutor,
+        stampClockProvider.getIfAvailable(),
+        heatViewProvider.getIfAvailable(),
+        warmProvider.getIfAvailable(),
+        policies
       );
     }
 
@@ -527,41 +636,60 @@ public class ZetaAmqpAutoConfiguration {
   }
 
   /**
-   * Matches when a DATA-PLANE {@link ConnectionFactory} bean exists — any
-   * candidate except the reserved {@code zetaHeartbeatConnectionFactory} name.
-   * The control-plane connection is held by {@link ControlPlaneConnectionFactory},
-   * not a {@code ConnectionFactory} bean, so it can never satisfy this
-   * condition; the name exclusion is the defensive boundary for a user-supplied
-   * factory under Zeta's reserved name.
-   */
-  static class DataPlaneConnectionFactoryPresent implements ConfigurationCondition {
-
-    @Override
-    @NonNull
-    public ConfigurationPhase getConfigurationPhase() {
-      return ConfigurationPhase.REGISTER_BEAN;
-    }
-
-    @Override
-    public boolean matches(ConditionContext context, @NonNull AnnotatedTypeMetadata metadata) {
-      ConfigurableListableBeanFactory beanFactory = context.getBeanFactory();
-      return beanFactory != null && findDataPlaneConnectionFactoryBeanName(beanFactory) != null;
-    }
-  }
-
-  /**
    * Inner configuration for receiving Worker HOT/COOL decisions.
-   * Creates a FanoutExchange, per-instance queue with TTL, binding, worker listener,
+   * Creates a DirectExchange, per-instance queue with TTL, binding, worker listener,
    * listener container, and a dedicated scheduled executor.
-   * Requires a data-plane {@link ConnectionFactory} (see
-   * {@link DataPlaneConnectionFactoryPresent}) and
+   * Requires a data-plane {@link ConnectionFactory} and
    * {@code zeta.worker-listener.enabled=true}.
    */
-  @Configuration
-  @Conditional(DataPlaneConnectionFactoryPresent.class)
+  @Configuration(proxyBeanMethods = false)
+  @ConditionalOnBean(ConnectionFactory.class)
   @ConditionalOnProperty(prefix = "zeta.worker-listener", name = "enabled", havingValue = "true")
+  @ConditionalOnProperty(prefix = "zeta.worker", name = "enabled", havingValue = "false", matchIfMissing = true)
   @Slf4j
   static class WorkerListenerConfiguration {
+
+    /**
+     * Create the dedicated notification executor for passive heat-lease endings, so a user
+     * listener never runs on a Caffeine write lock or a caller's read thread.
+     *
+     * <p>It lives here, with the lease table it serves: nothing else in the application can end a
+     * lease without a Worker decision, so an app-only deployment with the listener disabled must
+     * not pay for either the thread or the table.
+     *
+     * @return a single-thread daemon executor
+     */
+    @Bean(name = "heatNotifyExecutor", destroyMethod = "shutdownNow")
+    @ConditionalOnMissingBean(name = "heatNotifyExecutor")
+    public Executor heatNotifyExecutor() {
+      return Executors.newSingleThreadExecutor(new ZetaThreadFactory("zeta-heat"));
+    }
+
+    /**
+     * Create the cluster heat lease table.
+     *
+     * @param properties         the live configuration
+     * @param heatNotifyExecutor the passive-end notification executor
+     * @param healthViewProvider the Worker liveness view, when present
+     * @param ringProvider       the consistent-hash ring, when present
+     * @return a new lease table
+     */
+    @Bean
+    @ConditionalOnMissingBean
+    public HeatDirectory heatDirectory(
+      ZetaProperties properties,
+      @Qualifier("heatNotifyExecutor") Executor heatNotifyExecutor,
+      ObjectProvider<HealthView> healthViewProvider,
+      ObjectProvider<ConsistentHashRing> ringProvider
+    ) {
+      return new HeatDirectory(
+        properties.getWarm().getMaxClusterLeases(),
+        properties.getWarm().getCoolTombstoneMs(),
+        heatNotifyExecutor,
+        healthViewProvider.getIfAvailable(),
+        ringProvider.getIfAvailable()
+      );
+    }
 
     /**
      * Create the direct exchange the Worker publishes HOT/COOL decisions to.
@@ -596,38 +724,13 @@ public class ZetaAmqpAutoConfiguration {
     @Bean
     @SuppressWarnings("SpringJavaInjectionPointsAutowiringInspection")
     public Binding hotkeyWorkerBinding(
-      Queue hotkeyWorkerQueue,
-      DirectExchange hotkeyWorkerExchange,
+      @Qualifier("hotkeyWorkerQueue") Queue hotkeyWorkerQueue,
+      @Qualifier("hotkeyWorkerExchange") DirectExchange hotkeyWorkerExchange,
       ZetaAppProperties appProperties
     ) {
       return BindingBuilder.bind(hotkeyWorkerQueue)
         .to(hotkeyWorkerExchange)
         .with(ZetaConstants.Routing.PREFIX_DECISION + appProperties.getAppName());
-    }
-
-    /**
-     * Create the TopicExchange for Worker heartbeat broadcasts.
-     */
-    @Bean
-    @ConditionalOnMissingBean(name = "hotkeyHeartbeatExchange")
-    public TopicExchange hotkeyHeartbeatExchange(ZetaProperties properties) {
-      return new TopicExchange(properties.getHeartbeat().getExchangeName(), true, false);
-    }
-
-    /**
-     * Create the per-instance non-durable heartbeat queue that auto-deletes on disconnect.
-     */
-    @Bean
-    public Queue hotkeyHeartbeatQueue(NodeIdentity identity) {
-      return QueueBuilder.nonDurable("zeta.heartbeat:" + identity.instanceId()).autoDelete().build();
-    }
-
-    /**
-     * Bind the per-instance heartbeat queue to the heartbeat exchange with routing key {@code heartbeat.*}.
-     */
-    @Bean
-    public Binding hotkeyHeartbeatBinding(Queue hotkeyHeartbeatQueue, TopicExchange hotkeyHeartbeatExchange) {
-      return BindingBuilder.bind(hotkeyHeartbeatQueue).to(hotkeyHeartbeatExchange).with(KEY_HEARTBEAT + "*");
     }
 
     /**
@@ -644,88 +747,118 @@ public class ZetaAmqpAutoConfiguration {
     }
 
     /**
-     * Framework-owned {@link DefaultWorkerContext}: the guarded write path for HOT
-     * promotion and COOL downgrade. The context is not a user extension point: the policy
-     * decides, the context owns every guard and hook.
+     * Default {@link HotKeyHandler}: prewarm a missing entry on HOT and do nothing on COOL.
      *
-     * <p>The shard-ownership refinement for stale cross-Worker COOLs (scale re-balance
-     * ghost-COOL kill — see {@link DefaultWorkerContext}) is wired from the ring and the
-     * shared health view when present; both are optional so a report-disabled deployment
-     * still builds (the guard then fails open to the pure version-guard behaviour).
+     * @return the replaceable handler
      */
     @Bean
-    @SuppressWarnings("SpringJavaInjectionPointsAutowiringInspection")
-    public DefaultWorkerContext workerContext(
-      Cache<String, CacheEntry> hotLocalCache,
-      ObjectProvider<CacheLoader<String, Object>> hotKeyClusterLoaderProvider,
-      EntryLifecycle entryLifecycle,
-      StampClock stampClock,
-      ObjectProvider<WorkerDecisionHook> workerDecisionHookProvider,
-      ObjectProvider<ConsistentHashRing> ringProvider,
-      ObjectProvider<HealthView> healthViewProvider
-    ) {
-      return new DefaultWorkerContext(
-        hotLocalCache,
-        hotKeyClusterLoaderProvider.getIfAvailable(),
-        entryLifecycle,
-        stampClock,
-        workerDecisionHookProvider.stream().toList(),
-        ringProvider.getIfAvailable(),
-        healthViewProvider.getIfAvailable()
-      );
-    }
-
-    /**
-     * Default {@link WorkerPolicy}: the interface's default methods run the framework's
-     * standard HOT/COOL pipeline through the {@link DefaultWorkerContext}.
-     */
-    @Bean
-    @ConditionalOnMissingBean(WorkerPolicy.class)
-    public WorkerPolicy workerPolicy() {
-      return new WorkerPolicy() {};
+    @ConditionalOnMissingBean(HotKeyHandler.class)
+    public HotKeyHandler hotKeyHandler() {
+      return new HotKeyHandler() {};
     }
 
     /**
      * Create the listener that processes HOT/COOL decisions sent by the Worker.
      *
-     * <p>The app's {@code zeta.app-name} is passed in so foreign-app decisions can be
-     * dropped at reception. Broker routing already keeps them out of this queue (the binding
-     * key is {@code send.<appName>}, design decisions: sync messages), so the header check is
-     * the receiver-side boundary rather than the delivery mechanism: a queue bound to the wrong
-     * key — an operator mistake or a leftover queue — still must not promote keys in this
-     * application's cache. The declared application name is validated non-blank at binding time.
+     * <p>The app's {@code zeta.app-name} is passed in so foreign-app decisions can be dropped
+     * at reception. The mode is the receiver-side boundary rather than the delivery mechanism:
+     * a queue bound to the wrong key must not change this application's heat leases.
+     *
+     * @param properties           the listener configuration
+     * @param workerSchedScheduler the ordered dispatcher scheduler
+     * @param heatDirectory        the cluster lease table
+     * @param handler              the replaceable HOT/COOL action
+     * @param listenerProvider     the best-effort observers
+     * @param hotKeyCache          the L1 engine used by prewarm
+     * @param heatView             the heat query
+     * @param policies             the namespace policy registry
+     * @param warmProvider         the local renewal scheduler
+     * @param entryLifecycle       the entry lifecycle owning the shared TTL arithmetic
+     * @param appProperties        this application's identity
+     * @return the decision listener
      */
     @Bean
     @ConditionalOnMissingBean
     public WorkerListener workerListener(
       WorkerListenerProperties properties,
       @Qualifier("hotKeyWorkerSchedScheduler") ScheduledExecutorService workerSchedScheduler,
-      WorkerPolicy policy,
-      DefaultWorkerContext context,
+      HeatDirectory heatDirectory,
+      HotKeyHandler handler,
+      ObjectProvider<HotKeyListener> listenerProvider,
+      HotKeyCache hotKeyCache,
+      HeatView heatView,
+      NamespacePolicyRegistry policies,
+      ObjectProvider<KeepWarm> warmProvider,
+      EntryLifecycle entryLifecycle,
       ZetaAppProperties appProperties
     ) {
-      return new WorkerListener(properties, workerSchedScheduler, policy, context, appProperties.getAppName());
+      TtlPolicy ttlPolicy = entryLifecycle.ttlPolicy();
+      KeepWarm keepWarm = warmProvider.getIfAvailable();
+      HotKeyContextFactory contexts = HotKeyContextFactory.of(hotKeyCache, heatView, policies, keepWarm, ttlPolicy);
+      return new WorkerListener(
+        properties,
+        workerSchedScheduler,
+        heatDirectory,
+        handler,
+        listenerProvider.stream().toList(),
+        contexts,
+        keepWarm,
+        appProperties.getAppName()
+      );
     }
 
     /**
      * Create the AMQP message listener container that processes Worker heartbeat messages.
+     *
+     * <p>The heartbeat topology (exchange, per-instance auto-delete queue, binding) is built here
+     * and declared only on the control-plane connection, on every one of its (re)connects. It is
+     * deliberately not a set of {@code @Bean} declarations: the data-plane {@code RabbitAdmin}
+     * would declare the same auto-delete queue on the data-plane connection, which belongs to a
+     * different connection and therefore cannot keep the control-plane queue alive — and a
+     * declaration that only half the wiring knows about is the kind of duplicate that hides which
+     * connection actually owns the queue.
      */
-    @Bean
+    @Bean("hotkeyHeartbeatContainer")
     @ConditionalOnMissingBean(name = "hotkeyHeartbeatContainer")
     public SimpleMessageListenerContainer heartbeatContainer(
       @Qualifier("zetaHeartbeatConnectionFactory") ControlPlaneConnectionFactory controlPlane,
       HealthView healthView,
-      Queue hotkeyHeartbeatQueue,
+      ZetaProperties properties,
+      NodeIdentity identity,
       ZetaAppProperties appProperties,
       ObjectProvider<ConsistentHashRing> ringProvider
     ) {
-      SimpleMessageListenerContainer container = new SimpleMessageListenerContainer(controlPlane.connectionFactory());
-      container.setQueueNames(hotkeyHeartbeatQueue.getName());
+      TopicExchange heartbeatExchange = new TopicExchange(properties.getHeartbeat().getExchangeName(), true, false);
+      Queue heartbeatQueue = QueueBuilder.nonDurable(HEARTBEAT_QUEUE_PREFIX + identity.instanceId())
+        .autoDelete()
+        .build();
+      Binding heartbeatBinding = BindingBuilder.bind(heartbeatQueue).to(heartbeatExchange).with(KEY_HEARTBEAT + "*");
+      declareOnControlPlane(controlPlane.connectionFactory(), heartbeatExchange, heartbeatQueue, heartbeatBinding);
+      SimpleMessageListenerContainer container = new SimpleMessageListenerContainer(controlPlane.connectionFactory()) {
+        @Override
+        protected void redeclareElementsIfNecessary() {
+          // A channel-level failure can drop the auto-delete queue without a reconnect, so the
+          // connection listener alone cannot repair it; redeclare on the container's own check.
+          try {
+            declareHeartbeatTopology(
+              controlPlane.connectionFactory(),
+              heartbeatExchange,
+              heartbeatQueue,
+              heartbeatBinding
+            );
+          } catch (Exception e) {
+            log.warn("Failed to redeclare heartbeat topology on the control-plane connection", e);
+          }
+        }
+      };
+      container.setQueueNames(heartbeatQueue.getName());
       container.setAcknowledgeMode(AcknowledgeMode.NONE);
       container.setConcurrentConsumers(1);
       container.setPrefetchCount(100);
+      container.setMissingQueuesFatal(false);
       container.setErrorHandler(t -> log.warn("Heartbeat listener uncaught exception (message discarded)", t));
       AppIsolationFilter isolation = new AppIsolationFilter(appProperties.getAppName());
+      ConsistentHashRing ring = ringProvider.getIfAvailable();
       container.setMessageListener(msg -> {
         // Heartbeats share one topic exchange and bind under heartbeat.*; without the appName
         // header a foreign Worker would enter this tenant's ring and become a routing target.
@@ -735,7 +868,6 @@ public class ZetaAmqpAutoConfiguration {
         WorkerHeartbeatMessage heartbeat = WorkerHeartbeatMessage.from(msg);
         if (heartbeat != null) {
           healthView.onHeartbeat(heartbeat);
-          ConsistentHashRing ring = ringProvider.getIfAvailable();
           if (ring != null) {
             ring.rebuildIfPossible(healthView);
           }
@@ -776,12 +908,14 @@ public class ZetaAmqpAutoConfiguration {
    * affected by data-plane congestion or broker flow control on the shared connection.
    *
    * <p>The factory is built through Spring Boot's
-   * {@link RabbitConnectionFactoryBeanConfigurer} — the sanctioned extension point for custom
+   * {@link RabbitConnectionFactoryBeanConfigurer} bean — the sanctioned extension point for custom
    * connection factories — so the control plane inherits the full {@link RabbitProperties}
    * surface with the same semantics as the Boot-managed data-plane factory: credentials,
-   * virtual host, heartbeat, timeouts and {@code spring.rabbitmq.ssl.*} (TLS).
-   * {@code spring.rabbitmq.ssl.bundle} is not supported (it requires a Boot-internal factory
-   * bean subtype).
+   * virtual host, heartbeat, timeouts, {@code spring.rabbitmq.addresses} failover,
+   * {@code spring.rabbitmq.ssl.*} (TLS), {@code RabbitConnectionDetails} and
+   * {@code spring.rabbitmq.ssl.bundle}. Boot's {@link CachingConnectionFactoryConfigurer} and
+   * every {@link ConnectionFactoryCustomizer} are applied as well, so the wrapper's address list,
+   * shuffle mode and channel cache match the data plane.
    *
    * <p><b>Holder, not a {@code ConnectionFactory} bean.</b> The factory is exposed through
    * {@link ControlPlaneConnectionFactory}, so it is never a candidate for a host application's
@@ -799,17 +933,23 @@ public class ZetaAmqpAutoConfiguration {
    *
    * <p><b>Gating:</b> this configuration only activates when a feature that actually consumes
    * the control-plane connection is enabled — the app-side worker listener or worker mode —
-   * see {@link HeartbeatFeatureEnabled}.
+   * and a data-plane {@link ConnectionFactory} exists. Without the factory the holder would
+   * build an unconfigured connection factory that dials {@code localhost:5672}, so an
+   * application that keeps the AMQP classes on the classpath but has no broker would open a
+   * second, unintended connection.
    */
-  @Configuration
+  @Configuration(proxyBeanMethods = false)
+  @ConditionalOnBean(ConnectionFactory.class)
   @Conditional(HeartbeatFeatureEnabled.class)
   static class HeartbeatConnectionConfiguration {
 
     @Bean("zetaHeartbeatConnectionFactory")
     @ConditionalOnMissingBean(name = "zetaHeartbeatConnectionFactory")
-    @SuppressWarnings("all")
     public ControlPlaneConnectionFactory heartbeatConnectionFactory(
       ObjectProvider<RabbitProperties> propertiesProvider,
+      ObjectProvider<RabbitConnectionFactoryBeanConfigurer> configurerProvider,
+      ObjectProvider<CachingConnectionFactoryConfigurer> cachingConfigurerProvider,
+      ObjectProvider<ConnectionFactoryCustomizer> customizerProvider,
       ResourceLoader resourceLoader
     ) {
       RabbitProperties properties = propertiesProvider.getIfAvailable();
@@ -820,13 +960,39 @@ public class ZetaAmqpAutoConfiguration {
         return new ControlPlaneConnectionFactory(new CachingConnectionFactory());
       }
       RabbitConnectionFactoryBean factoryBean = new RabbitConnectionFactoryBean();
-      new RabbitConnectionFactoryBeanConfigurer(resourceLoader, properties).configure(factoryBean);
+      RabbitConnectionFactoryBeanConfigurer bootConfigurer = configurerProvider.getIfAvailable();
+      if (bootConfigurer != null) {
+        // Boot's configurer carries RabbitConnectionDetails and SslBundles as well as the
+        // properties; constructing a private one dropped both.
+        bootConfigurer.configure(factoryBean);
+      } else {
+        new RabbitConnectionFactoryBeanConfigurer(resourceLoader, properties).configure(factoryBean);
+      }
       try {
         factoryBean.afterPropertiesSet();
         com.rabbitmq.client.ConnectionFactory underlying = factoryBean.getObject();
         Assert.state(underlying != null, "RabbitConnectionFactoryBean produced no ConnectionFactory");
+        customizerProvider.orderedStream().forEach(customizer -> customizer.customize(underlying));
 
-        return new ControlPlaneConnectionFactory(new CachingConnectionFactory(underlying));
+        CachingConnectionFactory factory = new CachingConnectionFactory(underlying);
+        CachingConnectionFactoryConfigurer configurer = cachingConfigurerProvider.getIfAvailable();
+        if (configurer != null) {
+          // Boot's configurer owns the cluster addresses and shuffle mode shared with the
+          // data-plane factory.
+          configurer.configure(factory);
+        } else {
+          List<String> addresses = properties.getAddresses();
+          if (addresses != null && !addresses.isEmpty()) {
+            factory.setAddresses(addresses);
+          }
+          factory.setAddressShuffleMode(properties.getAddressShuffleMode());
+        }
+        // The control plane sends heartbeats and consumes them; publisher confirms and returns
+        // would add ACK frames and correlation state for a message that has no caller to settle.
+        factory.setPublisherConfirmType(CachingConnectionFactory.ConfirmType.NONE);
+        factory.setPublisherReturns(false);
+        factory.setCacheMode(CachingConnectionFactory.CacheMode.CHANNEL);
+        return new ControlPlaneConnectionFactory(factory);
       } catch (Exception ex) {
         throw new IllegalStateException("Failed to create RabbitConnectionFactory", ex);
       }
