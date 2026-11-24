@@ -44,7 +44,7 @@ import org.springframework.boot.actuate.endpoint.annotation.ReadOperation;
  * Actuator {@code /actuator/hotkey} endpoint that exposes runtime diagnostics.
  *
  * <p>The response includes the local TopK ranking, L1 cache size, SingleFlight
- * in-flight size, reporter queue state, refresh leases, version-clock skew,
+ * in-flight size, reporter queue state, refresh-pool availability, version-clock skew,
  * identity, and cluster-health/isolation counters. Each section is produced only
  * when the corresponding service is available in the current deployment mode.
  *
@@ -64,9 +64,6 @@ public class ZetaEndpoint {
   private static final int DEFAULT_LIMIT = 100;
 
   private static final int MAX_TOP_K_LIMIT = 1_000;
-
-  /** The stale-debt view stays a short diagnostic list regardless of the requested TopK size. */
-  private static final int MAX_STALE_DEBT_LIMIT = 100;
 
   /** L1 Caffeine cache instance. */
   @Nullable
@@ -126,7 +123,7 @@ public class ZetaEndpoint {
   /**
    * Collect all diagnostic metrics into a three-section response map:
    * <ul>
-   *   <li><b>local</b> — app-side detection, cache, reporting, refresh leases, version
+   *   <li><b>local</b> — app-side detection, cache, reporting, refresh-pool availability, version
    *   <li><b>worker</b> — worker-side health and foreign-app isolation
    *   <li><b>sync</b> — appName-isolation counters, node-id collisions
    * </ul>
@@ -137,7 +134,7 @@ public class ZetaEndpoint {
    * @throws InvalidEndpointRequestException when {@code limit} is below 1
    */
   @ReadOperation
-  public Map<String, Object> hotKeyInfo(@Nullable Integer limit) {
+  public Map<String, Object> hotKeyInfo(@org.springframework.lang.Nullable Integer limit) {
     if (limit != null && limit < 1) {
       throw new InvalidEndpointRequestException(
         "limit must be >= 1",
@@ -150,22 +147,17 @@ public class ZetaEndpoint {
     info.put("instanceId", identity.instanceId());
     info.put("jvmId", NodeIdentity.getJvmId());
 
-    Map<String, Object> local = buildLocalSection(topLimit);
-    if (!local.isEmpty()) {
-      info.put("local", local);
-    }
-
-    Map<String, Object> worker = buildWorkerSection();
-    if (!worker.isEmpty()) {
-      info.put("worker", worker);
-    }
-
-    Map<String, Object> sync = buildSyncSection();
-    if (!sync.isEmpty()) {
-      info.put("sync", sync);
-    }
-
+    putIfNotEmpty(info, "local", buildLocalSection(topLimit));
+    putIfNotEmpty(info, "worker", buildWorkerSection());
+    putIfNotEmpty(info, "sync", buildSyncSection());
     return info;
+  }
+
+  /** Adds a section only when the current deployment produced at least one field for it. */
+  private static void putIfNotEmpty(Map<String, Object> info, String name, Map<String, Object> section) {
+    if (!section.isEmpty()) {
+      info.put(name, section);
+    }
   }
 
   /**
@@ -235,10 +227,6 @@ public class ZetaEndpoint {
       if (refreshLimiter != null) {
         local.put("refreshPoolAvailable", refreshLimiter.availablePermits());
       }
-      // Lease-on-failure observability (design decisions: expiry and refresh): the keys a
-      // failed refresh is still holding servable, oldest first. One map replaces three
-      // aggregate counters — it answers "which keys, how stale" rather than "how many events".
-      local.put("staleDebt", backgroundRefresher.leasedStaleness(Math.min(limit, MAX_STALE_DEBT_LIMIT)));
     }
 
     if (stampClock != null) {

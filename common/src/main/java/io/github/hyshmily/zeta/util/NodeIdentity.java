@@ -23,54 +23,47 @@ import lombok.extern.slf4j.Slf4j;
 import org.jspecify.annotations.Nullable;
 
 /**
- * One application instance's identity: the instance id used in queue names and message
- * origins, and the 10-bit node id embedded in every {@code dataVersion} stamp.
+ * Immutable identity of one application instance: the {@code instanceId} used in queue names and
+ * message origin headers, and the 10-bit {@code nodeId} embedded in {@code dataVersion} stamps.
  *
- * <p>The identity is an immutable instance value, supplied as a Bean by the auto-configuration.
- * Two contexts in one JVM therefore get distinct instance ids and queue names; there is no
- * process-global mutable override.
+ * <p>Supplied as a Spring bean per context rather than a process-global mutable singleton, so
+ * multiple contexts in the same JVM receive distinct instance IDs and queue names.
  *
- * <p>Resolution order for the instance id:
- * <ol>
- *   <li>{@code zeta.local.instance-id}, when non-blank</li>
- *   <li>{@code <server.port|SERVER_PORT|instance>-<HOSTNAME|local>-<random 8 hex>}: the host and
- *       port make the id readable, the random suffix makes it unique per context and per process.
- *       Neither a hostname nor a process-wide UUID can distinguish two instances on one host or
- *       two contexts in one JVM.</li>
- * </ol>
+ * <p><b>Resolution order:</b>
+ * <ul>
+ *   <li>{@code instanceId}: {@code zeta.local.instance-id} when non-blank; otherwise
+ *       {@code <server.port|SERVER_PORT|instance>-<HOSTNAME|local>-<8-char hex>}.</li>
+ *   <li>{@code nodeId}: {@code zeta.local.node-id} ({@code 0..1023}) when set; otherwise a
+ *       stable CRC32 hash of {@code instanceId} masked to 10 bits.</li>
+ * </ul>
  *
- * <p>Resolution order for the node id:
- * <ol>
- *   <li>{@code zeta.local.node-id}, when set (0..1023)</li>
- *   <li>a stable CRC32 hash of the instance id</li>
- * </ol>
+ * <p>Two instances sharing a {@code nodeId} can mint identical stamps within the same millisecond,
+ * causing equal-version guards to skip updates in both directions. Configure unique explicit node
+ * IDs for larger deployments.
  *
- * <p>Two nodes that share a node id can mint equal stamps in the same millisecond: both
- * start a fresh window at sequence zero, and the equal-version guard then skips both
- * directions. Set a unique {@code node-id} per instance when instance ids are not unique.
- *
- * @param instanceId the unique instance id; never blank
- * @param nodeId     the 10-bit data-version node id
+ * @param instanceId unique non-blank instance identifier
+ * @param nodeId     10-bit {@code dataVersion} node identifier in {@code [0, MAX_NODE_ID]}
  */
 @Internal
 @Slf4j
 public record NodeIdentity(String instanceId, long nodeId) {
-  /** Width of the node identity carried by the low bits of a stamp. */
+  /** Bit width of the node identity carried in the low bits of a {@code dataVersion} stamp. */
   public static final int NODE_BITS = 10;
 
-  /** Largest valid node id. */
-  public static final long MAX_NODE_ID = (1L << NODE_BITS) - 1;
+  /** Largest valid 10-bit node identifier ({@code 1023}). */
+  public static final long MAX_NODE_ID = (1L << NODE_BITS) - 1L;
+
+  private static final String DEFAULT_PORT_SEGMENT = "instance";
+  private static final String DEFAULT_HOST_SEGMENT = "local";
+  private static final int AUTO_ID_SUFFIX_LENGTH = 8;
 
   /**
-   * One UUID per JVM: its most significant bits are the {@code jvmId} identity, and its string
-   * form is the instance-id fallback when no hostname exists. The string is materialized lazily,
-   * because a hostname-bearing deployment never needs it.
+   * Non-negative process-wide JVM identifier exposed via Actuator. Never used in instance IDs
+   * because a process-wide value cannot distinguish multiple Spring contexts in one JVM.
    */
-  private static final UUID JVM_UUID = UUID.randomUUID();
+  private static final long JVM_ID = UUID.randomUUID().getMostSignificantBits() & Long.MAX_VALUE;
 
-  /** JVM-local identifier exposed by the actuator endpoint; stable for the process. */
-  private static final long JVM_ID = JVM_UUID.getMostSignificantBits() & Long.MAX_VALUE;
-
+  /** Validates that {@code instanceId} is non-blank and {@code nodeId} fits in 10 bits. */
   public NodeIdentity {
     Objects.requireNonNull(instanceId, "instanceId must not be null");
     if (instanceId.isBlank()) {
@@ -82,16 +75,18 @@ public record NodeIdentity(String instanceId, long nodeId) {
   }
 
   /**
-   * Resolves one instance identity from the configured overrides, falling back to
-   * auto-detection for the instance id and to the CRC32 derivation for the node id.
+   * Resolves a {@link NodeIdentity} from optional configuration overrides, falling back to
+   * auto-detection for {@code instanceId} and CRC32 derivation for {@code nodeId}.
    *
-   * @param configuredInstanceId the configured {@code zeta.local.instance-id}, or blank
-   * @param configuredNodeId     the configured {@code zeta.local.node-id}, or {@code null}
-   * @return the resolved identity; never {@code null}
+   * @param configuredInstanceId configured {@code zeta.local.instance-id}, or {@code null}/blank
+   * @param configuredNodeId     configured {@code zeta.local.node-id}, or {@code null} to derive
+   * @return the resolved {@link NodeIdentity}
+   * @throws IllegalArgumentException if {@code configuredNodeId} is outside {@code [0, MAX_NODE_ID]}
    */
   public static NodeIdentity resolve(@Nullable String configuredInstanceId, @Nullable Integer configuredNodeId) {
-    String resolvedInstance =
-      configuredInstanceId != null && !configuredInstanceId.isBlank() ? configuredInstanceId : autoInstanceId();
+    String resolvedInstance = (configuredInstanceId != null && !configuredInstanceId.isBlank())
+      ? configuredInstanceId
+      : autoInstanceId();
     long resolvedNode = configuredNodeId != null ? configuredNodeId : deriveNodeId(resolvedInstance);
     NodeIdentity identity = new NodeIdentity(resolvedInstance, resolvedNode);
     log.info(
@@ -105,38 +100,30 @@ public record NodeIdentity(String instanceId, long nodeId) {
     return identity;
   }
 
-  /**
-   * The process-wide JVM identifier exposed by the actuator endpoint; not part of any data
-   * stamp or queue name.
-   *
-   * @return a non-negative identifier unique with high probability per JVM
-   */
+  /** Returns the stable non-negative process-wide JVM identifier for Actuator diagnostics. */
   public static long getJvmId() {
     return JVM_ID;
   }
 
   /**
-   * The auto-detected instance id: {@code <port>-<hostname|local>-<random>}. The random suffix is
-   * generated per call on purpose: a hostname alone is shared by every instance on the host, and a
-   * process-wide UUID is shared by every context in the JVM. Both would give two instances the same
-   * queue name and node id.
+   * Synthesizes a readable, per-context unique instance ID ({@code <port>-<host>-<hex>}).
    */
   private static String autoInstanceId() {
     String port = System.getProperty("server.port");
     if (port == null || port.isBlank()) {
       port = System.getenv("SERVER_PORT");
     }
-    if (port == null || port.isBlank()) {
-      port = "instance";
-    }
+    String portPart = (port != null && !port.isBlank()) ? port : DEFAULT_PORT_SEGMENT;
+
     String hostname = System.getenv("HOSTNAME");
-    String hostPart = hostname != null && !hostname.isBlank() ? hostname : "local";
-    // The first eight characters of a UUID's string form are hex digits (the first group), so the
-    // suffix is short and safe in a queue name.
-    return port + "-" + hostPart + "-" + UUID.randomUUID().toString().substring(0, 8);
+    String hostPart = (hostname != null && !hostname.isBlank()) ? hostname : DEFAULT_HOST_SEGMENT;
+
+    // Fresh per-context random suffix: the first 8 UUID chars are hex digits, short and safe in queue names.
+    String suffix = UUID.randomUUID().toString().substring(0, AUTO_ID_SUFFIX_LENGTH);
+    return portPart + "-" + hostPart + "-" + suffix;
   }
 
-  /** Stable mapping from an instance id to the 10-bit node space. */
+  /** Deterministically hashes {@code instanceId} into the 10-bit node ID range via CRC32. */
   private static long deriveNodeId(String instanceId) {
     CRC32 crc = new CRC32();
     crc.update(instanceId.getBytes(StandardCharsets.UTF_8));

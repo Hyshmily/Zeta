@@ -19,8 +19,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hyshmily.zeta.model.DecisionKind;
 import io.github.hyshmily.zeta.sync.worker.WorkerDecision;
-import io.github.hyshmily.zeta.sync.worker.WorkerType;
 import java.nio.charset.StandardCharsets;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
@@ -62,7 +62,7 @@ class WireCompatTest {
   @Test
   void headerFramedMessages_missingOptionalHeadersFallBackToDefaults() {
     MessageProperties props = new MessageProperties();
-    props.setHeader(io.github.hyshmily.zeta.constants.ZetaConstants.Amqp.HEADER_TYPE, WorkerType.HOT.code());
+    props.setHeader(io.github.hyshmily.zeta.constants.ZetaConstants.Amqp.HEADER_TYPE, DecisionKind.HOT.code());
     // The version is the one required header: without a positive stamp the decision is
     // unorderable and is dropped at the wire boundary.
     Message withoutVersion = new Message("k".getBytes(StandardCharsets.UTF_8), props);

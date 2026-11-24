@@ -130,10 +130,17 @@ class HeavyKeeperTest {
     Field fingerprintField = nodeType.getDeclaredField("fp");
     fingerprintField.setAccessible(true);
     int fingerprint = (int) fingerprintField.get(staleMember);
-    Method admit = HeavyKeeper.class.getDeclaredMethod("admit", String.class, long.class, int.class, nodeType);
+    Method admit = HeavyKeeper.class.getDeclaredMethod(
+      "admit",
+      String.class,
+      long.class,
+      int.class,
+      nodeType,
+      boolean.class
+    );
     admit.setAccessible(true);
 
-    AddResult result = (AddResult) admit.invoke(keeper, "hot", 150L, fingerprint, staleMember);
+    AddResult result = (AddResult) admit.invoke(keeper, "hot", 150L, fingerprint, staleMember, true);
 
     assertThat(result.isHotKey()).isTrue();
     assertThat(keeper.contains("hot")).as("the ghost member must be re-admitted").isTrue();
@@ -212,8 +219,10 @@ class HeavyKeeperTest {
    */
   @Test
   void expelled_shouldReturnNonEmptyQueueAfterEviction() {
+    // A newcomer must strictly outrank the current minimum: equal counts are refused to avoid
+    // eviction churn, so the batch uses increasing estimates.
     for (int i = 0; i < TOP_K + 5; i++) {
-      keeper.addDirect("key" + i, 50);
+      keeper.addDirect("key" + i, 50 + i);
     }
     assertThat(keeper.expelled()).isNotEmpty();
   }
@@ -521,6 +530,29 @@ class HeavyKeeperTest {
     hk.fading();
     assertThat(hk.list()).isEmpty();
     assertThat(hk.total()).isZero();
+  }
+
+  // ── Multi-row hashing ──
+
+  /**
+   * Two fingerprints that collide in row zero must not collide in every row. A row constant XORed
+   * onto the fingerprint is fully correlated under the power-of-two mask, so the sketch's depth
+   * would collapse to one row.
+   */
+  @Test
+  void bucketIndex_shouldGiveCorrelatedFingerprintsIndependentRows() throws Exception {
+    HeavyKeeper hk = new HeavyKeeper(10, 1024, 4, 0.9, 1, 10, 2, false);
+    Method bucketIndex = HeavyKeeper.class.getDeclaredMethod("bucketIndex", int.class, int.class);
+    bucketIndex.setAccessible(true);
+    int first = 0x12345678;
+    int second = first ^ 0x400; // same low 10 bits, so row zero collides under the mask
+
+    boolean differsInSomeRow = false;
+    for (int row = 0; row < 4 && !differsInSomeRow; row++) {
+      differsInSomeRow = (int) bucketIndex.invoke(hk, first, row) != (int) bucketIndex.invoke(hk, second, row);
+    }
+
+    assertThat(differsInSomeRow).isTrue();
   }
 
   // ── Fingerprint collision paths in addDirect(String, int) ──

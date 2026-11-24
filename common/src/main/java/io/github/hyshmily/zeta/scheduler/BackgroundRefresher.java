@@ -15,86 +15,104 @@
  */
 package io.github.hyshmily.zeta.scheduler;
 
+import io.github.hyshmily.zeta.cache.cachesupport.raw.CacheEntry;
 import io.github.hyshmily.zeta.cache.cachesupport.raw.VersionedValue;
 import io.github.hyshmily.zeta.util.Internal;
-import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Semaphore;
 import java.util.function.Supplier;
+import org.jspecify.annotations.Nullable;
 
 /**
- * Background soft-expire refresh executor for the L1 cache — the scheduling
- * half of the entry lifecycle.
+ * Background refresh executor for the L1 cache.
  *
- * <p>When a read serves a soft-expired (stale-while-revalidate) entry, the
- * read path calls {@link #triggerBackgroundRefresh}: the fresh value is loaded
- * on a bounded executor, version-guarded against superseding writes, and
- * merged into L1 without blocking the caller. Failures keep the stale entry
- * servable through the lease-on-failure extension (design decisions: expiry and refresh).
+ * <p>Two operations share one per-key dedup ticket and one limiter:
+ * <ul>
+ *   <li><b>soft refresh</b> — replaces the value and re-arms only the soft window, preserving the
+ *       caller's absolute hard bound;</li>
+ *   <li><b>hard renewal</b> — replaces the value and re-arms both declared windows, exactly like
+ *       a natural expiry-and-reload, but earlier.</li>
+ * </ul>
  *
- * <p>Implementations expose the refresh limiter semaphore through
- * {@link #getRefreshLimiter()}; monitoring surfaces (actuator endpoint,
- * Micrometer gauges) read it there.
+ * <p>A hard renewal that arrives while a soft refresh is in flight upgrades that ticket instead
+ * of issuing a second load. A failed soft refresh closes the retry window at the existing hard
+ * deadline; a failed pure renewal leaves every deadline untouched.
  */
 @Internal
 public interface BackgroundRefresher {
   /**
-   * Triggers an asynchronous background refresh for the given cache key. The
-   * caller (the read path) has already returned the stale value to the
-   * client, so this method executes entirely in the background without
-   * blocking the caller.
+   * Triggers a soft-expire refresh: the value is replaced and only the soft window re-arms, so
+   * the caller's hard bound remains absolute. A refresh already in flight for the key dedups
+   * this request; a resident that is absent, hard-expired or newer than the load is left
+   * untouched. A failed or empty refresh closes the retry window at the existing hard deadline
+   * so every stale read does not re-hit the source.
    *
-   * <p>The {@code reader} must return a
-   * {@link VersionedValue} with a non-null value —
-   * the implementation only applies that shape (anything else is treated as "no
-   * new value"). The production read path wraps the caller's supplier with a
-   * post-read version probe (design decisions: version stamps); a bare value is therefore silently not
-   * applied.
-   *
-   * @param cacheKey  the key whose value should be refreshed
-   * @param reader    the data-source supplier
-   * @param softTtlMs the soft TTL to set on the refreshed entry (milliseconds)
+   * @param cacheKey  the key to refresh
+   * @param reader    the loader; it must return a {@code VersionedValue} with a non-null value
+   * @param softTtlMs the soft TTL to apply
    */
-  void triggerBackgroundRefresh(String cacheKey, Supplier<?> reader, long softTtlMs);
+  void triggerBackgroundRefresh(String cacheKey, Supplier<VersionedValue> reader, long softTtlMs);
 
-  /** Expose the refresh limiter semaphore for monitoring purposes. */
+  /**
+   * Triggers a hard renewal: a fresh value starts a new full lifetime from the entry's own stored
+   * hard/soft durations. If a refresh is already in flight for the key, the returned future is
+   * that ticket's future: an upgraded soft ticket settles as this renewal, and a ticket already
+   * writing back its soft settlement completes it only after that write-back has landed. A caller
+   * that reschedules from the resident therefore observes the settled entry, never a half-applied
+   * one.
+   *
+   * <p>The returned future always completes, including the limiter-rejected and executor-rejected
+   * cases, so the caller can safely reschedule from it. A missing resident is never rebuilt from
+   * the snapshot: a renewal may replace a resident, not resurrect an evicted or invalidated one.
+   * A resident that crosses its hard deadline while the load runs is still the resident this
+   * renewal was reserved for, and the fresh value re-arms both windows on it.
+   *
+   * @param cacheKey the key to renew
+   * @param reader   the stamped loader
+   * @return a future that always completes with the outcome
+   */
+  CompletableFuture<RenewOutcome> renewHard(String cacheKey, Supplier<VersionedValue> reader);
+
+  /** @return the refresh limiter semaphore for monitoring */
   Semaphore getRefreshLimiter();
 
-  /**
-   * Cumulative background-refresh failures that were granted a lease
-   * (stale entry kept servable, design decisions: expiry and refresh). {@code 0} for implementations
-   * without lease accounting.
-   *
-   * @return lifetime count of leases granted
-   */
-  default long getRefreshFailureLeased() {
-    return 0L;
-  }
+  /** The result of one renewal. */
+  sealed interface RenewOutcome permits RenewOutcome.Applied, RenewOutcome.Skipped, RenewOutcome.Failed {
+    /**
+     * The renewal applied; the entry carries the fresh value and re-armed deadlines.
+     *
+     * @param entry the newly stored entry
+     */
+    record Applied(CacheEntry entry) implements RenewOutcome {}
 
-  /**
-   * Oldest currently-leased keys for the {@code staleDebt} diagnostic view:
-   * entries whose last refresh failed and whose lease is still holding them
-   * servable, ordered oldest-first.
-   *
-   * @param limit maximum entries to return; a non-positive value returns an
-   *              empty map without copying the lease table
-   * @return map of key to staleness milliseconds (time since the first lease
-   *         of the current episode), never {@code null}
-   */
-  default Map<String, Long> leasedStaleness(int limit) {
-    return Map.of();
-  }
+    /**
+     * No renewal was applied; the resident, if any, is untouched. A caller may act on the reason,
+     * so the closed set is the value itself rather than a diagnostic string:
+     * {@link #SOFT_REFRESH} and {@link #NEWER_VALUE} leave the key without a renewal and are the
+     * reasons a scheduler re-arms from the resident.
+     */
+    enum Skipped implements RenewOutcome {
+      /** The refresh limiter had no free permit. */
+      LIMITER,
+      /** The refresh executor refused the task. */
+      EXECUTOR_REJECTED,
+      /** The in-flight ticket settled a soft refresh instead, which does not re-arm the hard window. */
+      SOFT_REFRESH,
+      /** An invalidation tombstone outranks the loaded value. */
+      INVALIDATED,
+      /** The resident is gone, or a soft settlement found its hard deadline already passed. */
+      ABSENT_OR_EXPIRED,
+      /** The resident is newer than the value this ticket loaded. */
+      NEWER_VALUE,
+    }
 
-  /**
-   * O(1) count of currently tracked lease episodes for gauges.
-   *
-   * <p>Prefer this over {@code leasedStaleness(Integer.MAX_VALUE).size()} on hot
-   * metric paths: the view copy materialises the full map per scrape, while the
-   * count is a single map size read. May include entries whose L1 value already left
-   * (lazily reaped on the next view read).
-   *
-   * @return the number of tracked lease episodes
-   */
-  default int leasedKeyCount() {
-    return 0;
+    /**
+     * The load failed, timed out or returned no value.
+     *
+     * @param cause the failure, or {@code null} for an empty answer
+     */
+    record Failed(@Nullable Throwable cause) implements RenewOutcome {
+      public static final Failed EMPTY = new Failed(null);
+    }
   }
 }

@@ -44,7 +44,7 @@ class HealthViewAdaptiveTimeoutTest {
 
     for (int i = 0; i < WorkerHealthRecord.WARMUP_SAMPLES; i++) {
       now += 1_000L;
-      record.onHeartbeatSample(now, true);
+      record.onHeartbeatSample(now, true, 10_000L);
     }
     assertThat(record.effectiveTimeoutMs(10_000, 1)).as("warm-up publishes the estimate").isBetween(1_000L, 3_000L);
     // SRTT ≈ 1000, RTTVAR decays onto its 200 ms floor → 1800 → clamped to floor.
@@ -54,17 +54,17 @@ class HealthViewAdaptiveTimeoutTest {
     // must widen with observed variance instead of pinning the floor.
     for (int i = 0; i < 8; i++) {
       now += 6_000L;
-      record.onHeartbeatSample(now, true);
+      record.onHeartbeatSample(now, true, 10_000L);
     }
     assertThat(record.effectiveTimeoutMs(10_000, 3_000)).isGreaterThan(3_000);
 
-    // Sustained slow heartbeats push the raw estimate past the ceiling: the
-    // configured static window remains the upper bound.
+    // A long outage gap is not a latency sample: an interval at or beyond the static window is
+    // ignored, so recovery does not pin the adaptive window at the ceiling.
     for (int i = 0; i < 50; i++) {
       now += 60_000L;
-      record.onHeartbeatSample(now, true);
+      record.onHeartbeatSample(now, true, 10_000L);
     }
-    assertThat(record.effectiveTimeoutMs(10_000, 3_000)).isEqualTo(10_000);
+    assertThat(record.effectiveTimeoutMs(10_000, 3_000)).isBetween(3_000L, 10_000L);
   }
 
   @Test
@@ -72,8 +72,8 @@ class HealthViewAdaptiveTimeoutTest {
   void estimator_ignoresNonPositiveDeltas() {
     long now = 1_000_000L;
     WorkerHealthRecord record = recordAt(now, true);
-    record.onHeartbeatSample(now, true);
-    record.onHeartbeatSample(now, true);
+    record.onHeartbeatSample(now, true, 10_000L);
+    record.onHeartbeatSample(now, true, 10_000L);
     // Only one real sample: still below warm-up, so the static window is returned.
     assertThat(record.effectiveTimeoutMs(10_000, 1)).isEqualTo(10_000);
     // Fill the warm-up with the same delta: the rejected samples must not have skewed it,
@@ -81,7 +81,7 @@ class HealthViewAdaptiveTimeoutTest {
     // deviation) instead of drifting toward the bogus deltas.
     for (int i = 0; i < WorkerHealthRecord.WARMUP_SAMPLES; i++) {
       now += 1_000L;
-      record.onHeartbeatSample(now, true);
+      record.onHeartbeatSample(now, true, 10_000L);
     }
     assertThat(record.effectiveTimeoutMs(Long.MAX_VALUE, 1)).isBetween(1_000L, 3_000L);
   }
@@ -93,7 +93,7 @@ class HealthViewAdaptiveTimeoutTest {
     WorkerHealthRecord record = recordAt(now, true);
     for (int i = 0; i < 3; i++) {
       now += 1_000L;
-      record.onHeartbeatSample(now, true);
+      record.onHeartbeatSample(now, true, 10_000L);
     }
     assertThat(record.effectiveTimeoutMs(10_000, 3_000))
       .as("below warm-up the static window applies")
@@ -101,7 +101,7 @@ class HealthViewAdaptiveTimeoutTest {
 
     for (int i = 0; i < 6; i++) {
       now += 1_000L;
-      record.onHeartbeatSample(now, true);
+      record.onHeartbeatSample(now, true, 10_000L);
     }
     assertThat(record.effectiveTimeoutMs(10_000, 3_000))
       .as("warmed up: clamped estimate, not the flat window")
@@ -120,14 +120,14 @@ class HealthViewAdaptiveTimeoutTest {
     WorkerHealthRecord record = recordAt(now, true);
     for (int i = 0; i < 9; i++) {
       now += 1_000L;
-      record.onHeartbeatSample(now, true);
+      record.onHeartbeatSample(now, true, 10_000L);
     }
 
-    record.onHeartbeatSample(now - 3_500L, true);
+    record.onHeartbeatSample(now - 3_500L, true, 10_000L);
     assertThat(record.isAlive(now, 10_000, 3_000)).as("evidence older than the adaptive floor is dead").isFalse();
     assertThat(record.isAlive(now, 10_000, 0)).as("the same evidence is well inside the static window").isTrue();
 
-    record.onHeartbeatSample(now - 2_000L, true);
+    record.onHeartbeatSample(now - 2_000L, true, 10_000L);
     assertThat(record.isAlive(now, 10_000, 3_000)).isTrue();
   }
 }

@@ -163,9 +163,9 @@ public class ElasticTaskQueue extends LinkedTransferQueue<Runnable> {
       return super.offer(task);
     }
 
+    // Read the maximum only past the core fast path: it is a volatile read, and a fixed-size pool
+    // (core == max) has no growth step to force.
     int maxSize = owner.getMaximumPoolSize();
-    // A fixed-size pool (core == max) has no growth step to force, so the pool size cannot
-    // change the decision either.
     if (coreSize >= maxSize) {
       return super.offer(task);
     }

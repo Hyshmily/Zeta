@@ -376,7 +376,9 @@ class ConsistentHashRingTest {
         assertThat(ring.locateNode("dead-key-" + i, s -> false)).isNull();
       }
 
-      assertThat(appender.events).filteredOn(e -> e.getLevel() == Level.WARN).isEmpty();
+      assertThat(appender.events)
+        .filteredOn(e -> e.getLevel() == Level.WARN)
+        .isEmpty();
 
       assertThat(appender.events)
         .filteredOn(e -> e.getLevel() == Level.DEBUG)

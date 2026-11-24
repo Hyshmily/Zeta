@@ -20,6 +20,7 @@
 package io.github.hyshmily.zeta.counter;
 
 import com.google.errorprone.annotations.concurrent.GuardedBy;
+import io.github.hyshmily.zeta.util.CollectionSizing;
 import io.github.hyshmily.zeta.util.Internal;
 import io.github.hyshmily.zeta.util.TimeSource;
 import io.github.hyshmily.zeta.util.executor.PeriodicScheduler;
@@ -53,7 +54,8 @@ import java.util.concurrent.locks.ReentrantLock;
  * and the tide pacing are specified in {@code docs/design-decisions.md} (design decisions: counting
  * engine). This class owns the protocol: a slot is taken with {@code getAndSet(0)}, a racing add
  * recovers its delta through {@code Ceils#recoverZero}, the table swap is serialized under
- * {@code reservoirGate} and settled by {@code mergesInFlight}, and the hot path stays exact.
+ * {@code reservoirGate} and settled by the retired reservoir's in-flight counter, and the hot path
+ * stays exact.
  */
 
 @Slf4j
@@ -590,22 +592,6 @@ public class WaveCounter implements InitializingBean, Destroyable {
   private final LongAdder coldCapacityDrops = new LongAdder();
 
   /**
-   * In-flight hot merges into a captured table. Delivery waits for this to
-   * reach zero before snapshotting, guaranteeing the snapshot sees a
-   * quiescent table for hot-path data.
-   *
-   * <p>
-   * A plain {@link LongAdder}: every writer's bump lands in its own
-   * striping cell, so batch merges from many writers never contend on a
-   * single cache line, and {@link LongAdder#sum()} is a stable read for the
-   * deliverer's "reached zero" test (the adder is never reset, so cells are
-   * never migrated). The concurrently written state lives in the JDK's
-   * separately allocated, already {@code @Contended} {@code Striped64.Cell}s;
-   * padding the reference field would protect nothing.
-   */
-  private final LongAdder mergesInFlight = new LongAdder();
-
-  /**
    * Earliest-first tide scheduling: at most one tide is pending; a meaningfully earlier
    * request replaces it, requests within {@link #SCHEDULE_TOLERANCE_MS} merge.
    * Synchronized because a nudge can arrive from any thread while the deliverer
@@ -764,16 +750,17 @@ public class WaveCounter implements InitializingBean, Destroyable {
   private final int capacity;
 
   /**
-   * Shared table, swapped wholesale at every delivery. The {@code volatile}
-   * qualifier gives the <em>reference replacement</em> semantics (a writer
-   * either sees the old table or the fresh one); the table's internal state
-   * is made safe by {@link ConcurrentHashMap} itself plus
-   * {@link #reservoirGate} around reference capture and swap.
+   * Shared table plus its in-flight merge count, swapped wholesale at every delivery. The
+   * {@code volatile} qualifier gives the <em>reference replacement</em> semantics (a writer
+   * either sees the old reservoir or the fresh one); the table's internal state is made safe by
+   * {@link ConcurrentHashMap} itself plus {@link #reservoirGate} around reference capture and
+   * swap. A rotation waits on the retired reservoir's own counter, so merges into the fresh table
+   * cannot extend the wait.
    */
   @SuppressWarnings("java:S3077")
   // volatile reference: replacement semantics, state guarded by CHM +
   // reservoirGate
-  private volatile ConcurrentHashMap<String, LongAdder> reservoir = new ConcurrentHashMap<>();
+  private volatile Reservoir reservoir = new Reservoir();
 
   /**
    * Adder recycling pool: the previous cycle's drained table, published only after
@@ -1201,7 +1188,7 @@ public class WaveCounter implements InitializingBean, Destroyable {
         // the membership check ran against. One volatile read instead of two
         // also drops a per-miss acquire on weak memory models (AArch64:
         // ldar → ldr for the cached local); a no-op on x86 (TSO).
-        ConcurrentHashMap<String, LongAdder> table = reservoir;
+        ConcurrentHashMap<String, LongAdder> table = reservoir.map;
         LongAdder cell = table.get(key);
         if (cell == null) {
           // Soft capacity guard: only NEW keys at capacity are dropped —
@@ -1666,21 +1653,25 @@ public class WaveCounter implements InitializingBean, Destroyable {
 
   /**
    * Return a dead writer's fully-drained local map to the pool for reuse
-   * (see {@link #ceilPool}). The map is {@link Ceils#reset() reset} first,
-   * clearing any phantom claim slots a mid-claim death left behind. Only
-   * the deliverer pushes, and the size slot is reserved before the offer so a
-   * concurrent {@link #acquireLocal()} poll cannot drive the counter negative
-   * (or let the pool grow past its cap).
+   * (see {@link #ceilPool}). The map is {@link Ceils#tryReset() reset} first,
+   * clearing any phantom claim slots a mid-claim death left behind; a map whose
+   * lock is still held (the writer died between the lock acquisition and the
+   * protected block, so the finally never ran) is discarded instead of blocking
+   * the deliverer forever. Only the deliverer pushes, and the size slot is
+   * reserved before the offer so a concurrent {@link #acquireLocal()} poll cannot
+   * drive the counter negative (or let the pool grow past its cap).
    *
    * @param m the dead writer's local map (drained and reaped)
    */
   private void recycleCeils(Ceils m) {
+    if (!m.tryReset()) {
+      return;
+    }
     if (ceilPoolSize.incrementAndGet() > CEIL_POOL_CAP) {
       ceilPoolSize.decrementAndGet();
       return;
     }
 
-    m.reset();
     ceilPool.offer(m);
   }
 
@@ -1726,10 +1717,8 @@ public class WaveCounter implements InitializingBean, Destroyable {
    *                       {@link #coldWriteSeen}; hot drain sweeps pass
    *                       {@code false} because their caller marks once
    *                       before the sweep
-   * @return the live cell the value was added into (the {@code putIfAbsent}
-   *         winner, or the stolen/allocated cell on a first insert)
    */
-  private LongAdder mergeKey(
+  private void mergeKey(
     ConcurrentHashMap<String, LongAdder> table,
     SoftReference<ConcurrentHashMap<String, LongAdder>> ebb,
     String key,
@@ -1751,7 +1740,6 @@ public class WaveCounter implements InitializingBean, Destroyable {
 
     cell = prev != null ? prev : cell;
     cell.add(value);
-    return cell;
   }
 
   /**
@@ -1767,29 +1755,26 @@ public class WaveCounter implements InitializingBean, Destroyable {
   }
 
   /**
-   * Capture the shared-table reference, reserve an in-flight merge slot
-   * and mark the quiescence gate — atomically, under {@link #reservoirGate}.
+   * Capture the current reservoir, reserve an in-flight merge slot on it and mark the quiescence
+   * gate — atomically, under {@link #reservoirGate}.
    *
    * <p>
-   * The mutex makes the reference capture atomic against the deliverer's
-   * wholesale swap in {@link #tideWatcher()}, so the returned table is
-   * never a table the deliverer is already snapshotting. The in-flight
-   * reservation closes the capture-to-bump preemption window: a tide that
-   * swaps after this point and then waits for {@link #mergesInFlight} sees
-   * the reservation (monitor release-acquire ordering — the tide acquired
-   * the same gate to swap), so it cannot snapshot the table before this
-   * merge lands. The quiescence mark is taken under the same gate: the
-   * entries this merge inserts may land after the swap, and cold
-   * hit-writers on them need this cycle's window.
+   * The mutex makes the reference capture atomic against the deliverer's swap in
+   * {@link #tideWatcher()}, so the returned reservoir is never one the deliverer is already
+   * snapshotting. The in-flight reservation is per reservoir: a rotation waits only for merges
+   * that captured the table it retired, so traffic into the fresh table can neither extend that
+   * wait nor cancel an older reservation in a shared counter. The quiescence mark is taken under
+   * the same gate: the entries this merge inserts may land after the swap, and cold hit-writers
+   * on them need this cycle's window.
    *
-   * @return the current shared table, reserved for one in-flight merge
+   * @return the current reservoir, reserved for one in-flight merge
    */
-  private ConcurrentHashMap<String, LongAdder> captureAndReserve() {
+  private Reservoir captureAndReserve() {
     synchronized (reservoirGate) {
-      ConcurrentHashMap<String, LongAdder> table = reservoir;
-      mergesInFlight.increment();
+      Reservoir current = reservoir;
+      current.inFlight.incrementAndGet();
       markColdWrite();
-      return table;
+      return current;
     }
   }
 
@@ -1811,11 +1796,11 @@ public class WaveCounter implements InitializingBean, Destroyable {
     // (capture+reserve): the mutex makes the reference capture atomic vs
     // the tide swap, and the in-flight reservation plus the quiescence
     // mark are taken atomically with it (see {@link #captureAndReserve()}).
-    ConcurrentHashMap<String, LongAdder> table = captureAndReserve();
+    Reservoir captured = captureAndReserve();
     try {
-      m.drainInto(this, table, ebbReservoir);
+      m.drainInto(this, captured.map, ebbReservoir);
     } finally {
-      mergesInFlight.decrement();
+      captured.inFlight.decrementAndGet();
     }
   }
 
@@ -1831,11 +1816,11 @@ public class WaveCounter implements InitializingBean, Destroyable {
   private void reconcile(Ceils m) {
     // (capture+reserve): same reference-capture/reservation shape as
     // {@link #discharge(Ceils)} — see {@link #captureAndReserve()}.
-    ConcurrentHashMap<String, LongAdder> table = captureAndReserve();
+    Reservoir captured = captureAndReserve();
     try {
-      m.reconcile(this, table, ebbReservoir);
+      m.reconcile(this, captured.map, ebbReservoir);
     } finally {
-      mergesInFlight.decrement();
+      captured.inFlight.decrementAndGet();
     }
   }
 
@@ -1855,7 +1840,7 @@ public class WaveCounter implements InitializingBean, Destroyable {
    *         old table held no counts (an idle window)
    */
   private Snapshot tideWatcher() {
-    ConcurrentHashMap<String, LongAdder> old;
+    Reservoir rotated;
     boolean quiesce;
     long windowMs;
     synchronized (reservoirGate) {
@@ -1867,12 +1852,12 @@ public class WaveCounter implements InitializingBean, Destroyable {
       windowMs = lastSnapshotAtMs == 0L ? deliverIntervalMs : Math.max(1L, now - lastSnapshotAtMs);
       lastSnapshotAtMs = now;
       // (rotate-table): swap the shared table wholesale. New hot
-      // merges and cold direct writes now target the fresh table; `old`
-      // becomes read-only except for writers that captured the reference
-      // before the swap.
-      old = reservoir;
+      // merges and cold direct writes now target the fresh table; the
+      // retired reservoir becomes read-only except for writers that captured
+      // it before the swap.
+      rotated = reservoir;
       int nextCapacity = (int) Math.min(approximateSize.getOpaque(), MAX_RESERVOIR_PREALLOC);
-      reservoir = nextCapacity > 16 ? new ConcurrentHashMap<>(nextCapacity) : new ConcurrentHashMap<>();
+      reservoir = nextCapacity > 16 ? new Reservoir(nextCapacity) : new Reservoir();
       approximateSize.setOpaque(0L);
       // (quiescence-gate): capture and clear the cold-write flag under
       // the same mutex as the swap. A writer that marked before the swap
@@ -1895,15 +1880,14 @@ public class WaveCounter implements InitializingBean, Destroyable {
     // Residual loss with the window paid requires a preemption > 1ms
     // (~1e-5/op measured). The window precedes the emptiness check so
     // a writer that recovers during it can still land in the snapshot.
+    AtomicInteger inFlight = rotated.inFlight;
     int spin = SETTLE_SPIN_ITERATIONS;
-    if (mergesInFlight.sum() != 0) {
+    if (inFlight.get() != 0) {
       for (int check = 0; ; check++) {
-        // (settle-writes): the counter is re-read on a sampling cadence —
-        // get() walks the striping cells, and the 64-iteration period keeps
-        // the exit delay sub-µs (the counter is zero or a bounded 256-slot
-        // merge in the common case; the sample cannot miss a landing zero —
-        // the loop simply re-samples until it observes it).
-        if ((check & SETTLE_CHECK_MASK) == 0 && mergesInFlight.sum() == 0) {
+        // (settle-writes): the counter is re-read on a sampling cadence to keep the waiting
+        // thread's cache traffic bounded; the sample cannot miss a landing zero — the loop
+        // simply re-samples until it observes it.
+        if ((check & SETTLE_CHECK_MASK) == 0 && inFlight.get() == 0) {
           break;
         }
 
@@ -1936,6 +1920,7 @@ public class WaveCounter implements InitializingBean, Destroyable {
       }
     }
 
+    ConcurrentHashMap<String, LongAdder> old = rotated.map;
     if (old.isEmpty()) {
       // Nothing to snapshot (idle cycle, or all traffic still resident in
       // writers' local maps): the quiescence window above was still paid —
@@ -1960,7 +1945,7 @@ public class WaveCounter implements InitializingBean, Destroyable {
     // Pre-sized past the load factor: HashMap(initialCapacity) rounds DOWN
     // to the next power of two and still resizes at 0.75x of it, so the
     // raw size would rehash mid-fill on most tides.
-    Map<String, Long> snapshot = new HashMap<>((int) (old.size() / 0.75f) + 1);
+    Map<String, Long> snapshot = new HashMap<>(CollectionSizing.capacity(old.size()));
     long sum = 0;
     for (Map.Entry<String, LongAdder> e : old.entrySet()) {
       long s = e.getValue().sum();
@@ -1977,6 +1962,34 @@ public class WaveCounter implements InitializingBean, Destroyable {
 
   /** One rotated snapshot and the measured window it accumulated over. */
   private record Snapshot(Map<String, Long> counts, long windowMs) {}
+
+  /**
+   * One delivery cycle's accumulation table plus the hot merges that captured it. The counter is
+   * bound to the table it protects, so a rotation waits only for merges into the table it retired;
+   * merges into the fresh table never extend that wait.
+   */
+  private static final class Reservoir {
+
+    /** The shared accumulation map for one delivery cycle. */
+    private final ConcurrentHashMap<String, LongAdder> map;
+
+    /** Hot merges that captured {@link #map} and have not settled yet. */
+    private final AtomicInteger inFlight = new AtomicInteger();
+
+    /** Creates an empty reservoir with the default table capacity. */
+    private Reservoir() {
+      this.map = new ConcurrentHashMap<>();
+    }
+
+    /**
+     * Creates an empty reservoir with a pre-sized table.
+     *
+     * @param initialCapacity the expected distinct-key count
+     */
+    private Reservoir(int initialCapacity) {
+      this.map = new ConcurrentHashMap<>(initialCapacity);
+    }
+  }
 
   /**
    * Return an approximate add of distinct keys currently aggregated.
@@ -2044,7 +2057,7 @@ public class WaveCounter implements InitializingBean, Destroyable {
         // contract (counts racing a clear are lost by definition).
         ConcurrentHashMap<String, LongAdder> table;
         synchronized (reservoirGate) {
-          table = reservoir;
+          table = reservoir.map;
         }
         for (Map.Entry<Thread, Ceils> entry : hotRegistry.entrySet()) {
           Thread writer = entry.getKey();
@@ -2089,6 +2102,9 @@ public class WaveCounter implements InitializingBean, Destroyable {
           // (reap-dead): reclaim dead writers' entries — their
           // residuals were just merged, so the registry cannot leak.
           if (!writer.isAlive()) {
+            // A writer that died after the liveness check above may have added a final batch
+            // between the drain and this re-check; drain it again before pooling the map.
+            local.drainDead(this, table, ebbReservoir);
             hotRegistry.remove(writer, local);
             // (recycle-ceils): tryDrainInto just emptied the map and the
             // writer died before the re-check — pool it like the other
@@ -3048,11 +3064,11 @@ public class WaveCounter implements InitializingBean, Destroyable {
           // is exact; blocking on Ceils.lock here could hang forever because
           // Java locks are not released on thread death (tide() has the same
           // rule via drainDead()).
-          ConcurrentHashMap<String, LongAdder> table = captureAndReserve();
+          Reservoir captured = captureAndReserve();
           try {
-            local.drainDead(this, table, ebbReservoir);
+            local.drainDead(this, captured.map, ebbReservoir);
           } finally {
-            mergesInFlight.decrement();
+            captured.inFlight.decrementAndGet();
           }
           hotRegistry.remove(writer, local);
           // No recycle: destroy() clears the pool in the finally below, so a full reset here
@@ -3141,6 +3157,7 @@ public class WaveCounter implements InitializingBean, Destroyable {
     int size;
 
     /** Drain epoch: even when idle, odd while a sweep is in flight. Accessed only through {@link #DRAIN_STAMP}. */
+    @SuppressWarnings("unused")
     private long drainStamp;
 
     /**
@@ -3175,7 +3192,6 @@ public class WaveCounter implements InitializingBean, Destroyable {
 
     /** Slot of {@link #lastKey} (meaningful only while {@code lastKey != null}). */
     private int lastSlot;
-
 
     /**
      * Access handle for  (opaque first read, volatile
@@ -3527,7 +3543,7 @@ public class WaveCounter implements InitializingBean, Destroyable {
      * {@code destroy()}, both of which must wait out an in-flight add.
      *
      * <p>
-     * The {@code mergesInFlight} reservation is NOT bumped here: the
+     * The reservoir's in-flight reservation is NOT bumped here: the
      * caller ({@link WaveCounter#discharge(Ceils)}) reserves the slot
      * atomically with its table-reference capture, closing the
      * capture-to-bump preemption window that the tide's settle-wait
@@ -3536,8 +3552,8 @@ public class WaveCounter implements InitializingBean, Destroyable {
      * @param owner the owning counter (passed per call, never stored — see
      *              the class note)
      * @param table the shared table to drain into (reference already
-     *              captured atomically vs the tide swap, and reserved in
-     *              mergesInFlight by the caller)
+     *              captured atomically vs the tide swap, and reserved on the
+     *              owning reservoir by the caller)
      * @param ebb   the adder-recycling pool (previous tide's drained
      *              table, possibly null) — hot keys steal from it
      *              instead of allocating
@@ -3592,9 +3608,9 @@ public class WaveCounter implements InitializingBean, Destroyable {
         long s = (long) DRAIN_STAMP.getVolatile(this);
         DRAIN_STAMP.setVolatile(this, s | 1);
         try {
-          // No mergesInFlight reservation: this drain runs on the deliverer itself, and
+          // No reservoir reservation: this drain runs on the deliverer itself, and
           // tideWatcher() waits for in-flight merges only after this method returns. Bumping the
-          // shared adder here would add two contended atomics per live writer per tide for a
+          // reservoir's counter here would add two contended atomics per live writer per tide for a
           // wait that is already satisfied by the call order.
           waveTo(owner, table, ebb);
           size = 0;
@@ -3615,7 +3631,7 @@ public class WaveCounter implements InitializingBean, Destroyable {
      * Lock-free drain for a DEAD writer (called only after
      * {@link Thread#isAlive()} returned {@code false}): a dead thread can
      * never write again, so the map is quiescent — no lock, no
-     * {@code mergesInFlight} bump (nothing is in flight). A writer that
+     * reservoir reservation (nothing is in flight). A writer that
      * died after its bit-store leaves a complete, mergeable entry (the bit
      * is stored LAST in {@link #add}); one that died between its slot
      * writes and the bit-store leaves an unmarked slot the bitmap sweep
@@ -3736,14 +3752,14 @@ public class WaveCounter implements InitializingBean, Destroyable {
       // (capture+reserve): same capture/reserve protocol as
       // {@link WaveCounter#discharge(Ceils)} — see
       // {@link WaveCounter#captureAndReserve()}.
-      ConcurrentHashMap<String, LongAdder> table = owner.captureAndReserve();
+      Reservoir captured = owner.captureAndReserve();
 
       try {
         lock.lock();
         try {
           long v = counts.getAndSet(i, 0);
           if (v != 0) {
-            owner.mergeKey(table, owner.ebbReservoir, key, v, false);
+            owner.mergeKey(captured.map, owner.ebbReservoir, key, v, false);
           }
 
           releaseSlot(i);
@@ -3757,7 +3773,7 @@ public class WaveCounter implements InitializingBean, Destroyable {
           lock.unlock();
         }
       } finally {
-        owner.mergesInFlight.decrement();
+        captured.inFlight.decrementAndGet();
       }
     }
 
@@ -3893,11 +3909,14 @@ public class WaveCounter implements InitializingBean, Destroyable {
      * stored LAST in {@link #add}) would leave the writer's late bit-store
      * marking an emptied slot — a phantom claim bit whose 0 take
      * {@link #waveTo} never clears (a 0 take skips without clearing), so
-     * the bit would be re-visited on every sweep. Blocking here is
-     * fine: {@code clear()} is off the add hot path.
+     * the bit would be re-visited on every sweep. A dead owner that acquired the lock but never
+     * entered the protected block leaves it held forever, so this probes instead of blocking: a
+     * map that cannot be locked is discarded by {@link WaveCounter#recycleCeils}, never pooled.
      */
-    void reset() {
-      lock.lock();
+    boolean tryReset() {
+      if (!lock.tryLock()) {
+        return false;
+      }
       try {
         // Signal fast adds to take the locked path while the map is
         // cleared, then restore a fresh even epoch.
@@ -3924,6 +3943,7 @@ public class WaveCounter implements InitializingBean, Destroyable {
       } finally {
         lock.unlock();
       }
+      return true;
     }
   }
 
@@ -5164,7 +5184,7 @@ public class WaveCounter implements InitializingBean, Destroyable {
      * @param windowMs    the tide's measured accumulation window (positive)
      */
     private void onVolume(long snapshotSum, long windowMs) {
-      double rate = snapshotSum * 1000.0 / Math.max(1L, windowMs);
+      double rate = (snapshotSum * 1000.0) / Math.max(1L, windowMs);
       volumeRate = (volumeRate == 0.0) ? rate : volumeRate + VOLUME_ALPHA * (rate - volumeRate);
     }
 

@@ -65,6 +65,9 @@ import org.jspecify.annotations.NonNull;
 @Internal
 public class ElasticThreadPool extends ThreadPoolExecutor {
 
+  /** Drain budget of {@link #shutdownGracefully()}: a bounded window for queued I/O work. */
+  private static final long SHUTDOWN_DRAIN_MILLIS = 3_000L;
+
   /**
    * Per-submission bookkeeping visible only to the thread inside {@link #execute(Runnable)}.
    * {@link ThreadPoolExecutor#execute(Runnable)} only ever calls {@code remove(command)} inside its
@@ -283,6 +286,27 @@ public class ElasticThreadPool extends ThreadPoolExecutor {
     }
     submittedTasksCount.addAndGet(-drained.size());
     return drained;
+  }
+
+  /**
+   * Stop accepting tasks, drain the queue for a bounded window, then force-stop what is left.
+   * The send pool uses this on context shutdown: its queued tasks are already-committed peer
+   * broadcasts, and an immediate {@link #shutdownNow()} would discard them after the business
+   * transaction committed — widening the other nodes' stale window for no reason. The budget is
+   * short enough not to delay shutdown on a wedged broker.
+   *
+   * <p>An interrupt during the await forces the stop and restores the caller's interrupt flag.
+   */
+  public void shutdownGracefully() {
+    shutdown();
+    try {
+      if (!awaitTermination(SHUTDOWN_DRAIN_MILLIS, TimeUnit.MILLISECONDS)) {
+        shutdownNow();
+      }
+    } catch (InterruptedException e) {
+      shutdownNow();
+      Thread.currentThread().interrupt();
+    }
   }
 
   /**

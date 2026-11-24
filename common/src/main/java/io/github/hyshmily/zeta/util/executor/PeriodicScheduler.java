@@ -402,8 +402,9 @@ public class PeriodicScheduler extends ScheduledThreadPoolExecutor {
      * <p>A later link ends silently when the executor is shutting down: the chain has already run
      * and its future reports done. The first link follows the {@code ScheduledExecutorService}
      * contract instead — a submission to a shut-down executor throws
-     * {@link RejectedExecutionException} — while a chain cancelled before its first run still ends
-     * silently (the caller cancelled it, the executor did not refuse it).
+     * {@link RejectedExecutionException} — whether the chain observes the shutdown here
+     * ({@code TERMINATED}) or in the guard below. A chain cancelled before its first run still
+     * ends silently (the caller cancelled it, the executor did not refuse it).
      *
      * @param delayNanos the delay before this link
      * @param initial    whether this is the first link of a new chain
@@ -413,6 +414,12 @@ public class PeriodicScheduler extends ScheduledThreadPoolExecutor {
       int code = stateCode();
       if (code != ACTIVE) {
         unregister();
+        if (initial && code == TERMINATED) {
+          // shutdown() terminated this chain between its registration and this first link, so the
+          // task was never scheduled. Report it the same way as the shutdown guard below instead
+          // of letting the caller believe a periodic task is running.
+          throw new RejectedExecutionException("PeriodicScheduler is shut down");
+        }
         return;
       }
       if (closing || isShutdown()) {
@@ -431,34 +438,21 @@ public class PeriodicScheduler extends ScheduledThreadPoolExecutor {
         schedule(this, delayNanos, TimeUnit.NANOSECONDS);
       } catch (RejectedExecutionException e) {
         // Executor is shutting down; the chain ends terminally. decorateTask has already
-        // installed a wrapper the queue never accepted: cancel it, and leave the reference in
-        // place so getDelay() does not switch the chain back to "never scheduled".
-        PERIODIC_STATE.compareAndSet(this, ACTIVE, TERMINATED);
-        ScheduledFuture<?> rejected = current;
-        if (rejected != null) {
-          rejected.cancel(false);
-        }
-        unregister();
+        // installed a wrapper the queue never accepted: terminate() cancels it and keeps the
+        // reference so getDelay() does not switch the chain back to "never scheduled".
+        terminate();
         if (initial) {
           throw e;
         }
         return;
       }
-      // cancel()/terminate()/shutdown() may have raced the assignment above: they
-      // cancelled the OLD link while this new one was being queued. The state code
-      // and the closing flag are the authority — drop the freshly queued link too,
-      // or it (and every object the task closes over) lingers in the delay queue
-      // for its full period before the run() guard discards it.
-      code = stateCode();
-      if (code != ACTIVE || closing) {
-        if (code == ACTIVE) {
-          PERIODIC_STATE.compareAndSet(this, ACTIVE, TERMINATED);
-          // Re-read: a concurrent cancel(true) wins over the shutdown transition
-          // and must keep its interrupt request.
-          code = stateCode();
-        }
-        current.cancel(code == CANCELLED_INTERRUPT);
-        unregister();
+      // cancel()/terminate()/shutdown() may have raced the assignment above: they cancelled the
+      // OLD link while this new one was being queued. The state code and the closing flag are the
+      // authority — terminate() drops the freshly queued link too, or it (and every object the
+      // task closes over) lingers in the delay queue for its full period before the run() guard
+      // discards it.
+      if (stateCode() != ACTIVE || closing) {
+        terminate();
       }
     }
 

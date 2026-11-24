@@ -163,13 +163,6 @@ class TimeSourceTest {
   }
 
   @Test
-  void monotonicSecondsSinceBoot_shouldNeverReturnTheUnknownSentinel() {
-    // 0 is CacheEntry.getBirthStampSec()'s "unknown" marker; a value loaded in the
-    // first boot second must still receive a real max-lease-eligible stamp.
-    assertThat(TimeSource.monotonicSecondsSinceBoot()).isPositive();
-  }
-
-  @Test
   void currentTimeMillis_cachedValue_shouldUpdateOverTime() throws Exception {
     TimeSource.start();
     // Allow the background thread to advance the clock a few cycles (each sleeps 5 ms)

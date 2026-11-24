@@ -86,6 +86,37 @@ class ElasticThreadPoolTest {
   }
 
   @Test
+  void shutdownGracefully_drainsQueuedTasksBeforeTermination() throws Exception {
+    var executor = newExecutor(1, 1, 10);
+    var started = new CountDownLatch(1);
+    var release = new CountDownLatch(1);
+    var queuedRan = new CountDownLatch(1);
+    try {
+      executor.execute(() -> {
+        started.countDown();
+        try {
+          release.await();
+        } catch (InterruptedException e) {
+          Thread.currentThread().interrupt();
+        }
+      });
+      assertThat(started.await(5, TimeUnit.SECONDS)).isTrue();
+      executor.execute(queuedRan::countDown);
+
+      Thread shutdown = new Thread(executor::shutdownGracefully, "graceful-shutdown");
+      shutdown.start();
+      release.countDown();
+      shutdown.join(5_000);
+
+      assertThat(queuedRan.await(1, TimeUnit.SECONDS)).as("queued task drains").isTrue();
+      assertThat(executor.isTerminated()).isTrue();
+    } finally {
+      release.countDown();
+      executor.shutdownNow();
+    }
+  }
+
+  @Test
   void threadCreation_precedesQueueing_untilMaxPool() throws Exception {
     // core=1, max=4: the second task must create a new thread instead of queuing.
     var executor = newExecutor(1, 4, 100);

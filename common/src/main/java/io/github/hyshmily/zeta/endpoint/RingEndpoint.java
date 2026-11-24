@@ -22,12 +22,11 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 import org.jspecify.annotations.Nullable;
 import org.springframework.boot.actuate.endpoint.InvalidEndpointRequestException;
-import org.springframework.boot.actuate.endpoint.annotation.Endpoint;
 import org.springframework.boot.actuate.endpoint.annotation.ReadOperation;
 import org.springframework.boot.actuate.endpoint.annotation.Selector;
-import org.springframework.http.HttpStatus;
+import org.springframework.boot.actuate.endpoint.web.WebEndpointResponse;
+import org.springframework.boot.actuate.endpoint.web.annotation.WebEndpoint;
 import org.springframework.util.StringUtils;
-import org.springframework.web.server.ResponseStatusException;
 
 /**
  * Actuator {@code /actuator/hotkeyring} endpoint for consistent-hash ring inspection.
@@ -37,6 +36,11 @@ import org.springframework.web.server.ResponseStatusException;
  *   <li>{@code GET /actuator/hotkeyring} — ring topology
  *   <li>{@code GET /actuator/hotkeyring/{key}} — query which node handles a key
  * </ul>
+ *
+ * <p>A {@link WebEndpoint} rather than a technology-neutral {@code @Endpoint}: the operations report
+ * HTTP status codes, and {@code WebEndpointResponse} carries them without a compile-time dependency
+ * on {@code spring-web}. A JMX-only application therefore loads this class without
+ * {@code NoClassDefFoundError} and simply does not expose it over JMX.
  *
  * <p>Runs on the management plane (port, exposure, and roles honored via the
  * standard {@code management.*} configuration), unlike a plain MVC controller.
@@ -50,8 +54,11 @@ import org.springframework.web.server.ResponseStatusException;
  * internal infrastructure discovery in production environments.
  */
 @Internal
-@Endpoint(id = "hotkeyring")
+@WebEndpoint(id = "hotkeyring")
 public class RingEndpoint {
+
+  /** Status returned when the report plane (and therefore the ring) is not wired. */
+  private static final int SERVICE_UNAVAILABLE = 503;
 
   @Nullable
   private final ConsistentHashRing ring;
@@ -80,12 +87,15 @@ public class RingEndpoint {
   /**
    * Return the live ring topology as the sorted list of participating nodes.
    *
-   * @return a map containing the {@code nodes} entry
+   * @return a {@code nodes} map, or status 503 when the ring is not wired
    */
   @ReadOperation
-  public Map<String, Object> ringInfo() {
+  public WebEndpointResponse<Map<String, Object>> ringInfo() {
     ConsistentHashRing activeRing = reconciledRing();
-    return Map.of("nodes", activeRing.getNodes().stream().sorted().toList());
+    if (activeRing == null) {
+      return new WebEndpointResponse<>(Map.of(), SERVICE_UNAVAILABLE);
+    }
+    return new WebEndpointResponse<>(Map.of("nodes", activeRing.getNodes().stream().sorted().toList()));
   }
 
   /**
@@ -96,11 +106,12 @@ public class RingEndpoint {
    * @param keySegments the path segments of the key; a key containing {@code /} arrives as
    *                    several segments and is re-joined verbatim, or {@code null} when the
    *                    request carries no path segment
-   * @return a map containing the key and its assigned node ID
+   * @return a map containing the key and its assigned node ID, or status 503 when the ring is not
+   *         wired
    * @throws InvalidEndpointRequestException if the joined key is blank
    */
   @ReadOperation
-  public Map<String, Object> keyMapping(
+  public WebEndpointResponse<Map<String, Object>> keyMapping(
     @Selector(match = Selector.Match.ALL_REMAINING) String@Nullable [] keySegments
   ) {
     String key = keySegments == null ? "" : String.join("/", keySegments);
@@ -108,34 +119,33 @@ public class RingEndpoint {
       throw new InvalidEndpointRequestException("key must not be empty", "The 'key' path selector must not be blank");
     }
     ConsistentHashRing activeRing = reconciledRing();
+    if (activeRing == null) {
+      return new WebEndpointResponse<>(Map.of(), SERVICE_UNAVAILABLE);
+    }
     Map<String, Object> result = new LinkedHashMap<>(2);
     result.put("key", key);
     HealthView view = healthView;
     result.put("nodeId", view != null ? activeRing.locateNode(key, view) : activeRing.locateNode(key));
-    return result;
+    return new WebEndpointResponse<>(result);
   }
 
   /**
    * Reconcile the ring against the live health view and return it. Without a wired health
    * view the current published snapshot is returned unchanged; an absent ring is a disabled
-   * feature rather than a caller error, so the status line carries the signal — a probe that
-   * checks only the status must not mark an unwired ring plane healthy.
+   * feature rather than a caller error, so the caller reports 503 — a probe that checks only the
+   * status must not mark an unwired ring plane healthy.
    *
-   * @return the wired ring, after a refresh from the health view when one is wired
-   * @throws ResponseStatusException with {@code 503 Service Unavailable} when no
-   *                                {@link ConsistentHashRing} is wired
+   * @return the wired ring after a refresh from the health view, or {@code null} when none is wired
    */
-  private ConsistentHashRing reconciledRing() {
-    if (ring == null) {
-      throw new ResponseStatusException(
-        HttpStatus.SERVICE_UNAVAILABLE,
-        "ConsistentHashRing not available: the report plane is disabled or RabbitMQ is absent"
-      );
+  private @Nullable ConsistentHashRing reconciledRing() {
+    ConsistentHashRing activeRing = ring;
+    if (activeRing == null) {
+      return null;
     }
     HealthView view = healthView;
     if (view != null) {
-      ring.rebuildIfPossible(view);
+      activeRing.rebuildIfPossible(view);
     }
-    return ring;
+    return activeRing;
   }
 }

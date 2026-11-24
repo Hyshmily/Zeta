@@ -17,84 +17,53 @@ package io.github.hyshmily.zeta.util;
 
 import com.google.errorprone.annotations.concurrent.GuardedBy;
 import java.util.Objects;
-import java.util.concurrent.CancellationException;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.CompletionException;
-import java.util.concurrent.Executor;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
+import java.util.concurrent.*;
 import java.util.function.Supplier;
+import org.jspecify.annotations.Nullable;
 
 /**
- * Async supplier execution whose timeout <b>interrupts</b> the thread still
- * running the task — unlike a bare {@code CompletableFuture.supplyAsync(...).
- * orTimeout(...)}, which only abandons the future and leaves the pool thread
- * blocked until the task finishes on its own, silently shrinking the executor.
+ * Asynchronous supplier execution whose timeout and cancellation <b>interrupt</b> the executing
+ * worker thread, preventing slow or wedged tasks from silently shrinking the pool.
  *
- * <p><b>Mechanism.</b> The task runs inside an {@link InterruptingTask} that records
- * the executing thread under its own monitor and clears its phase reference on
- * exit; {@link InterruptingTask#completeExceptionally} (a timeout completes that way)
- * and {@link InterruptingTask#cancel(boolean)} interrupt the recorded thread only while
- * holding the same monitor with the reference still pointing at it. The monitor makes
- * "interrupt" and "task finished" mutually exclusive: finished → no interrupt; timeout
- * first → interrupt the thread while it is still executing this task. A timeout that
- * arrives after completion never interrupts a reused pool thread running an unrelated
- * task.
- * The interrupt flag left behind by a timed-out task (which may ignore the interrupt,
- * or re-interrupt itself from a {@code catch (InterruptedException)}) is also cleared
- * on task exit, so the next task on the same pool thread starts clean.
+ * <p><b>Interrupt isolation.</b> Each invocation allocates a single {@link InterruptingTask}
+ * serving as future, {@link Runnable}, and phase monitor. Timeout and cancellation interrupt the
+ * worker thread only while holding that monitor with the task still active, and task exit clears
+ * both the thread reference and any residual interrupt flag so reused pool threads never observe a
+ * stray interrupt.
  *
- * <p><b>Timeout scope.</b> The timeout is an <em>execution</em> budget: it starts when
- * the executor actually begins the task, not when this method is called. Time spent
- * queued behind a saturated executor is not charged to the task, so a deep backlog
- * cannot make a fast reader time out before it ever runs. Queue saturation is an
- * admission concern for the caller; a task that never starts never times out.
+ * <p><b>Execution-only timeout.</b> The timeout starts when the executor begins running the task,
+ * not at submission time, so queue wait under backlog does not consume execution budget.
  *
- * <p><b>Executor contract.</b> The interrupt flag on the wrapped task's thread
- * is owned exclusively by this class's timeout machinery — pass an executor
- * dedicated to these tasks (or at least one whose other tasks never rely on
- * foreign interrupts), and never expose its threads elsewhere.
- *
- * <p><b>Cancellation.</b> {@code future.cancel(true)} completes the future with a
- * {@link CancellationException}; the same callback that handles a timeout then
- * interrupts the executing thread, so an external cancellation actually releases
- * the pool thread. A cancelled task that has not started never runs its supplier.
- *
- * <p>Exception propagation (including {@link Error}) matches
- * {@link CompletableFuture#supplyAsync}'s standard {@code encodeThrowable}
- * semantics; a timeout surfaces as a {@link TimeoutException} — the
- * {@link CompletionException} cause on {@code join()}, the
- * {@link java.util.concurrent.ExecutionException} cause on {@code get()}. A
- * saturated executor throws
- * {@link java.util.concurrent.RejectedExecutionException} synchronously from
- * this method, exactly like {@code supplyAsync}.
- *
- * <p><b>Allocation.</b> The state lock, the single phase reference and the
- * Runnable are all the one {@link InterruptingTask} instance — one
- * short-lived object per call. The completion hooks are overridden on that
- * future, so no dependent callback node is registered.
+ * <p><b>Executor contract.</b> Pass an executor dedicated to tasks whose interrupt flag is owned
+ * exclusively by this timeout machinery. Exception propagation matches
+ * {@link CompletableFuture#supplyAsync}; executor saturation throws
+ * {@link RejectedExecutionException} synchronously.
  *
  * <p>Thread-safe.
  */
 @Internal
 public final class InterruptingAsync {
 
-  private InterruptingAsync() {}
+  /** Prevents instantiation of this utility class. */
+  private InterruptingAsync() {
+    throw new AssertionError("No InterruptingAsync instances");
+  }
 
   /**
-   * Executes {@code supplier} asynchronously on {@code executor}, completing
-   * exceptionally with a {@link TimeoutException} — and interrupting the
-   * executing thread — when its execution outlives {@code timeout}. Queue wait
-   * before the task starts is not counted; see the class doc.
+   * Executes {@code supplier} asynchronously on {@code executor}, completing exceptionally with
+   * {@link TimeoutException} and interrupting the executing thread if execution exceeds
+   * {@code timeout}. Queue wait prior to task start is excluded from the budget.
    *
    * @param supplier the task to execute asynchronously
-   * @param executor the executor running the task; see the class doc for the
-   *                 interrupt-ownership contract
-   * @param timeout  the maximum time the task may run; must be positive
-   * @param unit     the time unit of {@code timeout}
+   * @param executor the executor running the task (must dedicate interrupt ownership to this helper)
+   * @param timeout  maximum execution duration; must be strictly positive
+   * @param unit     time unit for {@code timeout}
    * @param <T>      the result type
-   * @return a future completing with the supplier's result, a
-   *         {@link TimeoutException}, or the task's failure
+   * @return a future completing with the supplier's result, {@link TimeoutException},
+   *         {@link CancellationException}, or the supplier's failure
+   * @throws NullPointerException       if {@code supplier}, {@code executor}, or {@code unit} is {@code null}
+   * @throws IllegalArgumentException   if {@code timeout <= 0}
+   * @throws RejectedExecutionException if {@code executor} rejects the task
    */
   public static <T> CompletableFuture<T> supplyAsync(
     Supplier<? extends T> supplier,
@@ -102,129 +71,120 @@ public final class InterruptingAsync {
     long timeout,
     TimeUnit unit
   ) {
-    // Fail at submission, not on the pool thread: a null unit must surface here
-    // as a synchronous validation failure, like supplyAsync's own argument checks.
+    // Validate synchronously at submission, matching CompletableFuture.supplyAsync semantics.
     Objects.requireNonNull(supplier, "supplier must not be null");
     Objects.requireNonNull(executor, "executor must not be null");
     Objects.requireNonNull(unit, "unit must not be null");
-    if (timeout <= 0) {
+    if (timeout <= 0L) {
       throw new IllegalArgumentException("timeout must be > 0, got " + timeout);
     }
-    InterruptingTask<T> task = new InterruptingTask<>(supplier, unit, timeout);
-    // Submit directly so a rejected task still throws synchronously, exactly like
-    // CompletableFuture.supplyAsync(..., executor).
+    InterruptingTask<T> task = new InterruptingTask<>(supplier, timeout, unit);
     executor.execute(task);
     return task;
   }
 
   /**
-   * The one object per call: the future, the Runnable the executor runs, and
-   * the completion callback that interrupts on timeout/cancellation. The task's
-   * own monitor guards {@code state}, so an interrupt can never land after the
-   * task exited and its pool thread was reused for an unrelated task.
+   * Single per-invocation allocation combining {@link CompletableFuture}, {@link Runnable}, and
+   * interrupt-synchronization monitor.
    *
-   * <p>{@code state} carries the mutually exclusive phases: a
-   * {@link Supplier} while queued, the running {@link Thread}, and {@code null}
-   * once done or interrupted.
+   * <p>Mutually exclusive {@link #state} phases under {@code this}:
+   * {@code Supplier} (queued) -&gt; {@code Thread} (running) -&gt; {@code ABORTED} (timed out or
+   * cancelled) -&gt; {@code null} (exited).
    */
   private static final class InterruptingTask<T> extends CompletableFuture<T> implements Runnable {
 
     /**
-     * Sentinel written to {@link #state} before a timeout or cancellation completes the future.
-     * A run that observes it must not publish its result: the interrupt and the terminal state are
-     * already decided, and completing from the worker would race the timeout into a loaded value.
+     * Sentinel written before timeout/cancellation completes the future so a finishing worker
+     * recognizes it lost ownership and does not race to publish a loaded result.
      */
     private static final Object ABORTED = new Object();
 
-    /** The execution budget in nanoseconds — the unit is folded in at construction. */
     private final long timeoutNanos;
 
     @GuardedBy("this")
-    private Object state;
+    private @Nullable Object state;
 
-    InterruptingTask(Supplier<? extends T> supplier, TimeUnit unit, long timeout) {
+    /** Creates a queued task capturing {@code supplier} and its execution budget in nanoseconds. */
+    private InterruptingTask(@Nullable Supplier<? extends T> supplier, long timeout, TimeUnit unit) {
       this.state = supplier;
       this.timeoutNanos = unit.toNanos(timeout);
     }
 
+    /**
+     * Transitions from queued to running, arms the execution timeout, runs the supplier, leaves
+     * the interruptible phase cleanly, and publishes the outcome unless already aborted.
+     */
     @Override
     @SuppressWarnings({ "unchecked", "java:S1181" })
     public void run() {
       Supplier<? extends T> supplier;
       synchronized (this) {
-        // isDone covers a cancellation that arrived while the task was queued:
-        // a cancelled future must not run its supplier.
+        // Guard against cancellation that landed while queued so the supplier never runs.
         if (!(state instanceof Supplier<?> queued) || isDone()) {
           state = null;
           return;
         }
-
         supplier = (Supplier<? extends T>) queued;
         state = Thread.currentThread();
       }
+
       T result = null;
       Throwable failure = null;
+      boolean aborted;
       try {
-        // Armed here, not at submission: queue wait is not execution time, so a
-        // batch's tail keys get the same budget as its head.
+        // Arm timeout on execution start so queue wait does not eat into the execution budget.
         orTimeout(timeoutNanos, TimeUnit.NANOSECONDS);
         result = supplier.get();
       } catch (Throwable t) {
         failure = t;
       } finally {
-        boolean aborted;
         synchronized (this) {
-          // Leave the interruptible phase before publishing the outcome: complete*() runs the
-          // dependent actions synchronously on this thread, and a stale interrupt flag (or a
-          // still-armed timeout/cancel that could target this thread) would hit those callbacks
-          // instead of the reader.
+          // Leave the interruptible phase and clear any stale interrupt before publishing:
+          // complete*() runs dependent callbacks inline on this thread.
           aborted = state == ABORTED;
           state = null;
           Thread.interrupted();
         }
-        if (aborted) {
-          // A timeout or cancellation already interrupted this thread and owns the terminal
-          // state. Publishing here would race it back to a successful value.
-          return;
-        }
+      }
+
+      if (aborted) {
+        // Timeout or cancellation already interrupted this thread and owns the terminal outcome.
+        return;
       }
       if (failure == null) {
         complete(result);
       } else {
-        // Same encoding as CompletableFuture.supplyAsync: a CompletionException
-        // travels as-is, everything else is wrapped once.
+        // Mirror CompletableFuture.supplyAsync: keep CompletionException as-is, wrap others once.
         completeExceptionally(failure instanceof CompletionException ? failure : new CompletionException(failure));
       }
     }
 
+    /**
+     * Interrupts the running worker thread before completing on {@link TimeoutException} so slow
+     * synchronous dependents cannot delay the interrupt or deadlock the JDK delay scheduler.
+     */
     @Override
     public boolean completeExceptionally(Throwable cause) {
-      // Interrupt and mark the task aborted BEFORE completing: complete*() runs non-async
-      // dependent actions synchronously on the calling thread (the JDK's shared delay scheduler
-      // for a timeout). A slow or lock-waiting callback must not delay the interrupt, and must
-      // not be able to deadlock that single scheduler thread against the interrupted reader.
       if (cause instanceof TimeoutException && !isDone()) {
         interruptRunning();
       }
       return super.completeExceptionally(cause);
     }
 
+    /**
+     * Cancels the future and interrupts the running worker thread (even when
+     * {@code mayInterruptIfRunning} is {@code false}) so external cancellation releases the pool
+     * thread promptly.
+     */
     @Override
     public boolean cancel(boolean mayInterruptIfRunning) {
-      // CompletableFuture.cancel() does not know the thread running run(); the
-      // interrupt has to come from the task's own state. Cancellation releases
-      // the pool thread even when the caller passes false.
       if (!isDone()) {
         interruptRunning();
       }
       return super.cancel(mayInterruptIfRunning);
     }
 
-    /**
-     * Interrupts the task thread once, and only while it is still inside
-     * {@link #run()}. The monitor is what makes the interrupt and the exit path
-     * mutually exclusive, so a later task on the same pooled thread is never hit.
-     */
+    /** Marks the task aborted and interrupts the executing thread once if still inside {@link #run()}. */
     private void interruptRunning() {
       synchronized (this) {
         Object phase = state;

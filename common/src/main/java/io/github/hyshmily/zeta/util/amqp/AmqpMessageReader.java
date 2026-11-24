@@ -27,41 +27,42 @@ import org.springframework.amqp.core.Message;
 import org.springframework.amqp.core.MessageProperties;
 
 /**
- * Shared helpers for reading AMQP messages across the sync and decision
- * planes — numeric header extraction with a DEBUG type-mismatch line,
- * bounded-size body summaries for error logs, and the per-listener
- * shared-broker appName isolation filter.
- *
- * <p>{@link AppIsolationFilter} is the single foreign-app predicate shared by
- * the sync and decision planes (design decisions: class layout).
+ * Shared AMQP message-reading utilities for the sync and decision planes: typed header extraction,
+ * bounded-allocation body abbreviation for diagnostics, and shared-broker tenant isolation via
+ * {@link AppIsolationFilter}.
  */
 @Slf4j
 @Internal
 public final class AmqpMessageReader {
 
-  private AmqpMessageReader() {}
+  /** Maximum body characters decoded when logging a dropped unknown-type message. */
+  private static final int UNKNOWN_TYPE_BODY_LIMIT = 128;
+
+  /** Worst-case UTF-8 byte length of one Unicode scalar value. */
+  private static final long MAX_UTF8_BYTES_PER_CHAR = 4L;
+
+  /** Prevents instantiation of this utility class. */
+  private AmqpMessageReader() {
+    throw new AssertionError("No AmqpMessageReader instances");
+  }
 
   /**
-   * Reads a numeric AMQP message header, returning its {@code long} value.
+   * Reads a numeric AMQP header as a {@code long}, falling back to {@code defaultValue} when
+   * missing or non-numeric (logging a DEBUG line on type mismatch).
    *
-   * <p>If the header value is not a {@link Number} (e.g. a String was sent by
-   * a different version of the sender), the method logs at DEBUG and returns
-   * the {@code defaultValue}. Missing headers are silent.
-   *
-   * @param props        the message properties containing the header; {@code null} returns the default
-   * @param header       the header name to read
-   * @param defaultValue the fallback value when the header is missing or non-numeric
-   * @return the header's numeric value, or {@code defaultValue}
+   * @param props        message properties carrying the header; {@code null} returns {@code defaultValue}
+   * @param header       header name to inspect
+   * @param defaultValue fallback value when absent or non-numeric
+   * @return the header's {@code long} value, or {@code defaultValue}
    */
   public static long readLongHeader(@Nullable MessageProperties props, String header, long defaultValue) {
     if (props == null) {
       return defaultValue;
     }
     Object value = props.getHeader(header);
-    if (value instanceof Number n) {
-      return n.longValue();
+    if (value instanceof Number number) {
+      return number.longValue();
     }
-
     if (value != null) {
       log.debug(
         "Non-numeric header '{}' (type {}), defaulting to {}. Value: {}",
@@ -75,76 +76,64 @@ public final class AmqpMessageReader {
   }
 
   /**
-   * Reads a string AMQP message header. A non-String header is converted with
-   * {@code toString()} because the sync wire treats the header as text (an older
-   * sender may write a {@link CharSequence}); a missing header is {@code null}.
+   * Reads a text AMQP header, converting non-{@link String} values (such as a {@link CharSequence}
+   * from another sender) via {@link Object#toString()}.
    *
-   * @param props  the message properties containing the header; {@code null} returns {@code null}
-   * @param header the header name to read
+   * @param props  message properties carrying the header; {@code null} returns {@code null}
+   * @param header header name to inspect
    * @return the header text, or {@code null} when absent
    */
   public static @Nullable String readStringHeader(@Nullable MessageProperties props, String header) {
-    if (props == null) {
-      return null;
-    }
-    Object value = props.getHeader(header);
-    if (value == null) {
-      return null;
-    }
-    return value instanceof String s ? s : value.toString();
+    Object value = props == null ? null : props.getHeader(header);
+    // String.toString() returns itself, covering both exact String and CharSequence headers.
+    return value == null ? null : value.toString();
   }
 
   /**
-   * Reports a message whose type header is unknown or missing, at DEBUG: the
-   * message is dropped, and its body is decoded only when DEBUG is on.
+   * Logs a dropped unknown- or missing-type message at DEBUG, decoding the body prefix lazily only
+   * when DEBUG logging is enabled.
    *
-   * @param log        the listener's logger
-   * @param planeLabel what is being dropped ("sync message", "worker decision")
-   * @param typeHeader the raw header value
-   * @param msg        the message carrying it
+   * @param logger     the listener's logger
+   * @param planeLabel descriptive plane label (e.g., {@code "sync message"}, {@code "worker decision"})
+   * @param typeHeader the unrecognized or {@code null} type header value
+   * @param msg        the dropped AMQP message
    */
-  public static void logUnknownType(Logger log, String planeLabel, @Nullable Object typeHeader, Message msg) {
-    if (!log.isDebugEnabled()) {
+  public static void logUnknownType(Logger logger, String planeLabel, @Nullable Object typeHeader, Message msg) {
+    if (!logger.isDebugEnabled()) {
       return;
     }
-    log.debug(
+    logger.debug(
       "Dropping {} with unknown or missing type header: {}, body: {}",
       planeLabel,
       typeHeader,
-      abbreviateBody(msg.getBody(), 128)
+      abbreviateBody(msg.getBody(), UNKNOWN_TYPE_BODY_LIMIT)
     );
   }
 
   /**
-   * Decodes an AMQP body as UTF-8 and bounds it for error-log output. Batch and
-   * PUT value payloads can be tens of KB; a parse-failure storm must not echo
-   * them into the log at message rate.
+   * Decodes a bounded UTF-8 prefix of an AMQP body for diagnostic logging so large PUT or batch
+   * payloads never allocate full strings under parse-failure bursts.
    *
-   * <p>Only the prefix needed for {@code maxChars} characters is decoded (a
-   * UTF-8 code point is at most 4 bytes), so a tens-of-KB body never
-   * materializes as a full String just to be truncated — the allocation is
-   * bounded by the log line even under a malformed-message flood.
-   *
-   * @param body     the raw message body; may be null
-   * @param maxChars hard cap on the returned string length (excluding the suffix)
-   * @return the decoded body, truncated with a total-size suffix when longer than
-   *         {@code maxChars}; {@code "<null>"} for a null body
+   * @param body     raw message body bytes, or {@code null}
+   * @param maxChars maximum decoded characters before appending a total-byte suffix
+   * @return decoded text (truncated with a byte-size suffix when exceeding {@code maxChars}), or
+   *         {@code "<null>"} when {@code body} is {@code null}
    */
-  public static String abbreviateBody(byte[] body, int maxChars) {
+  public static String abbreviateBody(byte@Nullable [] body, int maxChars) {
     if (body == null) {
       return "<null>";
     }
     if (maxChars <= 0) {
       return "...(total " + body.length + " bytes)";
     }
-    int decodeLen = (int) Math.min(body.length, (long) maxChars * 4L);
+    // Decode at most maxChars * 4 bytes so tens-of-KB payloads never materialize in full.
+    int decodeLen = (int) Math.min(body.length, (long) maxChars * MAX_UTF8_BYTES_PER_CHAR);
     String text = new String(body, 0, decodeLen, StandardCharsets.UTF_8);
     if (decodeLen == body.length && text.length() <= maxChars) {
       return text;
     }
     if (text.length() > maxChars) {
-      // Never cut between the two chars of a surrogate pair: the orphaned high surrogate is not
-      // valid UTF-16 and breaks downstream JSON log encoders.
+      // Never split a UTF-16 surrogate pair: an orphaned high surrogate breaks JSON log encoders.
       int cut = Character.isHighSurrogate(text.charAt(maxChars - 1)) ? maxChars - 1 : maxChars;
       text = text.substring(0, cut);
     }
@@ -152,66 +141,50 @@ public final class AmqpMessageReader {
   }
 
   /**
-   * Shared-broker appName isolation (design decisions: sync messages): the sync plane is a
-   * fanout whose exchange name is a global constant, so on a shared broker every bound queue
-   * receives every application's sync messages. The decision plane routes by
-   * {@code send.<appName>} and applies the same check as its own boundary.
+   * Shared-broker {@code appName} isolation filter used by both the sync and decision listeners.
    *
-   * <p>The filter owns the drop counter, the last-observed foreign sender, the DEBUG line and
-   * the drop-and-log tail; the two planes pass their own label so a dropped decision and a
-   * dropped sync message stay distinguishable. Each listener keeps its delegating
-   * {@code foreignAppDrops()} / {@code lastForeignApp()} accessors for the Actuator surface.
+   * <p>A message is treated as foreign if and only if this instance declares a non-blank
+   * {@code appName} and the sender declared a different non-blank {@code HEADER_APP_NAME}. Messages
+   * without an app header (rolling upgrades) or listeners with no configured {@code appName} pass
+   * through unfiltered.
    *
-   * <p>Thread-safe: the state is an immutable field, an {@link AtomicLong} and a volatile
-   * reference.
+   * <p>Thread-safe.
    */
   @Internal
   public static final class AppIsolationFilter {
 
-    /** Cumulative foreign-app drops (a non-zero value with a stable sender almost always means a misconfigured app-name). */
+    /** Cumulative foreign-application messages dropped since startup. */
     private final AtomicLong foreignDropCounter = new AtomicLong();
 
-    /** This instance's appName; {@code null} disables the filter (blank is normalized to null). */
-    private final String appName;
+    /** Normalized local {@code appName}, or {@code null} when isolation is disabled. */
+    private final @Nullable String appName;
 
-    /** The most recent foreign sender appName observed (for pairing with the counter). */
-    private volatile String lastForeignApp;
+    /** Most recently observed foreign sender {@code appName}, paired with {@link #foreignDropCounter}. */
+    private volatile @Nullable String lastForeignApp;
 
     /**
-     * Creates the filter. {@code appName} may be {@code null}/blank to disable
-     * foreign-app filtering (the unconfigured-filter behavior, which rolling
-     * upgrades still need).
+     * Creates an isolation filter, normalizing a blank {@code appName} to {@code null} so disabled
+     * instances short-circuit on a single reference check.
      *
-     * <p>Blank is normalized to {@code null} once, here, so the per-message check in
-     * {@link #dropIfForeign} is one reference comparison.
-     *
-     * @param appName this application's appName
+     * @param appName this application's name, or {@code null}/blank to disable filtering
      */
-    public AppIsolationFilter(String appName) {
+    public AppIsolationFilter(@Nullable String appName) {
       this.appName = (appName != null && !appName.isBlank()) ? appName : null;
     }
 
     /**
-     * Drops an inbound message that belongs to a different application on the
-     * same broker.
-     *
-     * <p>A message is foreign when — and only when — the sender declared an
-     * {@code appName} header that differs from this instance's appName:
-     * <ul>
-     *   <li>sender declared an appName that differs from ours → foreign (drop)</li>
-     *   <li>sender declared no appName (older sender) → not foreign (process)</li>
-     *   <li>this instance declares no appName → not foreign (process everything)</li>
-     * </ul>
-     *
-     * <p>The header is read and converted once; the drop counter, the
-     * last-observed sender and the DEBUG line are settled in one call.
+     * Checks whether {@code msg} belongs to another application on a shared broker; if foreign,
+     * records the drop, updates {@link #lastForeignApp()}, and logs at DEBUG.
      *
      * @param msg        the inbound AMQP message
-     * @param log        the plane's logger
-     * @param planeLabel what is being dropped ("sync message", "worker decision")
-     * @return {@code true} when the message was foreign and has been counted and logged
+     * @param logger     the calling listener's logger
+     * @param planeLabel descriptive plane label (e.g., {@code "sync message"}, {@code "worker decision"})
+     * @return {@code true} if the message is foreign and should be dropped
      */
-    public boolean dropIfForeign(Message msg, Logger log, String planeLabel) {
+    public boolean dropIfForeign(Message msg, Logger logger, String planeLabel) {
+      if (appName == null) {
+        return false;
+      }
       MessageProperties props = msg.getMessageProperties();
       if (props == null) {
         return false;
@@ -223,7 +196,7 @@ public final class AmqpMessageReader {
 
       lastForeignApp = senderApp;
       foreignDropCounter.incrementAndGet();
-      log.debug(
+      logger.debug(
         "Dropped {} from another application: senderApp={}, localApp={} (check zeta.app-name)",
         planeLabel,
         senderApp,
@@ -232,21 +205,20 @@ public final class AmqpMessageReader {
       return true;
     }
 
-    /** Whether the sender declared an appName that differs from this instance's. */
-    private boolean isForeign(@Nullable String senderApp) {
-      // A blank header declares no application: an older or differently configured sender must not
-      // be treated as a foreign tenant just because its header is empty.
-      return appName != null && senderApp != null && !senderApp.isBlank() && !appName.equals(senderApp);
-    }
-
-    /** Total foreign-app drops since startup. */
+    /** Returns the cumulative count of foreign-application messages dropped since startup. */
     public long drops() {
       return foreignDropCounter.get();
     }
 
-    /** The most recently observed foreign sender appName, or {@code null}. */
+    /** Returns the most recently observed foreign sender {@code appName}, or {@code null}. */
     public @Nullable String lastForeignApp() {
       return lastForeignApp;
+    }
+
+    /** Returns {@code true} if {@code senderApp} names a different application than {@link #appName}. */
+    private boolean isForeign(@Nullable String senderApp) {
+      // Blank headers declare no tenant and must not be rejected as foreign during rolling upgrades.
+      return senderApp != null && !senderApp.isBlank() && !senderApp.equals(appName);
     }
   }
 }

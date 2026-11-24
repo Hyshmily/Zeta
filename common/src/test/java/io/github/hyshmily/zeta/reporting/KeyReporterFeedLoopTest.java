@@ -31,6 +31,7 @@ import java.lang.reflect.Field;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.atomic.AtomicBoolean;
+import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -76,7 +77,26 @@ class KeyReporterFeedLoopTest {
   }
 
   private KeyReporterImpl newReporter() {
-    return new KeyReporterImpl(testPublisher, "testApp", QUEUE_CAPACITY, 100, 1, ring, healthView);
+    return newReporter(null);
+  }
+
+  private KeyReporterImpl newReporter(@Nullable ReportFeedLoop feedLoop) {
+    return new KeyReporterImpl(testPublisher, "testApp", QUEUE_CAPACITY, 100, 1, ring, healthView, feedLoop);
+  }
+
+  /** Rebuilds the reporter and its tide around one feed-loop tuner. */
+  private void useFeedLoop(ReportFeedLoop feedLoop) {
+    reporterCounter.destroy();
+    reporter = newReporter(feedLoop);
+    reporterCounter = new AccessCounter(
+      mock(io.github.hyshmily.zeta.hotkeydetector.HotKeyDetector.class),
+      reporter,
+      scheduler,
+      50L,
+      AccessCounter.DEFAULT_DETECTOR_INTERVAL_MS
+    );
+    reporter.setCadenceAdjuster(reporterCounter::adjustDeliverIntervalMs);
+    reporterCounter.afterPropertiesSet();
   }
 
   @AfterEach
@@ -164,7 +184,7 @@ class KeyReporterFeedLoopTest {
   @Test
   void shadowMode_samplesAndExposes_butNeverApplies() throws Exception {
     registerWorker(healthView, "worker-1");
-    reporter.setIntervalFeedLoop(new ReportFeedLoop(ReportFeedLoop.Mode.SHADOW, 512, 50, 1000, 50));
+    useFeedLoop(new ReportFeedLoop(ReportFeedLoop.Mode.SHADOW, 512, 50, 1000, 50));
     reporter.start();
 
     Thread reporterThread = startContinuousReporter("shadow-key");
@@ -189,7 +209,7 @@ class KeyReporterFeedLoopTest {
   @Test
   void applyMode_movesTheTideBaseUpOnSparseBatches() throws Exception {
     registerWorker(healthView, "worker-1");
-    reporter.setIntervalFeedLoop(new ReportFeedLoop(ReportFeedLoop.Mode.ON, 512, 50, 1000, 50));
+    useFeedLoop(new ReportFeedLoop(ReportFeedLoop.Mode.ON, 512, 50, 1000, 50));
     reporter.start();
 
     Thread reporterThread = startContinuousReporter("apply-key");
@@ -214,7 +234,7 @@ class KeyReporterFeedLoopTest {
     // A dedicated reporter with no tide loop: publishDirect must not sample even
     // though the shared counter's idle tides do.
     KeyReporterImpl directOnly = newReporter();
-    directOnly.setIntervalFeedLoop(new ReportFeedLoop(ReportFeedLoop.Mode.ON, 512, 50, 1000, 50));
+    directOnly = newReporter(new ReportFeedLoop(ReportFeedLoop.Mode.ON, 512, 50, 1000, 50));
     directOnly.start();
     try {
       directOnly.publishDirect(java.util.Map.of("tag-only", 1L));
@@ -233,7 +253,7 @@ class KeyReporterFeedLoopTest {
     // No worker registered: the flush drops at the alive-set guard, before the
     // sampling point — the tuner must never see a sample, even for a non-empty
     // batch.
-    reporter.setIntervalFeedLoop(new ReportFeedLoop(ReportFeedLoop.Mode.ON, 512, 50, 1000, 50));
+    useFeedLoop(new ReportFeedLoop(ReportFeedLoop.Mode.ON, 512, 50, 1000, 50));
     reporter.start();
 
     reporter.publishBatch(java.util.Map.of("ghost-key", 1L), 50L);
@@ -245,7 +265,7 @@ class KeyReporterFeedLoopTest {
   @Test
   void emptyFlush_cyclesAreSampledAsZeroRate() throws Exception {
     registerWorker(healthView, "worker-1");
-    reporter.setIntervalFeedLoop(new ReportFeedLoop(ReportFeedLoop.Mode.ON, 512, 50, 1000, 50));
+    useFeedLoop(new ReportFeedLoop(ReportFeedLoop.Mode.ON, 512, 50, 1000, 50));
     reporter.start();
 
     // No keys ever reported: every tide is an empty window and must feed the

@@ -17,8 +17,8 @@ package io.github.hyshmily.zeta.util.version;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import io.github.hyshmily.zeta.cache.cachesupport.raw.CacheEntry;
+import io.github.hyshmily.zeta.cache.cachesupport.raw.QuietCache;
 import io.github.hyshmily.zeta.model.DecisionStamp;
-import io.github.hyshmily.zeta.model.KeyState;
 import io.github.hyshmily.zeta.sync.local.CacheSyncListener;
 import io.github.hyshmily.zeta.sync.worker.WorkerListener;
 import io.github.hyshmily.zeta.util.Internal;
@@ -33,12 +33,10 @@ import org.jspecify.annotations.Nullable;
  *
  * <p>Two independent version spaces are compared here:
  * <ul>
- *   <li><b>Decision space</b> — {@link #shouldSkipForWorker} for COOL and
- *       {@link #shouldSkipForHot} for HOT. {@code nodeId} and {@code epoch} are
- *       node-local: a different node id accepts on arrival, while the same node
- *       compares epoch and then {@code decisionVersion}. The HOT variant also
- *       re-applies an equal same-node/same-epoch decision to a resident that a
- *       local lifecycle transition demoted to {@link KeyState#NORMAL}.</li>
+ *   <li><b>Decision space</b> — {@link #shouldSkipForWorker} for both HOT and COOL
+ *       leases. {@code nodeId} and {@code epoch} are node-local: a different node id
+ *       accepts on arrival, while the same node compares epoch and then
+ *       {@code decisionVersion}.</li>
  *   <li><b>Data space</b> — {@link #shouldSkipForSync} (an equal stamp skips) and
  *       {@link #shouldSkipForRefresh} (an equal stamp applies), one numeric
  *       comparison over {@code dataVersion} (design decisions: version stamps).</li>
@@ -84,7 +82,7 @@ public final class VersionGuard {
   }
 
   /**
-   * WorkerListener guard for COOL decisions, with epoch and node-id awareness.
+   * Lease guard for Worker decisions, with epoch and node-id awareness.
    * <p>Decision logic:
    * <ol>
    * <li>No existing entry → accept (return false)</li>
@@ -105,72 +103,23 @@ public final class VersionGuard {
    *       (same counter, directly comparable)</li>
    * </ol>
    *
-   * @param existing the existing cache entry; may be null
+   * @param resident the resident lease stamp, or {@code null} when absent
    * @param incoming the incoming Worker decision stamp; must not be null
-   * @return true if the incoming message should be skipped, false if it should be applied
-   */
-  public static boolean shouldSkipForWorker(CacheEntry existing, DecisionStamp incoming) {
-    Objects.requireNonNull(incoming, "incoming must not be null");
-    return shouldSkipDecision(existing == null ? null : existing.decision(), incoming, false);
-  }
-
-  /**
-   * COOL guard against a resident decision stamp, for batch folding where the resident
-   * entry is read once and then advanced locally through the run.
-   *
-   * @param resident the resident decision stamp, or {@code null} when absent
-   * @param incoming the incoming Worker decision stamp; must not be null
-   * @return true if the incoming COOL should be skipped
+   * @return true if the incoming decision should be skipped, false if it should be applied
    */
   public static boolean shouldSkipForWorker(@Nullable DecisionStamp resident, DecisionStamp incoming) {
     Objects.requireNonNull(incoming, "incoming must not be null");
-    return shouldSkipDecision(resident, incoming, false);
+    return shouldSkipDecision(resident, incoming);
   }
 
-  /**
-   * WorkerListener guard for <b>HOT</b> decisions: identical to
-   * {@link #shouldSkipForWorker} except that an equal same-node/same-epoch
-   * decision re-applies when the resident is {@link KeyState#NORMAL}.
-   *
-   * <p>An entry demoted to NORMAL by a local lifecycle transition (background
-   * refresh or soft-expiry rebuild) keeps its decision stamp, so a redelivered
-   * duplicate would compare equal and be skipped forever — the key would stay
-   * NORMAL under a decision that still says HOT. An equal decision on a HOT or
-   * COOL resident is still a duplicate and skips.
-   *
-   * @param existing the existing cache entry; may be null
-   * @param incoming the incoming Worker decision stamp; must not be null
-   * @return true if the incoming HOT decision should be skipped
-   */
-  public static boolean shouldSkipForHot(CacheEntry existing, DecisionStamp incoming) {
-    Objects.requireNonNull(incoming, "incoming must not be null");
-    return shouldSkipDecision(
-      existing == null ? null : existing.decision(),
-      incoming,
-      existing != null && existing.getKeyState() == KeyState.NORMAL
-    );
-  }
-
-  private static boolean shouldSkipDecision(
-    @Nullable DecisionStamp resident,
-    DecisionStamp incoming,
-    boolean equalApplies
-  ) {
+  private static boolean shouldSkipDecision(@Nullable DecisionStamp resident, DecisionStamp incoming) {
     if (resident == null) {
       return false;
     }
-    String residentNode = resident.decisionNodeId();
-    String incomingNode = incoming.decisionNodeId();
     // A missing or blank node id is not an identity: two anonymous messages may come from
     // different Workers, and their epoch/version counters are not comparable. Arrival order is the
     // only sound tie-break, exactly as for two different named nodes.
-    if (
-      residentNode == null ||
-      residentNode.isBlank() ||
-      incomingNode == null ||
-      incomingNode.isBlank() ||
-      !residentNode.equals(incomingNode)
-    ) {
+    if (!resident.sameNodeAs(incoming)) {
       return false;
     }
 
@@ -184,8 +133,7 @@ public final class VersionGuard {
       return epochRollback(incoming, residentEpoch, incomingEpoch);
     }
 
-    long residentVersion = resident.decisionVersion();
-    return equalApplies ? residentVersion > incoming.decisionVersion() : residentVersion >= incoming.decisionVersion();
+    return resident.decisionVersion() >= incoming.decisionVersion();
   }
 
   /** Records one stale-incarnation skip: a same-node decision below the resident epoch. */
@@ -275,12 +223,11 @@ public final class VersionGuard {
    * check (DCL pattern). A second guard inside the {@code compute} block is still
    * needed for correctness.
    *
-   * <p>The lookup goes through {@link Cache#asMap()} on purpose: a sync-plane
-   * pre-check is not a caller read, so it must not record a hit/miss. It does
-   * still offer the node to Caffeine's read buffer and frequency sketch; a probe
-   * that must not influence eviction either uses
-   * {@code policy().getIfPresentQuietly}. The entry-level overload is called
-   * directly, with no capturing predicate.
+   * <p>The lookup is a quiet probe ({@link QuietCache#getIfPresent(Cache, Object)}): a
+   * sync-plane pre-check is not a caller read, so it records no hit/miss and offers nothing to
+   * Caffeine's read buffer or frequency sketch. A replacement {@link Cache} that rejects
+   * {@code policy()} falls back to {@link Cache#asMap()}, which is stats-quiet but
+   * policy-active. The entry-level overload is called directly, with no capturing predicate.
    *
    * @param cache               the local Caffeine L1 cache; must not be null
    * @param cacheKey            the cache key to look up; must not be null
@@ -294,6 +241,6 @@ public final class VersionGuard {
     String cacheKey,
     long incomingDataVersion
   ) {
-    return shouldSkipForRefresh(cache.asMap().get(cacheKey), incomingDataVersion);
+    return shouldSkipForRefresh(QuietCache.getIfPresent(cache, cacheKey), incomingDataVersion);
   }
 }

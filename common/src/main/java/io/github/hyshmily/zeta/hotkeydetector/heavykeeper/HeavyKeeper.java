@@ -24,7 +24,7 @@ import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ThreadLocalRandom;
-import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Consumer;
@@ -33,22 +33,20 @@ import org.jspecify.annotations.Nullable;
 import org.springframework.util.Assert;
 
 /**
- * HeavyKeeper — a Count-Min Sketch variant for approximate Top‑K tracking of frequently accessed
+ * HeavyKeeper — a Count-Min Sketch variant for approximate Top-K tracking of frequently accessed
  * keys.
  *
  * <p>Each key hashes into one bucket per row. A matching fingerprint increments the bucket; a
- * collision is resolved by a strictly larger batch taking the slot over, or by an occupant decay
- * whose per-unit probability is {@code decay^count}, so an established hot count is exponentially
- * protected from cold churn. A per-slot ring of {@link #windowCount} windows is rotated by
- * {@link #fading()}, so an estimate covers the most recent
- * {@code windowCount × decayInterval}.
+ * collision is resolved by a strictly larger batch taking over the slot, or by probabilistic
+ * occupant decay with per-unit probability {@code decay^count}, exponentially protecting hot
+ * keys from cold churn. A per-slot ring of {@link #windowCount} windows rotates on every
+ * {@link #fading()} call so estimates reflect the most recent
+ * {@code windowCount * decayInterval}.
  *
- * <p>Thread-safe: stripe monitors guard one bucket's compound update, member counts use a
- * lock-free {@link VarHandle} max-raise, and {@link #admissionLock} guards admission and the
- * decay sweep. The sketch stripes and {@code admissionLock} are never held together, so the
- * acquisition order cannot invert.
- *
- * <p>design decisions: sketch.
+ * <p><b>Thread safety.</b> Striped monitors guard individual sketch slot updates, member counts
+ * use lock-free {@link VarHandle} max-raises, and {@link #admissionLock} serializes Top-K
+ * admission, eviction, and membership decay. Sketch stripes and {@link #admissionLock} are never
+ * held simultaneously, preventing lock-order inversion.
  *
  * @see <a href="https://github.com/Hyshmily/Zeta/blob/master/docs/design-decisions.md">design decisions: sketch</a>
  */
@@ -57,54 +55,58 @@ import org.springframework.util.Assert;
 public class HeavyKeeper implements TopK {
 
   /**
-   * Release/acquire handle for a slot word: the fingerprint ({@code base}) and the running
-   * sum ({@code base + 1}). A writer publishes the fingerprint last, after the windows and the
-   * running sum; the lock-free {@link #probeSketch} reads it first with acquire ordering and
-   * re-checks it after reading the sum.
+   * Acquire/release {@link VarHandle} over {@link #table} words. Writers publish the slot
+   * fingerprint last (after window and running-sum updates); lock-free {@link #probeSketch}
+   * reads the fingerprint before and after the sum as a seqlock.
    */
   private static final VarHandle SLOT = MethodHandles.arrayElementVarHandle(int[].class);
 
-  /**
-   * Number of precomputed {@code decay^count} probabilities. Below this count the collision path
-   * pays one array read; above it {@link Math#pow} is used, which is rare because the probability
-   * is already negligible for the default decay.
-   */
-  private static final int DECAY_TABLE_SIZE = 256;
-
-  /**
-   * Probabilities below this are treated as zero. With {@code delta <= cur} in the collision
-   * branch, the maximum expected decrement is {@code cur * 1e-12}, which is below one for every
-   * {@code int}-bounded count.
-   */
-  private static final double MIN_DECAY_PROBABILITY = 1e-12;
-
-  /**
-   * Log every Nth "Failed to offer" warning (both offer sites share the counter).
-   * A power of two so the rate check is a bitmask AND.
-   */
-  private static final int EXPELLED_LOG_INTERVAL = 1024;
-
-  /**
-   * Floor of the {@link #raiseCount} deadband: {@code max(this, cur / 32)} keeps a
-   * low-count member from paying a locked CAS on every hit.
-   */
-  private static final int RAISE_DEADBAND_FLOOR = 16;
-
-  /** CAS handle for a member's {@code count}; the field is a plain volatile int. */
+  /** CAS {@link VarHandle} over {@link Node#count}. */
   private static final VarHandle MEMBER_COUNT;
 
-  /**
-   * Sentinel from {@link #expelIfBelowThreshold(String)}: the member was kept, so
-   * there is no departure to report.
-   */
+  /** Slot word offset of the running window sum relative to a slot base. */
+  private static final int SLOT_SUM_OFFSET = 1;
+
+  /** Slot word offset where the per-slot window ring begins relative to a slot base. */
+  private static final int SLOT_WINDOWS_OFFSET = 2;
+
+  /** Fixed header words per slot: fingerprint + running sum. */
+  private static final int SLOT_HEADER_SIZE = SLOT_WINDOWS_OFFSET;
+
+  /** Number of precomputed {@code decay^count} probabilities for the common small-count path. */
+  private static final int DECAY_TABLE_SIZE = 256;
+
+  /** Probabilities below this cutoff are treated as zero (expected decrement < 1 for any int). */
+  private static final double MIN_DECAY_PROBABILITY = 1e-12d;
+
+  /** Power-of-two warning rate limit for dropped {@link #expelledQueue} offers. */
+  private static final int EXPELLED_LOG_INTERVAL = 1024;
+
+  /** Minimum deadband in {@link #raiseCount} to avoid locked CAS traffic on every hot hit. */
+  private static final int RAISE_DEADBAND_FLOOR = 16;
+
+  /** Sentinel returned by {@link #expelIfBelowThreshold} when a member survives removal. */
   private static final long KEPT = -1L;
 
-  /**
-   * Membership tombstone written into a member's count when the node leaves the map.
-   * Counts are non-negative, so a fast-path raise that observes it must take the
-   * locked admission path instead of reporting the node hot.
-   */
+  /** Tombstone written into {@link Node#count} when a member leaves {@link #members}. */
   private static final int DETACHED = -1;
+
+  /** Golden-ratio 32-bit mixing constant used to derive independent row hashes. */
+  private static final int ROW_MIX_CONSTANT = 0x9e3779b9;
+
+  /** Maximum sketch width that can be rounded up to a power of two without int overflow. */
+  private static final int MAX_AUTO_ALIGN_WIDTH = 1 << 30;
+
+  /** Maximum supported per-slot window ring depth. */
+  private static final int MAX_WINDOW_COUNT = 1 << 20;
+
+  /** Lower and upper bounds on striped sketch lock count (power of two). */
+  private static final int MIN_LOCK_STRIPES = 64;
+  private static final int MAX_LOCK_STRIPES = 2048;
+
+  /** Thresholds governing direct vs. normal vs. Poisson sampling in {@link #sampleBinomial}. */
+  private static final long BINOMIAL_DIRECT_LIMIT = 10L;
+  private static final double BINOMIAL_NORMAL_VARIANCE_THRESHOLD = 5.0d;
 
   static {
     try {
@@ -118,121 +120,64 @@ public class HeavyKeeper implements TopK {
     }
   }
 
-  /** Counts failed expelled-queue offers; the WARN is logged once per {@link #EXPELLED_LOG_INTERVAL}. */
-  private final AtomicInteger expelledLogCounter = new AtomicInteger();
+  private final int k;
+  private final int width;
+  private final int depth;
+  private final int expelBelowCount;
+  private final int windowCount;
+  private final int windowMask;
+  private final int slotStride;
+  private final int totalSlots;
+  private final int widthMask;
+  private final boolean widthIsPow2;
+  private final double decayBase;
+  private final double[] decayPowers;
 
-  /**
-   * Authoritative TopK membership map. Key → {@link Node} with a volatile
-   * count supporting atomic max-raise on the hot path and atomic decay. Size is bounded by {@link #k} and
-   * enforced by {@link #admissionLock}. Reads and writes of the count on
-   * existing members are lock-free.
-   */
+  /** Flattened per-slot state: {@code [fingerprint, slotSum, w0..w(windowCount-1)]}. */
+  private final int[] table;
+
+  /** Power-of-two striped monitors serializing compound updates to individual sketch slots. */
+  private final Object[] lockStripes;
+  private final int lockMask;
+
+  /** Authoritative Top-K membership map (size bounded by {@link #k} under {@link #admissionLock}). */
   private final ConcurrentHashMap<String, Node> members;
 
-  /** Bounded blocking queue receiving expelled (evicted) key-count items for downstream consumption. */
+  /** Non-fair lock guarding compound admission, eviction, and decay sweeps on {@link #members}. */
+  private final ReentrantLock admissionLock;
+
+  /** Bounded queue receiving evicted or decay-dropped {@link Item} entries. */
   private final BlockingQueue<Item> expelledQueue;
 
   /** Decayed running total of recorded increments, exposed by {@link #total()}. */
   private final LongAdder total = new LongAdder();
 
-  /**
-   * Short, non-fair lock guarding the compound admission/eviction step on
-   * {@link #members} (read-min, insert, evict) and the decay sweep that
-   * re-synchronises and drops members. The hot max-raise path does not acquire
-   * this lock.
-   */
-  private final ReentrantLock admissionLock;
+  /** Cumulative failed {@link #expelledQueue} offers across eviction and decay sites. */
+  private final AtomicLong expelledLogCounter = new AtomicLong();
 
-  /** Striped lock objects for fine-grained concurrency on sketch slot updates. */
-  private final Object[] lockStripes;
+  /** Optional non-blocking observer notified outside {@link #admissionLock} on new admissions. */
+  private volatile @Nullable Consumer<String> admissionListener;
 
-  /**
-   * Base of the exponential collision-decay probability: a colliding unit removes one occupant
-   * unit with probability {@code decay^count}.
-   */
-  private final double decayBase;
-
-  /** Precomputed {@code decayBase^i} for {@code i < DECAY_TABLE_SIZE}. */
-  private final double[] decayPowers;
-
-  /**
-   * Membership count below which a member is dropped by {@link #decayMembership()}:
-   * {@code max(1, minCount)}. A member at zero has no live estimate and only starves
-   * a better candidate; the floor of 1 keeps a {@code minCount == 0} sketch expelling.
-   */
-  private final int expelBelowCount;
-
-  /** Number of time windows per sketch slot (ring buffer depth). */
-  private final int windowCount;
-
-  /** Ints per slot in {@link #table}: fingerprint + running sum + the window ring. */
-  private final int slotStride;
-
-  /** Slot count ({@code depth * width}) — the bound for whole-table sweeps. */
-  private final int totalSlots;
-
-  /** Bitmask for window index when windowCount is a power of two ({@code windowCount - 1}). */
-  private final int windowMask;
-
-  /** Bitmask for bucket index when {@link #width} is a power of two ({@code width - 1}). */
-  private final int widthMask;
-
-  /** Minimum sketch estimate a key needs before it may enter the TopK set. */
-  private final int minCount;
-
-  /** Bitmask for mapping bucket index to lock stripe (stripe count must be power of two). */
-  private final int lockMask;
-
-  /**
-   * Flattened per-slot state: {@code slotStride = 2 + windowCount} ints per slot,
-   * {@code [fingerprint, slotSum, w0 .. w(windowCount-1)]}. Adjacent ints keep every
-   * row probe within one cache line; {@code int} caps the footprint. The saturation
-   * guard in {@link #applyIncrement} keeps values at or below
-   * {@link Integer#MAX_VALUE}.
-   */
-  private final int[] table;
-
-  private final int width;
-
-  private final int depth;
-
-  private final int k;
-
-  /** {@code true} when {@link #width} is a power of two — enables mask-based bucket lookup. */
-  private final boolean widthIsPow2;
-
-  /**
-   * Optional admission observer. Invoked once for every key that newly enters
-   * the TopK set, under {@link #admissionLock}; the listener must not block,
-   * because it runs on the admitting thread — a {@code DETECT_ONLY} add runs it
-   * on the read-path caller.
-   */
-  private volatile Consumer<String> admissionListener;
-
-  /**
-   * Lowest member count across the TopK, maintained by the admission path and
-   * the decay sweep. Read as an O(1) fast-reject threshold by {@link #admit}.
-   */
+  /** O(1) lower-bound fast-reject threshold, zero while the Top-K set is not full. */
   private volatile long minMemberCount;
 
-  /** Active sketch window index, advanced once per {@link #fading()}. */
+  /** Currently active window ring index, advanced once per {@link #fading()} cycle. */
   private volatile int activeWindow;
 
   /**
-   * Construct a HeavyKeeper instance with full configuration.
+   * Constructs a {@link HeavyKeeper} sketch with full geometry and decay configuration.
    *
-   * @param k                     maximum number of hot keys to track
-   * @param width                 width of the Count-Min Sketch (number of columns per row)
-   * @param depth                 depth of the Count-Min Sketch (number of rows / hash functions)
-   * @param decay                 base of the exponential collision-decay probability; a larger
-   *                              value decays faster, a smaller value protects established counts
-   *                              longer
-   * @param minCount              minimum count threshold before a key can enter the TopK set
-   * @param expelledQueueCapacity capacity of the bounded blocking queue for expelled items
-   * @param windowCount           number of time windows per sketch slot (ring buffer depth, at
-   *                              least 2; rounded up to a power of two when the bean is created)
-   * @param autoAlignWidth        when {@code true} and width is not a power of two, automatically
-   *                              round up to the nearest power of two for faster bucket indexing
+   * @param k                     maximum number of hot keys tracked
+   * @param width                 sketch width (buckets per row)
+   * @param depth                 sketch depth (number of rows / hash functions)
+   * @param decay                 collision-decay base in {@code [0.0, 1.0]}
+   * @param minCount              minimum sketch estimate required for Top-K admission; the
+   *                              admission and decay gates use {@code max(1, minCount)}
+   * @param expelledQueueCapacity capacity of the bounded queue receiving expelled items
+   * @param windowCount           time windows per slot (at least 2; rounded up to a power of two)
+   * @param autoAlignWidth        {@code true} to round {@code width} up to a power of two for
+   *                              bitmask indexing
+   * @throws IllegalArgumentException if any parameter violates bounds or geometry overflows
    */
   public HeavyKeeper(
     int k,
@@ -244,72 +189,47 @@ public class HeavyKeeper implements TopK {
     int windowCount,
     boolean autoAlignWidth
   ) {
-    Assert.isTrue(k > 0, "k must be > 0, but got: " + k);
-    Assert.isTrue(width > 0, "width must be > 0, but got: " + width);
-    Assert.isTrue(depth > 0, "depth must be > 0, but got: " + depth);
-    Assert.isTrue(decay >= 0.0 && decay <= 1.0, "decay must be in [0.0, 1.0], but got: " + decay);
-    Assert.isTrue(minCount >= 0, "minCount must be >= 0, but got: " + minCount);
-    Assert.isTrue(windowCount >= 2, "windowCount must be >= 2, but got: " + windowCount);
-    Assert.isTrue(expelledQueueCapacity > 0, "expelledQueueCapacity must be > 0, but got: " + expelledQueueCapacity);
+    validateConfig(k, width, depth, decay, minCount, expelledQueueCapacity, windowCount);
 
-    if (autoAlignWidth && (width & (width - 1)) != 0) {
-      // highestOneBit(width - 1) << 1 overflows into the sign bit above 2^30.
+    if (autoAlignWidth && !isPowerOfTwo(width)) {
       Assert.isTrue(
-        width <= (1 << 30),
+        width <= MAX_AUTO_ALIGN_WIDTH,
         "width must be <= 1073741824 when autoAlignWidth is enabled, but got: " + width
       );
       int original = width;
-      width = Integer.highestOneBit(width - 1) << 1;
+      width = nextPowerOfTwo(width);
       log.info("Auto-aligned width from {} to {} to enable bitmask optimization", original, width);
     }
 
-    Assert.isTrue(windowCount <= (1 << 20), "windowCount must be <= 1048576, but got: " + windowCount);
-    if ((windowCount & (windowCount - 1)) != 0) {
+    Assert.isTrue(windowCount <= MAX_WINDOW_COUNT, "windowCount must be <= 1048576, but got: " + windowCount);
+    if (!isPowerOfTwo(windowCount)) {
       int original = windowCount;
-      windowCount = Integer.highestOneBit(windowCount - 1) << 1;
+      windowCount = nextPowerOfTwo(windowCount);
       log.info("Auto-aligned windowCount from {} to {} to enable bitmask optimization", original, windowCount);
     }
 
-    this.k = k;
-    this.width = width;
-    this.depth = depth;
-    this.minCount = minCount;
-    this.windowCount = windowCount;
-    this.windowMask = windowCount - 1;
-    this.expelBelowCount = Math.max(1, minCount);
-
-    this.decayBase = decay;
-    this.decayPowers = new double[DECAY_TABLE_SIZE];
-    double probability = 1.0;
-    for (int i = 0; i < DECAY_TABLE_SIZE; i++) {
-      decayPowers[i] = probability;
-      probability *= decay;
-    }
-
-    int totalSlots;
+    int computedSlots;
     int tableLength;
     try {
-      totalSlots = Math.multiplyExact(depth, width);
-      tableLength = Math.multiplyExact(totalSlots, 2 + windowCount);
+      computedSlots = Math.multiplyExact(depth, width);
+      tableLength = Math.multiplyExact(computedSlots, SLOT_HEADER_SIZE + windowCount);
     } catch (ArithmeticException e) {
       throw new IllegalArgumentException(
         "sketch geometry too large: depth=" + depth + ", width=" + width + ", windowCount=" + windowCount,
         e
       );
     }
-    int stripes = Math.min(2048, Math.max(64, totalSlots >> 4));
-    if ((stripes & (stripes - 1)) != 0) {
-      stripes = Integer.highestOneBit(stripes - 1) << 1;
-    }
-    this.totalSlots = totalSlots;
-    this.slotStride = 2 + windowCount;
-    this.table = new int[tableLength];
-    this.lockStripes = new Object[stripes];
-    for (int i = 0; i < stripes; i++) {
-      lockStripes[i] = new Object();
-    }
-    this.lockMask = stripes - 1;
-    this.widthIsPow2 = width > 0 && (width & (width - 1)) == 0;
+
+    this.k = k;
+    this.width = width;
+    this.depth = depth;
+    this.expelBelowCount = Math.max(1, minCount);
+    this.windowCount = windowCount;
+    this.windowMask = windowCount - 1;
+    this.slotStride = SLOT_HEADER_SIZE + windowCount;
+    this.totalSlots = computedSlots;
+    this.widthIsPow2 = isPowerOfTwo(width);
+    this.widthMask = width - 1;
     if (!widthIsPow2) {
       log.warn(
         "Width {} is not a power of two; bucket index will use the FastRange mapping " +
@@ -317,88 +237,50 @@ public class HeavyKeeper implements TopK {
         width
       );
     }
-    this.widthMask = width - 1;
 
+    this.decayBase = decay;
+    this.decayPowers = buildDecayPowers(decay);
+    this.table = new int[tableLength];
+    this.lockStripes = createLockStripes(computedSlots);
+    this.lockMask = lockStripes.length - 1;
     this.admissionLock = new ReentrantLock();
     this.members = new ConcurrentHashMap<>(k);
     this.expelledQueue = new ArrayBlockingQueue<>(expelledQueueCapacity);
   }
 
   /**
-   * Compute the bucket index for row {@code i} given the key fingerprint,
-   * using a fast bit-mask when {@link #width} is a power of two and a
-   * FastRange mapping otherwise (adapted from RocksDB
-   * {@code util/fastrange.h}): the high half of the {@code width × uint32}
-   * product consumes the full 32-bit fingerprint entropy and replaces the
-   * division with a single multiplication.
-   */
-  private int bucketIndex(int itemFingerprint, int row) {
-    int hash = itemFingerprint ^ (int) (row * 0x9e3779b97f4a7c15L);
-    return widthIsPow2 ? (hash & widthMask) : (int) (((hash & 0xFFFFFFFFL) * width) >>> 32);
-  }
-
-  /**
-   * 32-bit fingerprint for sketch slot indexing: the key's cached
-   * {@link String#hashCode()} passed through the Murmur3 finalizer. {@code 0} is the
-   * switching sentinel, so a real owner never carries it.
-   */
-  private static int fingerprint(String key) {
-    int fingerprint = Hashes.mix32(key.hashCode());
-    return fingerprint == 0 ? 1 : fingerprint;
-  }
-
-  /**
-   * Record {@code delta} accesses for {@code key} and return the TopK membership
-   * decision: the sketch update followed by {@link #admit}.
+   * Records {@code delta} accesses for {@code key} and returns the Top-K membership decision.
+   * Non-positive increments are ignored and return {@link AddResult#cold()}.
    *
-   * <p>A non-positive increment is ignored ({@link AddResult#cold()}): the sketch has
-   * no decrement protocol, so a negative value would corrupt windows and slot sums.
+   * @param key   the non-null key to record
+   * @param delta the access count to add
+   * @return the {@link AddResult} describing hot-key status and any evicted key
+   * @throws NullPointerException if {@code key} is {@code null}
    */
   @Override
   public AddResult addDirect(String key, long delta) {
     if (key == null) {
-      // Strict kernel: a null key is a caller bug. HotKeyDetector maps invalid keys.
       throw new NullPointerException("key must not be null");
     }
-    if (delta <= 0) {
+    if (delta <= 0L) {
       return AddResult.cold();
     }
-
     long increment = saturateIncrement(delta);
     total.add(increment);
-    return addOne(key, increment);
+    return addOne(key, increment, true);
   }
 
   /**
-   * Records one counted access: sketch update followed by the membership decision.
-   * Both entry points own the key, non-positive-delta and saturation guards and the
-   * {@link #total} accounting, so a batch can fold its increments into one update.
+   * Ingests a batch of key counts without allocating per-key result lists, folding the batch sum
+   * into a single {@link #total} update. Null keys and non-positive deltas are skipped.
    *
-   * <p>The membership lookup resolves the member's captured fingerprint, so it serves
-   * both the fingerprint and the admission decision in one {@link ConcurrentHashMap#get}.
-   *
-   * @param key   the key to record (non-null; the empty string is a legitimate key)
-   * @param delta the positive, {@code int}-saturated increment to record
+   * @param keyCounts map from key to positive access count, or {@code null}
    */
-  private AddResult addOne(String key, long delta) {
-    Node member = members.get(key);
-    int itemFingerprint = member != null ? member.fp : fingerprint(key);
-    long maxCount = addToSketch(itemFingerprint, delta);
-    return admit(key, maxCount, itemFingerprint, member);
-  }
-
-  /**
-   * Ingest a flushed counting batch without allocating a result list: the caller
-   * discards every {@link AddResult}. A null key or non-positive delta is skipped so
-   * one bad element cannot discard the whole flush.
-   *
-   * @param keyCounts map of keys to their access counts
-   */
-  public void ingestBatch(Map<String, Long> keyCounts) {
+  public void ingestBatch(@Nullable Map<String, Long> keyCounts) {
     if (keyCounts == null || keyCounts.isEmpty()) {
       return;
     }
-    long batchTotal = 0;
+    long batchTotal = 0L;
     for (Map.Entry<String, Long> entry : keyCounts.entrySet()) {
       String key = entry.getKey();
       Long delta = entry.getValue();
@@ -407,32 +289,27 @@ public class HeavyKeeper implements TopK {
       }
       long increment = saturateIncrement(delta);
       batchTotal += increment;
-      addOne(key, increment);
+      addOne(key, increment, false);
     }
-    // One LongAdder update per flush keeps the cost constant instead of linear in the batch.
-    if (batchTotal > 0) {
+    if (batchTotal > 0L) {
       total.add(batchTotal);
     }
   }
 
   /**
-   * Register the admission observer. The listener runs under
-   * {@link #admissionLock} on the admitting thread and must only hand the key
-   * to a bounded queue (or perform an equally cheap non-blocking action).
+   * Registers or detaches the observer invoked outside {@link #admissionLock} whenever a key newly
+   * enters the Top-K set. The listener must be fast and non-blocking.
    *
-   * @param listener the observer, or {@code null} to detach
+   * @param listener the admission listener, or {@code null} to detach
    */
   public void setAdmissionListener(@Nullable Consumer<String> listener) {
     this.admissionListener = listener;
   }
 
   /**
-   * Return the current TopK list sorted by frequency descending.
+   * Returns all tracked Top-K items sorted by count descending, with ties broken by key ascending.
    *
-   * <p>Delegates to {@link #listTopN(int)} with {@link #k} as the limit,
-   * equivalent to requesting all tracked hot keys.
-   *
-   * @return list of {@link Item} entries, never {@code null}
+   * @return sorted list of up to {@link #k} {@link Item} entries
    */
   @Override
   public List<Item> list() {
@@ -440,18 +317,10 @@ public class HeavyKeeper implements TopK {
   }
 
   /**
-   * Return the top {@code limit} hot keys sorted by frequency (descending),
-   * with ties broken by key name (ascending).
+   * Returns up to {@code limit} Top-K items sorted by count descending (ties by key ascending).
    *
-   * <p>Takes a lock-free snapshot of the current membership, sorts it, and
-   * returns at most {@code limit} entries. Each {@link Item} carries the count
-   * captured when the snapshot pair was taken (see
-   * {@link #snapshotItemsSorted}), so the ordering and the reported counts are
-   * mutually consistent even under concurrent membership mutation. A negative
-   * {@code limit} is rejected.
-   *
-   * @param limit maximum number of keys to return
-   * @return list of at most {@code limit} {@link Item} entries
+   * @param limit maximum number of entries to return; must be non-negative
+   * @return detached list of at most {@code limit} {@link Item} entries
    * @throws IllegalArgumentException if {@code limit} is negative
    */
   @Override
@@ -464,13 +333,10 @@ public class HeavyKeeper implements TopK {
   }
 
   /**
-   * Check whether the given key is currently in the TopK set.
-   *
-   * <p>This is an O(1) lookup — a direct {@link ConcurrentHashMap#containsKey}
-   * call instead of a sorted-list scan.
+   * Checks in O(1) time whether {@code key} is currently a member of the Top-K set.
    *
    * @param key the key to check
-   * @return {@code true} if the key is a current TopK member
+   * @return {@code true} if {@code key} is currently tracked as hot
    */
   @Override
   public boolean contains(String key) {
@@ -478,15 +344,9 @@ public class HeavyKeeper implements TopK {
   }
 
   /**
-   * Return the bounded blocking queue of expelled (evicted) key-count items.
+   * Returns the bounded queue receiving evicted and decay-dropped {@link Item} entries.
    *
-   * <p>Consumers should drain this queue periodically for asynchronous
-   * processing (e.g. monitoring, logging, or follow-up eviction actions).
-   * When the queue is full, further departure events are dropped and the WARN
-   * is rate-limited per {@link #EXPELLED_LOG_INTERVAL} failures, so the
-   * admission path is never blocked by a slow consumer.
-   *
-   * @return the {@link BlockingQueue} of evicted {@link Item entries}
+   * @return the expelled-items {@link BlockingQueue}
    */
   @Override
   public BlockingQueue<Item> expelled() {
@@ -494,19 +354,9 @@ public class HeavyKeeper implements TopK {
   }
 
   /**
-   * Rotate the sliding window: advance the active window and zero the stale one for
-   * every sketch slot, re-synchronise membership counts under {@link #admissionLock},
-   * and enqueue members that fall below {@link #expelBelowCount} to
-   * {@link #expelled()}.
-   *
-   * <p>Guarded by the instance monitor: two concurrent calls would advance the window
-   * and halve {@link #total} twice in one interval. The next window is zeroed
-   * <em>before</em> it is published as active, so a concurrent {@link #addToSketch}
-   * still sees the previous window and never writes into a window being zeroed.
-   *
-   * <p>{@code total.sumThenReset()} can drop a delta landing between sum and reset,
-   * and only half the observed sum is restored; both are bounded, self-correcting
-   * drifts that never feed a TopK decision.
+   * Rotates the sliding window ring: zeroes the expiring window across all sketch slots before
+   * publishing it as active, re-synchronizes and prunes Top-K membership under
+   * {@link #admissionLock}, and halves {@link #total}.
    */
   @Override
   public synchronized void fading() {
@@ -515,104 +365,89 @@ public class HeavyKeeper implements TopK {
     activeWindow = nextAw;
     decayMembership();
 
-    long half = total.sumThenReset() >> 1;
-    if (half > 0) {
-      total.add(half);
+    long decrement = total.sum();
+    if (decrement > 0L) {
+      // Difference-decrement instead of sumThenReset: a sumThenReset would wipe concurrent adds
+      // that landed between the two steps and briefly publish zero.
+      total.add(-(decrement - (decrement >> 1)));
     }
   }
 
   /**
-   * Return the approximate number of distinct keys currently tracked in the
-   * TopK set. This is an O(1) call backed by {@link ConcurrentHashMap#size()}.
+   * Returns the approximate number of keys currently in the Top-K set (at most {@link #k}).
    *
-   * @return number of keys in the hot set (at most {@link #k})
+   * @return current membership size
    */
   @Override
   public int estimatedSize() {
     return members.size();
   }
 
+  /**
+   * Returns the decayed running total of recorded increments.
+   *
+   * @return decayed total count
+   */
   @Override
   public long total() {
     return total.sum();
   }
 
   /**
-   * Lock-free read of the sketch's current windowed estimate for a fingerprint: the
-   * largest running slot sum among the rows that still carry it, or {@code -1} when
-   * every row has been taken over.
+   * Captures a consistent snapshot of {@link #members}, sorts by count descending and key
+   * ascending, and truncates to at most {@code limit} entries.
    *
-   * <p>{@code 0} and {@code -1} differ: a row that still carries the fingerprint with a
-   * zero sum means the key's traffic rolled out of the window and its seat should be
-   * released; {@code -1} means the sketch is blind to a possibly busy key, so the
-   * caller must decay conservatively. Taking the maximum matches
-   * {@link #addToSketch}'s over-estimate contract.
-   *
-   * <p>Deliberately lock-free: {@link #decayMembership()} calls this under
-   * {@code admissionLock}, and taking a stripe lock here would invert the class's
-   * stripe → admission order. The read is a seqlock: the fingerprint is read with acquire
-   * ordering, the sum with acquire ordering, and the fingerprint is re-read. A takeover
-   * clears the fingerprint before it rewrites the sum, so a matching second read means the
-   * payload belongs to this key — an older owner's fingerprint can never be paired with the
-   * incoming key's count.
-   *
-   * @param itemFingerprint the member's captured fingerprint
-   * @return the current estimate (possibly 0), or -1 when no row carries the fingerprint
+   * @param limit maximum number of entries to return
+   * @return sorted, detached list of {@link Item} entries
    */
-  private long probeSketch(int itemFingerprint) {
-    long max = 0;
-    boolean present = false;
-    for (int i = 0; i < depth; i++) {
-      int base = (i * width + bucketIndex(itemFingerprint, i)) * slotStride;
-      if ((int) SLOT.getAcquire(table, base) != itemFingerprint) {
-        continue;
-      }
-      long sum = (int) SLOT.getAcquire(table, base + 1);
-      if ((int) SLOT.getAcquire(table, base) != itemFingerprint) {
-        // The slot changed hands after the first read: its new payload is not this key's.
-        continue;
-      }
-      present = true;
-      if (sum > max) {
-        max = sum;
-      }
+  List<Item> snapshotItemsSorted(int limit) {
+    if (members.isEmpty()) {
+      return Collections.emptyList();
     }
-    return present ? max : -1L;
+    List<Item> snapshot = new ArrayList<>(members.size());
+    for (Node node : members.values()) {
+      // Clamp detached tombstones (-1) observed during weakly consistent iteration to 0.
+      snapshot.add(new Item(node.key, Math.max(0L, node.count)));
+    }
+    snapshot.sort((a, b) -> {
+      int cmp = Long.compare(b.count(), a.count());
+      return cmp != 0 ? cmp : a.key().compareTo(b.key());
+    });
+    return snapshot.size() > limit ? new ArrayList<>(snapshot.subList(0, limit)) : snapshot;
   }
 
   /**
-   * Clamp an external delta to the sketch's {@code int} counter range. Entry points
-   * reject non-positive values, so only the upper bound needs clamping.
+   * Updates the sketch for a single validated key/increment pair and executes Top-K admission.
+   *
+   * @param key   the non-null key
+   * @param delta the positive, {@code int}-saturated increment
+   * @param needResult {@code false} to skip the {@link AddResult} allocation on a batch ingest
+   * @return the membership {@link AddResult}
    */
-  private static long saturateIncrement(long delta) {
-    return Math.min(delta, Integer.MAX_VALUE);
+  private AddResult addOne(String key, long delta, boolean needResult) {
+    Node member = members.get(key);
+    int itemFingerprint = member != null ? member.fp : fingerprint(key);
+    long maxCount = addToSketch(itemFingerprint, delta);
+    return admit(key, maxCount, itemFingerprint, member, needResult);
   }
 
   /**
-   * Apply {@code delta} to the sketch for the key whose fingerprint is
-   * {@code itemFingerprint} and return the maximum cross-row slot sum observed.
-   * Dispatch: empty slot, matching fingerprint, size-aware takeover, or collision
-   * decay. The row's stripe lock is released before the next row. Callers pass a
-   * positive delta.
+   * Applies {@code delta} across all {@link #depth} sketch rows under per-slot striped locks and
+   * returns the maximum matching slot sum observed.
+   *
+   * @param itemFingerprint the key's 32-bit non-zero fingerprint
+   * @param delta           the positive, {@code int}-saturated increment
+   * @return the maximum cross-row slot estimate observed for {@code itemFingerprint}
    */
   private long addToSketch(int itemFingerprint, long delta) {
-    long maxCount = 0;
-
-    for (int i = 0; i < depth; i++) {
-      int index = i * width + bucketIndex(itemFingerprint, i);
-      Object lock = lockStripes[index & lockMask];
+    long maxCount = 0L;
+    for (int row = 0; row < depth; row++) {
+      int index = row * width + bucketIndex(itemFingerprint, row);
       int base = index * slotStride;
-
-      //noinspection SynchronizationOnLocalVariableOrMethodParameter
-      synchronized (lock) {
-        // Re-read the active window inside the stripe lock. fading() zeroes the
-        // next window BEFORE publishing it as active, so this read always
-        // targets a window that rotateSketchWindows has already passed (or has
-        // not yet reached), making the two operations disjoint per window.
+      synchronized (lockStripes[index & lockMask]) {
         int active = activeWindow;
-
-        long cur = table[base + 1];
-        if (cur == 0) {
+        long cur = table[base + SLOT_SUM_OFFSET];
+        if (cur == 0L) {
           maxCount = updateEmptySlot(base, active, itemFingerprint, delta, maxCount);
         } else if (table[base] == itemFingerprint) {
           maxCount = applyIncrement(base, active, delta, maxCount);
@@ -627,347 +462,360 @@ public class HeavyKeeper implements TopK {
   }
 
   /**
-   * Initialise an empty sketch slot: detach the previous owner, then write the window and sum,
-   * and publish the fingerprint last.
+   * Claims an empty sketch slot: clears any stale fingerprint sentinel first, records {@code delta}
+   * into the active window and running sum, and publishes {@code itemFingerprint} last with release
+   * semantics.
+   *
+   * @param base            the slot's starting index in {@link #table}
+   * @param active          the active window index
+   * @param itemFingerprint the incoming key's fingerprint
+   * @param delta           the positive increment
+   * @param maxCount        the running cross-row maximum
+   * @return the updated cross-row maximum
    */
   private long updateEmptySlot(int base, int active, int itemFingerprint, long delta, long maxCount) {
-    // The sum reads 0 but the slot may still carry the previous owner's fingerprint: park it
-    // on the switching sentinel before the payload moves, so a concurrent probe cannot pair
-    // the old fingerprint with this key's count.
     SLOT.setVolatile(table, base, 0);
     long next = applyIncrement(base, active, delta, maxCount);
-    // Ownership is published last: a lock-free probe that observes this fingerprint must also
-    // observe the window and the running sum written before it.
     SLOT.setRelease(table, base, itemFingerprint);
     return next;
   }
 
   /**
-   * Shared fast-path tail of {@link #updateEmptySlot} and the matching-fingerprint
-   * branch of {@link #addToSketch}: add {@code delta} to the active window and mirror
-   * it into the slot sum.
+   * Adds {@code delta} (saturated at {@link Integer#MAX_VALUE}) to both the active window word and
+   * the slot's running sum.
    *
-   * <p>The increment is clamped against the slot sum's remaining headroom, so the
-   * window and the sum stay in lockstep at {@link Integer#MAX_VALUE}. Saturation is a
-   * stop-condition, not steady state; callers pass a positive delta.
+   * @param base     the slot's starting index in {@link #table}
+   * @param active   the active window index
+   * @param delta    the positive increment
+   * @param maxCount the running cross-row maximum
+   * @return the updated cross-row maximum
    */
   private long applyIncrement(int base, int active, long delta, long maxCount) {
-    int curSum = table[base + 1];
+    int curSum = table[base + SLOT_SUM_OFFSET];
     int actualDelta = (int) Math.min(delta, (long) Integer.MAX_VALUE - curSum);
     int sum = curSum + actualDelta;
-    table[base + 2 + active] += actualDelta;
-    SLOT.setRelease(table, base + 1, sum);
+    table[base + SLOT_WINDOWS_OFFSET + active] += actualDelta;
+    SLOT.setRelease(table, base + SLOT_SUM_OFFSET, sum);
     return Math.max(maxCount, sum);
   }
 
   /**
-   * Hand an occupied slot to the incoming fingerprint: swap the fingerprint, wipe all
-   * windows, and replay {@code delta} into the active window. Both handover paths
-   * share this body so they leave identical state. Callers hold the stripe lock.
+   * Transfers ownership of an occupied slot to {@code itemFingerprint}: detaches the prior owner
+   * via sentinel {@code 0}, resets all windows, writes {@code delta} into the active window and
+   * sum, and publishes the new fingerprint last.
+   *
+   * @param base            the slot's starting index in {@link #table}
+   * @param active          the active window index
+   * @param itemFingerprint the incoming key's fingerprint
+   * @param delta           the incoming positive increment
+   * @param maxCount        the running cross-row maximum
+   * @return the updated cross-row maximum
    */
   private long takeoverSlot(int base, int active, int itemFingerprint, long delta, long maxCount) {
-    // Detach the previous owner before the payload moves: a probe that read the old
-    // fingerprint then sees the sentinel (or the new owner) on its second read and discards
-    // the sum it observed in between.
     SLOT.setVolatile(table, base, 0);
-    int winBase = base + 2;
+    int winBase = base + SLOT_WINDOWS_OFFSET;
     Arrays.fill(table, winBase, winBase + windowCount, 0);
     table[winBase + active] = (int) delta;
-    SLOT.setRelease(table, base + 1, (int) delta);
-    // Ownership last, for the same acquire/release reason as updateEmptySlot.
+    SLOT.setRelease(table, base + SLOT_SUM_OFFSET, (int) delta);
     SLOT.setRelease(table, base, itemFingerprint);
     return Math.max(maxCount, delta);
   }
 
   /**
-   * Collision-with-different-fingerprint path: each incoming unit removes one occupant unit with
-   * probability {@code decay^cur}, so an established high count is exponentially unlikely to lose
-   * a unit to a cold collision while a small count still turns over. The sampled decrement is capped
-   * at {@code min(delta, cur)}; when it consumes the slot the incoming fingerprint takes it over,
-   * otherwise every window is proportionally decayed.
+   * Resolves a fingerprint collision by sampling probabilistic decay units; takes over the slot if
+   * the occupant is fully depleted, otherwise proportionally decrements each window using
+   * Bresenham remainder carry while contributing nothing to the colliding caller's estimate.
    *
-   * <p>A collision contributes zero to the caller's {@code maxCount} unless the slot
-   * changes hands: a row still owned by another key must not inflate this key's
-   * estimate. The occupant's decay is still applied.
+   * @param base            the slot's starting index in {@link #table}
+   * @param active          the active window index
+   * @param itemFingerprint the colliding key's fingerprint
+   * @param delta           the colliding positive increment
+   * @param cur             the occupant's current positive slot sum
+   * @param maxCount        the caller's running cross-row maximum
+   * @return the updated cross-row maximum
    */
   private long decayCollisionSlot(int base, int active, int itemFingerprint, long delta, long cur, long maxCount) {
     long decays = collisionDecays(cur, delta);
-
-    if (decays == 0) {
-      // The occupant kept every unit: the proportional pass below would compute
-      // sub = 0 for every window and write each value back unchanged. Callers reach here
-      // with cur > 0, so 0 can never satisfy the full-displacement test.
+    if (decays == 0L) {
       return maxCount;
     }
-
     if (decays >= cur) {
-      // The incoming units consumed the slot: same handover as the size-aware path.
       return takeoverSlot(base, active, itemFingerprint, delta, maxCount);
     }
-    int winBase = base + 2;
-    // Decrement each window proportionally, keeping the slot sum in sync. The
-    // remainder is carried across windows (Bresenham), so the shares sum to exactly
-    // `decays` whenever the windows total `cur`.
-    //
-    // Long arithmetic is required but does not overflow: both factors are at most
-    // 2^31, so the product is at most 2^62, and the carry stays below `cur`.
-    long sumBefore = table[base + 1];
-    long totalSubtracted = 0;
-    long carry = 0;
+
+    int winBase = base + SLOT_WINDOWS_OFFSET;
+    long sumBefore = table[base + SLOT_SUM_OFFSET];
+    long totalSubtracted = 0L;
+    long carry = 0L;
 
     for (int w = 0; w < windowCount; w++) {
       int off = winBase + w;
-      long wv = table[off];
-      if (wv > 0) {
-        long num = wv * decays + carry;
-        long sub = num / cur;
-        carry = num % cur;
-        long newVal = Math.max(0, wv - sub);
-        totalSubtracted += wv - newVal;
+      long windowVal = table[off];
+      if (windowVal > 0L) {
+        long numerator = windowVal * decays + carry;
+        long sub = numerator / cur;
+        carry = numerator % cur;
+        long newVal = Math.max(0L, windowVal - sub);
+        totalSubtracted += windowVal - newVal;
         table[off] = (int) newVal;
       }
     }
-    SLOT.setRelease(table, base + 1, (int) Math.max(0, sumBefore - totalSubtracted));
-    // The slot still belongs to the occupant: the incoming key contributed
-    // nothing to it, so it must contribute nothing to the caller's estimate.
-    // Returning the occupant's decayed slotSum here would let any cold key
-    // sharing a slot inherit a hot key's count — a delta=1 collision could
-    // admit it to the TopK and evict the real member.
+    SLOT.setRelease(table, base + SLOT_SUM_OFFSET, (int) Math.max(0L, sumBefore - totalSubtracted));
     return maxCount;
   }
 
   /**
-   * Number of occupant units one collision removes: each of the {@code delta} incoming units
-   * independently decrements the slot with probability {@code decay^cur}, so the total is
-   * {@code Binomial(delta, decay^cur)} capped at {@code min(delta, cur)}.
+   * Lock-free seqlock probe returning the maximum running slot sum across rows currently owned by
+   * {@code itemFingerprint}, or {@code -1} if every row has been taken over by other keys.
    *
-   * @param cur   the occupant's current slot sum (positive)
-   * @param delta the incoming batch (positive, at most {@code cur} in this path)
-   * @return the decrement, {@code 0..min(delta, cur)}
+   * @param itemFingerprint the member's captured fingerprint
+   * @return the current non-negative estimate, or {@code -1} when no row carries the fingerprint
+   */
+  private long probeSketch(int itemFingerprint) {
+    long max = 0L;
+    boolean present = false;
+    for (int row = 0; row < depth; row++) {
+      int base = (row * width + bucketIndex(itemFingerprint, row)) * slotStride;
+      if ((int) SLOT.getAcquire(table, base) != itemFingerprint) {
+        continue;
+      }
+      long sum = (int) SLOT.getAcquire(table, base + SLOT_SUM_OFFSET);
+      if ((int) SLOT.getAcquire(table, base) != itemFingerprint) {
+        continue;
+      }
+      present = true;
+      if (sum > max) {
+        max = sum;
+      }
+    }
+    return present ? max : -1L;
+  }
+
+  /**
+   * Zeroes window {@code windowIndex} across every sketch slot under each owning stripe monitor
+   * and subtracts the expired contribution from each slot's running sum.
+   *
+   * @param windowIndex the expiring window ring index to clear
+   */
+  private void rotateSketchWindows(int windowIndex) {
+    for (int stripe = 0; stripe < lockStripes.length; stripe++) {
+      synchronized (lockStripes[stripe]) {
+        for (int slot = stripe; slot < totalSlots; slot += lockStripes.length) {
+          int base = slot * slotStride;
+          int off = base + SLOT_WINDOWS_OFFSET + windowIndex;
+          int oldWindow = table[off];
+          if (oldWindow != 0) {
+            table[off] = 0;
+            int sum = Math.max(0, table[base + SLOT_SUM_OFFSET] - oldWindow);
+            SLOT.setRelease(table, base + SLOT_SUM_OFFSET, sum);
+          }
+        }
+      }
+    }
+  }
+
+  /**
+   * Samples the number of occupant units removed by a colliding batch of size {@code delta}
+   * against an occupant count {@code cur}, capped at {@code min(delta, cur)}.
+   *
+   * @param cur   the occupant's current positive count
+   * @param delta the colliding batch size
+   * @return the number of units to decay in {@code [0, min(delta, cur)]}
    */
   @SuppressWarnings("squid:S2245")
   private long collisionDecays(long cur, long delta) {
     double probability = decayProbability(cur);
-    if (probability <= 0.0) {
+    if (probability <= 0.0d) {
       return 0L;
     }
-    long decays = probability >= 1.0 ? delta : sampleBinomial(delta, probability, ThreadLocalRandom.current());
+    long decays = probability >= 1.0d ? delta : sampleBinomial(delta, probability, ThreadLocalRandom.current());
     return Math.min(decays, Math.min(delta, cur));
   }
 
   /**
-   * The per-unit collision-decay probability {@code decay^cur}. A precomputed table covers the
-   * small counts where collisions are common; beyond it the probability is either negligible
-   * (treated as zero) or computed directly.
+   * Returns the per-unit collision-decay probability {@code decayBase^cur}, using the precomputed
+   * lookup table for small counts and clamping negligible probabilities to zero.
    *
-   * @param cur the occupant's current slot sum
-   * @return the probability, {@code 0.0..1.0}
+   * @param cur the occupant's current slot count
+   * @return the decay probability in {@code [0.0, 1.0]}
    */
   private double decayProbability(long cur) {
     if (cur < DECAY_TABLE_SIZE) {
       return decayPowers[(int) cur];
     }
     double probability = Math.pow(decayBase, cur);
-    return probability < MIN_DECAY_PROBABILITY ? 0.0 : probability;
+    return probability < MIN_DECAY_PROBABILITY ? 0.0d : probability;
   }
 
   /**
-   * Zero the now-stale window ({@code aw}) for every sketch slot under its
-   * owning stripe lock, keeping each slot's running sum in sync.
+   * Computes the column index for {@code itemFingerprint} on {@code row}, using bitmasking when
+   * {@link #width} is a power of two and FastRange mapping otherwise.
+   *
+   * @param itemFingerprint the key's 32-bit fingerprint
+   * @param row             the zero-based row index
+   * @return the bucket column index in {@code [0, width)}
    */
-  private void rotateSketchWindows(int aw) {
-    for (int stripe = 0; stripe < lockStripes.length; stripe++) {
-      synchronized (lockStripes[stripe]) {
-        for (int i = stripe; i < totalSlots; i += lockStripes.length) {
-          int base = i * slotStride;
-          int off = base + 2 + aw;
-          int oldWindow = table[off];
-          if (oldWindow != 0) {
-            table[off] = 0;
-            int sum = table[base + 1] - oldWindow;
-            if (sum < 0) {
-              // Defensive clamp: the window sum can only exceed the running sum after
-              // the two saturation guards diverge, never from a concurrent update
-              // (the stripe lock serialises every writer of this slot).
-              sum = 0;
-            }
-            SLOT.setRelease(table, base + 1, sum);
-          }
-        }
-      }
-    }
+  private int bucketIndex(int itemFingerprint, int row) {
+    int hash = row == 0 ? itemFingerprint : Hashes.mix32(itemFingerprint + row * ROW_MIX_CONSTANT);
+    return widthIsPow2 ? (hash & widthMask) : (int) (((hash & 0xFFFFFFFFL) * width) >>> 32);
   }
 
   /**
-   * Re-synchronise every TopK membership count with the sketch under
-   * {@link #admissionLock}, and drop members whose count falls below
-   * {@link #expelBelowCount}.
+   * Computes a non-zero 32-bit Murmur3-mixed fingerprint for {@code key} ({@code 0} is reserved as
+   * the slot-transition sentinel).
    *
-   * <p>The sketch is the single source of truth: a member's count is re-read from its
-   * slot sums, so a key whose traffic stopped reaches zero exactly when the window
-   * rolls past it. When every row has been taken over, {@link #probeSketch} returns
-   * {@code -1} — the sketch is blind, not the key cold — and the member halves instead
-   * of dropping.
-   *
-   * <p>A member below {@code minCount} can never be re-admitted and only depresses
-   * {@link #minMemberCount}, so it is dropped. A lock-free raise landing between the
-   * final read and the removal is re-admitted on its next add.
+   * @param key the non-null key
+   * @return a non-zero 32-bit fingerprint
    */
-  private void decayMembership() {
-    admissionLock.lock();
-    try {
-      List<String> dropped = null;
-      for (Node n : members.values()) {
-        // One CAS loop; the value is re-derived on every retry so a concurrent raise
-        // is judged by the same rule instead of being overwritten.
-        int current = synchronizeMemberCount(n);
-        if (current < expelBelowCount) {
-          // Double-check: admit()'s lock-free fast path may have raised the count
-          // between our CAS and here. If so, keep the member.
-          if (n.count >= expelBelowCount) {
-            continue;
-          }
-          if (dropped == null) {
-            dropped = new ArrayList<>();
-          }
-          dropped.add(n.key);
-        }
-      }
-      if (dropped != null) {
-        for (String key : dropped) {
-          long departedAt = expelIfBelowThreshold(key);
-          if (departedAt != KEPT) {
-            // Same loss accounting as the admission path in evictMinAndPut:
-            // a full expelledQueue silently drops the decay-drop, and the
-            // shared expelledLogCounter rate-limits the WARN (one per
-            // EXPELLED_LOG_INTERVAL failures across both offer sites).
-            offerExpelled(key, departedAt, "decay-dropped key");
-          }
-        }
-      }
-      Node min = findMinMember();
-      minMemberCount = min == null ? 0L : min.count;
-    } finally {
-      admissionLock.unlock();
-    }
+  private static int fingerprint(String key) {
+    int fp = Hashes.mix32(key.hashCode());
+    return fp == 0 ? 1 : fp;
   }
 
-  /**
-   * Re-synchronise one member's count with the sketch, retrying against a concurrent
-   * raise or decay. A move that would not change the value returns without a CAS.
-   *
-   * @param node the member to synchronise
-   * @return the value in the field after the call
-   */
-  private int synchronizeMemberCount(Node node) {
-    for (;;) {
-      int prev = node.count;
-      long observed = probeSketch(node.fp);
-      // observed >= 0: a row still carries the fingerprint, so the value is
-      // authoritative even at 0. -1: every row was taken over — halve, costing one
-      // cycle rather than the seat.
-      int next = observed >= 0 ? (int) Math.min(observed, Integer.MAX_VALUE) : prev >> 1;
-      if (next == prev) {
-        return prev;
-      }
-      int witness = (int) MEMBER_COUNT.compareAndExchange(node, prev, next);
-      if (witness == prev) {
-        return next;
-      }
-    }
-  }
+  /** Sentinel result for a batch ingest that discards the outcome but must preserve the admission notification. */
+  private static final AddResult ADMITTED_SILENT = new AddResult(null, true, "");
 
   /**
-   * Remove one member unless its count was raised back to {@link #expelBelowCount}
-   * since {@link #decayMembership()}'s first pass.
+   * Evaluates Top-K membership for {@code key} given its sketch estimate {@code maxCount}: existing
+   * members max-raise lock-free, while new candidates or detached nodes take {@link #admissionLock}.
    *
-   * <p>The decision is re-made atomically inside the map's per-key critical section,
-   * so a concurrent revive is never lost; the departure count is captured in the same
-   * section.
-   *
-   * @param key the candidate member
-   * @return the count the member held at departure, or {@link #KEPT} when it survived
+   * @param key             the candidate key
+   * @param maxCount        the current sketch estimate
+   * @param itemFingerprint the key's 32-bit fingerprint
+   * @param resolvedMember  previously looked-up {@link Node}, or {@code null}
+   * @param needResult      {@code false} for a batch ingest that discards the result
+   * @return the {@link AddResult}, or {@link #ADMITTED_SILENT} when the result is not requested
    */
-  private long expelIfBelowThreshold(String key) {
-    long[] departedAt = { KEPT };
-    members.compute(key, (k, node) -> {
-      if (node == null) {
-        return null; // already departed — whoever removed it reported it
-      }
-      for (;;) {
-        int count = node.count;
-        if (count >= expelBelowCount) {
-          return node;
-        }
-        // Tombstone the departing node atomically: a lock-free raise that won the race is
-        // captured in the departure count instead of being overwritten by the removal.
-        if ((int) MEMBER_COUNT.compareAndExchange(node, count, DETACHED) == count) {
-          departedAt[0] = count;
-          return null;
-        }
-      }
-    });
-    return departedAt[0];
-  }
-
-  /**
-   * Apply the TopK membership decision for a key whose sketch estimate is
-   * {@code maxCount}.
-   *
-   * <p>An existing member is max-raised lock-free; a concurrent eviction tombstones
-   * its node, so the failed raise falls through to the locked admission path and
-   * re-admits the key. A key below {@code minCount} is rejected without locking.
-   * The admission path takes {@link #admissionLock}, re-checks membership, applies the
-   * O(1) minimum fast-reject, then inserts or evicts.
-   *
-   * @param key             the key to admit or refresh
-   * @param maxCount        the sketch estimate backing the decision
-   * @param itemFingerprint the key's resolved sketch fingerprint
-   * @param resolvedMember  the member {@link #addOne} already resolved, or {@code null};
-   *                        passing it removes a second {@link ConcurrentHashMap#get}
-   */
-  private AddResult admit(String key, long maxCount, int itemFingerprint, @Nullable Node resolvedMember) {
-    if (maxCount < minCount) {
+  private AddResult admit(
+    String key,
+    long maxCount,
+    int itemFingerprint,
+    @Nullable Node resolvedMember,
+    boolean needResult
+  ) {
+    if (maxCount < expelBelowCount) {
       return AddResult.cold();
     }
-    // Fast path: an existing member is max-raised without the lock. A concurrent
-    // eviction marks the node DETACHED; the failed raise falls through to the locked
-    // path, which re-admits the key and fires the admission observer.
     if (resolvedMember != null && raiseCount(resolvedMember, (int) maxCount)) {
-      return new AddResult(null, true, key);
+      return needResult ? new AddResult(null, true, key) : ADMITTED_SILENT;
     }
-    // Admission path: brand-new candidate, may enter or evict.
+    // Lock-free fast reject: minMemberCount is zero while the set is not full, so this can only
+    // refuse a candidate that cannot displace the current minimum.
+    if (resolvedMember == null && maxCount <= minMemberCount) {
+      return AddResult.cold();
+    }
+
+    AddResult result;
+    boolean newlyAdmitted;
     admissionLock.lock();
     try {
-      // Double-check under lock — another thread may have admitted this key.
       Node existing = members.get(key);
       if (existing != null) {
         raiseCount(existing, (int) maxCount);
-        return new AddResult(null, true, key);
+        return needResult ? new AddResult(null, true, key) : ADMITTED_SILENT;
       }
-      // O(1) fast reject: can't beat the current minimum member.
-      if (members.size() >= k && maxCount < minMemberCount) {
+      if (members.size() >= k && maxCount <= minMemberCount) {
         return AddResult.cold();
       }
-      return admitOrEvict(key, maxCount, itemFingerprint);
+      result = admitOrEvict(key, maxCount, itemFingerprint);
+      newlyAdmitted = result.isHotKey();
     } finally {
       admissionLock.unlock();
     }
+    if (newlyAdmitted) {
+      notifyAdmitted(key);
+    }
+    return needResult || !newlyAdmitted ? result : ADMITTED_SILENT;
   }
 
   /**
-   * Raise a member's count to {@code maxCount} when the estimate has grown past it by
-   * enough to be worth publishing.
+   * Inserts a new member or evicts the minimum member when {@link #members} is full; caller holds
+   * {@link #admissionLock}. Reuses one O(k) scan to resolve both the victim and runner-up floor.
    *
-   * <p>The deadband ({@code max(16, cur / 32)}) avoids a locked CAS on every hit: the
-   * stored count only feeds TopK ordering and the eviction floor, both of which
-   * tolerate a few percent of lag, while a member near {@link #minMemberCount} still
-   * raises eagerly because there the lag decides its seat. Observing the
-   * {@link #DETACHED} tombstone returns {@code false} so the caller re-admits.
+   * @param key             the incoming key
+   * @param maxCount        the incoming key's sketch estimate
+   * @param itemFingerprint the incoming key's fingerprint
+   * @return the resulting {@link AddResult}
+   */
+  private AddResult admitOrEvict(String key, long maxCount, int itemFingerprint) {
+    if (members.size() < k) {
+      members.put(key, new Node(key, maxCount, itemFingerprint));
+      if (members.size() >= k) {
+        // This insert filled the set: the fast-reject floor becomes meaningful now.
+        Node min = findMinMember();
+        minMemberCount = min == null ? 0L : min.count;
+      } else {
+        // The set is not full: every fresh candidate is admissible, so the floor is 0.
+        minMemberCount = 0L;
+      }
+      return new AddResult(null, true, key);
+    }
+
+    MinPair pair = findTwoSmallest();
+    if (maxCount <= pair.minCount()) {
+      minMemberCount = pair.minCount();
+      return AddResult.cold();
+    }
+    if (isStaleMinimum(pair, maxCount)) {
+      pair = findTwoSmallest();
+      if (maxCount <= pair.minCount()) {
+        minMemberCount = pair.minCount();
+        return AddResult.cold();
+      }
+    }
+
+    String expelledKey = evictMinAndPut(key, maxCount, itemFingerprint, pair.min());
+    minMemberCount = Math.min(maxCount, pair.secondCount());
+    return new AddResult(expelledKey, true, key);
+  }
+
+  /**
+   * Checks whether a lock-free count raise pushed {@code pair.min()} above either the runner-up or
+   * the newcomer since the scan completed.
    *
-   * @param node     the member to raise
-   * @param maxCount the sketch's current estimate for the key
-   * @return {@code true} when the node is still a live member
+   * @param pair     the scanned minimum and runner-up
+   * @param maxCount the newcomer's estimate
+   * @return {@code true} if the minimum must be re-resolved before eviction
+   */
+  private boolean isStaleMinimum(MinPair pair, long maxCount) {
+    Node min = pair.min();
+    if (min == null) {
+      return false;
+    }
+    long liveMinCount = min.count;
+    return liveMinCount > pair.secondCount() || liveMinCount >= maxCount;
+  }
+
+  /**
+   * Tombstones and removes {@code min} from {@link #members}, offers it to {@link #expelledQueue},
+   * and inserts the newcomer {@code key}. Caller holds {@link #admissionLock}.
+   *
+   * @param key             the incoming key
+   * @param count           the incoming key's count
+   * @param itemFingerprint the incoming key's fingerprint
+   * @param min             the victim node to evict, or {@code null}
+   * @return the evicted key, or {@code null} if none was evicted
+   */
+  private @Nullable String evictMinAndPut(String key, long count, int itemFingerprint, @Nullable Node min) {
+    String expelledKey = null;
+    if (min != null) {
+      int finalCount = (int) MEMBER_COUNT.getAndSet(min, DETACHED);
+      if (members.remove(min.key, min)) {
+        expelledKey = min.key;
+        offerExpelled(expelledKey, Math.max(0, finalCount), "expelled key");
+      }
+    }
+    members.put(key, new Node(key, count, itemFingerprint));
+    return expelledKey;
+  }
+
+  /**
+   * Lock-free max-raise of an existing member's count with a deadband of {@code max(16, cur / 32)}
+   * for safe interior members while raising eagerly near {@link #minMemberCount}.
+   *
+   * @param node     the member node
+   * @param maxCount the new sketch estimate
+   * @return {@code true} if {@code node} is still attached; {@code false} if {@link #DETACHED}
    */
   private boolean raiseCount(Node node, int maxCount) {
     int cur = node.count;
@@ -997,13 +845,146 @@ public class HeavyKeeper implements TopK {
   }
 
   /**
-   * Offer a departing key to {@link #expelledQueue}. A full queue drops the departure
-   * (tolerated by design); the shared {@link #expelledLogCounter} rate-limits the WARN
-   * across both offer sites.
+   * Re-synchronizes every member's count against the sketch under {@link #admissionLock}, drops
+   * members below {@link #expelBelowCount}, and refreshes {@link #minMemberCount}.
+   */
+  private void decayMembership() {
+    admissionLock.lock();
+    try {
+      // The sweep may drop members below k; the fast-reject floor is only meaningful on a full set.
+      minMemberCount = 0L;
+      List<String> dropped = null;
+      for (Node node : members.values()) {
+        int current = synchronizeMemberCount(node);
+        if (current < expelBelowCount && node.count < expelBelowCount) {
+          if (dropped == null) {
+            dropped = new ArrayList<>();
+          }
+          dropped.add(node.key);
+        }
+      }
+      if (dropped != null) {
+        for (String key : dropped) {
+          long departedAt = expelIfBelowThreshold(key);
+          if (departedAt != KEPT) {
+            offerExpelled(key, departedAt, "decay-dropped key");
+          }
+        }
+      }
+      if (members.size() >= k) {
+        Node min = findMinMember();
+        minMemberCount = min == null ? 0L : min.count;
+      }
+    } finally {
+      admissionLock.unlock();
+    }
+  }
+
+  /**
+   * Synchronizes one member's count with {@link #probeSketch}: adopts the authoritative sketch
+   * estimate when present, or halves the count if all sketch rows were taken over.
+   *
+   * @param node the member node to synchronize
+   * @return the resulting count stored in {@code node}
+   */
+  private int synchronizeMemberCount(Node node) {
+    for (;;) {
+      int prev = node.count;
+      long observed = probeSketch(node.fp);
+      int next = observed >= 0L ? (int) Math.min(observed, Integer.MAX_VALUE) : prev >> 1;
+      if (next == prev) {
+        return prev;
+      }
+      int witness = (int) MEMBER_COUNT.compareAndExchange(node, prev, next);
+      if (witness == prev) {
+        return next;
+      }
+    }
+  }
+
+  /**
+   * Atomically tombstones and removes {@code key} inside its map bin if its live count remains
+   * below {@link #expelBelowCount}, capturing the exact departure count.
+   *
+   * @param key the candidate member key
+   * @return the member's departure count, or {@link #KEPT} if revived concurrently
+   */
+  private long expelIfBelowThreshold(String key) {
+    long[] departedAt = { KEPT };
+    members.compute(key, (k, node) -> {
+      if (node == null) {
+        return null;
+      }
+      for (;;) {
+        int count = node.count;
+        if (count >= expelBelowCount) {
+          return node;
+        }
+        if ((int) MEMBER_COUNT.compareAndExchange(node, count, DETACHED) == count) {
+          departedAt[0] = count;
+          return null;
+        }
+      }
+    });
+    return departedAt[0];
+  }
+
+  /**
+   * Returns the minimum member under deterministic eviction ordering, or {@code null} when empty.
+   *
+   * @return the minimum {@link Node}, or {@code null}
+   */
+  private @Nullable Node findMinMember() {
+    return findTwoSmallest().min();
+  }
+
+  /**
+   * Scans {@link #members} once to find the smallest member (victim) and the second-smallest count
+   * (new floor after eviction).
+   *
+   * @return {@link MinPair} containing the victim, its scanned count, and the runner-up count
+   */
+  private MinPair findTwoSmallest() {
+    long minVal = Long.MAX_VALUE;
+    long secondVal = Long.MAX_VALUE;
+    String minKey = null;
+    Node min = null;
+
+    for (Node node : members.values()) {
+      long count = node.count;
+      if (beatsAsMin(count, node.key, minVal, minKey)) {
+        secondVal = minVal;
+        minVal = count;
+        minKey = node.key;
+        min = node;
+      } else if (count < secondVal) {
+        secondVal = count;
+      }
+    }
+    return new MinPair(min, minVal, secondVal);
+  }
+
+  /**
+   * Compares a candidate {@code (count, key)} against the current minimum under deterministic
+   * eviction order: smaller count wins, with ties broken by lexicographically smaller key.
+   *
+   * @param count    the candidate count
+   * @param key      the candidate key
+   * @param minCount the current minimum count
+   * @param minKey   the current minimum key, or {@code null} before the first element
+   * @return {@code true} if the candidate is strictly smaller under eviction order
+   */
+  private static boolean beatsAsMin(long count, String key, long minCount, @Nullable String minKey) {
+    return count < minCount || (count == minCount && (minKey == null || key.compareTo(minKey) < 0));
+  }
+
+  /**
+   * Offers a departing item to {@link #expelledQueue}, dropping silently when full and
+   * rate-limiting warnings to once every {@link #EXPELLED_LOG_INTERVAL} failures.
    *
    * @param key       the departing key
-   * @param count     the key's count at departure
-   * @param siteLabel WARN text fragment identifying the offer site
+   * @param count     the count at departure
+   * @param siteLabel descriptive label identifying eviction vs. decay drop
    */
   private void offerExpelled(String key, long count, String siteLabel) {
     if (expelledQueue.offer(new Item(key, count))) {
@@ -1020,16 +1001,16 @@ public class HeavyKeeper implements TopK {
   }
 
   /**
-   * Tell the admission observer that {@code key} just entered the TopK set.
-   * Runs under {@link #admissionLock}; a listener failure must never break
-   * admission (the event is an optimization, the TopK state is authoritative).
+   * Notifies {@link #admissionListener} of a newly admitted hot key, isolating runtime exceptions
+   * so listener failures never disrupt Top-K accounting.
+   *
+   * @param key the newly admitted key
    */
   private void notifyAdmitted(String key) {
     Consumer<String> listener = admissionListener;
     if (listener == null) {
       return;
     }
-
     try {
       listener.accept(key);
     } catch (RuntimeException e) {
@@ -1038,267 +1019,184 @@ public class HeavyKeeper implements TopK {
   }
 
   /**
-   * Admit or evict under {@link #admissionLock}. Called only when the key is not yet a
-   * member and the O(1) fast-reject has passed. The O(k) scan is reused for the victim
-   * and the runner-up, so the closing {@code minMemberCount} refresh never walks the
-   * map again.
+   * Validates raw constructor parameters before alignment and allocation.
+   *
+   * @param k                     Top-K capacity
+   * @param width                 sketch width
+   * @param depth                 sketch depth
+   * @param decay                 collision-decay base
+   * @param minCount              admission floor
+   * @param expelledQueueCapacity expelled queue capacity
+   * @param windowCount           window ring depth
+   * @throws IllegalArgumentException if any parameter is out of range
    */
-  private AddResult admitOrEvict(String key, long maxCount, int itemFingerprint) {
-    if (members.size() < k) {
-      members.put(key, new Node(key, maxCount, itemFingerprint));
-      if (maxCount < minMemberCount || members.size() == 1) {
-        minMemberCount = maxCount;
+  private static void validateConfig(
+    int k,
+    int width,
+    int depth,
+    double decay,
+    int minCount,
+    int expelledQueueCapacity,
+    int windowCount
+  ) {
+    Assert.isTrue(k > 0, "k must be > 0, but got: " + k);
+    Assert.isTrue(width > 0, "width must be > 0, but got: " + width);
+    Assert.isTrue(depth > 0, "depth must be > 0, but got: " + depth);
+    Assert.isTrue(decay >= 0.0d && decay <= 1.0d, "decay must be in [0.0, 1.0], but got: " + decay);
+    Assert.isTrue(minCount >= 0, "minCount must be >= 0, but got: " + minCount);
+    Assert.isTrue(windowCount >= 2, "windowCount must be >= 2, but got: " + windowCount);
+    Assert.isTrue(expelledQueueCapacity > 0, "expelledQueueCapacity must be > 0, but got: " + expelledQueueCapacity);
+  }
+
+  /**
+   * Precomputes {@code decay^i} for {@code 0 <= i < DECAY_TABLE_SIZE}.
+   *
+   * @param decay the collision-decay base
+   * @return the lookup table of decay powers
+   */
+  private static double[] buildDecayPowers(double decay) {
+    double[] powers = new double[DECAY_TABLE_SIZE];
+    double probability = 1.0d;
+    for (int i = 0; i < DECAY_TABLE_SIZE; i++) {
+      powers[i] = probability;
+      probability *= decay;
+    }
+    return powers;
+  }
+
+  /**
+   * Allocates a power-of-two array of striped monitor objects sized proportionally to
+   * {@code totalSlots} within {@code [MIN_LOCK_STRIPES, MAX_LOCK_STRIPES]}.
+   *
+   * @param totalSlots total number of sketch slots ({@code depth * width})
+   * @return the lock-stripe array
+   */
+  private static Object[] createLockStripes(int totalSlots) {
+    int stripes = Math.min(MAX_LOCK_STRIPES, Math.max(MIN_LOCK_STRIPES, totalSlots >> 4));
+    if (!isPowerOfTwo(stripes)) {
+      stripes = nextPowerOfTwo(stripes);
+    }
+    Object[] lockArray = new Object[stripes];
+    for (int i = 0; i < stripes; i++) {
+      lockArray[i] = new Object();
+    }
+    return lockArray;
+  }
+
+  /**
+   * Returns whether a positive integer {@code value} is a power of two.
+   *
+   * @param value the value to check
+   * @return {@code true} if {@code value > 0} and has a single set bit
+   */
+  private static boolean isPowerOfTwo(int value) {
+    return value > 0 && (value & (value - 1)) == 0;
+  }
+
+  /**
+   * Rounds a non-power-of-two positive integer up to the next power of two.
+   *
+   * @param value a positive integer at most {@code 1 << 30}
+   * @return the smallest power of two strictly greater than {@code value - 1}
+   */
+  private static int nextPowerOfTwo(int value) {
+    return Integer.highestOneBit(value - 1) << 1;
+  }
+
+  /**
+   * Clamps a positive external increment to the sketch's {@code int} counter range.
+   *
+   * @param delta a positive increment
+   * @return {@code min(delta, Integer.MAX_VALUE)}
+   */
+  private static long saturateIncrement(long delta) {
+    return Math.min(delta, Integer.MAX_VALUE);
+  }
+
+  /**
+   * Samples from {@code Binomial(n, p)} in O(1) expected time using direct Bernoulli trials for
+   * small {@code n}, normal approximation when variance exceeds 5, and Knuth's Poisson algorithm
+   * otherwise. Mirrors {@code p > 0.5} via one complement call.
+   *
+   * @param n      number of trials
+   * @param p      per-trial success probability
+   * @param random thread-local PRNG source
+   * @return sampled integer in {@code [0, n]}
+   */
+  private static long sampleBinomial(long n, double p, ThreadLocalRandom random) {
+    if (n <= 0L || p <= 0.0d) {
+      return 0L;
+    }
+    if (p >= 1.0d) {
+      return n;
+    }
+    if (p > 0.5d) {
+      return n - sampleBinomial(n, 1.0d - p, random);
+    }
+
+    double q = 1.0d - p;
+    if (n <= BINOMIAL_DIRECT_LIMIT) {
+      long successes = 0L;
+      for (long i = 0L; i < n; i++) {
+        if (random.nextDouble() < p) {
+          successes++;
+        }
       }
-      notifyAdmitted(key);
-
-      return new AddResult(null, true, key);
+      return successes;
     }
 
-    // Full — must evict the minimum member (O(k) scan). The same pass also
-    // resolves the runner-up, which is the new minimum after the eviction; a
-    // second scan would double the O(k) work inside the admission lock for a
-    // value one comparison carries.
-    MinPair pair = findTwoSmallest();
-    if (maxCount < pair.minCount()) {
-      // maxCount loses against the scan's snapshot, and member counts only grow between
-      // scans, so the snapshot is a valid lower bound for the fast-reject gate. Reading the
-      // node's live count here instead can put the gate above members it should admit.
-      minMemberCount = pair.minCount();
-      return AddResult.cold();
-    }
-    // Staleness guard: raiseCount mutates member counts without the admission
-    // lock, so the minimum resolved a moment ago may since have been lifted
-    // above the newcomer — or above the runner-up, which would evict a hotter
-    // key. Re-resolve in that (rare) case.
-    if (isStaleMinimum(pair, maxCount)) {
-      pair = findTwoSmallest();
-      if (maxCount < pair.minCount()) {
-        minMemberCount = pair.minCount();
-        return AddResult.cold();
-      }
+    double np = n * p;
+    double npq = np * q;
+    if (npq > BINOMIAL_NORMAL_VARIANCE_THRESHOLD) {
+      long sampled = Math.round(np + Math.sqrt(npq) * random.nextGaussian());
+      return Math.max(0L, Math.min(n, sampled));
     }
 
-    String expelledKey = evictMinAndPut(key, maxCount, itemFingerprint, pair.min());
-    // The evicted member was the smallest and the newcomer takes its place at
-    // maxCount, so the new minimum is the smaller of the runner-up and the
-    // newcomer. Written before the admission callback runs, so an observer never
-    // sees the new member with the previous gate.
-    minMemberCount = Math.min(maxCount, pair.secondCount());
-    notifyAdmitted(key);
-    return new AddResult(expelledKey, true, key);
+    double limit = Math.exp(-np);
+    long k = 0L;
+    double prod = 1.0d;
+    do {
+      k++;
+      prod *= random.nextDouble();
+    } while (prod > limit);
+    return Math.min(k - 1L, n);
   }
 
   /**
-   * Whether the pair's minimum has been overtaken since it was resolved: a lock-free
-   * raise pushed its count above the newcomer's or above the runner-up, so evicting it
-   * would swap out a hotter key. Every removal runs under {@link #admissionLock}, so
-   * the node cannot detach while this check runs.
-   *
-   * @param pair     the minimum and runner-up resolved by {@link #findTwoSmallest}
-   * @param maxCount the newcomer's count
-   * @return {@code true} when the pair must be re-resolved before evicting
+   * Mutable Top-K membership entry whose {@link #count} is updated atomically via
+   * {@link #MEMBER_COUNT} and set to {@link #DETACHED} upon removal.
    */
-  private boolean isStaleMinimum(MinPair pair, long maxCount) {
-    long liveMinCount = pair.min().count;
-    return liveMinCount > pair.secondCount() || liveMinCount > maxCount;
-  }
-
-  /**
-   * Evict {@code min} and insert {@code key} at {@code count}. Every membership
-   * departure is reported to {@link #expelledQueue} so the
-   * {@link AddResult#expelledKey()} contract holds. Expects
-   * {@link #admissionLock} and a verified winner.
-   *
-   * @param min the minimum member to evict, or {@code null} when nothing is evicted
-   * @return the key evicted to make room, or {@code null}
-   */
-  private String evictMinAndPut(String key, long count, int itemFingerprint, @Nullable Node min) {
-    String expelledKey = null;
-    if (min != null) {
-      // Tombstone first: a lock-free raise that observes it falls through to the admission
-      // path, and one that already won is captured in the departure count.
-      int finalCount = (int) MEMBER_COUNT.getAndSet(min, DETACHED);
-      if (members.remove(min.key, min)) {
-        expelledKey = min.key;
-        offerExpelled(expelledKey, Math.max(0, finalCount), "expelled key");
-      }
-    }
-    members.put(key, new Node(key, count, itemFingerprint));
-    return expelledKey;
-  }
-
-  /**
-   * Whether {@code (count, key)} beats the current scan minimum under the
-   * eviction ordering: lowest count first, ties broken on the key's natural
-   * ordering, so eviction is deterministic. One owner — {@link #findMinMember}
-   * and {@link #findTwoSmallest} must apply the same rule or the victim pick
-   * and the runner-up bookkeeping disagree.
-   */
-  private static boolean beatsAsMin(long count, String key, long minCount, String minKey) {
-    return count < minCount || (count == minCount && (minKey == null || key.compareTo(minKey) < 0));
-  }
-
-  /**
-   * Find the current minimum member, breaking ties on the key's natural
-   * ordering (lowest count, then lowest key) so eviction is deterministic.
-   *
-   * <p>Delegates to {@link #findTwoSmallest()} so the victim pick and the
-   * runner-up bookkeeping cannot drift apart.
-   *
-   * @return the minimum node, or {@code null} when no members exist
-   */
-  private Node findMinMember() {
-    return findTwoSmallest().min();
-  }
-
-  /**
-   * Resolve the smallest member and the second-smallest count in one pass. The
-   * minimum picks the victim, its scanned count is the sound comparison against the
-   * newcomer, and the runner-up is the new minimum after the eviction — so no second
-   * O(k) walk is needed.
-   *
-   * <p>{@code secondCount} stays {@link Long#MAX_VALUE} when fewer than two members
-   * exist. Ties resolve on the key as in {@link #beatsAsMin}.
-   *
-   * @return the minimum candidate, its scanned count and the second-smallest count
-   */
-  private MinPair findTwoSmallest() {
-    long minCount = Long.MAX_VALUE;
-    long secondCount = Long.MAX_VALUE;
-    String minKey = null;
-    Node min = null;
-
-    for (Node n : members.values()) {
-      long c = n.count;
-      if (beatsAsMin(c, n.key, minCount, minKey)) {
-        // The previous minimum becomes the runner-up candidate. When the new
-        // value ties the old minimum, secondCount simply keeps that same value.
-        secondCount = minCount;
-        minCount = c;
-        minKey = n.key;
-        min = n;
-      } else if (c < secondCount) {
-        secondCount = c;
-      }
-    }
-    return new MinPair(min, minCount, secondCount);
-  }
-
-  /**
-   * Snapshot the current membership as immutable {@link Item}s, sorted by count
-   * descending (ties on key ascending), limited to {@code limit} entries.
-   *
-   * <p>Each count is read once, before the sort. Member counts are mutated
-   * concurrently, so a comparator that re-read the counter could feed TimSort an
-   * inconsistent order and abort with "Comparison method violates its general
-   * contract!". Sorting the immutable snapshot is consistent by construction.
-   */
-  List<Item> snapshotItemsSorted(int limit) {
-    if (members.isEmpty()) {
-      return Collections.emptyList();
-    }
-
-    // Snapshot phase: one count read per member — the comparator never touches
-    // a mutable counter, so concurrent mutations cannot destabilize the sort.
-    // Weakly consistent iteration: a member admitted mid-snapshot may or may
-    // not appear.
-    List<Item> snapshot = new ArrayList<>(members.size());
-    for (Node n : members.values()) {
-      // A node tombstoned immediately before its map removal is not a member any more; the
-      // weakly consistent walk must not publish the negative sentinel as a count.
-      snapshot.add(new Item(n.key, Math.max(0L, n.count)));
-    }
-    snapshot.sort((a, b) -> {
-      int c = Long.compare(b.count(), a.count());
-      return c != 0 ? c : a.key().compareTo(b.key());
-    });
-    // Truncation returns a detached list: the snapshot is a private working
-    // buffer, and a caller must not observe it change or retain its capacity.
-    return snapshot.size() > limit ? new ArrayList<>(snapshot.subList(0, limit)) : snapshot;
-  }
-
-  /**
-   * A key-count pair in the TopK membership set. {@link #count} is a volatile
-   * {@code int} mutated through {@link #MEMBER_COUNT}: max-raise on the hot path and
-   * sketch re-synchronisation during decay. The negative {@link #DETACHED} value is
-   * written under {@code admissionLock} when the node leaves the membership. Counts are
-   * {@code int}-capped; {@link Integer#MAX_VALUE} is a stop-condition.
-   */
-  @SuppressWarnings("ClassCanBeRecord")
   private static final class Node {
 
-    /** The cache key. */
+    /** The tracked cache key. */
     final String key;
-    /** Mixed 32-bit fingerprint, captured once at admission — a pure function of {@link #key}. */
+
+    /** Precomputed 32-bit sketch fingerprint for {@link #key}. */
     final int fp;
 
-    /** Current estimated count, or {@link #DETACHED} once the node has left the membership. */
+    /** Current estimated count, or {@link #DETACHED} once removed from {@link #members}. */
     volatile int count;
 
-    Node(String key, long count, int fp) {
-      this.fp = fp;
+    /**
+     * Creates an attached membership node.
+     *
+     * @param key   the tracked key
+     * @param count the initial count (saturated at {@link Integer#MAX_VALUE})
+     * @param fp    the key's 32-bit sketch fingerprint
+     */
+    private Node(String key, long count, int fp) {
       this.key = key;
+      this.fp = fp;
       this.count = (int) Math.min(count, Integer.MAX_VALUE);
     }
   }
 
   /**
-   * The two smallest members, resolved by {@link #findTwoSmallest()}: the
-   * minimum node, its count at scan time and the second-smallest count.
-   */
-  private record MinPair(Node min, long minCount, long secondCount) {}
-
-  /**
-   * Sample from a Binomial(n, p) distribution in O(1) expected time.
+   * Snapshot of the smallest and second-smallest members produced by {@link #findTwoSmallest()}.
    *
-   * <p>Direct simulation for small n (≤10), a normal approximation for
-   * {@code np(1-p) > 5.0}, and a Poisson approximation otherwise. The {@code p > 0.5}
-   * mirror case recurses once on the complement.
+   * @param min         the victim node with the lowest count, or {@code null} when empty
+   * @param minCount    the scanned count of {@code min}, or {@link Long#MAX_VALUE} when empty
+   * @param secondCount the second-smallest scanned count, or {@link Long#MAX_VALUE} if fewer than 2
    */
-  private static long sampleBinomial(long n, double p, ThreadLocalRandom random) {
-    if (n <= 0) {
-      return 0;
-    }
-    if (p >= 1.0) {
-      return n;
-    }
-    if (p <= 0.0) {
-      return 0;
-    }
-
-    if (p > 0.5) {
-      // Complement trick: add failures instead — the recursive call runs
-      // with p' = 1 - p <= 0.5, so it never recurses a second level.
-      return n - sampleBinomial(n, 1.0 - p, random);
-    }
-
-    double q = 1.0 - p;
-
-    if (n <= 10) {
-      long k = 0;
-      for (long i = 0; i < n; i++) {
-        if (random.nextDouble() < p) {
-          k++;
-        }
-      }
-      return k;
-    }
-
-    double np = n * p;
-    double npq = np * q;
-
-    if (npq > 5.0) {
-      long k = Math.round(np + Math.sqrt(npq) * random.nextGaussian());
-      return Math.max(0, Math.min(n, k));
-    }
-
-    double limit = Math.exp(-np);
-    long k = 0;
-    double prod = 1.0;
-    do {
-      k++;
-      prod *= random.nextDouble();
-    } while (prod > limit);
-    return Math.min(k - 1, n);
-  }
+  private record MinPair(@Nullable Node min, long minCount, long secondCount) {}
 }

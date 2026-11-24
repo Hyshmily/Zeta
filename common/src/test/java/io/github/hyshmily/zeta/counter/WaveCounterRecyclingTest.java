@@ -155,9 +155,7 @@ class WaveCounterRecyclingTest {
     LongAdder original = poolRef.get().get("k");
     assertThat(original).isNotNull();
     counter.count("k", 1);
-    Field resField = WaveCounter.class.getDeclaredField("reservoir");
-    resField.setAccessible(true);
-    ConcurrentHashMap<String, LongAdder> table = (ConcurrentHashMap<String, LongAdder>) resField.get(counter);
+    ConcurrentHashMap<String, LongAdder> table = reservoirMap(counter);
     assertThat(table.get("k")).isSameAs(original);
   }
 
@@ -518,9 +516,7 @@ class WaveCounterRecyclingTest {
     long after = (long) stampField.get(ceils);
     assertThat(after).as("stamp restored to a fresh even epoch (s+2)").isEqualTo(before + 2);
     @SuppressWarnings("unchecked")
-    ConcurrentHashMap<String, LongAdder> table = (ConcurrentHashMap<String, LongAdder>) reservoirField(counter).get(
-      counter
-    );
+    ConcurrentHashMap<String, LongAdder> table = reservoirMap(counter);
     assertThat(table.get("k").sum()).as("reconcile merges the residual into the shared table").isEqualTo(1);
     Field sizeField = ceils.getClass().getDeclaredField("size");
     sizeField.setAccessible(true);
@@ -551,9 +547,7 @@ class WaveCounterRecyclingTest {
     assertThat((int) sizeField.get(ceils)).as("precondition: local map non-empty").isPositive();
 
     @SuppressWarnings("unchecked")
-    ConcurrentHashMap<String, LongAdder> table = (ConcurrentHashMap<String, LongAdder>) reservoirField(counter).get(
-      counter
-    );
+    ConcurrentHashMap<String, LongAdder> table = reservoirMap(counter);
     Field ebbField = WaveCounter.class.getDeclaredField("ebbReservoir");
     ebbField.setAccessible(true);
     @SuppressWarnings("unchecked")
@@ -710,10 +704,14 @@ class WaveCounterRecyclingTest {
     return f;
   }
 
-  private static java.lang.reflect.Field reservoirField(WaveCounter c) throws Exception {
-    java.lang.reflect.Field f = WaveCounter.class.getDeclaredField("reservoir");
-    f.setAccessible(true);
-    return f;
+  @SuppressWarnings("unchecked")
+  private static ConcurrentHashMap<String, LongAdder> reservoirMap(WaveCounter counter) throws Exception {
+    java.lang.reflect.Field reservoirField = WaveCounter.class.getDeclaredField("reservoir");
+    reservoirField.setAccessible(true);
+    Object reservoir = reservoirField.get(counter);
+    java.lang.reflect.Field mapField = reservoir.getClass().getDeclaredField("map");
+    mapField.setAccessible(true);
+    return (ConcurrentHashMap<String, LongAdder>) mapField.get(reservoir);
   }
 
   /**

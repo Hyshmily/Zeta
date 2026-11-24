@@ -15,855 +15,468 @@
  */
 package io.github.hyshmily.zeta.scheduler;
 
-import static io.github.hyshmily.zeta.constants.ZetaConstants.Version.VERSION_DEFAULT;
-
 import com.github.benmanes.caffeine.cache.Cache;
-import com.google.errorprone.annotations.concurrent.GuardedBy;
 import io.github.hyshmily.zeta.cache.cachesupport.lifecycle.EntryLifecycle;
 import io.github.hyshmily.zeta.cache.cachesupport.lifecycle.TtlPolicy;
 import io.github.hyshmily.zeta.cache.cachesupport.raw.CacheEntry;
 import io.github.hyshmily.zeta.cache.cachesupport.raw.EntryDraft;
+import io.github.hyshmily.zeta.cache.cachesupport.raw.QuietCache;
 import io.github.hyshmily.zeta.cache.cachesupport.raw.VersionedValue;
 import io.github.hyshmily.zeta.exception.ZetaExceptionHandler;
-import io.github.hyshmily.zeta.model.DecisionStamp;
-import io.github.hyshmily.zeta.model.KeyState;
 import io.github.hyshmily.zeta.util.Internal;
 import io.github.hyshmily.zeta.util.InterruptingAsync;
-import io.github.hyshmily.zeta.util.TimeSource;
-import java.util.*;
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.VarHandle;
+import java.util.Objects;
 import java.util.concurrent.*;
-import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BiConsumer;
-import java.util.function.Predicate;
 import java.util.function.Supplier;
 import lombok.extern.slf4j.Slf4j;
 import org.jspecify.annotations.Nullable;
 
 /**
- * Default {@link BackgroundRefresher}: soft-expire refresh scheduling with
- * per-key dedup, a global refresh limiter, timeout protection, a merge guarded
- * by both the version snapshot and the invalidation tombstones, and
- * lease-on-failure degradation (design decisions: expiry and refresh).
+ * Default {@link BackgroundRefresher} coordinating per-key soft refreshes and hard renewals behind
+ * a single concurrency limiter and deduplication table.
  *
- * <p>The entry lifecycle (factory, guards, demotion) and the background refresh
- * executor each own their own state behind their own seam.
+ * <p><b>Soft refresh vs. hard renewal.</b> A soft refresh replaces the value and re-arms only the
+ * soft window while keeping the caller's hard deadline intact. A hard renewal replaces the value
+ * and re-arms both soft and hard deadlines from the entry's stored durations. Neither operation
+ * resurrects an evicted or invalidated entry.
+ *
+ * <p><b>In-flight soft-to-hard upgrade.</b> A hard renewal arriving while a soft refresh is active
+ * upgrades the ticket atomically via {@link #TICKET_STATE} ({@code SOFT -> UPGRADED_HARD}) and
+ * shares its load; if soft settlement already claimed {@code SOFT -> SETTLING_SOFT}, the renewal
+ * shares the ticket's completion future and observes {@link RenewOutcome.Skipped#SOFT_REFRESH} once
+ * the write-back lands. Soft-only tickets allocate no {@link CompletableFuture}.
  */
 @Slf4j
 @Internal
 public class DefaultBackgroundRefresher implements BackgroundRefresher {
 
-  /** Budget of one background refresh before its reader thread is interrupted, in seconds. */
-  private static final long REFRESH_TIMEOUT_SECONDS = 30;
+  private static final int FLAG_HARD = 1;
+  private static final int FLAG_SETTLING = 1 << 1;
+  private static final int FLAG_FROM_SOFT = 1 << 2;
 
-  /** Lease-on-failure (design decisions: expiry and refresh): minimum lease duration in milliseconds — the decay floor. */
-  private static final long LEASE_MIN_TTL_MS = 120_000;
+  private static final int STATE_HARD = FLAG_HARD;
+  private static final int STATE_SOFT = FLAG_FROM_SOFT;
+  private static final int STATE_UPGRADED_HARD = FLAG_FROM_SOFT | FLAG_HARD;
+  private static final int STATE_SETTLING_SOFT = FLAG_FROM_SOFT | FLAG_SETTLING;
 
-  /** Upper bound of the {@code staleDebt} episode view; oldest entries are never evicted. */
-  private static final int MAX_LEASED_EPISODES = 1024;
+  private static final CompletableFuture<RenewOutcome> LIMITER_SKIPPED = CompletableFuture.completedFuture(
+    RenewOutcome.Skipped.LIMITER
+  );
+  private static final CompletableFuture<RenewOutcome> ABSENT_SKIPPED = CompletableFuture.completedFuture(
+    RenewOutcome.Skipped.ABSENT_OR_EXPIRED
+  );
+
+  private static final VarHandle TICKET_STATE;
+  private static final VarHandle TICKET_COMPLETION;
+
+  static {
+    try {
+      MethodHandles.Lookup lookup = MethodHandles.privateLookupIn(RefreshTicket.class, MethodHandles.lookup());
+      TICKET_STATE = lookup.findVarHandle(RefreshTicket.class, "state", int.class);
+      TICKET_COMPLETION = lookup.findVarHandle(RefreshTicket.class, "completion", Object.class);
+    } catch (ReflectiveOperationException e) {
+      throw new ExceptionInInitializerError(e);
+    }
+  }
 
   private final Cache<String, CacheEntry> cache;
   private final EntryLifecycle entryLifecycle;
-  private final Semaphore limiter;
   private final TtlPolicy ttlPolicy;
   private final Executor executor;
-
-  /**
-   * Per-key dedup for background refreshes. A ticket exists only while its
-   * refresh holds a limiter permit, so the map is bounded by
-   * {@code refreshMaxPools}. The ticket is both the reservation token and the
-   * completion callback: its identity makes the completion-time removal
-   * ABA-safe, and it carries the creation-time snapshot without a second object.
-   */
+  private final Semaphore limiter;
+  private final long refreshTimeoutMs;
   private final ConcurrentHashMap<String, RefreshTicket> refreshes = new ConcurrentHashMap<>();
 
-  /** Cumulative leases granted; source of the {@code zeta.expire.refresh.failure.leased.total} counter. */
-  private final AtomicLong leaseGrants = new AtomicLong();
-
-  /** Failure classifier gating the lease (never {@code null}). */
-  private final LeaseClassifier classifier;
-
   /**
-   * Currently-leased keys for the {@code staleDebt} diagnostic view:
-   * key to first-lease monotonic time. Insertion-ordered so iteration is
-   * oldest-first without sorting; at {@link #MAX_LEASED_EPISODES} new keys are
-   * refused rather than evicting the oldest debt. Every access is guarded by
-   * this map's monitor; {@link #episodeCount} is the lock-free empty
-   * probe that keeps the common no-lease success path off that monitor.
-   */
-  @GuardedBy("leasedEpisodes")
-  private final Map<String, Long> leasedEpisodes = new LinkedHashMap<>(64, 0.75f, false);
-
-  /** Live episode count, maintained under {@code leasedEpisodes}' monitor. */
-  private volatile int episodeCount;
-
-  /**
-   * Decides whether a failed background refresh may keep its stale entry
-   * servable. The default leases every failure except JVM-level {@code Error}s
-   * (fatal, never a reason to serve older data longer); applications with
-   * definitive "not found" error types supply their own predicate to also
-   * refuse those. Evaluated against the peeled cause (one
-   * {@code CompletionException} layer removed).
-   */
-  @FunctionalInterface
-  public interface LeaseClassifier extends Predicate<Throwable> {
-    /**
-     * Default: lease everything but {@code Error}.
-     *
-     * @return a classifier that refuses only {@code Error} causes
-     */
-    static LeaseClassifier defaults() {
-      return cause -> !(cause instanceof Error);
-    }
-  }
-
-  /** Outcome of the lease decision made inside one refresh's compute block. */
-  private enum LeaseOutcome {
-    NONE,
-    GRANTED,
-    CAPPED,
-    CLOSED,
-    EXPIRED,
-  }
-
-  /**
-   * One background refresh, from reservation to settlement: the instance is the dedup token in
-   * {@link #refreshes}, the creation-time snapshot and the {@code whenComplete} callback.
+   * Creates a background refresher bounded by {@code refreshMaxPools} concurrent loads.
    *
-   * <p>The snapshot fields are written once by {@link #captureSnapshot} before
-   * submission and read by the completion path: the data stamp, decision stamp, key state,
-   * hard expiry/duration and the normal hard/soft baselines. {@link #leaseOutcome} and
-   * {@link #leasedAtMs} are the settlement written inside the failure compute;
-   * a dedicated outcome keeps the snapshot fields immutable for the whole call.
-   */
-  private final class RefreshTicket implements BiConsumer<Object, Throwable> {
-
-    private final String key;
-    private final long softTtlMs;
-    private long dataVersion;
-    private long hardExpireAtMs;
-    private long hardTtlMs;
-    private long normalHardTtlMs;
-    private long normalSoftTtlMs;
-    private long leasedAtMs;
-    private KeyState keyState;
-    private @Nullable DecisionStamp decision;
-    private LeaseOutcome leaseOutcome = LeaseOutcome.NONE;
-
-    private RefreshTicket(String key, long softTtlMs) {
-      this.key = key;
-      this.softTtlMs = softTtlMs;
-    }
-
-    private void captureSnapshot(CacheEntry raw) {
-      if (raw == null) {
-        dataVersion = VERSION_DEFAULT;
-        decision = null;
-        keyState = KeyState.NORMAL;
-        hardExpireAtMs = Long.MAX_VALUE;
-        hardTtlMs = 0L;
-        // -1 is the "no captured baseline" sentinel: a real entry's 0 means disabled.
-        normalHardTtlMs = -1L;
-        normalSoftTtlMs = -1L;
-        return;
-      }
-      dataVersion = raw.getDataVersion();
-      decision = raw.decision();
-      keyState = raw.getKeyState();
-      hardExpireAtMs = raw.getHardExpireAtMs();
-      hardTtlMs = raw.getHardTtlMs();
-      normalHardTtlMs = raw.getNormalHardTtlMs();
-      normalSoftTtlMs = raw.getNormalSoftTtlMs();
-    }
-
-    /**
-     * Whether {@code raw} still carries the identity this ticket snapshotted:
-     * same data stamp, same hard deadline, and not permanent. A lease applies to
-     * its own snapshot only — a write, broadcast or promotion that landed in
-     * flight already installed a newer value or regime, and a lease must not
-     * extend that different entry under the old refresh.
-     */
-    private boolean sameEntry(@Nullable CacheEntry raw) {
-      return (
-        raw != null &&
-        raw.getDataVersion() == dataVersion &&
-        raw.getHardExpireAtMs() == hardExpireAtMs &&
-        hardExpireAtMs != Long.MAX_VALUE
-      );
-    }
-
-    @Override
-    public void accept(Object value, Throwable failure) {
-      try {
-        if (failure != null) {
-          // Peel one CompletionException layer for the classifier: supplier failures
-          // arrive wrapped (supplyAsync encodeThrowable semantics) while orTimeout
-          // timeouts arrive bare. The log discriminator stays on the outer instance:
-          // only the bare TimeoutException is this refresh's own 30s budget, while a
-          // supplier's inner Future timeout arrives wrapped.
-          Throwable cause = firstCause(failure);
-          if (failure instanceof TimeoutException) {
-            log.warn("Background soft refresh timed out after {}s: {}", REFRESH_TIMEOUT_SECONDS, key);
-          } else {
-            log.warn("Background soft refresh failed: {}", key, failure);
-          }
-
-          // design decisions: expiry and refresh: keep the stale entry servable instead of letting it run
-          // into the hard TTL and stampede the failing source on every read.
-          leaseOnFailure(this, cause);
-          return;
-        }
-
-        if (value instanceof VersionedValue loaded && loaded.value() != null) {
-          applyRefreshTask(loaded, this);
-          // Healed: the fresh value ends the lease episode.
-          removeLeaseEpisode(key);
-        } else {
-          // A clean refresh that produced no value leaves a soft-expired, hard-valid entry:
-          // without closing the retry window every later read re-arms the refresh and the
-          // source is hammered for the rest of the hard TTL. Keep the value servable, but
-          // stop re-arming it; the next explicit write or hard expiry is the recovery point.
-          closeRetryWindowAfterEmptyRefresh(this);
-        }
-      } catch (Throwable t) {
-        // A whenComplete callback's failure is swallowed by the discarded future: report it
-        // here, or a classifier/hook bug silently strands the entry and the limiter permit.
-        ZetaExceptionHandler.handleException("background refresh settlement failed: key=" + key, t);
-      } finally {
-        // Always remove the ticket and release the limiter permit so a future
-        // refresh can be scheduled. Conditional removal by object identity
-        // against the RESERVATION token this task owns: a concurrent trigger
-        // that installed a newer ticket is left untouched (ABA).
-        refreshes.remove(key, this);
-        limiter.release();
-      }
-    }
-  }
-
-  /**
-   * Creates a refresher over the given Caffeine cache, executor, entry
-   * lifecycle and refresh pool bound.
-   *
-   * @param caffeineCache   the underlying L1 Caffeine cache
-   * @param executor        async executor for background refresh
-   * @param entryLifecycle  the entry lifecycle (TTL policy and tombstones)
-   * @param refreshMaxPools maximum concurrent background refreshes; must be positive and
-   *                        should stay below the executor's pool size (see
-   *                        {@code zeta.local.refresh-max-pools})
-   */
-  public DefaultBackgroundRefresher(
-    Cache<String, CacheEntry> caffeineCache,
-    Executor executor,
-    EntryLifecycle entryLifecycle,
-    int refreshMaxPools
-  ) {
-    this(caffeineCache, executor, entryLifecycle, refreshMaxPools, LeaseClassifier.defaults());
-  }
-
-  /**
-   * Creates a refresher with an explicit lease classifier (see
-   * {@link LeaseClassifier}): applications with definitive "not found" error
-   * types refuse the lease for those and let the entry hard-expire instead of
-   * serving known-stale data.
-   *
-   * @param caffeineCache   the underlying L1 Caffeine cache
-   * @param executor        async executor for background refresh
-   * @param entryLifecycle  the entry lifecycle (TTL policy and tombstones)
-   * @param refreshMaxPools maximum concurrent background refreshes; must be positive and
-   *                        should stay below the executor's pool size (see
-   *                        {@code zeta.local.refresh-max-pools})
-   * @param leaseClassifier the failure classifier gating the lease; {@code null} selects
-   *                        {@link LeaseClassifier#defaults()}
+   * @param caffeineCache    the L1 Caffeine cache
+   * @param executor         the interruptible executor running background loads
+   * @param entryLifecycle   entry draft factory and invalidation guard manager
+   * @param refreshMaxPools  maximum concurrent refreshes allowed across all keys; must be positive
+   * @param refreshTimeoutMs per-refresh execution timeout in milliseconds; must be positive
+   * @throws IllegalArgumentException if {@code refreshMaxPools} or {@code refreshTimeoutMs} is non-positive
+   * @throws NullPointerException     if any required collaborator is {@code null}
    */
   public DefaultBackgroundRefresher(
     Cache<String, CacheEntry> caffeineCache,
     Executor executor,
     EntryLifecycle entryLifecycle,
     int refreshMaxPools,
-    LeaseClassifier leaseClassifier
+    long refreshTimeoutMs
   ) {
-    this.executor = executor;
-    this.cache = caffeineCache;
-    this.entryLifecycle = entryLifecycle;
-    this.ttlPolicy = entryLifecycle.ttlPolicy();
+    this.cache = Objects.requireNonNull(caffeineCache, "caffeineCache must not be null");
+    this.executor = Objects.requireNonNull(executor, "executor must not be null");
+    this.entryLifecycle = Objects.requireNonNull(entryLifecycle, "entryLifecycle must not be null");
     if (refreshMaxPools <= 0) {
-      // A zero-permit semaphore would block every refresh forever. The
-      // configuration layer derives the bound from the executor; a direct
-      // caller must pass a real one.
       throw new IllegalArgumentException("refreshMaxPools must be positive, but got: " + refreshMaxPools);
     }
+    if (refreshTimeoutMs <= 0L) {
+      throw new IllegalArgumentException("refreshTimeoutMs must be positive, but got: " + refreshTimeoutMs);
+    }
+    this.ttlPolicy = entryLifecycle.ttlPolicy();
     this.limiter = new Semaphore(refreshMaxPools);
-    this.classifier = leaseClassifier != null ? leaseClassifier : LeaseClassifier.defaults();
+    this.refreshTimeoutMs = refreshTimeoutMs;
   }
 
   /**
-   * Exposes the refresh limiter semaphore for monitoring purposes — the only
-   * instance state intentionally surfaced beyond the seam's counters.
+   * Returns the semaphore bounding concurrent background refresh executions.
+   *
+   * @return the shared refresh concurrency limiter
    */
   @Override
   public Semaphore getRefreshLimiter() {
     return limiter;
   }
 
-  /** Cumulative leases granted (see {@link BackgroundRefresher#getRefreshFailureLeased()}). */
-  @Override
-  public long getRefreshFailureLeased() {
-    return leaseGrants.get();
-  }
-
   /**
-   * O(1) count of currently tracked lease episodes for gauges. May include keys
-   * whose L1 value already left (they are lazily reaped by the next
-   * {@link #leasedStaleness(int)} read).
-   */
-  @Override
-  public int leasedKeyCount() {
-    return episodeCount;
-  }
-
-  /**
-   * Oldest currently-leased keys, oldest-first, capped at {@code limit} — the
-   * {@code staleDebt} diagnostic view. A key leaves the view when a refresh
-   * applies a fresh value (healed), a refusal closes/expires its lease, or its
-   * entry leaves L1.
-   */
-  @Override
-  public Map<String, Long> leasedStaleness(int limit) {
-    if (limit <= 0) {
-      return Map.of();
-    }
-    long now = TimeSource.monotonicMillis();
-    List<Map.Entry<String, Long>> episodes;
-    synchronized (leasedEpisodes) {
-      episodes = new ArrayList<>(leasedEpisodes.entrySet());
-    }
-    Map<String, Long> view = new LinkedHashMap<>();
-    for (Map.Entry<String, Long> episode : episodes) {
-      if (view.size() >= limit) {
-        break;
-      }
-      String key = episode.getKey();
-      long leasedAt = episode.getValue();
-      // asMap().containsKey is the quiet probe: unlike getIfPresent it neither
-      // records a hit/miss nor promotes the key in the access-order queue, so a
-      // diagnostics scrape cannot make a leased entry look hotter than it is.
-      if (!cache.asMap().containsKey(key)) {
-        // Conditional removal: a concurrent failure may already have recorded a
-        // new lease episode for the same key after this snapshot was taken.
-        removeLeaseEpisode(key, leasedAt);
-        continue;
-      }
-      view.put(key, Math.max(0L, now - leasedAt));
-    }
-    return Collections.unmodifiableMap(view);
-  }
-
-  /**
-   * Triggers an asynchronous background refresh for the given cache key. The
-   * caller (typically the soft-expire read path) has already returned the
-   * stale value to the client, so this method executes entirely in the
-   * background without blocking the caller.
+   * {@inheritDoc}
    *
-   * <p><b>Concurrency:</b> the read-side dedup is a single lock-free
-   * {@link ConcurrentHashMap#containsKey} — a soft-expired read for a key whose
-   * refresh is already in flight serves the stale value and returns. Only a
-   * read that finds no ticket enters the reservation path: acquire a limiter
-   * permit, install the ticket with {@code putIfAbsent} (losing a race releases
-   * the permit immediately), then create the task <b>outside</b> the map.
-   * Creating it inside a map update would let a synchronous executor run the
-   * ticket's completion callback (and its same-key map removal) inside the
-   * mapping function, an unsupported recursive update that
-   * {@code ConcurrentHashMap} answers with {@code IllegalStateException}. The
-   * ticket is identity-removed by its own completion callback, so the deduped
-   * key is always free again once its refresh settles.
+   * <p>Deduplicates against any in-flight refresh for {@code cacheKey} and skips silently when the
+   * entry is absent/expired or the concurrency limiter is saturated.
    *
-   * @param cacheKey  the key whose value should be refreshed
-   * @param reader    the data-source supplier; must return a
-   *                  {@link VersionedValue} with a
-   *                  non-null value — anything else is treated as "no new value"
-   *                  and leaves the entry untouched (the production read path
-   *                  wraps the reader result with a version probe, design decisions: version stamps)
-   * @param softTtlMs the soft TTL to set on the refreshed entry (milliseconds)
+   * @param cacheKey  the physical cache key to refresh
+   * @param reader    the value loader producing a stamped {@link VersionedValue}
+   * @param softTtlMs the resolved soft TTL in milliseconds for the refreshed entry
    */
   @Override
-  @SuppressWarnings("java:S1181")
-  public void triggerBackgroundRefresh(String cacheKey, Supplier<?> reader, long softTtlMs) {
-    // Lock-free dedup fast path: an in-flight refresh for this key means every
-    // later read just serves the stale value. A plain containsKey keeps the
-    // read path off the CHM bin lock. Presence, not a separate flag, is the
-    // state: a completion that is still settling leaves the ticket in place, so
-    // this read correctly dedups instead of racing a reservation it would lose.
+  public void triggerBackgroundRefresh(String cacheKey, Supplier<VersionedValue> reader, long softTtlMs) {
     if (refreshes.containsKey(cacheKey)) {
       return;
     }
+    submitSoft(cacheKey, softTtlMs, reader);
+  }
 
-    // Try to acquire a permit from the global refresh limiter.
-    if (!limiter.tryAcquire()) {
-      log.debug("Refresh limiter blocked, skip background refresh: {}", cacheKey);
+  /**
+   * {@inheritDoc}
+   *
+   * <p>Upgrades an existing in-flight soft ticket in place when present; otherwise reserves and
+   * submits a new hard-renewal ticket.
+   *
+   * @param cacheKey the physical cache key to renew
+   * @param reader   the value loader producing a stamped {@link VersionedValue}
+   * @return a future completing with the {@link RenewOutcome} once settlement finishes
+   */
+  @Override
+  public CompletableFuture<RenewOutcome> renewHard(String cacheKey, Supplier<VersionedValue> reader) {
+    RefreshTicket existing = refreshes.get(cacheKey);
+    return existing != null ? existing.upgradeToHard() : submitHard(cacheKey, reader);
+  }
+
+  /**
+   * Reserves and submits a soft-refresh ticket without allocating a caller future.
+   *
+   * @param cacheKey  the physical cache key
+   * @param softTtlMs the soft TTL to apply upon settlement
+   * @param reader    the stamped value loader
+   */
+  private void submitSoft(String cacheKey, long softTtlMs, Supplier<VersionedValue> reader) {
+    CacheEntry snapshot = liveSnapshot(cacheKey);
+    if (snapshot == null || !limiter.tryAcquire()) {
       return;
     }
-
-    // Reserve the key atomically; the task is created outside the map (see
-    // the method Javadoc for why the reservation must not submit it).
-    // The ticket is its own identity token: the completion removes by
-    // reference, so a ticket installed by a later reservation can never be
-    // removed by an earlier task.
-    RefreshTicket ticket = new RefreshTicket(cacheKey, softTtlMs);
+    RefreshTicket ticket = new RefreshTicket(
+      cacheKey,
+      softTtlMs,
+      STATE_SOFT,
+      null,
+      snapshot.getDataVersion(),
+      snapshot.getHardExpireAtMs()
+    );
     if (refreshes.putIfAbsent(cacheKey, ticket) != null) {
-      // Another trigger owns the key, or its just-completed ticket is still
-      // waiting for identity removal. Either way this attempt adds nothing:
-      // release the permit and let the next soft-expired read retry.
       limiter.release();
       return;
     }
+    dispatchTicket(cacheKey, ticket, reader, false);
+  }
 
-    CompletableFuture<?> task;
+  /**
+   * Reserves and submits a hard-renewal ticket, upgrading a racing ticket if another thread
+   * installed one concurrently.
+   *
+   * @param cacheKey the physical cache key
+   * @param reader   the stamped value loader
+   * @return a future completing with the renewal outcome
+   */
+  private CompletableFuture<RenewOutcome> submitHard(String cacheKey, Supplier<VersionedValue> reader) {
+    CacheEntry snapshot = liveSnapshot(cacheKey);
+    if (snapshot == null) {
+      return ABSENT_SKIPPED;
+    }
+    if (!limiter.tryAcquire()) {
+      RefreshTicket raced = refreshes.get(cacheKey);
+      return raced != null ? raced.upgradeToHard() : LIMITER_SKIPPED;
+    }
+    CompletableFuture<RenewOutcome> hardFuture = new CompletableFuture<>();
+    RefreshTicket ticket = new RefreshTicket(
+      cacheKey,
+      0L,
+      STATE_HARD,
+      hardFuture,
+      snapshot.getDataVersion(),
+      snapshot.getHardExpireAtMs()
+    );
+    RefreshTicket raced = refreshes.putIfAbsent(cacheKey, ticket);
+    if (raced != null) {
+      limiter.release();
+      return raced.upgradeToHard();
+    }
+    dispatchTicket(cacheKey, ticket, reader, true);
+    return hardFuture;
+  }
+
+  /**
+   * Samples the current live resident entry for {@code cacheKey}, returning {@code null} when
+   * absent or already logically expired.
+   *
+   * @param cacheKey the physical cache key
+   * @return the live {@link CacheEntry}, or {@code null}
+   */
+  private @Nullable CacheEntry liveSnapshot(String cacheKey) {
+    CacheEntry snapshot = QuietCache.getIfPresent(cache, cacheKey);
+    return snapshot == null || ttlPolicy.isLogicallyExpired(snapshot) ? null : snapshot;
+  }
+
+  /**
+   * Submits a reserved {@link RefreshTicket} to {@link #executor} with {@link #refreshTimeoutMs},
+   * retiring the ticket and releasing the limiter permit if submission throws.
+   *
+   * @param cacheKey the physical cache key
+   * @param ticket   the installed reservation ticket
+   * @param reader   the stamped value loader
+   * @param hard     {@code true} for a hard renewal, {@code false} for a soft refresh
+   */
+  private void dispatchTicket(String cacheKey, RefreshTicket ticket, Supplier<VersionedValue> reader, boolean hard) {
     try {
-      task = createRefreshTask(ticket, reader);
+      InterruptingAsync.supplyAsync(reader, executor, refreshTimeoutMs, TimeUnit.MILLISECONDS).whenComplete(ticket);
     } catch (Throwable t) {
-      // Unexpected failure before task creation (snapshot lookup, supplyAsync
-      // Error, etc.) — release the semaphore so the refresh limiter does not
-      // permanently lose a slot, and drop the reservation so the next read can
-      // retry.
-      log.warn("Unexpected error during background refresh scheduling: {}", cacheKey, t);
-      limiter.release();
-      refreshes.remove(cacheKey, ticket);
-      throw t;
-    }
-    if (task == null) {
-      // Executor rejected (createRefreshTask already released the permit):
-      // leave no pending ticket so the next read can retry immediately.
-      refreshes.remove(cacheKey, ticket);
-    }
-  }
-
-  /**
-   * Creates a background async refresh task for the given ticket, with
-   * soft-TTL semantics, version-guarded merge, and rate-limited concurrency.
-   *
-   * <p><b>Flow:</b>
-   * <ol>
-   *   <li>Capture the current entry's metadata on the ticket
-   *       ({@code dataVersion}, {@link DecisionStamp}, {@code keyState}, hard
-   *       expiry) at call time, so {@link #applyRefreshTask} can detect
-   *       superseding writes and preserve Worker decision state across the
-   *       refresh boundary.</li>
-   *   <li>Submit the supplier to a bounded executor; if the executor rejects,
-   *       release the limiter permit immediately and return null so the next
-   *       read can retry without waiting.</li>
-   *   <li>Register the ticket as the completion callback. It identity-removes
-   *       itself from {@code refreshes}, releases the permit, and either
-   *       applies the value or leases the failed entry.</li>
-   * </ol>
-   *
-   * <p><b>Version guard:</b> Inside {@code applyRefreshTask}, the stale
-   * refresh result is discarded (keeping the existing entry) whenever the
-   * current {@code dataVersion} is strictly newer than the snapshot taken at
-   * creation time.
-   *
-   * <p><b>Limiter:</b> Controlled by the {@code limiter} semaphore
-   * acquired in the calling method. One permit is held until the future
-   * completes (success, error, timeout) and is released by the ticket.
-   *
-   * @param ticket the reservation, snapshot carrier and completion callback
-   * @param reader the async value supplier (executed on the bounded pool)
-   * @return the {@link CompletableFuture} representing the refresh, or
-   *         {@code null} if the executor rejected the task
-   */
-  private CompletableFuture<?> createRefreshTask(RefreshTicket ticket, Supplier<?> reader) {
-    // asMap().get is stats-quiet: a background refresh must not record a cache
-    // hit/miss, or every soft-expired read would count twice (the read path's own
-    // hit plus this snapshot) and inflate the L1 hit rate. It still feeds the
-    // eviction policy's read buffer, which is harmless for a key already being
-    // refreshed.
-    ticket.captureSnapshot(cache.asMap().get(ticket.key));
-
-    // Build the async refresh task with timeout protection. Unlike a bare
-    // orTimeout, a timeout also interrupts the reader thread (via
-    // {@link InterruptingAsync}) — otherwise a hung data source would pin the
-    // shared refresh executor until the reader finished on its own.
-    CompletableFuture<?> task;
-    try {
-      task = InterruptingAsync.supplyAsync(reader, executor, REFRESH_TIMEOUT_SECONDS, TimeUnit.SECONDS);
-    } catch (RejectedExecutionException e) {
-      // Executor saturated – release the limiter permit and leave no
-      // pending ticket so the next read can retry immediately. The pool's own
-      // rejection handler already reported the refusal.
-      limiter.release();
-      log.debug("Background refresh rejected by executor (saturated), key={}", ticket.key);
-      return null;
-    }
-
-    task.whenComplete(ticket);
-    return task;
-  }
-
-  /**
-   * Unwrap one {@code CompletionException}/{@code ExecutionException} layer so
-   * the classifier sees the real cause: supplier failures arrive wrapped
-   * (supplyAsync encodeThrowable semantics) while orTimeout timeouts arrive
-   * bare. Mirrors {@code LoadFlights}'s join-side {@code getCause()} handling.
-   *
-   * @param error the raw {@code whenComplete} error (never {@code null} here)
-   * @return the peeled cause, or the error itself when it carries no cause
-   */
-  private static Throwable firstCause(Throwable error) {
-    if ((error instanceof CompletionException || error instanceof ExecutionException) && error.getCause() != null) {
-      return error.getCause();
-    }
-    return error;
-  }
-
-  /**
-   * Decides whether the failure may keep the entry servable. A classifier that throws is a
-   * broken policy, not a reason to extend the lease: log it and refuse.
-   *
-   * @param key   the refreshed key (diagnostic context)
-   * @param cause the peeled refresh failure
-   * @return the classifier verdict, or {@code false} when it threw
-   */
-  private boolean mayLease(String key, Throwable cause) {
-    try {
-      return classifier.test(cause);
-    } catch (RuntimeException e) {
-      log.warn("Lease classifier failed for key={}; refusing the lease", key, e);
-      return false;
-    }
-  }
-
-  /**
-   * Lease-on-Failure (design decisions: expiry and refresh): keep a stale entry servable after its
-   * background refresh failed, by extending its expire timestamps.
-   *
-   * <p><b>Semantics:</b> the lease is a <i>provisional keep-alive</i>, not an
-   * authoritative state transition — the value, all metadata (dataVersion,
-   * decision stamps, keyState) and the {@code hardTtlMs}/{@code softTtlMs}
-   * duration fields are preserved verbatim; only the expire timestamps move.
-   * The hard timestamp extends to {@code now + max(remaining, floor)} — never
-   * shorter than the remaining budget (a failure must not punish a healthy
-   * long TTL), decaying to the floor on repeated failure, so repeated failure
-   * is graceful degradation rather than an entry clearing. The floor follows the entry's own scale
-   * ({@code min(120s, hardTtlMs)}): a single lease never exceeds one declared
-   * lifetime. The soft timestamp extends to the lease midpoint
-   * ({@code now + lease/2}): the entry is soft-expired during the second half
-   * of every lease while still hard-valid, which is the read-triggered retry
-   * window — the next read re-arms the refresh. {@code soft == hard} would
-   * close the window: the read path checks hard expiry before soft expiry, so
-   * the entry would die at lease end without ever retrying.
-   *
-   * <p><b>Refusals:</b> the classifier may refuse definitive/fatal failures; such
-   * an entry is hard-expired immediately (both deadlines moved into the past)
-   * instead of serving known-stale data. Entries older than the staleness cap
-   * ({@code birthStampSec}, default 30 min), and entries whose declared hard TTL
-   * is below twice the refresh timeout, cannot justify a retry: their soft
-   * deadline moves to the existing hard deadline, so they stay servable until
-   * that bound but no read re-arms the failing refresh in between. Every grant is
-   * counted, and the {@code staleDebt} view tracks the oldest up to its cap, so
-   * "bounded staleness" is verifiable, not a belief.
-   *
-   * <p><b>Identity guard:</b> mirrors {@link #applyRefreshTask}'s version
-   * guard — the lease applies only to the same logical entry that failed the
-   * refresh ({@code dataVersion} and {@code hardExpireAtMs} both equal to the
-   * creation-time snapshot). A write, broadcast, or promotion that landed
-   * in-flight already granted fresh TTLs; leasing it would shorten them. An
-   * absent (evicted) entry is never recreated — the failure path carries no
-   * new value. Permanent entries ({@code hardExpireAtMs == Long.MAX_VALUE})
-   * are never leased: there is nothing to extend and the halving arithmetic
-   * would overflow.
-   *
-   * @param ticket the refresh whose entry may be leased
-   * @param cause  the peeled refresh failure (one wrapper layer removed)
-   */
-  private void leaseOnFailure(RefreshTicket ticket, Throwable cause) {
-    boolean leaseAllowed = mayLease(ticket.key, cause);
-    if (!leaseAllowed) {
-      log.debug(
-        "Lease-on-failure: classifier refused lease for key={} (cause {}), hard-expiring the entry",
-        ticket.key,
-        cause.toString()
-      );
-    }
-
-    // Decided under the bin lock, published after it: the ticket's outcome
-    // records the grant or refusal. The diagnostic map (and its monitor) is
-    // updated outside the compute so the Caffeine bin lock is never held while
-    // waiting for it — a diagnostics scrape copying the map must not stall L1
-    // writers on this bin.
-    // Diagnostic age axis; the lease deadlines below use the entry's epoch-millis axis.
-    long leasedAt = TimeSource.monotonicMillis();
-    cache
-      .asMap()
-      .compute(ticket.key, (key, entry) -> {
-        if (!ticket.sameEntry(entry)) {
-          return entry;
-        }
-        // A peer invalidation may have closed the soft window or removed the entry while this
-        // refresh was in flight. The lease must not re-open a retry window an explicit
-        // invalidation just condemned.
-        if (entryLifecycle.staleAgainstInvalidation(ticket.key, ticket.dataVersion)) {
-          ticket.leaseOutcome = LeaseOutcome.NONE;
-          return entry;
-        }
-
-        long now = TimeSource.currentTimeMillis();
-        if (!leaseAllowed) {
-          // Both deadlines move into the past; the read path removes the entry on its next
-          // pass, so an in-flight reader is never raced by an explicit removal.
-          ticket.leaseOutcome = LeaseOutcome.EXPIRED;
-          return EntryDraft.of(entry, ttlPolicy).expiryAt(now - 1L, now - 1L).build();
-        }
-
-        // A refused lease must not leave the entry soft-expired while hard-valid: every read
-        // would re-arm the refresh and hammer a failing source. Close the retry window at the
-        // hard deadline and let the entry expire naturally (the documented staleness-cap
-        // response).
-        if (entry.isLeaseStaleCapped(TimeSource.monotonicSecondsSinceBoot())) {
-          ticket.leaseOutcome = LeaseOutcome.CAPPED;
-          log.debug("Lease-on-failure: staleness cap refused lease for key={}, closing retry window", ticket.key);
-          return closeRetryWindow(entry);
-        }
-
-        // No retry window fits below twice the refresh timeout: same response —
-        // keep the value until its original hard deadline, but do not retry.
-        long scaleMs = Math.max(1L, entry.getHardTtlMs());
-        if (scaleMs < 2 * TimeUnit.SECONDS.toMillis(REFRESH_TIMEOUT_SECONDS)) {
-          ticket.leaseOutcome = LeaseOutcome.CLOSED;
-          log.debug("Lease-on-failure: retry window cannot fit, closing it for key={} until hard expiry", ticket.key);
-          return closeRetryWindow(entry);
-        }
-
-        long remainingMs = Math.max(0L, entry.getHardExpireAtMs() - now);
-        long floorMs = Math.min(LEASE_MIN_TTL_MS, scaleMs);
-        // Never shorter than the remaining budget: a failure never shortens a
-        // healthy budget; decay toward the floor happens through wall-time
-        // passage, not halving.
-        long leaseTtlMs = Math.max(remainingMs, floorMs);
-        long leaseExpireAtMs = now + leaseTtlMs;
-        // The soft timestamp sits at the lease midpoint: the second half of every lease is the
-        // read-triggered retry window (see the method contract). The halving applies to the
-        // DURATION only — halving the epoch timestamp would land it decades in the past.
-        long leaseSoftExpireAtMs = now + (leaseTtlMs >> 1);
-        log.debug(
-          "Lease-on-failure: extending stale entry for key={} by {}ms (floor {}ms)",
-          ticket.key,
-          leaseTtlMs,
-          floorMs
-        );
-
-        ticket.leaseOutcome = LeaseOutcome.GRANTED;
-        ticket.leasedAtMs = leasedAt;
-        // Provisional keep-alive: durations, value, and all metadata preserved
-        // verbatim; only the two expire timestamps move (explicit lease
-        // arithmetic — the draft's computed expiry must not run here).
-        return EntryDraft.of(entry, ttlPolicy).expiryAt(leaseExpireAtMs, leaseSoftExpireAtMs).build();
-      });
-
-    switch (ticket.leaseOutcome) {
-      case GRANTED -> {
-        leaseGrants.incrementAndGet();
-        recordLeaseEpisode(ticket.key, ticket.leasedAtMs);
+      // Retire before releasing the permit so the next acquirer cannot adopt this failed ticket.
+      boolean retired = refreshes.remove(cacheKey, ticket);
+      if (retired) {
+        limiter.release();
       }
-      case CAPPED, CLOSED, EXPIRED -> removeLeaseEpisode(ticket.key);
-      case NONE -> {
-        // The entry changed or vanished while the refresh was in flight: no lease.
+      boolean rejected = t instanceof RejectedExecutionException;
+      if (rejected) {
+        log.debug("Background refresh rejected by executor (saturated), key={}", cacheKey);
+      }
+      ticket.complete(rejected ? RenewOutcome.Skipped.EXECUTOR_REJECTED : new RenewOutcome.Failed(t));
+      if (!hard && !rejected) {
+        throw t;
       }
     }
   }
 
   /**
-   * Move the soft deadline up to the existing hard deadline: the entry stays servable
-   * until its already-scheduled hard expiry, but a read no longer re-arms the failing
-   * refresh in between.
-   */
-  private CacheEntry closeRetryWindow(CacheEntry entry) {
-    return EntryDraft.of(entry, ttlPolicy).softExpiryAt(entry.getHardExpireAtMs()).build();
-  }
-
-  /**
-   * Close the retry window after a successful refresh returned no value. The identity guard is
-   * the ticket's snapshot (data stamp and hard deadline, permanent included): a concurrent write
-   * or promotion already granted fresh TTLs and must keep them. A matched close also ends the
-   * key's lease episode, because the source has now answered cleanly.
+   * Unwraps a single {@link CompletionException} layer so timeouts and root causes are classified
+   * directly.
    *
-   * @param ticket the refresh whose empty result settles
+   * @param failure the async completion failure
+   * @return the unwrapped cause, or {@code failure} itself
    */
-  private void closeRetryWindowAfterEmptyRefresh(RefreshTicket ticket) {
-    boolean[] closed = { false };
-    cache
-      .asMap()
-      .compute(ticket.key, (key, entry) -> {
-        if (
-          entry == null ||
-          entry.getDataVersion() != ticket.dataVersion ||
-          entry.getHardExpireAtMs() != ticket.hardExpireAtMs
-        ) {
-          return entry;
-        }
-        closed[0] = true;
-        return closeRetryWindow(entry);
-      });
-    if (closed[0]) {
-      removeLeaseEpisode(ticket.key);
-      log.debug("Background soft refresh returned no value; closed the retry window for key={}", ticket.key);
-    }
+  private static Throwable unwrapCause(Throwable failure) {
+    return failure instanceof CompletionException && failure.getCause() != null ? failure.getCause() : failure;
   }
 
   /**
-   * Admit a lease episode while preserving the diagnostic view's oldest-first meaning:
-   * once the cap is reached, new keys are refused rather than evicting the oldest (and
-   * therefore most stale) debt. Before refusing, keys whose L1 entry already left are
-   * reaped, so a full view cannot pin itself on dead episodes until a diagnostics scrape
-   * happens to walk past them. The check, reap, insert and count move as one critical
-   * section under the map's monitor.
+   * Per-key refresh reservation, creation-time baseline snapshot, atomic upgrade state machine,
+   * and async completion callback.
    */
-  private void recordLeaseEpisode(String key, long leasedAt) {
-    synchronized (leasedEpisodes) {
-      if (leasedEpisodes.size() >= MAX_LEASED_EPISODES && !leasedEpisodes.containsKey(key)) {
-        leasedEpisodes.keySet().removeIf(k -> !cache.asMap().containsKey(k));
-        episodeCount = leasedEpisodes.size();
-        if (leasedEpisodes.size() >= MAX_LEASED_EPISODES) {
-          return;
+  private final class RefreshTicket implements BiConsumer<VersionedValue, Throwable> {
+
+    private final String key;
+    private final long refreshSoftTtlMs;
+    private final long dataVersion;
+    private final long hardExpireAtMs;
+
+    @SuppressWarnings("all")
+    private int state;
+
+    /** {@code null} (no waiter) | {@code CompletableFuture<RenewOutcome>} | terminal {@link RenewOutcome}. */
+    @SuppressWarnings("all")
+    private @Nullable Object completion;
+
+    /**
+     * Creates a refresh ticket bound to a live resident snapshot.
+     *
+     * @param key              the physical cache key
+     * @param refreshSoftTtlMs the soft TTL to apply on soft settlement
+     * @param initialState     {@link #STATE_SOFT} or {@link #STATE_HARD}
+     * @param hardFuture       pre-allocated future for hard renewals, or {@code null} for soft
+     * @param dataVersion      the resident's version at reservation time
+     * @param hardExpireAtMs   the resident's hard deadline at reservation time
+     */
+    private RefreshTicket(
+      String key,
+      long refreshSoftTtlMs,
+      int initialState,
+      @Nullable CompletableFuture<RenewOutcome> hardFuture,
+      long dataVersion,
+      long hardExpireAtMs
+    ) {
+      this.key = key;
+      this.refreshSoftTtlMs = refreshSoftTtlMs;
+      this.state = initialState;
+      this.completion = hardFuture;
+      this.dataVersion = dataVersion;
+      this.hardExpireAtMs = hardExpireAtMs;
+    }
+
+    /**
+     * Atomically upgrades a soft ticket to hard renewal if not yet settling, and returns a
+     * {@link CompletableFuture} that completes once this ticket's settlement has finished.
+     *
+     * @return the shared completion future
+     */
+    @SuppressWarnings("unchecked")
+    private CompletableFuture<RenewOutcome> upgradeToHard() {
+      TICKET_STATE.compareAndSet(this, STATE_SOFT, STATE_UPGRADED_HARD);
+      for (;;) {
+        Object current = TICKET_COMPLETION.getVolatile(this);
+        if (current instanceof CompletableFuture<?> future) {
+          return (CompletableFuture<RenewOutcome>) future;
+        }
+        if (current instanceof RenewOutcome done) {
+          return CompletableFuture.completedFuture(done);
+        }
+        CompletableFuture<RenewOutcome> created = new CompletableFuture<>();
+        if (TICKET_COMPLETION.compareAndSet(this, null, created)) {
+          return created;
         }
       }
-      if (leasedEpisodes.putIfAbsent(key, leasedAt) == null) {
-        episodeCount++;
+    }
+
+    /**
+     * Publishes the terminal {@link RenewOutcome} and completes any attached waiter future.
+     *
+     * @param outcome the terminal settlement outcome
+     */
+    @SuppressWarnings("unchecked")
+    private void complete(RenewOutcome outcome) {
+      Object previous = TICKET_COMPLETION.getAndSet(this, outcome);
+      if (previous instanceof CompletableFuture<?> future) {
+        ((CompletableFuture<RenewOutcome>) future).complete(outcome);
       }
     }
-  }
 
-  /** Removes a key's episode unconditionally; the lock-free count keeps the common path out of the monitor. */
-  private void removeLeaseEpisode(String key) {
-    if (episodeCount == 0) {
-      return;
-    }
-    synchronized (leasedEpisodes) {
-      if (leasedEpisodes.remove(key) != null) {
-        episodeCount--;
-      }
-    }
-  }
-
-  /** Conditional removal for the staleDebt reap: never drops a newer episode for the same key. */
-  private void removeLeaseEpisode(String key, long leasedAt) {
-    if (episodeCount == 0) {
-      return;
-    }
-    synchronized (leasedEpisodes) {
-      if (leasedEpisodes.remove(key, leasedAt)) {
-        episodeCount--;
-      }
-    }
-  }
-
-  /**
-   * Applies a soft-refresh result to the cache under the snapshot guard: the refresh applies
-   * unless a newer write landed in flight (the resident stamp is strictly above the ticket's
-   * creation-time snapshot), so an ordinary refresh extends the TTLs while a concurrent
-   * writer's fresher value survives (design decisions: version stamps). An absent or logically
-   * expired entry is rebuilt from the ticket's snapshot — writing a fresh value back with an
-   * already-past hard deadline would let Caffeine evict it on the next maintenance pass and send
-   * the next read back to the source. An entry invalidated during the refresh is left untouched
-   * (anti-resurrection, design decisions: invalidation). Values are stored as passed by the
-   * caller (no codec).
-   *
-   * @param loaded the freshly-loaded value paired with the pre-read {@code dataVersion} stamp
-   * @param ticket the refresh whose snapshot and soft TTL apply
-   */
-  private void applyRefreshTask(VersionedValue loaded, RefreshTicket ticket) {
-    Object value = loaded.value();
-    String key = ticket.key;
-
-    cache
-      .asMap()
-      .compute(key, (k, entry) -> {
-        // Anti-resurrection: the refresh read its value before this compute, so an
-        // INVALIDATE / clearAll that landed in between outranks it. Only the tombstone can
-        // tell an explicit removal (keep absent) from capacity eviction (rebuild).
-        if (entryLifecycle.staleAgainstInvalidation(key, loaded.dataVersion())) {
-          log.debug("Async refresh discarded: key was invalidated during the refresh: {}", key);
-          return entry;
+    /**
+     * Settles the async refresh result or failure, retires the ticket and releases the limiter
+     * permit before completing any waiting future so callbacks can safely re-enter.
+     *
+     * @param loaded  the loaded {@link VersionedValue}, or {@code null}
+     * @param failure the execution or timeout failure, or {@code null}
+     */
+    @Override
+    public void accept(@Nullable VersionedValue loaded, @Nullable Throwable failure) {
+      RenewOutcome outcome;
+      try {
+        if (failure != null) {
+          Throwable root = unwrapCause(failure);
+          settleFailure(root);
+          outcome = new RenewOutcome.Failed(root);
+        } else if (loaded != null && loaded.value() != null) {
+          boolean hard = !TICKET_STATE.compareAndSet(this, STATE_SOFT, STATE_SETTLING_SOFT);
+          outcome = settleLoaded(loaded, hard);
+        } else {
+          settleFailure(null);
+          outcome = RenewOutcome.Failed.EMPTY;
         }
+      } catch (Throwable t) {
+        ZetaExceptionHandler.handleException("background refresh settlement failed: key=" + key, t);
+        outcome = new RenewOutcome.Failed(t);
+      } finally {
+        // Retire and release before completing so chained callbacks observe a clean reservation slot.
+        // The successful removal owns the permit, keeping retirement and release idempotent.
+        if (refreshes.remove(key, this)) {
+          limiter.release();
+        }
+      }
+      complete(outcome);
+    }
 
-        if (entry != null && !ttlPolicy.isLogicallyExpired(entry)) {
-          // Snapshot guard: discard only when a newer write landed while the refresh was in
-          // flight. Comparing against the INCOMING stamp would discard every ordinary refresh
-          // (entry == incoming with no concurrent write).
-          if (entry.getDataVersion() > ticket.dataVersion) {
-            log.debug("Async refresh discarded: newer version exists: {}", key);
+    /**
+     * Logs a failure and closes the soft retry window if this ticket originated as a soft refresh.
+     *
+     * @param failure the root failure, or {@code null} when the loader returned empty
+     */
+    private void settleFailure(@Nullable Throwable failure) {
+      if (failure instanceof TimeoutException) {
+        log.warn("Background refresh timed out after {}ms: {}", refreshTimeoutMs, key);
+      } else if (failure != null) {
+        log.warn("Background refresh failed: {}", key, failure);
+      }
+      if (((int) TICKET_STATE.getVolatile(this) & FLAG_FROM_SOFT) != 0) {
+        closeRetryWindow();
+      }
+    }
+
+    /**
+     * Applies a loaded value inside the key's map bin under invalidation, residency, version, and
+     * expiry guards, re-arming either both deadlines (hard) or only the soft window (soft).
+     *
+     * @param loaded the loaded value and its pre-load version stamp
+     * @param hard   {@code true} to perform hard renewal, {@code false} for soft refresh
+     * @return the settlement {@link RenewOutcome}
+     */
+    private RenewOutcome settleLoaded(VersionedValue loaded, boolean hard) {
+      RenewOutcome[] outcome = { RenewOutcome.Skipped.SOFT_REFRESH };
+      cache
+        .asMap()
+        .compute(key, (k, entry) -> {
+          if (entryLifecycle.staleAgainstInvalidation(key, loaded.dataVersion())) {
+            outcome[0] = RenewOutcome.Skipped.INVALIDATED;
             return entry;
           }
-
-          // Keep L1's stamp monotonic: the entry's own stamp wins ties, while
-          // the fresh value and extended TTLs still apply.
-          return refreshedEntry(entry, value, Math.max(entry.getDataVersion(), loaded.dataVersion()), ticket.softTtlMs);
-        }
-        return rebuildEvictedEntry(loaded, ticket, value);
-      });
-  }
-
-  /**
-   * Merge a successful refresh result into an existing entry — the rebuild
-   * tail of {@link #applyRefreshTask}'s compute: fresh value, the
-   * given data version, and the refresh soft TTL. A successful refresh of a
-   * COOL entry downgrades it to NORMAL: the local read that triggered the
-   * refresh shows the key is still active locally, so it returns to the
-   * ordinary local lifecycle (promotion-eligible, hard-TTL reload). Decision
-   * metadata is preserved, so a later Worker broadcast still overrides via
-   * {@code decisionVersion}. NORMAL/HOT entries keep state.
-   *
-   * @param entry       the existing entry to merge into (not modified)
-   * @param value       the refreshed value (stored as-is, no codec)
-   * @param dataVersion  the data stamp to store
-   * @param softTtlMs    the soft TTL for the refreshed entry
-   * @return the merged entry
-   */
-  private CacheEntry refreshedEntry(CacheEntry entry, Object value, long dataVersion, long softTtlMs) {
-    // Fresh value ⇒ reborn: the birth stamp resets so the lease staleness cap
-    // measures the current value's age, not the superseded entry's.
-    EntryDraft refreshed = EntryDraft.of(entry, ttlPolicy)
-      .value(value)
-      .version(dataVersion)
-      .softTtl(softTtlMs)
-      .birthStampSec(TimeSource.monotonicSecondsSinceBoot());
-    if (entry.getKeyState() == KeyState.COOL) {
-      refreshed.keyState(KeyState.NORMAL);
-    }
-    return refreshed.build();
-  }
-
-  /**
-   * Rebuild an entry after the snapshot it was snapshotted from was evicted or logically
-   * expired while the refresh was in flight — the absent/expired branch of
-   * {@link #applyRefreshTask}.
-   *
-   * <p>The rebuild uses the ticket's OWN hard TTL so a per-call TTL override
-   * (stamped on the entry at load time) survives eviction+refresh instead of
-   * silently reverting to the configured default; a ticket captured with no
-   * entry present ({@code hardTtlMs = 0}, normal baselines {@code -1}) falls back
-   * to the configured defaults. The captured normal baselines are restored as well,
-   * so a later promotion or cool-down still sees the entry's original regime.
-   * The snapshot's decision stamp is carried forward and a successful refresh
-   * rebuilds a COOL entry as NORMAL (same downgrade as the existing-entry
-   * branch).
-   */
-  private CacheEntry rebuildEvictedEntry(VersionedValue loaded, RefreshTicket ticket, Object value) {
-    long hardTtlMs = ttlPolicy.resolveEffectiveHardTtl(ticket.hardTtlMs);
-    long normalHardTtlMs =
-      ticket.normalHardTtlMs >= 0L
-        ? ticket.normalHardTtlMs
-        : ttlPolicy.normalHardBaseline(ttlPolicy.effectiveHardTtlMs());
-    long normalSoftTtlMs = ticket.normalSoftTtlMs >= 0L ? ticket.normalSoftTtlMs : ttlPolicy.effectiveSoftTtlMs();
-    // design decisions: version stamps: the rebuilt entry carries the pre-read stamp taken before the
-    // refresh load began.
-    EntryDraft rebuilt = EntryDraft.blank(ttlPolicy)
-      .value(value)
-      .version(loaded.dataVersion())
-      .ttl(hardTtlMs, ticket.softTtlMs, normalHardTtlMs, normalSoftTtlMs)
-      .keyState(ticket.keyState == KeyState.COOL ? KeyState.NORMAL : ticket.keyState)
-      .birthStampSec(TimeSource.monotonicSecondsSinceBoot());
-    if (ticket.decision != null) {
-      rebuilt.decision(ticket.decision);
+          if (entry == null) {
+            outcome[0] = RenewOutcome.Skipped.ABSENT_OR_EXPIRED;
+            return null;
+          }
+          if (entry.getDataVersion() > dataVersion) {
+            outcome[0] = RenewOutcome.Skipped.NEWER_VALUE;
+            return entry;
+          }
+          if (!hard && ttlPolicy.isLogicallyExpired(entry)) {
+            outcome[0] = RenewOutcome.Skipped.ABSENT_OR_EXPIRED;
+            return entry;
+          }
+          EntryDraft draft = entryLifecycle
+            .editEntry(entry)
+            .value(loaded.value())
+            .version(Math.max(entry.getDataVersion(), loaded.dataVersion()));
+          CacheEntry updated = (hard ? draft.rearmExpiry() : draft.softTtl(refreshSoftTtlMs)).build();
+          if (hard) {
+            outcome[0] = new RenewOutcome.Applied(updated);
+          }
+          return updated;
+        });
+      return outcome[0];
     }
 
-    return rebuilt.build();
+    /**
+     * Moves the soft deadline to the existing hard deadline after a failed soft refresh so
+     * subsequent reads do not hammer a failing source, guarded by snapshot identity and tombstones.
+     */
+    private void closeRetryWindow() {
+      boolean[] closed = { false };
+      cache
+        .asMap()
+        .compute(key, (k, entry) -> {
+          if (
+            entry == null ||
+            entry.getDataVersion() != dataVersion ||
+            entry.getHardExpireAtMs() != hardExpireAtMs ||
+            entryLifecycle.staleAgainstInvalidation(key, dataVersion)
+          ) {
+            return entry;
+          }
+          closed[0] = true;
+          return entryLifecycle.editEntry(entry).softExpiryAt(entry.getHardExpireAtMs()).build();
+        });
+      if (closed[0]) {
+        log.debug("Background soft refresh settled without a value; closed the retry window for key={}", key);
+      }
+    }
   }
 }

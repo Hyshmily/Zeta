@@ -31,8 +31,7 @@ import java.util.Set;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.actuate.endpoint.InvalidEndpointRequestException;
-import org.springframework.http.HttpStatus;
-import org.springframework.web.server.ResponseStatusException;
+import org.springframework.boot.actuate.endpoint.web.WebEndpointResponse;
 
 class RingEndpointTest {
 
@@ -51,17 +50,18 @@ class RingEndpointTest {
   void ringInfo_shouldReturnLiveNodesOnly() {
     when(ring.getNodes()).thenReturn(Set.of("node1", "node2", "node3"));
 
-    Map<String, Object> result = endpoint.ringInfo();
+    WebEndpointResponse<Map<String, Object>> response = endpoint.ringInfo();
 
-    assertThat(result).containsOnlyKeys("nodes");
-    assertThat(result.get("nodes")).isEqualTo(List.of("node1", "node2", "node3"));
+    assertThat(response.getStatus()).isEqualTo(200);
+    assertThat(response.getBody()).containsOnlyKeys("nodes");
+    assertThat(response.getBody().get("nodes")).isEqualTo(List.of("node1", "node2", "node3"));
   }
 
   @Test
   void keyMapping_shouldUseTheInjectedHealthView() {
     when(ring.locateNode("k", healthView)).thenReturn("node1");
 
-    assertThat(endpoint.keyMapping(new String[] { "k" })).containsEntry("nodeId", "node1");
+    assertThat(endpoint.keyMapping(new String[] { "k" }).getBody()).containsEntry("nodeId", "node1");
   }
 
   /**
@@ -73,7 +73,7 @@ class RingEndpointTest {
     RingEndpoint unwired = new RingEndpoint(ring, null);
     when(ring.locateNode("k")).thenReturn("node1");
 
-    Map<String, Object> result = unwired.keyMapping(new String[] { "k" });
+    Map<String, Object> result = unwired.keyMapping(new String[] { "k" }).getBody();
 
     verify(ring).locateNode("k");
     verify(ring, never()).rebuildIfPossible(any());
@@ -85,7 +85,7 @@ class RingEndpointTest {
     RingEndpoint unwired = new RingEndpoint(ring, null);
     when(ring.getNodes()).thenReturn(Set.of("node1"));
 
-    assertThat(unwired.ringInfo()).containsEntry("nodes", List.of("node1"));
+    assertThat(unwired.ringInfo().getBody()).containsEntry("nodes", List.of("node1"));
 
     verify(ring, never()).rebuildIfPossible(any());
   }
@@ -94,7 +94,7 @@ class RingEndpointTest {
   void keyMapping_shouldJoinRemainingPathSegmentsVerbatim() {
     when(ring.locateNode("a/b", healthView)).thenReturn("node2");
 
-    assertThat(endpoint.keyMapping(new String[] { "a", "b" }))
+    assertThat(endpoint.keyMapping(new String[] { "a", "b" }).getBody())
       .containsEntry("key", "a/b")
       .containsEntry("nodeId", "node2");
   }
@@ -122,22 +122,14 @@ class RingEndpointTest {
   void ringInfo_shouldBeServiceUnavailableWhenRingIsAbsent() {
     RingEndpoint unwired = new RingEndpoint(null, healthView);
 
-    assertThatThrownBy(unwired::ringInfo)
-      .isInstanceOf(ResponseStatusException.class)
-      .satisfies(ex ->
-        assertThat(((ResponseStatusException) ex).getStatusCode()).isEqualTo(HttpStatus.SERVICE_UNAVAILABLE)
-      );
+    assertThat(unwired.ringInfo().getStatus()).isEqualTo(503);
   }
 
   @Test
   void keyMapping_shouldBeServiceUnavailableWhenRingIsAbsent() {
     RingEndpoint unwired = new RingEndpoint(null, healthView);
 
-    assertThatThrownBy(() -> unwired.keyMapping(new String[] { "myKey" }))
-      .isInstanceOf(ResponseStatusException.class)
-      .satisfies(ex ->
-        assertThat(((ResponseStatusException) ex).getStatusCode()).isEqualTo(HttpStatus.SERVICE_UNAVAILABLE)
-      );
+    assertThat(unwired.keyMapping(new String[] { "myKey" }).getStatus()).isEqualTo(503);
   }
 
   @Test

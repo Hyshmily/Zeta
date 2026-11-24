@@ -16,6 +16,7 @@
 package io.github.hyshmily.zeta.sharding;
 
 import io.github.hyshmily.zeta.sync.worker.WorkerHeartbeatMessage;
+import io.github.hyshmily.zeta.util.CollectionSizing;
 import io.github.hyshmily.zeta.util.Internal;
 import io.github.hyshmily.zeta.util.TimeSource;
 import java.util.HashSet;
@@ -102,7 +103,8 @@ public class ClusterHealth implements HealthView {
   }
 
   /**
-   * Creates a ClusterHealth with adaptive per-Worker liveness timeouts.
+   * Creates a ClusterHealth with adaptive per-Worker liveness timeouts and the configured
+   * minimum alive Worker threshold.
    *
    * @param heartbeatTimeoutMs heartbeat timeout window (ms, positive); with adaptive
    *                           timeouts this is the warm-up window and the ceiling
@@ -110,9 +112,17 @@ public class ClusterHealth implements HealthView {
    * @param adaptiveTimeout    whether liveness windows adapt per Worker
    * @param adaptiveFloorMs    lower clamp for the adaptive window; ignored when
    *                           {@code adaptiveTimeout} is off ({@code 0})
+   * @param minAliveWorkers    minimum alive Workers for a healthy cluster; {@code <= 0}
+   *                           restores the records-derived one-third threshold
    * @throws IllegalArgumentException when the timeout is non-positive or the cache TTL is negative
    */
-  public ClusterHealth(long heartbeatTimeoutMs, long healthCacheTtlMs, boolean adaptiveTimeout, long adaptiveFloorMs) {
+  public ClusterHealth(
+    long heartbeatTimeoutMs,
+    long healthCacheTtlMs,
+    boolean adaptiveTimeout,
+    long adaptiveFloorMs,
+    int minAliveWorkers
+  ) {
     if (heartbeatTimeoutMs <= 0L) {
       throw new IllegalArgumentException("heartbeatTimeoutMs must be > 0, but got: " + heartbeatTimeoutMs);
     }
@@ -122,6 +132,20 @@ public class ClusterHealth implements HealthView {
     this.healthCacheTtlMs = healthCacheTtlMs;
     this.heartbeatTimeoutMs = heartbeatTimeoutMs;
     this.adaptiveFloorMs = adaptiveTimeout ? Math.max(1L, adaptiveFloorMs) : 0L;
+    this.minAliveWorkers = minAliveWorkers;
+  }
+
+  /**
+   * Creates a ClusterHealth with adaptive timeouts and the records-derived minimum (one third of
+   * the observed Workers).
+   *
+   * @param heartbeatTimeoutMs heartbeat timeout window (ms, positive)
+   * @param healthCacheTtlMs   cluster-health judgment cache TTL (ms, non-negative)
+   * @param adaptiveTimeout    whether liveness windows adapt per Worker
+   * @param adaptiveFloorMs    lower clamp for the adaptive window; ignored when adaptive is off
+   */
+  public ClusterHealth(long heartbeatTimeoutMs, long healthCacheTtlMs, boolean adaptiveTimeout, long adaptiveFloorMs) {
+    this(heartbeatTimeoutMs, healthCacheTtlMs, adaptiveTimeout, adaptiveFloorMs, 0);
   }
 
   /**
@@ -183,7 +207,7 @@ public class ClusterHealth implements HealthView {
         invalidate = true;
       } else {
         boolean wasAlive = aliveAt(record, now);
-        record.onHeartbeatSample(now, hb.readyToServe());
+        record.onHeartbeatSample(now, hb.readyToServe(), heartbeatTimeoutMs);
         invalidate = wasAlive != aliveAt(record, now);
         previousEpoch = UNKNOWN_EPOCH;
         rejoined = false;
@@ -313,7 +337,7 @@ public class ClusterHealth implements HealthView {
     // One clock sample for the walk (see computeClusterHealthy): every Worker is judged
     // against the same instant, and the hot liveness path pays no per-record clock read.
     long now = TimeSource.monotonicMillis();
-    Set<String> alive = new HashSet<>(Math.max(16, records.size()));
+    Set<String> alive = new HashSet<>(CollectionSizing.capacity(records.size()));
     for (WorkerHealthRecord record : records.values()) {
       if (aliveAt(record, now)) {
         alive.add(record.workerId);
@@ -460,10 +484,18 @@ public class ClusterHealth implements HealthView {
      * Feeds one heartbeat arrival: the inter-arrival delta updates the estimator and
      * the same volatile write publishes the new evidence instant and readiness.
      * Runs under the owning health view's record lock.
+     *
+     * @param now           the heartbeat's monotonic arrival instant
+     * @param ready         the readiness flag carried by the heartbeat
+     * @param maxIntervalMs the static liveness window; an interval at or beyond it is an outage
+     *                      sample and does not feed the estimator
      */
-    void onHeartbeatSample(long now, boolean ready) {
+    void onHeartbeatSample(long now, boolean ready, long maxIntervalMs) {
       long intervalMs = now - getLastAliveEvidenceTime();
-      if (intervalMs > 0L) {
+      // An interval at or beyond the static ceiling means the Worker was already considered dead;
+      // feeding that outage-length gap to the estimator would pin the adaptive window at the
+      // ceiling and keep a healthy recovery marked dead. RFC 6298 isolates exactly these samples.
+      if (intervalMs > 0L && intervalMs < maxIntervalMs) {
         if (srttMs < 0L) {
           srttMs = intervalMs;
           // RTTVAR = interval / 2, stored 4x: 4 * (interval / 2) = 2 * interval.
