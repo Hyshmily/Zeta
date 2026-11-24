@@ -29,17 +29,16 @@ import io.github.hyshmily.zeta.cache.cachesupport.raw.CacheEntry;
 import io.github.hyshmily.zeta.cache.cachesupport.raw.EntryDraft;
 import io.github.hyshmily.zeta.hotkeydetector.HotKeyDetector;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.HeavyKeeper;
-import io.github.hyshmily.zeta.model.KeyState;
 import io.github.hyshmily.zeta.reporting.KeyReporter;
 import io.github.hyshmily.zeta.reporting.ReportMessage;
 import io.github.hyshmily.zeta.reporting.ReportPublisher;
 import io.github.hyshmily.zeta.reporting.impl.KeyReporterImpl;
 import io.github.hyshmily.zeta.scheduler.BackgroundRefresher;
 import io.github.hyshmily.zeta.scheduler.DefaultBackgroundRefresher;
+import io.github.hyshmily.zeta.sharding.ClusterHealth;
 import io.github.hyshmily.zeta.sharding.ConsistentHashRing;
 import io.github.hyshmily.zeta.sharding.HashRing;
 import io.github.hyshmily.zeta.sharding.HealthView;
-import io.github.hyshmily.zeta.sharding.ClusterHealth;
 import io.github.hyshmily.zeta.util.clock.MonotonicStampClock;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -194,8 +193,14 @@ public class HotHitBenchmark {
       true
     );
     this.detector = new HotKeyDetector(sketch);
-    EntryLifecycle entryLifecycle = new EntryLifecycleImpl(caffeine, zetaProps, healthView);
-    BackgroundRefresher refresher = new DefaultBackgroundRefresher(caffeine, Runnable::run, entryLifecycle, 10);
+    EntryLifecycle entryLifecycle = new EntryLifecycleImpl(caffeine, zetaProps);
+    BackgroundRefresher refresher = new DefaultBackgroundRefresher(
+      caffeine,
+      Runnable::run,
+      entryLifecycle,
+      10,
+      zetaProps.getRefreshTimeoutMs()
+    );
     BroadcastBuffer broadcast = new BroadcastBuffer(scheduler, null, 500, 2_000, null);
     ConsistentHashRing ring = new HashRing(150);
     KeyReporter reporter = new KeyReporterImpl(new DropPublisher(), "bench", 1000, 100, 1, ring, healthView);
@@ -206,17 +211,7 @@ public class HotHitBenchmark {
     AccessCounter accessCounter = new AccessCounter(detector, reporter, scheduler, 50L, 500L);
     accessCounter.afterPropertiesSet();
     SingleFlight flight = new PassThroughFlight();
-    cachePlain = new HotKeyCache(
-      detector,
-      caffeine,
-      flight,
-      entryLifecycle,
-      refresher,
-      accessCounter,
-      broadcast,
-      stampClock,
-      healthView
-    );
+    cachePlain = new HotKeyCache(caffeine, flight, entryLifecycle, refresher, accessCounter, broadcast, stampClock);
 
     long farFuture = System.currentTimeMillis() + 300_000;
     keys = new String[KEY_SPACE];
@@ -237,13 +232,7 @@ public class HotHitBenchmark {
   }
 
   private static CacheEntry entry(String value, long farFuture) {
-    return EntryDraft.blank(null)
-      .value(value)
-      .version(1)
-      .ttl(300_000, 30_000, 300_000, 30_000)
-      .expiryAt(farFuture, farFuture)
-      .keyState(KeyState.NORMAL)
-      .build();
+    return EntryDraft.blank(null).value(value).version(1).ttl(300_000, 30_000).expiryAt(farFuture, farFuture).build();
   }
 
   @TearDown(Level.Trial)

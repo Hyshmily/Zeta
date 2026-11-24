@@ -21,7 +21,6 @@ import com.github.benmanes.caffeine.cache.Expiry;
 import io.github.hyshmily.zeta.autoconfigure.ZetaProperties;
 import io.github.hyshmily.zeta.cache.cachesupport.raw.CacheEntry;
 import io.github.hyshmily.zeta.cache.cachesupport.raw.EntryDraft;
-import io.github.hyshmily.zeta.model.KeyState;
 import io.github.hyshmily.zeta.util.TimeSource;
 import java.util.concurrent.TimeUnit;
 import org.openjdk.jmh.annotations.Benchmark;
@@ -151,9 +150,8 @@ public class CaffeineFloorBenchmark {
     return EntryDraft.blank(null)
       .value("v-" + index)
       .version(1)
-      .ttl(HARD_TTL_MS, 0L, HARD_TTL_MS, 0L)
+      .ttl(HARD_TTL_MS, 0L)
       .expiryAt(now + HARD_TTL_MS, 0L)
-      .keyState(KeyState.NORMAL)
       .build();
   }
 

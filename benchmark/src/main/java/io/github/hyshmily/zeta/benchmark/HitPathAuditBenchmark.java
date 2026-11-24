@@ -28,15 +28,11 @@ import io.github.hyshmily.zeta.cache.cachesupport.loader.singleflight.SingleFlig
 import io.github.hyshmily.zeta.cache.cachesupport.policy.GetPolicy;
 import io.github.hyshmily.zeta.cache.cachesupport.raw.CacheEntry;
 import io.github.hyshmily.zeta.cache.cachesupport.raw.EntryDraft;
+import io.github.hyshmily.zeta.heat.HeatView;
 import io.github.hyshmily.zeta.hotkeydetector.HotKeyDetector;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.HeavyKeeper;
-import io.github.hyshmily.zeta.model.DecisionStamp;
-import io.github.hyshmily.zeta.model.KeyState;
 import io.github.hyshmily.zeta.scheduler.BackgroundRefresher;
 import io.github.hyshmily.zeta.scheduler.DefaultBackgroundRefresher;
-import io.github.hyshmily.zeta.sharding.ClusterHealth;
-import io.github.hyshmily.zeta.sharding.HealthView;
-import io.github.hyshmily.zeta.sync.worker.WorkerHeartbeatMessage;
 import io.github.hyshmily.zeta.util.TimeSource;
 import io.github.hyshmily.zeta.util.clock.MonotonicStampClock;
 import java.util.concurrent.ExecutorService;
@@ -64,22 +60,18 @@ import org.openjdk.jmh.annotations.Warmup;
 
 /**
  * Audit benchmark for the three production hit shapes of {@code HotKeyCache.get}
- * — the companion to {@link HotHitBenchmark}, which only covers the warmed-HOT
- * steady state (both benchmarks build the L1 table through the same
- * production-shaped wiring).
+ * — the companion to {@link HotHitBenchmark}, which only covers the warmed steady
+ * state (both benchmarks build the L1 table through the same production-shaped
+ * wiring).
  *
  * <h2>What each {@code mode} means</h2>
  * <ul>
- *   <li><b>{@code LOCAL_NORMAL}</b> — a plain {@link KeyState#NORMAL} entry with
- *       no COOL lease: the long-tail shape. Exercises the classification
- *       short-circuit; the TopK probe is not reached because the state/lease
- *       gate fails first.</li>
- *   <li><b>{@code WORKER_HOT}</b> — a Worker-stamped HOT entry
- *       ({@code decisionNodeId} set, live health record): the highest-QPS shape.
- *       Exercises the per-hit Decision-Validity liveness probe
- *       ({@code EntryLifecycle.demoteIfDecisionInvalid} →
- *       {@code HealthView.isCurrentIncarnation(String, long)}).</li>
- *   <li><b>{@code SOFT_EXPIRED}</b> — a NORMAL entry past its soft TTL with a
+ *   <li><b>{@code LOCAL_NORMAL}</b> — an ordinary resident entry with an enabled
+ *       hard deadline: the long-tail shape.</li>
+ *   <li><b>{@code WORKER_HOT}</b> — the same entry shape. Heat is a lease in
+ *       {@code HeatDirectory}, not a field on the entry, so a cluster-hot key has
+ *       no distinct hit path; the mode is retained to prove that.</li>
+ *   <li><b>{@code SOFT_EXPIRED}</b> — an entry past its soft TTL with a
  *       <b>slow</b> refresh source (500&nbsp;ms). This pins the steady state
  *       inside the soft-expire window, so every hit runs the
  *       {@code BackgroundRefresher.triggerBackgroundRefresh} in-flight
@@ -139,8 +131,6 @@ public class HitPathAuditBenchmark {
     FRESH,
   }
 
-  private static final String WORKER_NODE = "worker-bench";
-  private static final long WORKER_EPOCH = 1L;
   private static final long HARD_TTL_MS = 600_000L;
   private static final long SOFT_TTL_MS = 1_000L;
   /** How long the background-refresh source blocks (SOFT_EXPIRED only). */
@@ -204,10 +194,6 @@ public class HitPathAuditBenchmark {
 
     ZetaProperties props = new ZetaProperties();
     Cache<String, CacheEntry> caffeine = buildL1Table(props);
-    HealthView healthView = new ClusterHealth(300_000L, 3, false, 0);
-    // A live, non-stale Worker incarnation so WORKER_HOT entries stay valid
-    // (a dead one would demote on the first hit and drift into LOCAL_NORMAL).
-    healthView.onHeartbeat(new WorkerHeartbeatMessage(1L, WORKER_NODE, WORKER_EPOCH, true, null));
 
     HeavyKeeper sketch = new HeavyKeeper(
       props.getTopK(),
@@ -220,27 +206,26 @@ public class HitPathAuditBenchmark {
       true
     );
     HotKeyDetector detector = new HotKeyDetector(sketch);
-    EntryLifecycle entryLifecycle = new EntryLifecycleImpl(caffeine, props, healthView);
+    EntryLifecycle entryLifecycle = new EntryLifecycleImpl(caffeine, props);
     BackgroundRefresher refresher = new DefaultBackgroundRefresher(
       caffeine,
       refreshPool,
       entryLifecycle,
-      props.effectiveRefreshMaxPools()
+      props.effectiveRefreshMaxPools(),
+      props.getRefreshTimeoutMs()
     );
     BroadcastBuffer broadcast = new BroadcastBuffer(scheduler, null, 500, 2_000, null);
     accessCounter = new AccessCounter(detector, null, scheduler, 50L, 500L);
     accessCounter.afterPropertiesSet();
     MonotonicStampClock clock = new MonotonicStampClock(1L, MonotonicStampClock.DEFAULT_MAX_FORWARD_DRIFT_MS);
     cache = new HotKeyCache(
-      detector,
       caffeine,
       new HotHitBenchmark.PassThroughFlight(),
       entryLifecycle,
       refresher,
       accessCounter,
       broadcast,
-      clock,
-      healthView
+      clock
     );
 
     long now = TimeSource.currentTimeMillis();
@@ -256,19 +241,12 @@ public class HitPathAuditBenchmark {
     EntryDraft draft = EntryDraft.blank(null)
       .value("v-" + index)
       .version(1)
-      .ttl(HARD_TTL_MS, 0L, HARD_TTL_MS, 0L)
-      .expiryAt(now + HARD_TTL_MS, 0L);
-    switch (mode) {
-      case LOCAL_NORMAL -> draft.keyState(KeyState.NORMAL);
-      case WORKER_HOT -> draft.keyState(KeyState.HOT).decision(DecisionStamp.hot(5, WORKER_NODE, WORKER_EPOCH));
-      case SOFT_EXPIRED -> draft
-        .keyState(KeyState.NORMAL)
-        .ttl(HARD_TTL_MS, SOFT_TTL_MS, HARD_TTL_MS, SOFT_TTL_MS)
-        // Already stale: the soft window is the state under test.
-        .expiryAt(now + HARD_TTL_MS, now - 60_000L);
-      default -> throw new IllegalStateException(mode.toString());
+      .ttl(HARD_TTL_MS, mode == HitMode.SOFT_EXPIRED ? SOFT_TTL_MS : 0L);
+    if (mode == HitMode.SOFT_EXPIRED) {
+      // Already stale: the soft window is the state under test.
+      return draft.expiryAt(now + HARD_TTL_MS, now - 60_000L).build();
     }
-    return draft.build();
+    return draft.expiryAt(now + HARD_TTL_MS, 0L).build();
   }
 
   /**
