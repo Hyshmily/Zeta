@@ -34,9 +34,9 @@ import org.jspecify.annotations.Nullable;
  *
  * <p><b>Cluster sync plane:</b> the cluster loader is supplied by the
  * application and may be absent. When present, the same SPI fetches
- * authoritative values for Worker HOT warm-up and peer REFRESH; when absent,
- * HOT promotes the current L1 entry when it has a usable one and a peer REFRESH
- * degrades to a local invalidation (a soft-expire for a Worker-managed entry).
+ * authoritative values for a namespace's prewarm/keep-warm and a peer REFRESH;
+ * when absent, prewarm is skipped and a peer REFRESH degrades to a local
+ * invalidation (a soft-close for a cluster-hot entry).
  *
  * <h2>Contract</h2>
  * <ul>
@@ -130,8 +130,8 @@ public interface CacheLoader<K, V> {
    * are unaffected — a rejected key still counts toward hot-key statistics.
    *
    * <p><b>Not a global cacheability switch.</b> An explicit {@code put} stores
-   * the caller's value regardless of this predicate, and a TTL promotion or a
-   * raw-table write rewrites an existing entry without re-consulting it. The
+   * the caller's value regardless of this predicate, and a keep-warm renewal or
+   * a raw-table write rewrites an existing entry without re-consulting it. The
    * filter covers values the engine obtains on the loader's behalf, not writes
    * the caller performs itself.
    *

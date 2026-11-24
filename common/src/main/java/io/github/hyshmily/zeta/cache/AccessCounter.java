@@ -22,6 +22,7 @@ import io.github.hyshmily.zeta.Zeta;
 import io.github.hyshmily.zeta.counter.WaveCounter;
 import io.github.hyshmily.zeta.hotkeydetector.HotKeyDetector;
 import io.github.hyshmily.zeta.reporting.KeyReporter;
+import io.github.hyshmily.zeta.util.CollectionSizing;
 import io.github.hyshmily.zeta.util.Internal;
 import io.github.hyshmily.zeta.util.TimeSource;
 import java.util.Collections;
@@ -38,133 +39,92 @@ import org.springframework.beans.factory.DisposableBean;
 import org.springframework.beans.factory.InitializingBean;
 
 /**
- * The single buffered access counter behind the read path (design decisions: access counting):
- * every served read increments <b>one</b> {@link WaveCounter}, and each tide fans the merged
- * snapshot out to both aggregation legs.
+ * Single buffered access counter behind the read path: every served read increments one
+ * {@link WaveCounter}, and each delivered tide fans out to both the local {@link HotKeyDetector}
+ * and the optional {@link KeyReporter}.
  *
  * <pre>
  *   read ──► AccessCounter WaveCounter (report cadence)
  *              ├─ every tide    ──► reporter.publishBatch (route/publish)
- *              └─ every ≥500 ms ──► detector.ingest (merged batch)
+ *              └─ every >=500ms ──► detector.ingest (merged batch)
  * </pre>
  *
- * <p>One add per read pays one hash, one thread-local lookup, one beacon check and one
- * cold-capacity check for both legs; the two pipelines cannot disagree because they share one
- * capacity bound and one tide task. The reporter leg keeps its configured cadence and the
- * feed-loop tuner (design decisions: reporting); the detector leg sees the same volumes on its own
- * 500 ms rhythm, batched through an accumulator flushed whenever {@code detectorIntervalMs}
- * elapses.
+ * <p>Sharing one reservoir guarantees both pipelines observe consistent volumes under one capacity
+ * bound. The reporter leg tracks its configured cadence (tuned by its feedback loop), while the
+ * detector leg merges tides in a bounded accumulator flushed at {@code detectorIntervalMs}.
  *
- * <p><b>Tag-mode routing</b> (per-key granularity the merged tide cannot express):
- * {@code DETECT_ONLY} adds synchronously to the sketch ({@link HotKeyDetector#addDirect}) and
- * {@code REPORT_ONLY} publishes directly — both are rare, opt-in paths. {@code RECORD} is the
- * normal path: the read path and both tag batch forms feed {@link WaveCounter} through
- * {@link #record(String, boolean)} or {@link #record(String, long, Zeta.TagMode)}.
+ * <p><b>Tag-mode routing.</b> {@link Zeta.TagMode#RECORD} feeds the shared {@link WaveCounter};
+ * {@link Zeta.TagMode#DETECT_ONLY} updates the sketch directly via
+ * {@link HotKeyDetector#addDirect}; {@link Zeta.TagMode#REPORT_ONLY} publishes directly to the
+ * reporter without entering the local sketch; {@link Zeta.TagMode#SILENT} is a no-op.
  *
- * <p>Without a reporter (no RabbitMQ / App-only deployment) the counter is the detector's sole
- * feed at the detector's own cadence.
- *
- * <p><b>Thread-safety:</b> {@link #record(String, boolean)} is the hot path — thread-safe through
- * the {@link WaveCounter}. {@link #onTide} is serialized by its own monitor so the shutdown-time
- * final drain cannot overlap a running tide. Lifecycle follows the Spring bean contract
- * ({@link InitializingBean}/{@link DisposableBean}).
+ * <p><b>Thread safety.</b> {@link #record(String, boolean)} is lock-free via {@link WaveCounter}.
+ * Detector accumulation and scheduled flushes serialize on {@code this} so shutdown draining never
+ * overlaps an active tide, while remote reporting executes outside the monitor.
  */
 @Slf4j
 @Internal
 public class AccessCounter implements InitializingBean, DisposableBean {
 
   /**
-   * Default cap on distinct keys buffered between two sketch ingests — 16× the
-   * per-tide reservoir of a healthy workload, and a few MB in the worst case.
+   * Default cap on distinct keys buffered between two sketch ingests. Overflow flushes early
+   * instead of dropping counts so detection quality is preserved under key-churn scans.
    */
   public static final int DEFAULT_MAX_ACCUMULATED_KEYS = 16_384;
 
-  /** Initial capacity of the reused detector accumulator (a filter map, not a reservoir). */
+  /** Default sketch ingest cadence in milliseconds when no tighter interval is configured. */
+  public static final long DEFAULT_DETECTOR_INTERVAL_MS = 500L;
+
+  /** Initial logical capacity of the reused detector accumulator map. */
   private static final int ACCUMULATOR_INITIAL_CAPACITY = 1024;
 
-  /**
-   * Table size that holds {@link #ACCUMULATOR_INITIAL_CAPACITY} entries without a
-   * resize at the default load factor.
-   */
-  private static final int ACCUMULATOR_INITIAL_TABLE_SIZE = (int) (ACCUMULATOR_INITIAL_CAPACITY / 0.75f) + 1;
+  /** Backing table size holding {@link #ACCUMULATOR_INITIAL_CAPACITY} entries without resizing. */
+  private static final int ACCUMULATOR_INITIAL_TABLE_SIZE = CollectionSizing.capacity(ACCUMULATOR_INITIAL_CAPACITY);
 
   /**
-   * A flushed batch larger than this releases its table instead of clearing it, so
-   * one scan burst cannot pin the peak capacity for the process lifetime. Below it,
-   * the table is reused: steady-state cardinality must not rehash every cadence.
+   * Flushed batch size above which the accumulator map is replaced rather than cleared, preventing
+   * a single scan burst from pinning peak heap capacity permanently.
    */
   private static final int ACCUMULATOR_SHRINK_THRESHOLD = 4096;
 
-  /** Default sketch ingest cadence when no tighter interval is configured (the detector's 500ms rhythm). */
-  public static final long DEFAULT_DETECTOR_INTERVAL_MS = 500;
-
-  /** Max distinct cold keys per counting cycle. */
+  /** Maximum distinct cold keys buffered per {@link WaveCounter} cycle. */
   private static final int MAX_BUFFER_SIZE = 100_000;
 
   private final ScheduledExecutorService scheduler;
-
   private final HotKeyDetector detector;
-
   private final long detectorIntervalMs;
-
-  /**
-   * Key ceiling for {@link #detectorAccumulator}. The sketch itself is bounded,
-   * so the accumulator must be too: a scan between two detector ticks would
-   * otherwise buffer every distinct key it touched, making the <em>accumulator</em>
-   * the largest structure in the process under exactly the traffic this cache
-   * exists to absorb. Overflow flushes early instead of dropping counts
-   * (detection quality is unaffected — only the batching cadence is).
-   */
   private final int maxAccumulatedKeys;
-
-  @Nullable
-  private final KeyReporter reporter;
-
+  private final @Nullable KeyReporter reporter;
   private final WaveCounter counter;
 
-  /**
-   * Detector-side accumulator: counts merged from reporter-sized tides until
-   * {@link #detectorIntervalMs} has elapsed, then handed to the sketch as one
-   * batch. A flush only releases the map when the flushed batch exceeds the burst
-   * watermark, so steady-state cardinality keeps its table and one scan burst
-   * cannot pin the peak capacity for the process lifetime.
-   */
+  /** Observer notified with the keys read on each tide; defaults to a no-op. */
+  private volatile ReadObserver readObserver = ReadObserver.NONE;
+
+  /** Accumulator batching reporter-cadence tides until {@link #detectorIntervalMs} elapses. */
   @GuardedBy("this")
   private HashMap<String, Long> detectorAccumulator = new HashMap<>(ACCUMULATOR_INITIAL_TABLE_SIZE);
 
-  /**
-   * One-shot task that flushes the accumulator at the detector cadence even
-   * when traffic stops after a single burst. Tides are delivered for every
-   * window, including empty ones; an empty tide never advances the detector
-   * anchor.
-   */
+  /** Armed one-shot task flushing {@link #detectorAccumulator} even when traffic goes idle. */
   @GuardedBy("this")
-  private ScheduledFuture<?> pendingDetectorFlush;
+  private @Nullable ScheduledFuture<?> pendingDetectorFlush;
 
-  /** Monotonic timestamp of the last sketch ingest. */
+  /** Monotonic timestamp in milliseconds of the most recent sketch ingest. */
   @GuardedBy("this")
   private long lastDetectorFlushMs;
 
-  /**
-   * Generation token of the armed detector flush. It is advanced whenever the flush is armed or
-   * cancelled, so a task that already started before a cancellation can recognise that it does
-   * not own the schedule and return without touching the new task or the cadence anchor.
-   */
+  /** Monotonic generation token invalidating already-started flush tasks after cancellation. */
   @GuardedBy("this")
   private long detectorFlushGen;
 
   /**
-   * Creates the counter.
+   * Creates an {@link AccessCounter} feeding {@code detector} and optionally {@code reporter}.
    *
-   * @param detector           the local TopK detector (sketch ingest sink; never {@code null})
-   * @param reporter           the Worker reporter ({@code null} when reporting is disabled —
-   *                           the counter then feeds the detector only)
-   * @param scheduler          the shared scheduler driving the tide ({@code hotKeyScheduler};
-   *                           never {@code null})
-   * @param reportIntervalMs   the reporter's tide base in ms (the configured
-   *                           {@code zeta.local.report-interval-ms}); ignored when
-   *                           {@code reporter} is {@code null}
-   * @param detectorIntervalMs max elapsed time between sketch ingests in ms
+   * @param detector           the local Top-K hot-key detector; must not be {@code null}
+   * @param reporter           the worker reporter, or {@code null} when reporting is disabled
+   * @param scheduler          the shared scheduler driving tides and deferred detector flushes;
+   *                           must not be {@code null}
+   * @param reportIntervalMs   base tide interval in milliseconds when {@code reporter} is present
+   * @param detectorIntervalMs maximum elapsed time in milliseconds between sketch ingests
    */
   public AccessCounter(
     HotKeyDetector detector,
@@ -173,114 +133,21 @@ public class AccessCounter implements InitializingBean, DisposableBean {
     long reportIntervalMs,
     long detectorIntervalMs
   ) {
-    this.reporter = reporter;
-    this.maxAccumulatedKeys = DEFAULT_MAX_ACCUMULATED_KEYS;
-    // Anchor at "now" so the first, report-sized tide accumulates like every
-    // other one instead of looking detector-interval-old and flushing early.
-    this.lastDetectorFlushMs = TimeSource.monotonicMillis();
-    this.detectorIntervalMs = Math.max(1L, detectorIntervalMs);
     this.detector = Objects.requireNonNull(detector, "detector must not be null");
     this.scheduler = Objects.requireNonNull(scheduler, "scheduler must not be null");
+    this.reporter = reporter;
+    this.maxAccumulatedKeys = DEFAULT_MAX_ACCUMULATED_KEYS;
+    // Anchor at construction time so the first tide accumulates normally instead of flushing early.
+    this.lastDetectorFlushMs = TimeSource.monotonicMillis();
+    this.detectorIntervalMs = Math.max(1L, detectorIntervalMs);
     long tideBaseMs = reporter != null ? Math.max(1L, reportIntervalMs) : this.detectorIntervalMs;
     this.counter = new WaveCounter(this::onTide, MAX_BUFFER_SIZE, scheduler, tideBaseMs);
   }
 
   /**
-   * Record one access on the pipeline selected by {@code report}: the merged detection and Worker
-   * reporting path when reporting is allowed, the synchronous detection-only path otherwise.
-   *
-   * @param cacheKey the accessed key
-   * @param report   whether this access feeds the Worker reporting plane
-   */
-  void record(String cacheKey, boolean report) {
-    if (report) {
-      counter.count(cacheKey, TOPK_INCR);
-    } else {
-      addDetection(cacheKey, TOPK_INCR);
-    }
-  }
-
-  /**
-   * Record {@code count} accesses for one key under an explicit tag mode. The switch is exhaustive
-   * so a new mode cannot silently fall through to the merged read path.
-   *
-   * @param cacheKey the accessed key
-   * @param count    the positive number of accesses to add
-   * @param mode     how much of the pipeline to run (never {@code null})
-   */
-  public void record(String cacheKey, long count, Zeta.TagMode mode) {
-    switch (mode) {
-      case RECORD -> counter.count(cacheKey, count);
-      case DETECT_ONLY -> addDetection(cacheKey, count);
-      case REPORT_ONLY -> addReportOnly(cacheKey, count);
-      case SILENT -> {
-      }
-    }
-  }
-
-  /**
-   * Record weighted accesses for a batch of keys under one shared tag mode.
-   *
-   * <p>{@code RECORD} iterates the shared reservoir so the batch keeps its capacity bound and
-   * merges with concurrent reads; {@code DETECT_ONLY} hands the batch to the sketch in one pass;
-   * {@code REPORT_ONLY} publishes it as one batch.
-   *
-   * @param keyCounts validated map of cacheKey to a positive access count
-   * @param mode      how much of the pipeline to run (never {@code null})
-   */
-  public void recordAll(Map<String, Long> keyCounts, Zeta.TagMode mode) {
-    switch (mode) {
-      case RECORD -> keyCounts.forEach(counter::count);
-      case DETECT_ONLY -> ingestSafely(keyCounts);
-      case REPORT_ONLY -> addReportOnlyBatch(keyCounts);
-      case SILENT -> {
-      }
-    }
-  }
-
-  /**
-   * Record a detection-only access ({@code TagMode.DETECT_ONLY}): one synchronous sketch update,
-   * no Worker report. The callers that use this are rare, so the synchronous sketch cost is
-   * acceptable; the merged tide cannot express per-key mode splits.
-   *
-   * @param cacheKey the accessed key
-   * @param count    the positive number of accesses to add
-   */
-  private void addDetection(String cacheKey, long count) {
-    detector.addDirect(cacheKey, count);
-  }
-
-  /**
-   * Record a report-only access ({@code TagMode.REPORT_ONLY}): one single-key batch published
-   * directly, with no local counting at all — the key never enters the local sketch, honoring the
-   * skip contract the merged tide cannot. Out-of-band by construction: the cadence tuner never
-   * samples it, because a one-key report says nothing about how many keys a flush window
-   * accumulates.
-   *
-   * @param cacheKey the accessed key
-   * @param count    the positive number of accesses to add
-   */
-  private void addReportOnly(String cacheKey, long count) {
-    if (reporter == null) {
-      return;
-    }
-    reporter.publishDirect(Map.of(cacheKey, count));
-  }
-
-  /**
-   * Batch form of {@link #addReportOnly(String, long)}: one publish for the whole map.
-   *
-   * @param keyCounts validated map of cacheKey to a positive access count
-   */
-  private void addReportOnlyBatch(Map<String, Long> keyCounts) {
-    if (reporter == null) {
-      return;
-    }
-    reporter.publishDirect(Collections.unmodifiableMap(keyCounts));
-  }
-
-  /**
-   * Start the tide loop. Called by the Spring container after construction.
+   * Starts the underlying {@link WaveCounter} tide loop once bean initialization completes. All
+   * fields, including the observer and the reporter cadence, are final or set by then, so the first
+   * tide can arrive immediately without seeing a partially constructed counter.
    */
   @Override
   public void afterPropertiesSet() {
@@ -288,11 +155,8 @@ public class AccessCounter implements InitializingBean, DisposableBean {
   }
 
   /**
-   * Stop the tide loop and drain what the last tide left behind. The counter's
-   * own shutdown contract drops pending counts (bounded one-tide loss), but
-   * the detector accumulator is this class's state: without the drain, a final
-   * tide inside the detector interval (or under the key cap) returns early and
-   * silently discards both the snapshot and everything already merged.
+   * Stops the tide loop, cancels any pending detector flush task, and drains residual accumulated
+   * counts into {@link #detector}.
    */
   @Override
   public void destroy() {
@@ -304,72 +168,171 @@ public class AccessCounter implements InitializingBean, DisposableBean {
   }
 
   /**
-   * The tide consumer — the single delivery point of the merged snapshot.
-   * Merges into the sketch accumulator and flushes it when the detector cadence
-   * has elapsed, then publishes to the reporter (when wired).
+   * Records a single read access: routes to the merged {@link WaveCounter} pipeline when
+   * {@code report} is {@code true}, or directly to {@link #detector} otherwise.
    *
-   * <p>The snapshot must not be mutated (WaveCounter contract) — both legs
-   * only read it.
+   * @param cacheKey the accessed physical key
+   * @param report   {@code true} to include this read in the worker reporting pipeline
+   */
+  void record(String cacheKey, boolean report) {
+    if (report) {
+      counter.count(cacheKey, TOPK_INCR);
+    } else {
+      addDetection(cacheKey, TOPK_INCR);
+    }
+  }
+
+  /**
+   * Records {@code count} accesses for one key according to an explicit {@link Zeta.TagMode}.
    *
-   * <p>The detector leg runs first: the reporting plane is remote and can block
-   * for its bounded offer budget, while local detection must not fall behind a
-   * stalled broker. The reporter leg runs <b>outside</b> the accumulator monitor:
-   * its queue offer can block, and holding this monitor across that wait would
-   * stall the tide (and {@code destroy}'s drain). The monitor covers only this
-   * class's own accumulator state.
+   * @param cacheKey the accessed physical key
+   * @param count    the positive number of accesses to record
+   * @param mode     the pipeline routing mode; must not be {@code null}
+   */
+  public void record(String cacheKey, long count, Zeta.TagMode mode) {
+    Objects.requireNonNull(mode, "mode must not be null");
+    switch (mode) {
+      case RECORD -> counter.count(cacheKey, count);
+      case DETECT_ONLY -> addDetection(cacheKey, count);
+      case REPORT_ONLY -> addReportOnly(cacheKey, count);
+      case SILENT -> {
+        // Intentionally ignored.
+      }
+    }
+  }
+
+  /**
+   * Records weighted accesses for a batch of keys under one shared {@link Zeta.TagMode}.
    *
-   * @param snapshot the tide's merged key counts (never {@code null}, may be empty)
-   * @param windowMs measured monotonic window the snapshot accumulated over,
-   *                 in ms (positive; the reporter's feed loop turns the batch
-   *                 into an arrival rate with it)
+   * @param keyCounts validated map from physical key to positive access count; must not be {@code null}
+   * @param mode      the pipeline routing mode; must not be {@code null}
+   */
+  public void recordAll(Map<String, Long> keyCounts, Zeta.TagMode mode) {
+    Objects.requireNonNull(keyCounts, "keyCounts must not be null");
+    Objects.requireNonNull(mode, "mode must not be null");
+    switch (mode) {
+      case RECORD -> keyCounts.forEach(counter::count);
+      case DETECT_ONLY -> ingestSafely(keyCounts);
+      case REPORT_ONLY -> addReportOnlyBatch(keyCounts);
+      case SILENT -> {
+        // Intentionally ignored.
+      }
+    }
+  }
+
+  /**
+   * Installs the observer notified of keys observed on each tide.
+   *
+   * @param observer the read observer, or {@code null} to reset to {@link ReadObserver#NONE}
+   */
+  public void setReadObserver(@Nullable ReadObserver observer) {
+    this.readObserver = observer != null ? observer : ReadObserver.NONE;
+  }
+
+  /**
+   * Returns the approximate number of distinct keys currently buffered in the counting reservoir.
+   *
+   * @return estimated distinct keys with pending counts
+   */
+  public long pendingKeyCount() {
+    return counter.estimatedSizeOfKeysCount();
+  }
+
+  /**
+   * Updates the {@link WaveCounter} tide delivery interval in milliseconds.
+   *
+   * @param intervalMs the new tide interval in milliseconds
+   */
+  public void adjustDeliverIntervalMs(long intervalMs) {
+    counter.adjustDeliverIntervalMs(intervalMs);
+  }
+
+  /**
+   * Consumes one merged tide snapshot from {@link WaveCounter}: feeds the local detector leg first
+   * (under monitor), notifies {@link #readObserver}, and publishes to {@link #reporter} outside
+   * the monitor so remote backpressure cannot block detector flushes or shutdown draining.
+   *
+   * @param snapshot the immutable tide snapshot of key counts (may be empty)
+   * @param windowMs measured monotonic accumulation window in milliseconds
    */
   void onTide(Map<String, Long> snapshot, long windowMs) {
     mergeIntoSketches(snapshot);
+    try {
+      readObserver.onReads(snapshot.keySet(), TimeSource.monotonicMillis());
+    } catch (RuntimeException e) {
+      log.debug("Read observer failed for a tide of {} keys", snapshot.size(), e);
+    }
     if (reporter != null) {
-      // Empty snapshots are delivered too: the reporter's feed loop needs the
-      // zero-arrival window to back the cadence off, and admit() still drops the
-      // report itself when there is nothing to route.
+      // Deliver empty snapshots too so the reporter's feed loop observes idle windows.
       reporter.publishBatch(snapshot, windowMs);
     }
   }
 
   /**
-   * The detector leg of {@link #onTide}: merges the tide into the sketch
-   * accumulator and drains it when the detector cadence has elapsed.
+   * Records a detection-only access synchronously into {@link #detector} without reporting.
    *
-   * <p>Synchronized because the WaveCounter's shutdown path invokes the
-   * consumer one last time <em>from the closing thread</em> while a tide that
-   * already fired may still be draining on the scheduler thread
-   * ({@code pendingTide.cancel(false)} deliberately does not interrupt a
-   * running one). One monitor per tide — every 50 ms by default, never per
-   * read — makes the accumulator and its flush timestamp safe for that overlap.
+   * @param cacheKey the accessed physical key
+   * @param count    the positive access count
+   */
+  private void addDetection(String cacheKey, long count) {
+    detector.addDirect(cacheKey, count);
+  }
+
+  /**
+   * Publishes a single report-only access directly to {@link #reporter} without updating the local
+   * detector sketch.
    *
-   * @param snapshot the tide's merged key counts (never {@code null}, may be empty)
+   * @param cacheKey the accessed physical key
+   * @param count    the positive access count
+   */
+  private void addReportOnly(String cacheKey, long count) {
+    if (reporter == null) {
+      return;
+    }
+    reporter.publishDirect(Map.of(cacheKey, count));
+  }
+
+  /**
+   * Publishes a batch of report-only accesses directly to {@link #reporter} without updating the
+   * local detector sketch.
+   *
+   * @param keyCounts validated map of key counts
+   */
+  private void addReportOnlyBatch(Map<String, Long> keyCounts) {
+    if (reporter == null || keyCounts.isEmpty()) {
+      return;
+    }
+    reporter.publishDirect(Collections.unmodifiableMap(keyCounts));
+  }
+
+  /**
+   * Merges a tide snapshot into {@link #detectorAccumulator} and flushes to {@link #detector}
+   * whenever {@link #detectorIntervalMs} has elapsed or {@link #maxAccumulatedKeys} is reached.
+   *
+   * <p>Synchronized so a final drain during {@link #destroy()} never overlaps an in-flight tide on
+   * the scheduler thread.
+   *
+   * @param snapshot the immutable tide snapshot of key counts (may be empty)
    */
   private synchronized void mergeIntoSketches(Map<String, Long> snapshot) {
     long now = TimeSource.monotonicMillis();
     boolean due = now - lastDetectorFlushMs >= detectorIntervalMs;
-    // An empty tide is a reporter signal, not a detector ingest: it must not advance
-    // the cadence anchor, or the first real traffic after an idle period is batched
-    // behind a full detector interval. A non-empty residual at the boundary still
-    // drains here; otherwise keep its flush armed, which also retries a schedule the
-    // scheduler rejected at merge time.
+
     if (snapshot.isEmpty()) {
-      if (due && !detectorAccumulator.isEmpty()) {
-        flushNow(now);
-      } else if (!detectorAccumulator.isEmpty()) {
-        scheduleDetectorFlush(now);
+      // Empty tides must not advance the cadence anchor, or subsequent traffic after an idle
+      // period would wait a full detector interval. Drain any due residual or keep its timer armed.
+      if (!detectorAccumulator.isEmpty()) {
+        if (due) {
+          flushNow(now);
+        } else {
+          scheduleDetectorFlush(now);
+        }
       }
       return;
     }
 
     boolean oversize = snapshot.size() >= maxAccumulatedKeys;
     boolean emptyAtBoundary = due && detectorAccumulator.isEmpty();
-    // A single tide that alone fills the accumulator can never be merged
-    // without oversizing it: a key-churn scan may deliver up to MAX_BUFFER_SIZE
-    // keys. An empty accumulator at the cadence boundary bypasses it for the
-    // same reason: there is nothing to merge, so hand the snapshot straight to
-    // the sketch. Both cases anchor the cadence and drain the residual first.
     if (oversize || emptyAtBoundary) {
       flushNow(now);
       ingestSafely(snapshot);
@@ -377,8 +340,6 @@ public class AccessCounter implements InitializingBean, DisposableBean {
     }
 
     mergeSnapshot(snapshot);
-    // Judge the MERGED size: the snapshot and the accumulator overlap on a stable
-    // hot set, so summing the two views would trip the cap at roughly half of it.
     if (due || detectorAccumulator.size() >= maxAccumulatedKeys) {
       flushNow(now);
     } else {
@@ -386,15 +347,21 @@ public class AccessCounter implements InitializingBean, DisposableBean {
     }
   }
 
-  /** Merges one tide's counts into the accumulator; the caller holds the monitor. */
+  /**
+   * Merges all entries of {@code snapshot} into {@link #detectorAccumulator}.
+   *
+   * @param snapshot the tide snapshot to merge
+   */
   @GuardedBy("this")
   private void mergeSnapshot(Map<String, Long> snapshot) {
     snapshot.forEach((key, count) -> detectorAccumulator.merge(key, count, Long::sum));
   }
 
   /**
-   * The one "flush now" action: move the cadence anchor, cancel the armed flush, drain the
-   * accumulator. The caller holds the monitor.
+   * Advances the detector flush anchor to {@code now}, cancels any armed flush task, and drains
+   * {@link #detectorAccumulator}.
+   *
+   * @param now the current monotonic timestamp in milliseconds
    */
   @GuardedBy("this")
   private void flushNow(long now) {
@@ -404,10 +371,8 @@ public class AccessCounter implements InitializingBean, DisposableBean {
   }
 
   /**
-   * Hands the accumulator to the sketch and resets it. A batch that outgrew the
-   * shrink threshold is replaced instead of cleared: {@code HashMap.clear()} keeps
-   * its {@code Node[]} table, so a scan burst would otherwise pin the peak capacity
-   * for the process lifetime. A steady-state batch reuses the table.
+   * Hands {@link #detectorAccumulator} to {@link #detector} and resets it, replacing the map when
+   * it grew past {@link #ACCUMULATOR_SHRINK_THRESHOLD} to release burst memory.
    */
   @GuardedBy("this")
   private void flushBatch() {
@@ -425,8 +390,9 @@ public class AccessCounter implements InitializingBean, DisposableBean {
   }
 
   /**
-   * Arms the one-shot detector flush at the remaining part of the cadence.
-   * A no-op while a flush is already armed.
+   * Arms a one-shot flush task for the remainder of {@link #detectorIntervalMs} if none is active.
+   *
+   * @param now the current monotonic timestamp in milliseconds
    */
   @GuardedBy("this")
   private void scheduleDetectorFlush(long now) {
@@ -438,17 +404,18 @@ public class AccessCounter implements InitializingBean, DisposableBean {
     try {
       pendingDetectorFlush = scheduler.schedule(() -> flushDetector(gen), delayMs, TimeUnit.MILLISECONDS);
     } catch (RejectedExecutionException e) {
-      // Scheduler saturated or shutting down: a later tide or destroy()
-      // still drains the accumulator.
       log.debug("Detector flush scheduling rejected; accumulator will drain on a later tide", e);
     }
   }
 
-  /** The armed detector-cadence flush: drain the accumulator even if no tide follows. */
+  /**
+   * Executes a scheduled detector flush if its generation token still matches
+   * {@link #detectorFlushGen}.
+   *
+   * @param gen the generation token captured when the task was scheduled
+   */
   private synchronized void flushDetector(long gen) {
     if (gen != detectorFlushGen) {
-      // A running task cannot be interrupted by cancel(false); a cancellation or a replacement
-      // schedule advanced the generation while this one waited for the monitor.
       return;
     }
     pendingDetectorFlush = null;
@@ -459,7 +426,10 @@ public class AccessCounter implements InitializingBean, DisposableBean {
     flushBatch();
   }
 
-  /** Cancels the armed detector flush and invalidates any task that already started. */
+  /**
+   * Cancels any armed detector flush task and advances {@link #detectorFlushGen} so an already
+   * running callback exits without mutating state.
+   */
   @GuardedBy("this")
   private void cancelPendingDetectorFlush() {
     detectorFlushGen++;
@@ -469,37 +439,20 @@ public class AccessCounter implements InitializingBean, DisposableBean {
     }
   }
 
+  /**
+   * Passes a non-empty batch to {@link HotKeyDetector#ingest(Map)}, isolating runtime failures so
+   * the tide loop is never disrupted.
+   *
+   * @param batch the batch of key counts to ingest
+   */
   private void ingestSafely(Map<String, Long> batch) {
     if (batch.isEmpty()) {
-      // The tide also delivers empty snapshots (the reporter's zero-arrival
-      // window), and an empty detector flush reaches here: neither is an ingest.
       return;
     }
     try {
       detector.ingest(batch);
     } catch (RuntimeException e) {
-      // The sketch ingest must never kill the tide (design decisions: buffering and ordering).
       log.debug("Detector ingest failed for a batch of {} keys", batch.size(), e);
     }
-  }
-
-  /**
-   * Approximate number of unique keys currently buffered in the counting reservoir
-   * (design decisions: access counting).
-   *
-   * @return estimated distinct keys with pending counts
-   */
-  public long pendingKeyCount() {
-    return counter.estimatedSizeOfKeysCount();
-  }
-
-  /**
-   * Move the tide base. The reporting feed-loop tuner computes the interval and applies it here;
-   * the tuner stays in the reporter (design decisions: reporting).
-   *
-   * @param intervalMs the new tide base in ms
-   */
-  public void adjustDeliverIntervalMs(long intervalMs) {
-    counter.adjustDeliverIntervalMs(intervalMs);
   }
 }

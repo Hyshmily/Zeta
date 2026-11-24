@@ -32,8 +32,6 @@ import io.github.hyshmily.zeta.cache.cachesupport.loader.singleflight.SingleFlig
 import io.github.hyshmily.zeta.cache.cachesupport.raw.CacheEntry;
 import io.github.hyshmily.zeta.cache.cachesupport.raw.EntryDraft;
 import io.github.hyshmily.zeta.hotkeydetector.HotKeyDetector;
-import io.github.hyshmily.zeta.model.DecisionStamp;
-import io.github.hyshmily.zeta.model.KeyState;
 import io.github.hyshmily.zeta.scheduler.DefaultBackgroundRefresher;
 import io.github.hyshmily.zeta.sharding.HealthView;
 import io.github.hyshmily.zeta.sync.local.SyncMessage;
@@ -134,7 +132,8 @@ final class StampTestSupport implements AutoCloseable {
     scheduler = Executors.newSingleThreadScheduledExecutor();
     HotKeyDetector detector = mock(HotKeyDetector.class);
     when(detector.contains(anyString())).thenReturn(false);
-    lifecycle = new EntryLifecycleImpl(l1, new ZetaProperties(), null);
+    ZetaProperties props = new ZetaProperties();
+    lifecycle = new EntryLifecycleImpl(l1, props);
     // The shared access counter owns the read path's counting (design decisions: access counting);
     // a null reporter keeps the harness detection-only.
     AccessCounter accessCounter = new AccessCounter(
@@ -145,15 +144,13 @@ final class StampTestSupport implements AutoCloseable {
       AccessCounter.DEFAULT_DETECTOR_INTERVAL_MS
     );
     cache = new HotKeyCache(
-      detector,
       l1,
       singleFlight,
       lifecycle,
-      new DefaultBackgroundRefresher(l1, Runnable::run, lifecycle, 10),
+      new DefaultBackgroundRefresher(l1, Runnable::run, lifecycle, 10, props.getRefreshTimeoutMs()),
       accessCounter,
       new RecordingBroadcastBuffer(),
-      clock,
-      mock(HealthView.class)
+      clock
     );
   }
 
@@ -181,10 +178,8 @@ final class StampTestSupport implements AutoCloseable {
     return EntryDraft.blank(null)
       .value(value)
       .version(dataVersion)
-      .decision(DecisionStamp.hot(0, null, 0L))
-      .ttl(300_000, 30_000, 300_000, 30_000)
+      .ttl(300_000, 30_000)
       .expiryAt(Long.MAX_VALUE, Long.MAX_VALUE)
-      .keyState(KeyState.NORMAL)
       .build();
   }
 

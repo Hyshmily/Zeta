@@ -31,7 +31,6 @@ import io.github.hyshmily.zeta.cache.cachesupport.policy.InvalidatePolicy;
 import io.github.hyshmily.zeta.cache.cachesupport.raw.CacheEntry;
 import io.github.hyshmily.zeta.hotkeydetector.HotKeyDetector;
 import io.github.hyshmily.zeta.scheduler.BackgroundRefresher;
-import io.github.hyshmily.zeta.sharding.HealthView;
 import io.github.hyshmily.zeta.util.clock.MonotonicStampClock;
 import java.util.List;
 import org.junit.jupiter.api.BeforeEach;
@@ -50,19 +49,16 @@ class RemoteInvalidationTransactionTest {
   void setUp() {
     Cache<String, CacheEntry> table = Caffeine.newBuilder().maximumSize(10).build();
     ZetaProperties properties = new ZetaProperties();
-    HealthView healthView = mock(HealthView.class);
-    EntryLifecycle lifecycle = new EntryLifecycleImpl(table, properties, healthView);
+    EntryLifecycle lifecycle = new EntryLifecycleImpl(table, properties);
     broadcastBuffer = mock(BroadcastBuffer.class);
     cache = new HotKeyCache(
-      mock(HotKeyDetector.class),
       table,
       mock(SingleFlight.class),
       lifecycle,
       mock(BackgroundRefresher.class),
       mock(AccessCounter.class),
       broadcastBuffer,
-      new MonotonicStampClock(1L, MonotonicStampClock.DEFAULT_MAX_FORWARD_DRIFT_MS),
-      healthView
+      new MonotonicStampClock(1L, MonotonicStampClock.DEFAULT_MAX_FORWARD_DRIFT_MS)
     );
   }
 

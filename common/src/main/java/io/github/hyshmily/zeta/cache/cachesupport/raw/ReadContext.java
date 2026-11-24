@@ -32,9 +32,9 @@ import org.jspecify.annotations.Nullable;
  * The TTL suppliers are memoized on first use so the documented
  * at-most-once-per-call contract of {@link GetPolicy} holds structurally,
  * even when several {@link HotKeyCache} methods consume the same override
- * within one call (e.g. the SOFT_REFRESH branch feeds both the background
- * refresh and the promotion probe). The memo state is two primitive fields, so
- * a call that never consumes a TTL — a plain NORMAL-entry hit, per the
+ * within one call (the SOFT_REFRESH branch reads the override once for the
+ * background refresh and once for the entry build). The memo state is two
+ * primitive fields, so a call that never consumes a TTL — a plain hit, per the
  * {@link GetPolicy} contract — allocates nothing extra.
  *
  * <p>
@@ -42,8 +42,8 @@ import org.jspecify.annotations.Nullable;
  * adapted to one. The context holds no per-call key; {@link #loadValue(String)}
  * receives it from the caller, so a loader call binds the key once instead of
  * storing it in every context. The adapter for a plain supplier is created
- * lazily by {@link HotKeyCache} only when a miss or a reconciliation actually
- * needs a context; a plain hit allocates neither the context nor the adapter.
+ * lazily by {@link HotKeyCache} only when a miss actually needs a context; a
+ * plain hit allocates neither the context nor the adapter.
  *
  * <p>
  * One instance per read call. The mutable memoization is confined to the
@@ -61,11 +61,11 @@ public final class ReadContext {
   private static final long UNRESOLVED = Long.MIN_VALUE;
 
   /**
-   * The lazy TTL suppliers. {@code null} only on the batch path, whose factory
-   * pre-seeds both resolved values, so the lazy branch is never reached.
+   * The lazy TTL suppliers, memoized once per call. {@link GetPolicy} replaces a
+   * {@code null} supplier with a constant zero, so both are always present.
    */
-  private final @Nullable LongSupplier rawHardTtlMs;
-  private final @Nullable LongSupplier rawSoftTtlMs;
+  private final LongSupplier rawHardTtlMs;
+  private final LongSupplier rawSoftTtlMs;
 
   /** The single value source, or {@code null} when this call carries no source. */
   private final @Nullable CacheLoader<String, Object> loader;
@@ -82,8 +82,8 @@ public final class ReadContext {
     StalePolicy stalePolicy,
     boolean report,
     boolean callerRunsLoader,
-    @Nullable LongSupplier rawHardTtlMs,
-    @Nullable LongSupplier rawSoftTtlMs
+    LongSupplier rawHardTtlMs,
+    LongSupplier rawSoftTtlMs
   ) {
     this.loader = loader;
     this.report = report;
@@ -117,39 +117,6 @@ public final class ReadContext {
       options.hardTtlMs(),
       options.softTtlMs()
     );
-  }
-
-  /**
-   * Batch read helpers: the TTL overrides are already-resolved constants
-   * carried by the caller, so the memo is pre-seeded directly — no supplier
-   * object and no lazy indirection is allocated per key. The batch path never
-   * asks for caller-runs, so its readers run on the load executor.
-   *
-   * <p>The batch path has no separate refresh source and no admission filter:
-   * the same loader serves a soft-expire background refresh, and every
-   * non-{@code null} value is stored when the adapter's {@code isCacheable}
-   * defaults to true.
-   *
-   * @param loader     the refresh source (may be {@code null} when the policy
-   *                   has no refresh branch)
-   * @param hardTtlMs  the batch-resolved, already validated hard TTL override
-   * @param softTtlMs  the batch-resolved, already validated soft TTL override
-   * @param report     whether this batch feeds Worker reporting
-   * @param stalePolicy the batch-resolved stale policy
-   * @return the per-call context
-   */
-  @SuppressWarnings("unchecked")
-  public static ReadContext ofBatch(
-    @Nullable CacheLoader<String, ?> loader,
-    long hardTtlMs,
-    long softTtlMs,
-    boolean report,
-    StalePolicy stalePolicy
-  ) {
-    ReadContext ctx = new ReadContext((CacheLoader<String, Object>) loader, stalePolicy, report, false, null, null);
-    ctx.hardTtl = hardTtlMs;
-    ctx.softTtl = softTtlMs;
-    return ctx;
   }
 
   /** Whether this call has a value source. */
@@ -213,41 +180,41 @@ public final class ReadContext {
   }
 
   /**
-   * Memoized lazy hard TTL override (0 = use configured default): the
+   * Memoized lazy hard TTL override ({@code 0}/{@code -1} = configured default): the
    * underlying (possibly SpEL-backed) supplier evaluates at most once per call.
    * This is the boundary a lazy override is validated at: the value does not
    * exist until the supplier runs, so the same encodability rule the static
    * {@link GetPolicy} boundary applies must be applied here.
    *
-   * @return the encodable hard TTL override
-   * @throws IllegalArgumentException when the supplier returns a negative value or
-   *                                  one above the packed maximum other than
+   * @return the declared hard TTL override
+   * @throws IllegalArgumentException when the supplier returns a negative value other than
+   *                                  {@code -1}, or one above the packed maximum other than
    *                                  {@link Long#MAX_VALUE}
    */
   public long hardTtlMs() {
     long resolved = hardTtl;
-    if (resolved == UNRESOLVED && rawHardTtlMs != null) {
+    if (resolved == UNRESOLVED) {
       long value = rawHardTtlMs.getAsLong();
-      CacheEntry.requireEncodableTtl(value, "hardTtlMs");
+      CacheEntry.requireDeclaredTtl(value, "hardTtlMs");
       hardTtl = resolved = value;
     }
     return resolved;
   }
 
   /**
-   * Memoized lazy soft TTL override (0 = use configured default), same contract
-   * and validation as {@link #hardTtlMs()}.
+   * Memoized lazy soft TTL override ({@code 0} = configured default, {@code -1} = disabled), same
+   * contract and validation as {@link #hardTtlMs()}.
    *
-   * @return the encodable soft TTL override
-   * @throws IllegalArgumentException when the supplier returns a negative value or
-   *                                  one above the packed maximum other than
+   * @return the declared soft TTL override
+   * @throws IllegalArgumentException when the supplier returns a negative value other than
+   *                                  {@code -1}, or one above the packed maximum other than
    *                                  {@link Long#MAX_VALUE}
    */
   public long softTtlMs() {
     long resolved = softTtl;
-    if (resolved == UNRESOLVED && rawSoftTtlMs != null) {
+    if (resolved == UNRESOLVED) {
       long value = rawSoftTtlMs.getAsLong();
-      CacheEntry.requireEncodableTtl(value, "softTtlMs");
+      CacheEntry.requireDeclaredTtl(value, "softTtlMs");
       softTtl = resolved = value;
     }
     return resolved;

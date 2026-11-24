@@ -62,6 +62,27 @@ public final class QuietCache<K, V> {
     return quiet ? cache.policy().getIfPresentQuietly(key) : cache.asMap().get(key);
   }
 
+  /**
+   * Return the value without recording a hit/miss or offering it to the frequency sketch.
+   *
+   * <p>The static form for callers that hold a bare {@link Cache} and keep no wrapper: the
+   * support probe repeats per call, which only costs an exception on a replacement {@link Cache}
+   * that rejects {@code policy()}.
+   *
+   * @param cache the cache to probe
+   * @param key   the key to look up
+   * @param <K>   the cache key type
+   * @param <V>   the cache value type
+   * @return the value, or {@code null} when absent or expired
+   */
+  public static <K, V> @Nullable V getIfPresent(Cache<K, V> cache, K key) {
+    try {
+      return cache.policy().getIfPresentQuietly(key);
+    } catch (UnsupportedOperationException ignored) {
+      return cache.asMap().get(key);
+    }
+  }
+
   private static boolean supportsPolicy(Cache<?, ?> cache) {
     try {
       cache.policy();

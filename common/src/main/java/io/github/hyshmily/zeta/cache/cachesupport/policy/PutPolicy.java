@@ -38,10 +38,10 @@ import java.util.function.LongSupplier;
  * caller. The default is local-only; {@link #synced()} upgrades a single call
  * to a version-stamped cluster write.
  *
- * @param hardTtlMs lazy hard TTL override in milliseconds (0 = use configured
- *                  default); evaluated at most once per cache call
- * @param softTtlMs lazy soft TTL override in milliseconds (0 = use configured
- *                  default); evaluated at most once per cache call
+ * @param hardTtlMs lazy hard TTL override in milliseconds ({@code 0}/{@code -1} = use the
+ *                  configured default); evaluated at most once per cache call
+ * @param softTtlMs lazy soft TTL override in milliseconds ({@code 0} = use the configured default,
+ *                  {@code -1} = disabled); evaluated at most once per cache call
  * @param sync      whether this write is synchronized to peer instances
  */
 public record PutPolicy(LongSupplier hardTtlMs, LongSupplier softTtlMs, boolean sync) {
@@ -84,9 +84,9 @@ public record PutPolicy(LongSupplier hardTtlMs, LongSupplier softTtlMs, boolean 
    * Builds write options from static TTL overrides with explicit cluster sync
    * control.
    *
-   * @param hardTtlMs hard TTL override (0 = use configured default;
+   * @param hardTtlMs hard TTL override ({@code 0}/{@code -1} = configured default;
    *                  {@link Long#MAX_VALUE} for permanent entry)
-   * @param softTtlMs soft TTL override (0 = use configured default)
+   * @param softTtlMs soft TTL override ({@code 0} = configured default, {@code -1} = disabled)
    * @param sync      whether this write is synchronized to peer instances
    * @return a new options instance
    * @throws IllegalArgumentException when a permanent hard TTL is combined with
@@ -95,8 +95,13 @@ public record PutPolicy(LongSupplier hardTtlMs, LongSupplier softTtlMs, boolean 
    *                                  entry pins a stale value on every peer
    */
   public static PutPolicy of(long hardTtlMs, long softTtlMs, boolean sync) {
+    if (hardTtlMs == 0L && softTtlMs == 0L) {
+      // The all-default pair is one of the two shared instances; there is nothing to validate
+      // (a permanent hard TTL is the only sync conflict and 0 is not one) and nothing to build.
+      return sync ? SYNC : DEFAULTS;
+    }
     requireSyncable(hardTtlMs, sync);
-    return new PutPolicy(GetPolicy.ttlSupplier(hardTtlMs), GetPolicy.ttlSupplier(softTtlMs), sync);
+    return new PutPolicy(GetPolicy.ttlSupplier(hardTtlMs), GetPolicy.softTtlSupplier(softTtlMs), sync);
   }
 
   /**
@@ -105,7 +110,7 @@ public record PutPolicy(LongSupplier hardTtlMs, LongSupplier softTtlMs, boolean 
    * hard TTL that resolves to {@link Long#MAX_VALUE} fails before the business
    * side effect rather than after the transaction committed.
    *
-   * @param hardTtlMs hard TTL override (0 = use configured default;
+   * @param hardTtlMs hard TTL override ({@code 0}/{@code -1} = configured default;
    *                  {@link Long#MAX_VALUE} for permanent entry)
    * @param sync      whether this write is synchronized to peer instances
    * @throws IllegalArgumentException when a permanent hard TTL is combined with

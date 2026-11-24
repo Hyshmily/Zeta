@@ -19,10 +19,12 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import io.github.hyshmily.zeta.cache.cachesupport.policy.GetPolicy;
 import io.github.hyshmily.zeta.cache.cachesupport.policy.InvalidatePolicy;
+import io.github.hyshmily.zeta.cache.cachesupport.policy.StalePolicy;
 import io.github.hyshmily.zeta.sync.local.SyncMessage;
 import io.github.hyshmily.zeta.util.clock.MonotonicStampClock;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -93,6 +95,36 @@ class BatchStampRangeTest {
       // The batch's block is newer than the write's stamp: every entry applies.
       support.cache.invalidate(List.of("k"), new InvalidatePolicy(InvalidatePolicy.Scope.BOTH, false));
       assertThat(support.cache.<String>peek("k")).isNull();
+    }
+  }
+
+  @Test
+  void aBatchOfPureHits_shouldNotEvaluateTheTtlSuppliers() {
+    try (
+      StampTestSupport support = new StampTestSupport(
+        new MonotonicStampClock(1L, MonotonicStampClock.DEFAULT_MAX_FORWARD_DRIFT_MS)
+      )
+    ) {
+      support.cache.get("k", () -> "v", GetPolicy.defaults());
+      AtomicInteger evaluations = new AtomicInteger();
+      GetPolicy policy = new GetPolicy(
+        () -> {
+          evaluations.incrementAndGet();
+          return 60_000L;
+        },
+        () -> {
+          evaluations.incrementAndGet();
+          return 0L;
+        },
+        StalePolicy.SOFT_REFRESH,
+        false,
+        false
+      );
+
+      Map<String, Object> result = support.cache.get(List.of("k"), k -> "ignored", policy);
+
+      assertThat(result).containsEntry("k", "v");
+      assertThat(evaluations).as("a pure hit resolves no TTL").hasValue(0);
     }
   }
 

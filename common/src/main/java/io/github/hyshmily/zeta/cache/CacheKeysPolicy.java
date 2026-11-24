@@ -19,6 +19,7 @@ import io.github.hyshmily.zeta.util.Internal;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
+import org.jspecify.annotations.Nullable;
 
 /**
  * Static utility for validating cache key inputs across the library.
@@ -36,8 +37,11 @@ import java.util.List;
 @Internal
 public final class CacheKeysPolicy {
 
-  /** Delimiter between an annotation namespace and the logical key it addresses. */
+  /** Delimiter between a TYPED annotation namespace and the logical key it addresses. */
   public static final char NAMESPACE_DELIMITER = '\u0000';
+
+  /** Delimiter between a PLAIN annotation namespace and the logical key it addresses. */
+  public static final char PLAIN_DELIMITER = ':';
 
   /**
    * Builds the physical key prefix of one annotation namespace.
@@ -47,6 +51,124 @@ public final class CacheKeysPolicy {
    */
   public static String namespacePrefix(String cache) {
     return cache + NAMESPACE_DELIMITER;
+  }
+
+  /**
+   * The namespace a physical key belongs to, or {@code null} when it has none.
+   *
+   * <p>The one prefix rule of the library: an annotation key carries the namespace before
+   * {@link #NAMESPACE_DELIMITER} (returned including the delimiter, so it can never prefix-match
+   * a sibling namespace), and a programmatic key its first {@code ':'} segment. The annotation
+   * layer builds the prefix through {@link #namespacePrefix(String)} and the TTL contract registry
+   * resolves through this method, so the two cannot disagree about which namespace a key is in.
+   *
+   * @param cacheKey the physical key
+   * @return the namespace, or {@code null} when the key carries no prefix
+   */
+  public static @Nullable String namespaceOf(String cacheKey) {
+    int idx = delimiterIndex(cacheKey);
+    if (idx < 0) {
+      return null;
+    }
+    return cacheKey.charAt(idx) == NAMESPACE_DELIMITER ? cacheKey.substring(0, idx + 1) : cacheKey.substring(0, idx);
+  }
+
+  /**
+   * The logical name of a key's namespace: {@link #namespaceOf(String)} without the delimiter its
+   * encoding uses. A TYPED key ({@code users\u0000u-1}) and a PLAIN key ({@code users:u-1}) in the
+   * same namespace both answer {@code users}, so a caller can compare a key against a namespace
+   * name without knowing which layer produced it.
+   *
+   * @param cacheKey the physical key
+   * @return the bare namespace name, or {@code null} when the key carries no namespace
+   */
+  public static @Nullable String logicalNamespaceOf(String cacheKey) {
+    int idx = delimiterIndex(cacheKey);
+    return idx < 0 ? null : cacheKey.substring(0, idx);
+  }
+
+  /**
+   * The physical namespace prefix of a key, including the delimiter that belongs to its format.
+   *
+   * <p>{@link #logicalNamespaceOf(String)} drops the delimiter because a policy lookup by logical
+   * name does not need it; a registry keyed by physical prefix does. The two forms must not be
+   * mixed: a TYPED prefix ends with U+0000 and a PLAIN prefix ends with {@code ':'}.
+   *
+   * @param cacheKey the physical key
+   * @return the prefix including its delimiter, or {@code null} when the key has no namespace
+   */
+  public static @Nullable String physicalPrefixOf(String cacheKey) {
+    int idx = delimiterIndex(cacheKey);
+    return idx < 0 ? null : cacheKey.substring(0, idx + 1);
+  }
+
+  /**
+   * The bare prefix of a physical key: the same two-level split as {@link #namespaceOf(String)},
+   * without the annotation delimiter and with a caller-supplied fallback.
+   *
+   * <p>The circuit-breaker shard id and the namespace policy must resolve the same key to the same
+   * bucket, so both use this one rule; the shard id is opaque and only drops the trailing
+   * delimiter to keep the map key compact. This is {@link #logicalNamespaceOf(String)} with a
+   * fallback instead of {@code null}.
+   *
+   * @param key           the physical key, or {@code null}
+   * @param defaultBucket the bucket for a key with no namespace
+   * @return the bare prefix, or {@code defaultBucket}
+   */
+  public static String prefixOf(@Nullable String key, String defaultBucket) {
+    if (key == null) {
+      return defaultBucket;
+    }
+    String namespace = logicalNamespaceOf(key);
+    return namespace != null ? namespace : defaultBucket;
+  }
+
+  /**
+   * The index of the delimiter that ends the namespace: the first of either form. The index is the
+   * one every accessor slices at — the TYPED prefix keeps the delimiter at it, the PLAIN prefix
+   * includes it — so no caller repeats the {@code -1} arithmetic. A delimiter at index zero means
+   * the key has no non-empty prefix.
+   *
+   * @param key the physical key
+   * @return the delimiter index, or {@code -1} when the key has no namespace
+   */
+  private static int delimiterIndex(String key) {
+    for (int i = 0, len = key.length(); i < len; i++) {
+      if (isDelimiter(key.charAt(i))) {
+        return i > 0 ? i : -1;
+      }
+    }
+    return -1;
+  }
+
+  /**
+   * Whether {@code c} is one of the two namespace delimiters.
+   *
+   * @param c the character to test
+   * @return whether it separates a namespace from its key
+   */
+  public static boolean isDelimiter(char c) {
+    return c == NAMESPACE_DELIMITER || c == PLAIN_DELIMITER;
+  }
+
+  /**
+   * Whether {@code text} contains either namespace delimiter, so it cannot be a namespace name.
+   *
+   * @param text the candidate name
+   * @return whether a delimiter occurs anywhere in it
+   */
+  public static boolean containsDelimiter(String text) {
+    return text.indexOf(NAMESPACE_DELIMITER) >= 0 || text.indexOf(PLAIN_DELIMITER) >= 0;
+  }
+
+  /**
+   * Whether {@code text} ends with either namespace delimiter, so it is already a physical prefix.
+   *
+   * @param text the candidate prefix
+   * @return whether its last character is a delimiter
+   */
+  public static boolean hasTrailingDelimiter(String text) {
+    return !text.isEmpty() && isDelimiter(text.charAt(text.length() - 1));
   }
 
   /**

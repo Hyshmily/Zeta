@@ -15,7 +15,10 @@
  */
 package io.github.hyshmily.zeta.cache.cachesupport.raw;
 
+import io.github.hyshmily.zeta.cache.cachesupport.loader.CacheLoader;
 import io.github.hyshmily.zeta.util.Internal;
+import io.github.hyshmily.zeta.util.clock.StampClock;
+import java.util.function.Supplier;
 
 /**
  * A value loaded from the data source together with the {@code dataVersion}
@@ -31,4 +34,26 @@ import io.github.hyshmily.zeta.util.Internal;
  *                    weakest claim (accepts any real stamp)
  */
 @Internal
-public record VersionedValue(Object value, long dataVersion) {}
+public record VersionedValue(Object value, long dataVersion) {
+  /**
+   * The one stamped reload shared by every background warming path: allocate the stamp before the
+   * load, and decline a value the loader will not store.
+   *
+   * @param key    the key to reload
+   * @param loader the warmable source
+   * @param clock  the node-local stamp allocator
+   * @return a supplier producing the stamped value, or {@code null} when the source is empty or
+   *         the loader declines it
+   */
+  public static Supplier<VersionedValue> stampedReload(
+    String key,
+    CacheLoader<String, Object> loader,
+    StampClock clock
+  ) {
+    return () -> {
+      long stamp = clock.nextStamp();
+      Object value = loader.reload(key);
+      return value != null && loader.isCacheable(value) ? new VersionedValue(value, stamp) : null;
+    };
+  }
+}

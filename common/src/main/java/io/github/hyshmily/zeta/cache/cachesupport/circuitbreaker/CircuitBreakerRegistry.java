@@ -76,7 +76,7 @@ public final class CircuitBreakerRegistry implements AutoCloseable {
    * @return the responsible breaker (never {@code null})
    */
   public CircuitBreaker breakerFor(String cacheKey) {
-    return breakers.get(prefixOf(cacheKey), prefix -> new SlidingWindowBreaker(config));
+    return breakers.get(CacheKeysPolicy.prefixOf(cacheKey, DEFAULT_BUCKET), prefix -> new SlidingWindowBreaker(config));
   }
 
   /**
@@ -87,7 +87,7 @@ public final class CircuitBreakerRegistry implements AutoCloseable {
    * @return {@code true} when the responsible breaker exists and is open
    */
   public boolean isOpen(String cacheKey) {
-    CircuitBreaker breaker = breakers.getIfPresent(prefixOf(cacheKey));
+    CircuitBreaker breaker = breakers.getIfPresent(CacheKeysPolicy.prefixOf(cacheKey, DEFAULT_BUCKET));
     return breaker != null && breaker.isOpen();
   }
 
@@ -100,7 +100,7 @@ public final class CircuitBreakerRegistry implements AutoCloseable {
    * @return {@code true} when the responsible breaker exists and is in a degraded state
    */
   public boolean isDegraded(String cacheKey) {
-    CircuitBreaker breaker = breakers.getIfPresent(prefixOf(cacheKey));
+    CircuitBreaker breaker = breakers.getIfPresent(CacheKeysPolicy.prefixOf(cacheKey, DEFAULT_BUCKET));
     return breaker != null && breaker.isDegraded();
   }
 
@@ -116,28 +116,6 @@ public final class CircuitBreakerRegistry implements AutoCloseable {
       }
     }
     return false;
-  }
-
-  /**
-   * Extract the shard prefix: the non-empty cache namespace before the first
-   * {@link CacheKeysPolicy#NAMESPACE_DELIMITER}, else the non-empty segment
-   * before the first {@code ':'}, or the default bucket for a key with
-   * neither.
-   *
-   * @param key the cache key (may be {@code null})
-   * @return the shard name (never {@code null})
-   */
-  private static String prefixOf(String key) {
-    if (key == null) {
-      return DEFAULT_BUCKET;
-    }
-
-    int namespace = key.indexOf(CacheKeysPolicy.NAMESPACE_DELIMITER);
-    if (namespace > 0) {
-      return key.substring(0, namespace);
-    }
-    int sep = key.indexOf(':');
-    return sep > 0 ? key.substring(0, sep) : DEFAULT_BUCKET;
   }
 
   /**

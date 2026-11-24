@@ -119,6 +119,21 @@ public final class TransactionSupport {
   }
 
   /**
+   * Whether the active transaction declared itself read-only
+   * ({@link TransactionSynchronizationManager#isCurrentTransactionReadOnly()}). A read performed
+   * inside one cannot have observed the transaction's own uncommitted writes — it declared none —
+   * so its loaded value is committed data and may be shared and stored like any other read.
+   *
+   * @return {@code true} only when a transaction is active and marked read-only
+   */
+  public static boolean isCurrentTransactionReadOnly() {
+    return (
+      TransactionSynchronizationManager.isSynchronizationActive() &&
+      TransactionSynchronizationManager.isCurrentTransactionReadOnly()
+    );
+  }
+
+  /**
    * Run a write-path task at the right boundary: inline when {@code immediate} is set or no
    * transaction is active, otherwise from {@code afterCommit} on the committing thread.
    *

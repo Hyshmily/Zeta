@@ -15,28 +15,20 @@
  */
 package io.github.hyshmily.zeta.model;
 
-import io.github.hyshmily.zeta.cache.cachesupport.raw.CacheEntry;
-import io.github.hyshmily.zeta.cache.cachesupport.raw.EntryDraft;
 import java.util.Objects;
 import org.jspecify.annotations.Nullable;
 
 /**
- * The Worker decision lease carried by a {@link CacheEntry}. Only present when
- * the entry has a Worker origin (HOT/COOL broadcasts); local entries carry no
- * decision metadata.
+ * The identity of one Worker heat decision: its operation and causal position.
  *
- * <p>The stamp records the operation together with its causal identity: the
- * version orders decisions of one Worker incarnation, the node id scopes the
- * version space, the epoch detects a Worker restart, and {@link #kind()}
- * distinguishes a HOT lease from a COOL lease. The effective {@code keyState}
- * remains separate: a COOL lease can outlive its state while an entry is
- * re-warmed normally, or while a degraded App locally promotes it.
+ * <p>The stamp is carried by a {@link io.github.hyshmily.zeta.heat.HeatLease}, never by a
+ * {@code CacheEntry}. It records the operation together with its causal identity: the version
+ * orders decisions of one Worker incarnation, the node id scopes the version space, the epoch
+ * detects a Worker restart, and {@link #kind()} distinguishes a HOT grant from a COOL revoke.
  *
- * <p>This is the single value type for decision metadata across the entry
- * pipeline: {@code CacheEntry#decision()} exposes it from a raw cache value,
- * {@link EntryDraft#decision(DecisionStamp)} applies it to a draft, and the
- * worker decision handler and the background refresh carry it between read and
- * write sites. A {@code null} stamp is the local origin.
+ * <p>This is the single value type for decision metadata: the Worker listener hands it to
+ * {@code HeatDirectory}, the COOL-run reducer advances it, and {@code VersionGuard} compares it.
+ * A {@code null} stamp is the local origin.
  *
  * @param decisionVersion the causal decision version; {@code 0} when unallocated
  * @param decisionNodeId  the Worker node ID that produced the decision, or
@@ -86,6 +78,28 @@ public record DecisionStamp(
    */
   public boolean isHot() {
     return kind == DecisionKind.HOT;
+  }
+
+  /**
+   * Whether this stamp carries a usable Worker identity. A missing or blank node id is not an
+   * identity: its version and epoch counters are node-local and cannot be compared with anyone
+   * else's.
+   *
+   * @return whether the node id is present and non-blank
+   */
+  public boolean hasNodeId() {
+    return decisionNodeId != null && !decisionNodeId.isBlank();
+  }
+
+  /**
+   * Whether both stamps were produced by the same Worker node. Two anonymous stamps never match,
+   * even when both node ids are the same blank string.
+   *
+   * @param other the other stamp
+   * @return whether both carry the same non-blank node id
+   */
+  public boolean sameNodeAs(DecisionStamp other) {
+    return hasNodeId() && decisionNodeId.equals(other.decisionNodeId);
   }
 
   /**

@@ -59,10 +59,10 @@ public interface ZetaConstants {
     /**
      * Publishing app instance's {@code NodeIdentity#getInstanceId()} instance ID on
      * instance-to-instance sync messages (design decisions: dedup lifecycle). Receivers drop
-     * their own REFRESH, PUT and clear/batch INVALIDATE broadcasts — the sender already
-     * applied them — while a plain self-INVALIDATE is still processed (it heals
-     * invalidate-vs-reload repopulations stamped with older versions). Absent on messages
-     * from older senders (rolling upgrade); an absent origin is always processed.
+     * their own REFRESH, PUT and clear broadcasts — the sender already applied them — while a
+     * self INVALIDATE or INVALIDATE_BATCH is still processed (it heals invalidation-vs-reload
+     * repopulations stamped with older versions). Absent on messages from older senders
+     * (rolling upgrade); an absent origin is always processed.
      */
     String HEADER_ORIGIN_INSTANCE = "originInstance";
     /**

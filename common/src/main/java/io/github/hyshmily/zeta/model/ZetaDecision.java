@@ -75,9 +75,9 @@ public record ZetaDecision(DecisionType type, String cacheKey, long decisionVers
    * </ul>
    */
   public enum DecisionType {
-    /** Key exceeds the frequency threshold and should be promoted to L1 cache. */
+    /** Key exceeds the frequency threshold: grant a cluster heat lease. */
     HOT,
-    /** Key frequency has dropped below the cooldown threshold; the entry reverts to the normal TTL regime. */
+    /** Key frequency has dropped below the cooldown threshold: revoke the cluster heat lease. */
     COOL,
     /** No action is required for this key during this evaluation cycle. */
     NONE,

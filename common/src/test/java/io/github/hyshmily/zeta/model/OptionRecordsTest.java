@@ -74,10 +74,12 @@ class OptionRecordsTest {
     }
 
     @Test
-    @DisplayName("a negative TTL override is rejected at construction")
-    void negativeTtlIsRejected() {
-      assertThatThrownBy(() -> PutPolicy.of(-1L, 0L, false)).isInstanceOf(IllegalArgumentException.class);
-      assertThatThrownBy(() -> PutPolicy.of(0L, -1L, false)).isInstanceOf(IllegalArgumentException.class);
+    @DisplayName("-1 inherits on hard and disables on soft; every other negative is rejected")
+    void onlyMinusOneIsALegalNegativeDeclaration() {
+      assertThatCode(() -> PutPolicy.of(-1L, 0L, false)).doesNotThrowAnyException();
+      assertThatCode(() -> PutPolicy.of(0L, -1L, false)).doesNotThrowAnyException();
+      assertThatThrownBy(() -> PutPolicy.of(-2L, 0L, false)).isInstanceOf(IllegalArgumentException.class);
+      assertThatThrownBy(() -> PutPolicy.of(0L, -2L, false)).isInstanceOf(IllegalArgumentException.class);
     }
   }
 
@@ -86,9 +88,17 @@ class OptionRecordsTest {
   class Get {
 
     @Test
-    @DisplayName("a negative TTL override is rejected at construction")
-    void negativeTtlIsRejected() {
-      assertThatThrownBy(() -> GetPolicy.of(-1L, 0L, true, StalePolicy.SOFT_REFRESH))
+    @DisplayName("-1 means the configured default on hard and disabled on soft")
+    void minusOneIsTheDeclaredDefault() {
+      assertThatCode(() -> GetPolicy.of(-1L, 0L, true, StalePolicy.SOFT_REFRESH)).doesNotThrowAnyException();
+      assertThat(GetPolicy.of(-1L, 0L, true, StalePolicy.SOFT_REFRESH).hardTtlMs().getAsLong()).isZero();
+      assertThat(GetPolicy.of(0L, -1L, true, StalePolicy.SOFT_REFRESH).softTtlMs().getAsLong()).isEqualTo(-1L);
+    }
+
+    @Test
+    @DisplayName("a negative TTL override other than -1 is rejected at construction")
+    void otherNegativeTtlsAreRejected() {
+      assertThatThrownBy(() -> GetPolicy.of(-5L, 0L, true, StalePolicy.SOFT_REFRESH))
         .isInstanceOf(IllegalArgumentException.class)
         .hasMessageContaining("out of range");
     }
@@ -106,11 +116,11 @@ class OptionRecordsTest {
   class Draft {
 
     @Test
-    @DisplayName("a negative duration is rejected before it reaches L1")
-    void negativeDurationIsRejected() {
+    @DisplayName("an unresolved or negative duration is rejected before it reaches L1")
+    void negativeOrUnresolvedDurationIsRejected() {
       assertThatThrownBy(() -> EntryDraft.blank(null).value("v").version(1L).ttl(-1L, 0L))
         .isInstanceOf(IllegalArgumentException.class)
-        .hasMessageContaining("out of range");
+        .hasMessageContaining("must be resolved");
       assertThatThrownBy(() -> EntryDraft.blank(null).value("v").version(1L).ttl(0L, -1L)).isInstanceOf(
         IllegalArgumentException.class
       );

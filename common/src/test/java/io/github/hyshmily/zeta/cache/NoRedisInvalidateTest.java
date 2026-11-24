@@ -15,11 +15,10 @@
  */
 package io.github.hyshmily.zeta.cache;
 
-import io.github.hyshmily.zeta.cache.cachesupport.policy.InvalidatePolicy;
-
 import static org.assertj.core.api.Assertions.assertThat;
 
 import io.github.hyshmily.zeta.cache.cachesupport.policy.GetPolicy;
+import io.github.hyshmily.zeta.cache.cachesupport.policy.InvalidatePolicy;
 import io.github.hyshmily.zeta.cache.cachesupport.policy.StalePolicy;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.DisplayName;

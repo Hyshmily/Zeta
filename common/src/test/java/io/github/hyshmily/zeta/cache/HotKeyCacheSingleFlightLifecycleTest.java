@@ -24,16 +24,16 @@ import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import io.github.hyshmily.zeta.autoconfigure.ZetaProperties;
 import io.github.hyshmily.zeta.cache.cachesupport.circuitbreaker.CircuitBreakerRegistry;
+import io.github.hyshmily.zeta.cache.cachesupport.lifecycle.EntryLifecycle;
 import io.github.hyshmily.zeta.cache.cachesupport.lifecycle.EntryLifecycleImpl;
 import io.github.hyshmily.zeta.cache.cachesupport.loader.CacheLoader;
-import io.github.hyshmily.zeta.cache.cachesupport.loader.singleflight.SingleFlight;
 import io.github.hyshmily.zeta.cache.cachesupport.loader.singleflight.LoadFlights;
+import io.github.hyshmily.zeta.cache.cachesupport.loader.singleflight.SingleFlight;
 import io.github.hyshmily.zeta.cache.cachesupport.policy.GetPolicy;
 import io.github.hyshmily.zeta.cache.cachesupport.policy.StalePolicy;
 import io.github.hyshmily.zeta.cache.cachesupport.raw.CacheEntry;
 import io.github.hyshmily.zeta.hotkeydetector.HotKeyDetector;
 import io.github.hyshmily.zeta.scheduler.DefaultBackgroundRefresher;
-import io.github.hyshmily.zeta.sharding.HealthView;
 import io.github.hyshmily.zeta.util.clock.MonotonicStampClock;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -46,6 +46,8 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 /**
  * Converged SingleFlight lifecycle: the read path pins its dedup future and
@@ -85,18 +87,16 @@ class HotKeyCacheSingleFlightLifecycleTest {
       // Production wiring shape: a registry whose default (disabled) config keeps every shard closed.
       new CircuitBreakerRegistry(new ZetaProperties.CircuitBreaker(), 64)
     );
-    HealthView healthView = mock(HealthView.class);
     scheduler = Executors.newSingleThreadScheduledExecutor();
+    EntryLifecycle lifecycle = new EntryLifecycleImpl(l1, props);
     return new HotKeyCache(
-      detector,
       l1,
       singleFlight,
-      new EntryLifecycleImpl(l1, props, healthView),
-      new DefaultBackgroundRefresher(l1, Runnable::run, new EntryLifecycleImpl(l1, props, healthView), 10),
+      lifecycle,
+      new DefaultBackgroundRefresher(l1, Runnable::run, lifecycle, 10, props.getRefreshTimeoutMs()),
       new AccessCounter(detector, null, scheduler, 50L, AccessCounter.DEFAULT_DETECTOR_INTERVAL_MS),
       new BroadcastBuffer(scheduler, null, 500, 2_000, null),
-      new MonotonicStampClock(1L, MonotonicStampClock.DEFAULT_MAX_FORWARD_DRIFT_MS),
-      healthView
+      new MonotonicStampClock(1L, MonotonicStampClock.DEFAULT_MAX_FORWARD_DRIFT_MS)
     );
   }
 
@@ -104,6 +104,27 @@ class HotKeyCacheSingleFlightLifecycleTest {
   void tearDown() {
     flightExecutor.shutdownNow();
     scheduler.shutdownNow();
+  }
+
+  @Test
+  @DisplayName("a caller-affine load inside a read-write transaction never stores, even after commit")
+  void transactionalLoadDoesNotStore() {
+    GetPolicy policy = new GetPolicy(() -> 0L, () -> 0L, StalePolicy.SOFT_REFRESH, true, true);
+    TransactionSynchronizationManager.initSynchronization();
+    try {
+      String value = hotKeyCache.get("tx", () -> "v", policy);
+
+      assertThat(value).isEqualTo("v");
+      assertThat(l1.getIfPresent("tx")).as("an uncommitted load must not enter L1").isNull();
+
+      TransactionSynchronizationManager.getSynchronizations().forEach(TransactionSynchronization::afterCommit);
+
+      assertThat(l1.getIfPresent("tx"))
+        .as("the isolated load registers no store, because its value may still roll back")
+        .isNull();
+    } finally {
+      TransactionSynchronizationManager.clear();
+    }
   }
 
   @Test

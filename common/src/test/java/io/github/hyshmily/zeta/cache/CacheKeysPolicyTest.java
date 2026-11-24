@@ -94,6 +94,51 @@ class CacheKeysPolicyTest {
   }
 
   /**
+   * The namespace and the bare prefix are one split rule: the first delimiter ends the namespace,
+   * a leading delimiter means no namespace, and a key with neither falls back to the caller's default.
+   */
+  @Test
+  void namespaceAndPrefix_shouldShareTheTwoLevelSplit() {
+    assertThat(CacheKeysPolicy.namespaceOf("users\u0000u-1")).isEqualTo("users\u0000");
+    assertThat(CacheKeysPolicy.prefixOf("users\u0000u-1", "default")).isEqualTo("users");
+    assertThat(CacheKeysPolicy.namespaceOf("user:1")).isEqualTo("user");
+    assertThat(CacheKeysPolicy.prefixOf("user:1", "default")).isEqualTo("user");
+    assertThat(CacheKeysPolicy.namespaceOf("plain")).isNull();
+    assertThat(CacheKeysPolicy.prefixOf("plain", "default")).isEqualTo("default");
+    assertThat(CacheKeysPolicy.prefixOf(null, "default")).isEqualTo("default");
+    assertThat(CacheKeysPolicy.prefixOf("\u0000k", "default")).isEqualTo("default");
+  }
+
+  /**
+   * A namespace ends at the first delimiter even when the other delimiter appears later in the
+   * key, and a leading delimiter leaves no namespace at all.
+   */
+  @Test
+  void namespaceEnd_shouldStopAtTheFirstDelimiter() {
+    assertThat(CacheKeysPolicy.namespaceOf("users:u\u0000-1")).isEqualTo("users");
+    assertThat(CacheKeysPolicy.logicalNamespaceOf("users:u\u0000-1")).isEqualTo("users");
+    assertThat(CacheKeysPolicy.physicalPrefixOf("users:u\u0000-1")).isEqualTo("users:");
+    assertThat(CacheKeysPolicy.namespaceOf(":a\u0000b")).isNull();
+    assertThat(CacheKeysPolicy.namespaceOf("\u0000a:b")).isNull();
+    assertThat(CacheKeysPolicy.logicalNamespaceOf(":a\u0000b")).isNull();
+    assertThat(CacheKeysPolicy.logicalNamespaceOf("\u0000a:b")).isNull();
+  }
+
+  /**
+   * The logical name is the one form a business comparison can use: both encodings answer with the
+   * bare name, while {@link CacheKeysPolicy#namespaceOf(String)} keeps the TYPED delimiter.
+   */
+  @Test
+  void logicalNamespaceOf_shouldDropTheEncodingDelimiter() {
+    assertThat(CacheKeysPolicy.logicalNamespaceOf("users\u0000u-1")).isEqualTo("users");
+    assertThat(CacheKeysPolicy.logicalNamespaceOf("users:u-1")).isEqualTo("users");
+    assertThat(CacheKeysPolicy.logicalNamespaceOf("users\u0000")).isEqualTo("users");
+    assertThat(CacheKeysPolicy.logicalNamespaceOf("users:")).isEqualTo("users");
+    assertThat(CacheKeysPolicy.logicalNamespaceOf("plain")).isNull();
+    assertThat(CacheKeysPolicy.logicalNamespaceOf("\u0000k")).isNull();
+  }
+
+  /**
    * Verifies that the constructor is private and cannot be instantiated.
    */
   @Test

@@ -18,6 +18,7 @@ package io.github.hyshmily.zeta.cache.cachesupport.loader.singleflight;
 import io.github.hyshmily.zeta.cache.cachesupport.loader.LoaderOutcome;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 import java.util.function.Function;
@@ -118,6 +119,29 @@ public interface SingleFlight {
    * @return the explicit outcome (never {@code null})
    */
   <T> LoaderOutcome<T> loadIsolated(String cacheKey, Supplier<T> reader, Consumer<? super T> leaderCommit);
+
+  /**
+   * Non-blocking form of {@link #load(String, Supplier, boolean, Consumer)} for framework wins
+   * that already run on a shared executor: the caller never waits on the flight, so a prewarm
+   * worker cannot occupy a thread while the reader it is waiting for queues behind it.
+   *
+   * <p>The default keeps a custom implementation correct by delegating to the blocking form; the
+   * built-in implementation joins the flight through a completion stage instead.
+   *
+   * @param cacheKey     the key to load
+   * @param reader       the value supplier, run at most once per election
+   * @param leaderCommit runs on the leader's thread with the loaded value
+   * @param <T>          the value type
+   * @return a future completed with the explicit outcome; it never completes exceptionally for a
+   *         reader failure
+   */
+  default <T> CompletableFuture<LoaderOutcome<T>> loadAsync(
+    String cacheKey,
+    Supplier<T> reader,
+    Consumer<? super T> leaderCommit
+  ) {
+    return CompletableFuture.completedFuture(load(cacheKey, reader, false, leaderCommit));
+  }
 
   /**
    * Batch form: elects every key before joining any, so a batch of misses loads in

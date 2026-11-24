@@ -46,7 +46,20 @@ final class TestSync {
     EntryLifecycle lifecycle,
     List<SyncHook> hooks
   ) {
-    this.context = new DefaultSyncContext(cache, loader, lifecycle, hooks, null, null);
+    this.context = new DefaultSyncContext(
+      cache,
+      loader,
+      lifecycle,
+      hooks,
+      null,
+      null,
+      Runnable::run,
+      Runnable::run,
+      null,
+      null,
+      null,
+      null
+    );
   }
 
   TestSync(
@@ -56,7 +69,20 @@ final class TestSync {
     List<SyncHook> hooks,
     SingleFlight singleFlight
   ) {
-    this.context = new DefaultSyncContext(cache, loader, lifecycle, hooks, singleFlight, null);
+    this.context = new DefaultSyncContext(
+      cache,
+      loader,
+      lifecycle,
+      hooks,
+      singleFlight,
+      null,
+      Runnable::run,
+      Runnable::run,
+      null,
+      null,
+      null,
+      null
+    );
   }
 
   void handleRefresh(SyncMessage message) {
@@ -72,20 +98,14 @@ final class TestSync {
   }
 
   void handleClearAll(long stamp) {
-    context.apply(
-      new Batch.Clear(List.of(new SyncMessage(0L, "clear-all", SyncType.INVALIDATE_ALL, stamp))),
-      policy
-    );
+    context.apply(new Batch.Clear(List.of(new SyncMessage(0L, "clear-all", SyncType.INVALIDATE_ALL, stamp))), policy);
   }
 
   void handleClearPrefix(String prefix, long stamp) {
-    context.apply(
-      new Batch.Clear(List.of(new SyncMessage(0L, prefix, SyncType.INVALIDATE_PREFIX, stamp))),
-      policy
-    );
+    context.apply(new Batch.Clear(List.of(new SyncMessage(0L, prefix, SyncType.INVALIDATE_PREFIX, stamp))), policy);
   }
 
   private static Batch.Value value(SyncMessage message) {
-    return new Batch.Value(List.of(message), message, List.of(), null);
+    return new Batch.Value(message, List.of(), null);
   }
 }

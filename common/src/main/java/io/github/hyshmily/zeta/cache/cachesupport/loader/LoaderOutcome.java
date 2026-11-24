@@ -30,6 +30,30 @@ import org.jspecify.annotations.Nullable;
  * @param cause  the reader failure; non-null iff {@code status == FAILED}
  */
 public record LoaderOutcome<T>(@Nullable T value, LoadStatus status, @Nullable Throwable cause) {
+  /** The shared no-data outcome: no value, no cause, one instance per JVM. */
+  private static final LoaderOutcome<?> SOURCE_EMPTY = new LoaderOutcome<>(null, LoadStatus.SOURCE_EMPTY, null);
+
+  /** The shared breaker-suppressed outcome. */
+  private static final LoaderOutcome<?> SUPPRESSED_BREAKER = new LoaderOutcome<>(
+    null,
+    LoadStatus.SUPPRESSED_BREAKER,
+    null
+  );
+
+  /** The shared timeout-suppressed outcome. */
+  private static final LoaderOutcome<?> SUPPRESSED_TIMEOUT = new LoaderOutcome<>(
+    null,
+    LoadStatus.SUPPRESSED_TIMEOUT,
+    null
+  );
+
+  /** The shared executor-suppressed outcome. */
+  private static final LoaderOutcome<?> SUPPRESSED_EXECUTOR = new LoaderOutcome<>(
+    null,
+    LoadStatus.SUPPRESSED_EXECUTOR,
+    null
+  );
+
   /**
    * Compact constructor: enforces the value/cause invariants per status.
    */
@@ -66,22 +90,43 @@ public record LoaderOutcome<T>(@Nullable T value, LoadStatus status, @Nullable T
    *
    * @return the outcome
    */
+  @SuppressWarnings("unchecked")
   public static <T> LoaderOutcome<T> sourceEmpty() {
-    return new LoaderOutcome<>(null, LoadStatus.SOURCE_EMPTY, null);
+    return (LoaderOutcome<T>) SOURCE_EMPTY;
+  }
+
+  /**
+   * A successful load of a nullable value: the value when present, the empty outcome otherwise.
+   * The one place the reader's null is classified, so no call site repeats the ternary.
+   *
+   * @param value the loaded value, or {@code null}
+   * @param <T>   the value type
+   * @return the loaded outcome, or the empty outcome for a null value
+   */
+  public static <T> LoaderOutcome<T> ofNullable(@Nullable T value) {
+    return value == null ? sourceEmpty() : loaded(value);
   }
 
   /**
    * A suppressed load (breaker / timeout / executor saturation).
    *
+   * <p>The three suppressions carry no per-call state, so a suppression storm allocates nothing.
+   *
    * @param status the suppression reason (a SUPPRESSED_* status)
    * @return the outcome
    * @throws IllegalArgumentException for any non-suppression status
    */
+  @SuppressWarnings("unchecked")
   public static <T> LoaderOutcome<T> suppressed(LoadStatus status) {
-    if (status == null || !status.isSuppressed()) {
-      throw new IllegalArgumentException("suppressed() requires a SUPPRESSED_* status, got " + status);
+    if (status == null) {
+      throw new IllegalArgumentException("suppressed() requires a SUPPRESSED_* status, got null");
     }
-    return new LoaderOutcome<>(null, status, null);
+    return (LoaderOutcome<T>) switch (status) {
+      case SUPPRESSED_BREAKER -> SUPPRESSED_BREAKER;
+      case SUPPRESSED_TIMEOUT -> SUPPRESSED_TIMEOUT;
+      case SUPPRESSED_EXECUTOR -> SUPPRESSED_EXECUTOR;
+      default -> throw new IllegalArgumentException("suppressed() requires a SUPPRESSED_* status, got " + status);
+    };
   }
 
   /**

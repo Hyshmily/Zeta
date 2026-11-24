@@ -19,10 +19,10 @@ import static io.github.hyshmily.zeta.constants.ZetaConstants.Amqp.HEADER_TYPE;
 import static io.github.hyshmily.zeta.constants.ZetaConstants.Amqp.HEADER_VERSION;
 import static org.assertj.core.api.Assertions.assertThat;
 
+import io.github.hyshmily.zeta.model.DecisionKind;
 import io.github.hyshmily.zeta.sync.local.SyncMessage;
 import io.github.hyshmily.zeta.sync.local.SyncType;
 import io.github.hyshmily.zeta.sync.worker.WorkerDecision;
-import io.github.hyshmily.zeta.sync.worker.WorkerType;
 import java.nio.charset.StandardCharsets;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -53,7 +53,7 @@ class MalformedMessageDroppedTest {
   @DisplayName("a worker decision without a positive version never reaches a handler")
   void workerNonPositiveVersion_droppedAtParseBoundary() {
     MessageProperties props = new MessageProperties();
-    props.setHeader(HEADER_TYPE, WorkerType.HOT.code());
+    props.setHeader(HEADER_TYPE, DecisionKind.HOT.code());
     byte[] body = "k".getBytes(StandardCharsets.UTF_8);
 
     assertThat(WorkerDecision.from(new Message(body, props))).as("missing header").isNull();

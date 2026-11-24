@@ -15,14 +15,16 @@
  */
 package io.github.hyshmily.zeta.cache;
 
+import com.github.benmanes.caffeine.cache.Cache;
 import io.github.hyshmily.zeta.cache.cachesupport.lifecycle.TtlPolicy;
 import io.github.hyshmily.zeta.cache.cachesupport.raw.CacheEntry;
-import io.github.hyshmily.zeta.model.KeyState;
+import io.github.hyshmily.zeta.cache.cachesupport.raw.QuietCache;
+import io.github.hyshmily.zeta.util.TimeSource;
 import org.jspecify.annotations.Nullable;
 
 /**
- * A read-only snapshot of one L1 entry, handed to {@code SyncPolicy}, {@code WorkerPolicy}
- * and {@code SyncHook}. The snapshot is advisory: the resident may change before the framework
+ * A read-only snapshot of one L1 entry, handed to {@code SyncPolicy}, {@code SyncHook} and
+ * {@code HotKeyContext}. The snapshot is advisory: the resident may change before the framework
  * applies a decision, so the guarded write path re-checks every version and tombstone.
  *
  * <p>{@link #value()} is the entry's own reference, not a copy. A policy must treat it as
@@ -30,7 +32,6 @@ import org.jspecify.annotations.Nullable;
  *
  * @param value             the cached value, or {@code null} when the entry carries none
  * @param dataVersion       the data stamp ({@code 0} = unknown)
- * @param keyState          the current hot/cool state, or {@code null} when unset
  * @param softExpireAtMs    the absolute soft-expiry timestamp
  * @param hardExpireAtMs    the absolute hard-expiry timestamp
  * @param softExpired       whether the soft window was closed at snapshot time
@@ -39,7 +40,6 @@ import org.jspecify.annotations.Nullable;
 public record EntryView(
   @Nullable Object value,
   long dataVersion,
-  @Nullable KeyState keyState,
   long softExpireAtMs,
   long hardExpireAtMs,
   boolean softExpired,
@@ -61,11 +61,35 @@ public record EntryView(
     return new EntryView(
       entry.getValue(),
       entry.getDataVersion(),
-      entry.getKeyState(),
       entry.getSoftExpireAtMs(),
       entry.getHardExpireAtMs(),
       ttlPolicy.isSoftExpired(entry, now),
       ttlPolicy.isLogicallyExpired(entry, now)
     );
+  }
+
+  /**
+   * Snapshots a resident key against one clock sample: the cache-side form of {@link #of}, shared
+   * by the planes that read an entry without owning the table.
+   *
+   * @param cache     the L1 table
+   * @param key       the key to snapshot
+   * @param ttlPolicy the expiry arithmetic
+   * @return the snapshot, or {@code null} when the key is absent
+   */
+  public static @Nullable EntryView snapshot(Cache<String, CacheEntry> cache, String key, TtlPolicy ttlPolicy) {
+    return of(QuietCache.getIfPresent(cache, key), ttlPolicy, TimeSource.currentTimeMillis());
+  }
+
+  /**
+   * Whether a snapshot represents a servable entry: present and not past its hard deadline. The
+   * null-safe form of {@code view != null && !view.logicallyExpired()}, so a policy does not
+   * repeat the pair — and cannot get it wrong by testing only one half.
+   *
+   * @param view the snapshot, or {@code null} for an absent key
+   * @return whether the entry is servable
+   */
+  public static boolean isLive(@Nullable EntryView view) {
+    return view != null && !view.logicallyExpired();
   }
 }

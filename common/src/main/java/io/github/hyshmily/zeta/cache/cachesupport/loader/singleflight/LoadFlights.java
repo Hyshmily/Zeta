@@ -17,13 +17,16 @@ package io.github.hyshmily.zeta.cache.cachesupport.loader.singleflight;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
+import com.github.benmanes.caffeine.cache.RemovalCause;
 import io.github.hyshmily.zeta.cache.cachesupport.circuitbreaker.CircuitBreaker;
 import io.github.hyshmily.zeta.cache.cachesupport.circuitbreaker.CircuitBreakerRegistry;
 import io.github.hyshmily.zeta.cache.cachesupport.loader.LoadStatus;
 import io.github.hyshmily.zeta.cache.cachesupport.loader.LoaderOutcome;
+import io.github.hyshmily.zeta.util.CollectionSizing;
 import io.github.hyshmily.zeta.util.Internal;
 import io.github.hyshmily.zeta.util.InterruptingAsync;
 import jakarta.annotation.PreDestroy;
+import java.io.Serial;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.VarHandle;
 import java.util.*;
@@ -36,49 +39,84 @@ import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.function.Supplier;
 import lombok.extern.slf4j.Slf4j;
+import org.jspecify.annotations.Nullable;
 import org.springframework.util.Assert;
 
 /**
- * Default {@link SingleFlight}: one Caffeine table of in-flight elections, a per-prefix
- * breaker registry for admission, and an executor that runs elected readers with an
- * interrupting timeout.
+ * Default {@link SingleFlight} implementation: a bounded Caffeine table of in-flight elections, a
+ * per-prefix {@link CircuitBreakerRegistry} for admission control, and an {@link Executor} running
+ * elected readers under an interrupting timeout budget.
  *
- * <p>The leader owns its whole lifecycle — breaker admission, the reader, the commit and
- * the breaker settlement — and retires its flight <em>before</em> completing it, so a
- * waiter woken by the completion cannot re-elect the settled flight. Followers only
- * join. A write-path {@link #invalidate(String)} marks the flight, so a leader whose
- * value was superseded finishes for its waiters but commits nothing to L1.
+ * <p>The elected leader owns the entire load lifecycle — breaker admission, reader execution,
+ * L1 commit, and breaker settlement — and retires its flight from the table <em>before</em>
+ * completing the shared future so woken waiters never re-elect a settled flight. Followers simply
+ * join the shared future. Write-path invalidations flag live flights so superseded leaders still
+ * return a value to waiting callers without committing stale data to L1.
  */
 @Slf4j
 @Internal
 public class LoadFlights implements SingleFlight {
 
+  /** High-water ratio of {@code inFlightMaxSize} above which backlog debug warnings are emitted. */
+  private static final double HIGH_IN_FLIGHT_RATIO = 0.8d;
+
+  /** Default map capacity when a batch {@link Iterable} cannot report its size upfront. */
+  private static final int DEFAULT_BATCH_CAPACITY = 16;
+
+  /** Sentinel indicating the executor rejected the leader's submission. */
+  private static final InFlight REJECTED = new InFlight();
+
+  /** Sentinel indicating the circuit breaker denied admission before creating a flight. */
+  private static final InFlight DENIED = new InFlight();
+
+  /** Sentinel indicating this {@link LoadFlights} instance has been closed. */
+  private static final InFlight CLOSED = new InFlight();
+
   private final CircuitBreakerRegistry breakerRegistry;
-  /** Key → the flight currently serving it. */
+
+  /** Maps each physical cache key to the {@link InFlight} currently serving it. */
   private final Cache<String, InFlight> inFlightLoads;
+
+  /**
+   * Flights that left {@link #inFlightLoads} while still unsettled — evicted, expired, or removed
+   * by an explicit invalidation. {@link #close()} still cancels their executor task, and each
+   * flight removes itself on completion so this set cannot retain a finished load.
+   */
+  private final Set<InFlight> detachedActive = ConcurrentHashMap.newKeySet();
+
   private final int inFlightMaxSize;
-  /** Per-load execution budget; queue wait before the task starts is not counted. */
+
+  /** Per-reader execution timeout budget in seconds (queue wait time is excluded). */
   private final int timeoutSeconds;
+
   private final Executor executor;
 
-  /** Readers executing right now — the in-flight gauge. */
+  /** Count of readers actively executing right now. */
   private final AtomicInteger runningLoads = new AtomicInteger();
-  /** Loads submitted but not yet settled — the backlog the high-water DEBUG line watches. */
+
+  /** Count of executor-submitted loads not yet settled (observed by the high-water debug guard). */
   private final AtomicInteger pendingLoads = new AtomicInteger();
-  /** Leader-only reader timeouts, the source-degraded stall signal. */
+
+  /** Cumulative leader execution timeouts (source-degradation signal). */
   private final AtomicLong timeoutCounter = new AtomicLong();
-  /** {@code maxSize × 0.8}, floored at 1 so a single-key table never warns. */
+
+  /** Backlog warning threshold ({@code max(1, (long) (maxSize * 0.8))}). */
   private final long highInFlightThreshold;
-  /** Set before the shutdown drain; a load that elects afterwards is suppressed, not queued. */
+
+  /** Set before draining flights during shutdown; subsequent elections are suppressed. */
   private final AtomicBoolean closed = new AtomicBoolean();
 
   /**
-   * @param maxSize         maximum number of dedup keys tracked at once
-   * @param ttlSec          retention bound for an unsettled flight; the table expiry is
-   *                        raised to at least {@code timeoutSeconds + 1}
-   * @param timeoutSeconds  per-reader execution budget
+   * Creates a {@link LoadFlights} coordinator.
+   *
+   * @param maxSize         maximum number of concurrent deduplication keys tracked
+   * @param ttlSec          retention bound for an unsettled flight in seconds (raised to at least
+   *                        {@code timeoutSeconds + 1} so active leaders are not evicted prematurely)
+   * @param timeoutSeconds  per-reader execution budget in seconds
    * @param executor        executor running non-caller-affine readers
-   * @param breakerRegistry per-prefix breaker shards
+   * @param breakerRegistry per-prefix circuit breaker registry
+   * @throws IllegalArgumentException if any numeric parameter is non-positive
+   * @throws NullPointerException     if {@code executor} or {@code breakerRegistry} is {@code null}
    */
   public LoadFlights(
     int maxSize,
@@ -90,187 +128,100 @@ public class LoadFlights implements SingleFlight {
     Assert.isTrue(maxSize > 0, "maxSize must be > 0, but got: " + maxSize);
     Assert.isTrue(ttlSec > 0, "ttlSec must be > 0, but got: " + ttlSec);
     Assert.isTrue(timeoutSeconds > 0, "timeoutSeconds must be > 0, but got: " + timeoutSeconds);
-    Objects.requireNonNull(executor, "executor must not be null");
-    Objects.requireNonNull(breakerRegistry, "breakerRegistry must not be null");
-    this.executor = executor;
+    this.executor = Objects.requireNonNull(executor, "executor must not be null");
+    this.breakerRegistry = Objects.requireNonNull(breakerRegistry, "breakerRegistry must not be null");
     this.inFlightMaxSize = maxSize;
     this.timeoutSeconds = timeoutSeconds;
-    this.breakerRegistry = breakerRegistry;
-    this.highInFlightThreshold = Math.max(1L, (long) (maxSize * 0.8));
-    // A dedup entry must outlive one load attempt, or the next caller misses it while
-    // its leader is still loading and starts a second concurrent load.
+    this.highInFlightThreshold = Math.max(1L, (long) (maxSize * HIGH_IN_FLIGHT_RATIO));
     this.inFlightLoads = Caffeine.newBuilder()
       .maximumSize(maxSize)
       .expireAfterWrite(Math.max(ttlSec, timeoutSeconds + 1), TimeUnit.SECONDS)
+      .evictionListener((String key, InFlight flight, RemovalCause cause) -> detach(flight))
       .build();
   }
 
-  /** Any-shard view: the read path's degraded-mode gate. */
+  /**
+   * Tracks a flight removed from the deduplication table while still unsettled, so {@link #close()}
+   * can cancel a task the table no longer references. The completion callback removes it again, so
+   * a flight that settles between the check and the registration cannot linger.
+   *
+   * <p>The trailing {@code closed} check mirrors {@code submit}: a flight that left the table just
+   * before {@code close()} took its snapshot is in neither collection, so this is the only place
+   * that can still retire it. Without it a refresh of the table that loses the race leaves a flight
+   * (and every thread waiting on it) unsettled until the executor discards the queued task, which
+   * {@code shutdownNow} does without completing the future.
+   *
+   * @param flight the detached flight, or {@code null}
+   */
+  private void detach(@Nullable InFlight flight) {
+    if (flight == null || isSentinel(flight) || flight.isDone()) {
+      return;
+    }
+    detachedActive.add(flight);
+    flight.whenComplete((ignored, failure) -> detachedActive.remove(flight));
+    if (closed.get()) {
+      // Every step is idempotent: close() may already have processed this flight from either
+      // snapshot, and the settlement bit keeps the breaker and the backlog count single-owner.
+      detachedActive.remove(flight);
+      releasePending(flight);
+      abandonFlight(flight, new RejectedExecutionException("SingleFlight closed"));
+      flight.cancelTask();
+    }
+  }
+
+  /**
+   * Returns whether any circuit breaker shard is currently degraded.
+   *
+   * @return {@code true} if any shard is open or half-open
+   */
   @Override
   public boolean isBreakerOpen() {
     return breakerRegistry.isAnyDegraded();
   }
 
-  /** Per-key view: only the key's own shard decides. */
+  /**
+   * Returns whether the circuit breaker shard owning {@code cacheKey} is currently degraded.
+   *
+   * @param cacheKey the physical cache key
+   * @return {@code true} if the key's shard is open or half-open
+   */
   @Override
   public boolean isBreakerOpen(String cacheKey) {
     return breakerRegistry.isDegraded(cacheKey);
   }
 
-  /** Readers executing right now — not the dedup table's size. */
+  /**
+   * Returns the number of readers actively executing at this moment (excluding queued tasks).
+   *
+   * @return the current count of running readers
+   */
   @Override
   public long estimatedInFlightSize() {
     return runningLoads.get();
   }
 
-  /** Cumulative leader timeouts — the source-degradation signal. */
+  /**
+   * Returns the cumulative count of leader reader timeouts observed since startup.
+   *
+   * @return the total leader timeout count
+   */
   @Override
   public long loadTimeoutCount() {
     return timeoutCounter.get();
   }
 
   /**
-   * One key's dedup entry: the future every waiter joins, the write-path kill
-   * flag and the breaker settlement packed into one word. The flight is the
-   * future, so a miss allocates one {@code InFlight} and a caller that joins an
-   * existing flight allocates only the small election result.
+   * Deduplicates and loads a single key: elects a leader outside any cache lock, executes its
+   * reader either inline ({@code callerRuns == true}) or on {@link #executor}, and classifies the
+   * resulting {@link LoaderOutcome}.
    *
-   * <p>The thread executing the leader's reader is recorded for re-entrancy
-   * detection only: a same-key call from inside that reader must fail fast
-   * instead of joining a future it is itself responsible for completing.
-   */
-  private static final class InFlight extends CompletableFuture<Object> {
-
-    /** Probe stamps are breaker generations; 61 bits outlast any JVM incarnation. */
-    private static final long STAMP_MASK = (1L << 61) - 1;
-    /** The write-path kill bit; the sign bit makes {@link #isInvalidated()} one compare. */
-    private static final long BIT_INVALIDATED = 1L << 63;
-    /** The single settlement bit (leader commit + breaker outcome). */
-    private static final long BIT_SETTLED = 1L << 62;
-    /** Set once the load has incremented the backlog; cleared by the one releaser. */
-    private static final long BIT_BACKLOG = 1L << 61;
-    private static final VarHandle STATE;
-
-    static {
-      try {
-        STATE = MethodHandles.lookup().findVarHandle(InFlight.class, "state", long.class);
-      } catch (ReflectiveOperationException e) {
-        throw new ExceptionInInitializerError(e);
-      }
-    }
-
-    private final CircuitBreaker breaker;
-    /** The thread running the leader's reader, or {@code 0} when none is running. */
-    private volatile long runningThreadId;
-    /** [63]: invalidated | [62]: settled | [61]: backlog counted | [0..60]: circuit-breaker stamp. */
-    private volatile long state;
-
-    InFlight(CircuitBreaker breaker, long stamp) {
-      this.breaker = breaker;
-      this.state = stamp & STAMP_MASK;
-    }
-
-    /** Sentinel constructor: no breaker, no running reader, no stamp. */
-    private InFlight() {
-      this.state = 0L;
-      this.breaker = null;
-      this.runningThreadId = 0L;
-    }
-
-    /**
-     * Marks this flight's backlog slot as counted. Called after
-     * {@code pendingLoads.incrementAndGet()}, so close() can release exactly the
-     * slots that were actually counted.
-     */
-    void claimPending() {
-      STATE.getAndBitwiseOr(this, BIT_BACKLOG);
-    }
-
-    /**
-     * Releases this flight's backlog count once. Returns {@code false} when the
-     * slot was never claimed or was already released, so the decrement happens
-     * exactly once per counted load.
-     */
-    boolean tryReleasePending() {
-      for (;;) {
-        long current = state;
-        if ((current & BIT_BACKLOG) == 0L) {
-          return false;
-        }
-        if (STATE.compareAndSet(this, current, current & ~BIT_BACKLOG)) {
-          return true;
-        }
-      }
-    }
-
-    /** Whether this flight's reader is executing on the calling thread. */
-    boolean isRunningOnCurrentThread() {
-      return runningThreadId == Thread.currentThread().getId();
-    }
-
-    CircuitBreaker breaker() {
-      return breaker;
-    }
-
-    long stamp() {
-      return state & STAMP_MASK;
-    }
-
-    boolean isInvalidated() {
-      return state < 0L;
-    }
-
-    /**
-     * Claims this flight's single settlement: the breaker outcome and the leader
-     * commit. A timeout competes with the reader's normal completion, so a result
-     * that arrives after the timeout loses this CAS and neither commits to L1 nor
-     * counts as a breaker success.
-     */
-    boolean trySettle() {
-      for (;;) {
-        long current = state;
-        if ((current & BIT_SETTLED) != 0L) {
-          return false;
-        }
-        if (STATE.compareAndSet(this, current, current | BIT_SETTLED)) {
-          return true;
-        }
-      }
-    }
-
-    /** Set only by {@link #invalidate}/{@link #invalidateAll}; never cleared. */
-    void markInvalidated() {
-      STATE.getAndBitwiseOr(this, BIT_INVALIDATED);
-    }
-  }
-
-  /** The executor refused the reader: the flight was aborted. */
-  private static final InFlight REJECTED = new InFlight();
-  /** The breaker refused the load: no flight exists. */
-  private static final InFlight DENIED = new InFlight();
-  /** The dedup layer is closed: no new flight may be elected. */
-  private static final InFlight CLOSED = new InFlight();
-
-  /**
-   * One election result. {@code leader} is true only for the call that inserted
-   * the flight, so a re-entrant same-thread call that reads the same flight is a
-   * follower, not a second leader.
-   */
-  private record Election(InFlight flight, boolean leader) {}
-
-  /**
-   * Load one value: elect a leader outside any cache lock, run its reader (on this
-   * thread under {@code callerRuns}, otherwise on the executor), then classify this
-   * caller's role. A follower joins the flight's shared future; an inline leader
-   * returns its outcome directly.
-   *
-   * @param cacheKey     the key to load
-   * @param reader       the value supplier, run at most once per election
-   * @param callerRuns   {@code true} keeps the reader on the calling thread
-   * @param leaderCommit stores the leader's value before any waiter wakes (or registers
-   *                     that store for the caller transaction's afterCommit)
+   * @param cacheKey     the physical key to load
+   * @param reader       the value supplier executed at most once per election
+   * @param callerRuns   {@code true} to execute the leader's reader on the calling thread
+   * @param leaderCommit callback storing the leader's loaded value before followers wake
    * @param <T>          the value type
-   * @return the explicit outcome; reader failures surface as {@code FAILED}
+   * @return the classified {@link LoaderOutcome}; reader failures surface as
+   *         {@link LoadStatus#FAILED} rather than throwing
    */
   @Override
   public <T> LoaderOutcome<T> load(
@@ -281,8 +232,8 @@ public class LoadFlights implements SingleFlight {
   ) {
     Election election = elect(cacheKey);
     InFlight flight = election.flight();
-    // close() may have drained and failed the flight between the election and this line; the
-    // join below then reports the rejection instead of running a reader nobody waits for.
+    // close() may have drained and failed the flight between election and dispatch; fall through
+    // to settle() so the caller observes the rejection instead of running an orphaned reader.
     if (election.leader() && !flight.isDone()) {
       if (callerRuns) {
         return runInline(cacheKey, flight, reader, leaderCommit);
@@ -293,12 +244,17 @@ public class LoadFlights implements SingleFlight {
   }
 
   /**
-   * Runs the reader on the calling thread without electing a flight. Used by a caller-affine
-   * transactional load: followers must never observe a value that may still roll back, and a
-   * concurrent caller's own load is cheaper than a shared future that has to be withheld.
+   * Executes a caller-isolated load directly on the calling thread without participating in
+   * SingleFlight deduplication, used for transactional loads whose uncommitted values must not be
+   * shared with concurrent followers.
    *
-   * <p>Breaker admission still applies, so a rejected probe maps to
-   * {@link LoadStatus#SUPPRESSED_BREAKER} and the read path can serve its stale fallback.
+   * <p>Circuit breaker admission and settlement still apply.
+   *
+   * @param cacheKey     the physical key to load
+   * @param reader       the value supplier
+   * @param leaderCommit callback committing a non-null loaded value
+   * @param <T>          the value type
+   * @return the classified {@link LoaderOutcome}
    */
   @Override
   public <T> LoaderOutcome<T> loadIsolated(String cacheKey, Supplier<T> reader, Consumer<? super T> leaderCommit) {
@@ -316,11 +272,11 @@ public class LoadFlights implements SingleFlight {
     runningLoads.incrementAndGet();
     try {
       T value = reader.get();
+      breaker.onSuccess(stamp);
       if (value != null) {
         leaderCommit.accept(value);
       }
-      breaker.onSuccess(stamp);
-      return value == null ? LoaderOutcome.sourceEmpty() : LoaderOutcome.loaded(value);
+      return LoaderOutcome.ofNullable(value);
     } catch (Throwable t) {
       Throwable cause = causeOf(t);
       breaker.onFailure(cause, stamp);
@@ -328,8 +284,6 @@ public class LoadFlights implements SingleFlight {
         throw err;
       }
       if (cause instanceof InterruptedException) {
-        // The reader ran on this thread, which is the only thread allowed to
-        // restore the flag: a follower never observes this outcome.
         Thread.currentThread().interrupt();
       }
       return LoaderOutcome.failed(cause);
@@ -339,14 +293,39 @@ public class LoadFlights implements SingleFlight {
   }
 
   /**
-   * Batch form: elect and submit every distinct key before joining any, so a batch of
-   * misses overlaps its loads. A duplicated key reuses its first election and outcome.
+   * Performs a non-blocking deduplicated load: elects and submits on {@link #executor} and returns
+   * a {@link CompletableFuture} translating the flight's completion into a {@link LoaderOutcome}.
    *
-   * @param cacheKeys    the keys to load
-   * @param reader       the per-key value function
-   * @param leaderCommit the per-key leader commit
+   * @param cacheKey     the physical key to load
+   * @param reader       the value supplier executed at most once per election
+   * @param leaderCommit callback storing the leader's loaded value before waiters wake
    * @param <T>          the value type
-   * @return key → outcome, in first-seen order
+   * @return a future completing with the classified {@link LoaderOutcome} (never exceptionally for
+   *         reader failures)
+   */
+  @Override
+  public <T> CompletableFuture<LoaderOutcome<T>> loadAsync(
+    String cacheKey,
+    Supplier<T> reader,
+    Consumer<? super T> leaderCommit
+  ) {
+    Election election = elect(cacheKey);
+    InFlight flight = election.flight();
+    if (election.leader() && !flight.isDone()) {
+      flight = submit(cacheKey, flight, reader, leaderCommit);
+    }
+    return settleAsync(cacheKey, flight);
+  }
+
+  /**
+   * Deduplicates and loads a batch of keys in parallel: elects and submits every distinct key
+   * before joining any flight so cache misses overlap. Duplicate keys reuse their first election.
+   *
+   * @param cacheKeys    the physical keys to load
+   * @param reader       the per-key value supplier function
+   * @param leaderCommit the per-key leader commit callback
+   * @param <T>          the value type
+   * @return map from each distinct key to its {@link LoaderOutcome}, preserving first-seen order
    */
   @Override
   public <T> Map<String, LoaderOutcome<T>> load(
@@ -354,8 +333,6 @@ public class LoadFlights implements SingleFlight {
     Function<? super String, ? extends T> reader,
     BiConsumer<String, ? super T> leaderCommit
   ) {
-    // Elect (and submit) every key before joining any: a batch of misses must load in
-    // parallel. A duplicated key reuses its first election.
     Map<String, InFlight> elections = new LinkedHashMap<>(mapCapacity(cacheKeys));
     for (String key : cacheKeys) {
       if (elections.containsKey(key)) {
@@ -364,11 +341,12 @@ public class LoadFlights implements SingleFlight {
       Election election = elect(key);
       InFlight flight = election.flight();
       if (election.leader() && !flight.isDone()) {
-        flight = submit(key, flight, () -> reader.apply(key), v -> leaderCommit.accept(key, v));
+        flight = submit(key, flight, () -> reader.apply(key), value -> leaderCommit.accept(key, value));
       }
       elections.put(key, flight);
     }
-    Map<String, LoaderOutcome<T>> outcomes = new LinkedHashMap<>(mapCapacity(elections.size()));
+
+    Map<String, LoaderOutcome<T>> outcomes = new LinkedHashMap<>(CollectionSizing.capacity(elections.size()));
     for (Map.Entry<String, InFlight> entry : elections.entrySet()) {
       outcomes.put(entry.getKey(), settle(entry.getKey(), entry.getValue()));
     }
@@ -376,37 +354,86 @@ public class LoadFlights implements SingleFlight {
   }
 
   /**
-   * Initial capacity that holds {@code expectedEntries} without an intermediate
-   * rehash at the default 0.75 load factor.
+   * Removes a key's active flight from the deduplication table and flags it as invalidated so a
+   * running leader completes for its waiters without committing stale data to L1.
    *
-   * @param expectedEntries the number of entries the map must hold
-   * @return the constructor capacity
+   * @param cacheKey the physical key to invalidate
    */
-  private static int mapCapacity(int expectedEntries) {
-    return (int) (expectedEntries / 0.75f) + 1;
+  @Override
+  public void invalidate(String cacheKey) {
+    InFlight flight = inFlightLoads.asMap().remove(cacheKey);
+    if (flight != null) {
+      flight.markInvalidated();
+      detach(flight);
+    }
   }
 
   /**
-   * The batch-map capacity for a key source: its exact size when the source can
-   * report one, otherwise the {@link LinkedHashMap} default.
-   *
-   * @param cacheKeys the keys the batch will visit
-   * @return the constructor capacity
+   * Flags every active flight as invalidated and clears the entire deduplication table. Marking
+   * before clearing matters: a leader that has captured its flight but not yet committed sees the
+   * invalidated bit and drops its result, while a new load after the clear starts a fresh flight.
+   * Existing joiners settle against the marked flight rather than waiting for a commit that will
+   * never land.
    */
-  private static int mapCapacity(Iterable<String> cacheKeys) {
-    return cacheKeys instanceof Collection<?> c ? mapCapacity(c.size()) : 16;
+  @Override
+  public void invalidateAll() {
+    inFlightLoads
+      .asMap()
+      .values()
+      .forEach(flight -> {
+        flight.markInvalidated();
+        detach(flight);
+      });
+    inFlightLoads.invalidateAll();
   }
 
   /**
-   * Elect a leader for the key, or join the flight already serving it.
+   * Invalidates every active flight whose key starts with {@code prefix}, leaving flights elected
+   * after traversal begins untouched.
    *
-   * <p>The fast path answers from a lock-free {@code getIfPresent}: an in-flight
-   * flight is the overwhelmingly common case on a hot key, and the mapping
-   * function below would have observed the same reference and run nothing.
+   * @param prefix the physical namespace prefix
+   */
+  @Override
+  public void invalidatePrefix(String prefix) {
+    for (String key : inFlightLoads.asMap().keySet()) {
+      if (key.startsWith(prefix)) {
+        invalidate(key);
+      }
+    }
+  }
+
+  /**
+   * Marks this coordinator closed, cancels every queued or running executor task, and fails every
+   * remaining in-flight entry (including one already detached from the table) with
+   * {@link RejectedExecutionException} so waiting threads unblock cleanly before executor shutdown
+   * drains queued tasks.
+   */
+  @PreDestroy
+  public void close() {
+    if (!closed.compareAndSet(false, true)) {
+      return;
+    }
+    // A flight can leave the table while an executor task is still queued; close() must cancel
+    // those too, or a shutdownNow that discards queued work leaves every waiter blocked forever.
+    Set<InFlight> stranded = new LinkedHashSet<>(inFlightLoads.asMap().values());
+    stranded.addAll(detachedActive);
+    inFlightLoads.invalidateAll();
+    detachedActive.clear();
+    for (InFlight flight : stranded) {
+      // Fail the waiters first: cancelling the task completes the flight with a cancellation, which
+      // would classify a coordinated shutdown as a failed load instead of a suppression.
+      releasePending(flight);
+      abandonFlight(flight, new RejectedExecutionException("SingleFlight closed"));
+      flight.cancelTask();
+    }
+  }
+
+  /**
+   * Elects a new leader flight for {@code key} under circuit breaker admission, or joins an
+   * existing in-flight entry via a lock-free fast path.
    *
-   * <p>The slow path admits under the breaker <em>inside</em> the map's atomic insertion,
-   * so a loser never consumes a probe; only the placeholder is created under the bin lock
-   * — the reader is submitted afterwards.
+   * @param key the physical cache key
+   * @return the {@link Election} indicating the flight (or sentinel) and whether this caller won
    */
   private Election elect(String key) {
     if (closed.get()) {
@@ -414,17 +441,10 @@ public class LoadFlights implements SingleFlight {
     }
     InFlight reusable = inFlightLoads.getIfPresent(key);
     if (reusable != null) {
-      // Followers short-circuit before the breaker lookup: the hot-key contention
-      // path is mostly followers, and they never consult the breaker.
       return new Election(reusable, false);
     }
-    CircuitBreaker breaker = breakerRegistry.breakerFor(key);
 
-    // The flight is created only after breaker admission, inside the atomic
-    // insertion: a rejected load allocates nothing beyond the small holder. The
-    // holder publishes the created instance back to this call; identity with the
-    // returned flight is the election result, so a loser is a follower without a
-    // second atomic read-modify-write.
+    CircuitBreaker breaker = breakerRegistry.breakerFor(key);
     InFlight[] created = new InFlight[1];
     InFlight flight;
     try {
@@ -440,34 +460,33 @@ public class LoadFlights implements SingleFlight {
           return candidate;
         });
     } catch (RuntimeException | Error e) {
-      // The mapping stored nothing, so a probe it took before failing must not stay
-      // reserved in HALF_OPEN.
       InFlight candidate = created[0];
       if (candidate != null) {
         breaker.onAbandoned(candidate.stamp());
       }
       throw e;
     }
+
     boolean leader = flight != null && flight == created[0];
     if (leader && closed.get()) {
-      // close() may have drained the table before this insertion became visible, and a
-      // concurrent invalidate(key) may have removed the flight in the same window. Settle and
-      // fail the flight unconditionally: a withdrawal gated on "the removal won" would leak the
-      // breaker probe and leave a follower that already joined waiting forever.
-      inFlightLoads.asMap().remove(key, flight);
-      if (flight.trySettle() && flight.breaker() != null) {
-        flight.breaker().onAbandoned(flight.stamp());
-      }
-      flight.completeExceptionally(new RejectedExecutionException("SingleFlight closed"));
+      // Unconditionally retire and fail: close() may have already swept the table or a concurrent
+      // invalidate(key) may have removed the entry while a follower already joined.
+      abortLeaderElection(key, flight, new RejectedExecutionException("SingleFlight closed"));
       return new Election(CLOSED, false);
     }
     return flight == null ? new Election(DENIED, false) : new Election(flight, leader);
   }
 
   /**
-   * Submit the elected leader's reader to the executor, wrapped so that it commits the
-   * value (unless the load was superseded) and settles the breaker on the thread that
-   * actually performed the downstream call.
+   * Submits an elected leader's reader task to {@link #executor} with an interrupting timeout and
+   * wires completion settlement.
+   *
+   * @param key    the physical cache key
+   * @param flight the elected leader flight
+   * @param reader the value supplier
+   * @param commit the leader L1 commit callback
+   * @param <T>    the value type
+   * @return {@code flight} on submission success, or {@link #REJECTED} on executor rejection
    */
   private <T> InFlight submit(String key, InFlight flight, Supplier<T> reader, Consumer<? super T> commit) {
     CompletableFuture<Object> submitted;
@@ -480,47 +499,109 @@ public class LoadFlights implements SingleFlight {
       }
       throw e;
     }
-    logHighBacklog();
     submitted.whenComplete((result, error) -> finishFlight(key, flight, result, error));
+    flight.attachTask(submitted);
+    // close() may have drained the table between elect() and this submission; cancelling an
+    // already-queued task releases its waiter instead of letting it run against a closed pool.
+    if (closed.get()) {
+      flight.cancelTask();
+    }
+    logHighBacklog();
     return flight;
   }
 
   /**
-   * The leader's reader execution and settlement, shared by the inline and submitted
-   * paths. The flight is settled exactly once; the leader commits only when it owns
-   * that settlement and the value was not superseded.
+   * Submits a reader task to {@link #executor} under {@link InterruptingAsync} and accounts for
+   * its backlog slot in {@link #pendingLoads}.
    *
-   * <p>The breaker is settled as soon as the reader returns, before the local commit.
-   * The commit runs the admission predicate and the TTL encoding, none of which
-   * passed through the data source: counting a commit failure as a source failure
-   * would fail a HALF_OPEN probe (reopening the breaker) or trip it on a bad
-   * {@code isCacheable} decision.
+   * @param flight the leader flight
+   * @param reader the wrapped reader task
+   * @return the underlying execution future
    */
-  private <T> T executeLeaderTask(InFlight flight, Supplier<T> reader, Consumer<? super T> commit) {
+  private CompletableFuture<Object> submitReader(InFlight flight, Supplier<Object> reader) {
+    pendingLoads.incrementAndGet();
+    try {
+      CompletableFuture<Object> submitted = InterruptingAsync.supplyAsync(
+        reader,
+        executor,
+        timeoutSeconds,
+        TimeUnit.SECONDS
+      );
+      flight.claimPending();
+      return submitted;
+    } catch (RuntimeException | Error e) {
+      pendingLoads.decrementAndGet();
+      throw e;
+    }
+  }
+
+  /**
+   * Executes the leader's reader on the calling thread without an executor timeout so caller
+   * transaction, security context, and MDC remain intact.
+   *
+   * @param key    the physical cache key
+   * @param flight the elected leader flight
+   * @param reader the value supplier
+   * @param commit the leader L1 commit callback
+   * @param <T>    the value type
+   * @return the classified {@link LoaderOutcome}
+   */
+  private <T> LoaderOutcome<T> runInline(String key, InFlight flight, Supplier<T> reader, Consumer<? super T> commit) {
+    T value;
+    try {
+      value = executeLeaderTask(flight, reader, commit);
+    } catch (Throwable t) {
+      CompletionException wrapped = t instanceof CompletionException ce ? ce : new CompletionException(t);
+      if (causeOf(wrapped) instanceof InterruptedException) {
+        Thread.currentThread().interrupt();
+      }
+      finishFlight(key, flight, null, wrapped);
+      return failureOutcome(wrapped);
+    }
+    finishFlight(key, flight, value, null);
+    return LoaderOutcome.ofNullable(value);
+  }
+
+  /**
+   * Executes the leader's reader, settles the circuit breaker once, and invokes {@code commit}
+   * when this thread owns settlement and the flight was not invalidated.
+   *
+   * <p>The circuit breaker settles before {@code commit} so local admission or TTL failures never
+   * masquerade as downstream data-source failures.
+   *
+   * @param flight the leader flight
+   * @param reader the value supplier
+   * @param commit the leader L1 commit callback
+   * @param <T>    the value type
+   * @return the loaded value, which may be {@code null}
+   */
+  private <T> @Nullable T executeLeaderTask(InFlight flight, Supplier<T> reader, Consumer<? super T> commit) {
     runningLoads.incrementAndGet();
     flight.runningThreadId = Thread.currentThread().getId();
     try {
       T value = reader.get();
       if (flight.trySettle()) {
-        flight.breaker().onSuccess(flight.stamp());
+        CircuitBreaker breaker = flight.breaker();
+        if (breaker != null) {
+          breaker.onSuccess(flight.stamp());
+        }
         if (value != null && !flight.isInvalidated()) {
           commit.accept(value);
         }
       }
       return value;
     } catch (Throwable t) {
-      // A reader failure settles only if no external timeout won the flight first. A commit
-      // failure finds the flight already settled here, so the source breaker stays untouched.
       if (flight.trySettle()) {
-        flight.breaker().onFailure(causeOf(t), flight.stamp());
+        CircuitBreaker breaker = flight.breaker();
+        if (breaker != null) {
+          breaker.onFailure(causeOf(t), flight.stamp());
+        }
       }
       if (t instanceof Error err) {
         throw err;
       }
-      // Tag every reader failure, including a RuntimeException such as a nested
-      // RejectedExecutionException: only the dedup layer's own rejection and timeout
-      // stay bare, so the join-side classifier can tell a failed reader from a
-      // suppressed submission (design decisions: executors).
+      // Tag all reader failures so join-side classification distinguishes reader-thrown
+      // TimeoutException/RejectedExecutionException from coordinator-originated suppressions.
       throw new ReaderFailure(t);
     } finally {
       flight.runningThreadId = 0L;
@@ -529,78 +610,97 @@ public class LoadFlights implements SingleFlight {
   }
 
   /**
-   * Retires the flight, completes its future and, on failure, settles any outcome the
-   * executor's interrupting timeout did not. Retirement precedes completion, so a woken
-   * waiter never re-elects a settled flight.
+   * Retires {@code flight} from the deduplication table, releases its backlog slot, settles any
+   * timeout failure not observed by the reader thread, and completes the shared future.
+   *
+   * <p>The error is classified after unwrapping transport envelopes, so a coordinator timeout that
+   * arrives wrapped in a {@link CompletionException} still reaches the timeout counter and is not
+   * logged as a join failure. A {@link ReaderFailure}-wrapped timeout is a reader failure and is
+   * counted as one, matching {@link #failureOutcome(Throwable)}.
+   *
+   * @param key    the physical cache key
+   * @param flight the leader flight being finalized
+   * @param result the loaded value, or {@code null}
+   * @param error  the execution error or timeout, or {@code null} on success
    */
-  private void finishFlight(String key, InFlight flight, Object result, Throwable error) {
+  private void finishFlight(String key, InFlight flight, @Nullable Object result, @Nullable Throwable error) {
     boolean retired = inFlightLoads.asMap().remove(key, flight);
-    // Decrement on settlement, not on return: a task queued behind a saturated
-    // executor must stay visible to the backlog DEBUG line for its whole life. The
-    // shutdown drain may have released it first.
-    if (flight.tryReleasePending()) {
-      pendingLoads.decrementAndGet();
-    }
+    releasePending(flight);
     if (error == null) {
       flight.complete(result);
       return;
     }
 
-    Throwable cause = causeOf(error);
-    // The interrupting timeout completes the future exceptionally without the reader
-    // seeing the TimeoutException, so settle the breaker here: a reader that ignores the
-    // interrupt must not keep a failed flight out of the window.
+    Throwable failure = unwrapTransport(error);
+    boolean timedOut = failure instanceof TimeoutException;
     if (flight.trySettle()) {
-      flight.breaker().onFailure(cause, flight.stamp());
+      CircuitBreaker breaker = flight.breaker();
+      if (breaker != null) {
+        breaker.onFailure(causeOf(failure), flight.stamp());
+      }
     }
-    // Only the dedup layer's own budget timeout stays bare; a reader-thrown TimeoutException
-    // was wrapped by executeLeaderTask and is a supplier failure, not a leader timeout.
-    // Count that timeout once, on the leader that actually ran the call.
-    if (error instanceof TimeoutException) {
+    if (timedOut) {
       timeoutCounter.incrementAndGet();
     }
     flight.completeExceptionally(error);
-    // A budget timeout is an operational suppression the caller logs with its fallback
-    // decision; only a reader failure needs the owner-side stack here.
-    if (retired && !(error instanceof TimeoutException)) {
+    if (retired && !timedOut) {
       log.warn("singleflight join failed: key={}", key, error);
     }
   }
 
   /**
-   * Run the leader's reader on this thread — the caller-affine path, where the reader
-   * must observe the caller's transaction, security context and MDC. No timeout: a
-   * timeout would interrupt the caller's own work and there is no pool slot to release.
+   * Undoes a leader election that failed before executor submission by retiring the flight,
+   * releasing any reserved probe, and failing waiting followers.
+   *
+   * @param key    the physical cache key
+   * @param flight the aborted leader flight
+   * @param cause  the exception preventing submission
    */
-  private <T> LoaderOutcome<T> runInline(String key, InFlight flight, Supplier<T> reader, Consumer<? super T> commit) {
-    // Inline loads never enter the executor: pendingLoads is the executor backlog gauge, so
-    // this path must not claim or release it. runningLoads is maintained by executeLeaderTask.
-    T value;
-    try {
-      value = executeLeaderTask(flight, reader, commit);
-    } catch (Throwable t) {
-      CompletionException wrapped = t instanceof CompletionException ce ? ce : new CompletionException(t);
-      if (causeOf(wrapped) instanceof InterruptedException) {
-        // The only thread allowed to restore the flag: this one cleared it.
-        Thread.currentThread().interrupt();
-      }
-      finishFlight(key, flight, null, wrapped);
-      return failureOutcome(wrapped);
-    }
-    finishFlight(key, flight, value, null);
-    return value == null ? LoaderOutcome.sourceEmpty() : LoaderOutcome.loaded(value);
+  private void abortLeaderElection(String key, InFlight flight, Throwable cause) {
+    inFlightLoads.asMap().remove(key, flight);
+    releasePending(flight);
+    abandonFlight(flight, cause);
   }
 
   /**
-   * Join a flight interruptibly and classify the result. Never throws for a reader
-   * failure. A follower's own interrupt cancels the wait with a
-   * {@code FAILED(InterruptedException)} outcome and restores that follower's flag;
-   * the reader's interrupt flag is owned by the thread that ran the reader, so a
-   * waiter never inherits it.
+   * Releases the breaker probe (at most once) and completes {@code flight} exceptionally.
+   *
+   * @param flight the flight being abandoned
+   * @param cause  the failure to propagate to joined waiters
+   */
+  private static void abandonFlight(InFlight flight, Throwable cause) {
+    if (flight.trySettle()) {
+      CircuitBreaker breaker = flight.breaker();
+      if (breaker != null) {
+        breaker.onAbandoned(flight.stamp());
+      }
+    }
+    flight.completeExceptionally(cause);
+  }
+
+  /**
+   * Decrements {@link #pendingLoads} at most once if {@code flight} claimed a backlog slot.
+   *
+   * @param flight the flight whose backlog slot should be released
+   */
+  private void releasePending(InFlight flight) {
+    if (flight.tryReleasePending()) {
+      pendingLoads.decrementAndGet();
+    }
+  }
+
+  /**
+   * Joins a flight interruptibly and translates its outcome into a {@link LoaderOutcome}.
+   *
+   * @param key    the physical cache key
+   * @param flight the flight or sentinel to join
+   * @param <T>    the value type
+   * @return the classified {@link LoaderOutcome}
+   * @throws IllegalStateException if the calling thread is already executing this key's leader task
    */
   @SuppressWarnings("unchecked")
   private <T> LoaderOutcome<T> settle(String key, InFlight flight) {
-    if (flight == DENIED || flight == REJECTED || flight == CLOSED) {
+    if (isSentinel(flight)) {
       return suppressedOutcome(key, flight);
     }
     if (flight.isRunningOnCurrentThread()) {
@@ -608,7 +708,7 @@ public class LoadFlights implements SingleFlight {
     }
     try {
       T result = (T) flight.get();
-      return result == null ? LoaderOutcome.sourceEmpty() : LoaderOutcome.loaded(result);
+      return LoaderOutcome.ofNullable(result);
     } catch (InterruptedException e) {
       Thread.currentThread().interrupt();
       return LoaderOutcome.failed(e);
@@ -617,7 +717,40 @@ public class LoadFlights implements SingleFlight {
     }
   }
 
-  /** Map a denial/rejection to its explicit outcome. */
+  /**
+   * Translates a flight into a non-blocking {@link CompletableFuture} of {@link LoaderOutcome}.
+   *
+   * @param key    the physical cache key
+   * @param flight the flight or sentinel to observe
+   * @param <T>    the value type
+   * @return a future completing with the classified {@link LoaderOutcome}
+   * @throws IllegalStateException if the calling thread is already executing this key's leader task
+   */
+  @SuppressWarnings("unchecked")
+  private <T> CompletableFuture<LoaderOutcome<T>> settleAsync(String key, InFlight flight) {
+    if (isSentinel(flight)) {
+      return CompletableFuture.completedFuture(suppressedOutcome(key, flight));
+    }
+    if (flight.isRunningOnCurrentThread()) {
+      throw new IllegalStateException("re-entrant SingleFlight load for key: " + key);
+    }
+    return flight.handle((result, error) -> {
+      if (error != null) {
+        return failureOutcome(error);
+      }
+      return LoaderOutcome.ofNullable((T) result);
+    });
+  }
+
+  /**
+   * Maps a sentinel flight ({@link #DENIED}, {@link #REJECTED}, or {@link #CLOSED}) to its
+   * corresponding suppressed {@link LoaderOutcome}.
+   *
+   * @param key    the physical cache key
+   * @param flight the sentinel flight
+   * @param <T>    the value type
+   * @return the suppressed {@link LoaderOutcome}
+   */
   private <T> LoaderOutcome<T> suppressedOutcome(String key, InFlight flight) {
     if (flight == DENIED) {
       log.debug("CB open, skip load for key={}", key);
@@ -632,19 +765,61 @@ public class LoadFlights implements SingleFlight {
   }
 
   /**
-   * Classify a failed join. The leader already retired the flight before completing the
-   * future, so a retry re-runs the reader; the failure WARN is owner-side too, which keeps
-   * one line per failed flight instead of one per woken waiter.
+   * Classifies a failed flight into either a coordinator suppression
+   * ({@link LoadStatus#SUPPRESSED_EXECUTOR} / {@link LoadStatus#SUPPRESSED_TIMEOUT}) or a
+   * {@link LoadStatus#FAILED} outcome wrapping the underlying reader cause.
    *
-   * @param error the reader or timeout failure carried by the flight
-   * @return the classified outcome
+   * @param error the exception carried by the failed flight
+   * @param <T>   the value type
+   * @return the classified {@link LoaderOutcome}
    */
   @SuppressWarnings("all")
   private <T> LoaderOutcome<T> failureOutcome(Throwable error) {
-    // Unwrap only the join envelopes: a reader failure is tagged by executeLeaderTask
-    // (ReaderFailure), while the dedup layer's own timeout and submission rejection stay
-    // bare. Classifying the fully unwrapped cause would turn a reader-thrown
-    // RejectedExecutionException into a suppression the reader never saw.
+    Throwable failure = unwrapTransport(error);
+    if (failure instanceof ReaderFailure readerFailure) {
+      return LoaderOutcome.failed(causeOf(readerFailure));
+    }
+    if (failure instanceof RejectedExecutionException) {
+      return LoaderOutcome.suppressed(LoadStatus.SUPPRESSED_EXECUTOR);
+    }
+    return failure instanceof TimeoutException
+      ? LoaderOutcome.suppressed(LoadStatus.SUPPRESSED_TIMEOUT)
+      : LoaderOutcome.failed(causeOf(failure));
+  }
+
+  /**
+   * Emits a debug warning when the submitted executor backlog exceeds
+   * {@link #highInFlightThreshold}.
+   */
+  private void logHighBacklog() {
+    long backlog = pendingLoads.get();
+    if (backlog > highInFlightThreshold) {
+      log.debug("SingleFlight in-flight queue is high: {}/{}", backlog, inFlightMaxSize);
+    }
+  }
+
+  /**
+   * Returns whether {@code flight} is one of the static suppression sentinels.
+   *
+   * @param flight the flight reference to test
+   * @return {@code true} if {@code flight} is {@link #DENIED}, {@link #REJECTED}, or {@link #CLOSED}
+   */
+  private static boolean isSentinel(InFlight flight) {
+    return flight == DENIED || flight == REJECTED || flight == CLOSED;
+  }
+
+  /**
+   * Unwraps transport envelopes ({@link CompletionException}, {@link ExecutionException}) down to
+   * the first failure that is not an envelope, stopping at a {@link ReaderFailure} tag.
+   *
+   * <p>The stop is what keeps classification honest: a coordinator timeout fails bare and is a
+   * suppression, while a reader-thrown {@link TimeoutException} arrives wrapped in
+   * {@link ReaderFailure} and is a reader failure like any other.
+   *
+   * @param error the wrapped or bare throwable
+   * @return the transport-free failure
+   */
+  private static Throwable unwrapTransport(Throwable error) {
     Throwable failure = error;
     while (
       !(failure instanceof ReaderFailure) &&
@@ -656,62 +831,16 @@ public class LoadFlights implements SingleFlight {
       }
       failure = next;
     }
-    if (failure instanceof ReaderFailure readerFailure) {
-      return LoaderOutcome.failed(causeOf(readerFailure));
-    }
-    if (failure instanceof RejectedExecutionException) {
-      // A follower joined the leader's flight before the executor refused it;
-      // it must resolve to the same suppressed outcome as the leader.
-      return LoaderOutcome.suppressed(LoadStatus.SUPPRESSED_EXECUTOR);
-    }
-    return failure instanceof TimeoutException
-      ? LoaderOutcome.suppressed(LoadStatus.SUPPRESSED_TIMEOUT)
-      : LoaderOutcome.failed(causeOf(failure));
+    return failure;
   }
 
   /**
-   * A reader failure, tagged so it is never mistaken for a suppressed submission.
-   * A plain {@link RuntimeException}, not a {@link CompletionException}: the latter
-   * would be unwrapped by {@link CompletableFuture#get()} before it is wrapped in an
-   * {@link ExecutionException}, losing the tag a joining follower needs.
-   */
-  private static final class ReaderFailure extends RuntimeException {
-
-    ReaderFailure(Throwable cause) {
-      super(cause);
-    }
-  }
-
-  /**
-   * Fail every flight still in the table so a waiter cannot outlive the context.
+   * Unwraps transport envelopes ({@link CompletionException}, {@link ExecutionException}) and
+   * {@link ReaderFailure} tags to expose the underlying root cause.
    *
-   * <p>Spring destroys this bean before {@code interruptibleLoadExecutor}: the
-   * executor's {@code shutdownNow} drains queued tasks without completing their
-   * futures, so without this drain a caller already joining one of those flights
-   * blocks forever. The task that never ran is classified as
-   * {@code SUPPRESSED_EXECUTOR}, the same outcome a rejected submission gets.
+   * @param error the wrapped or bare throwable
+   * @return the unwrapped cause
    */
-  @PreDestroy
-  public void close() {
-    if (!closed.compareAndSet(false, true)) {
-      return;
-    }
-    for (String key : List.copyOf(inFlightLoads.asMap().keySet())) {
-      InFlight flight = inFlightLoads.asMap().remove(key);
-      if (flight == null) {
-        continue;
-      }
-      if (flight.tryReleasePending()) {
-        pendingLoads.decrementAndGet();
-      }
-      if (flight.trySettle() && flight.breaker() != null) {
-        flight.breaker().onAbandoned(flight.stamp());
-      }
-      flight.completeExceptionally(new RejectedExecutionException("SingleFlight closed"));
-    }
-  }
-
-  /** The real cause behind transport envelopes ({@code CompletionException}/{@code ExecutionException}) and the reader tag. */
   private static Throwable causeOf(Throwable error) {
     Throwable current = error;
     while (
@@ -726,91 +855,200 @@ public class LoadFlights implements SingleFlight {
   }
 
   /**
-   * Reports a newly submitted leader that takes the executor backlog over its threshold. Runs
-   * after a successful submission, outside the Caffeine bin lock, so only loads that actually
-   * entered the executor count.
-   */
-  private void logHighBacklog() {
-    long backlog = pendingLoads.get();
-    if (backlog > highInFlightThreshold) {
-      log.debug("SingleFlight in-flight queue is high: {}/{}", backlog, inFlightMaxSize);
-    }
-  }
-
-  /**
-   * Undo a leader election that never reached the executor: retire the placeholder,
-   * release the breaker probe it reserved, and fail any waiter that joined it.
-   */
-  private void abortLeaderElection(String key, InFlight flight, Throwable cause) {
-    inFlightLoads.asMap().remove(key, flight);
-    // The shutdown drain may have settled this flight first; release the probe
-    // exactly once.
-    if (flight.trySettle() && flight.breaker() != null) {
-      flight.breaker().onAbandoned(flight.stamp());
-    }
-    flight.completeExceptionally(cause);
-  }
-
-  /**
-   * Submit a reader with an interrupting timeout: the budget is armed when a pool thread
-   * starts the task (queue wait is free), and expiry interrupts that thread so a wedged
-   * call cannot shrink the pool one batch at a time.
+   * Computes an initial {@link LinkedHashMap} capacity for a batch key source, falling back to
+   * {@link #DEFAULT_BATCH_CAPACITY} when the iterable is not a {@link Collection}.
    *
-   * <p>The caller's completion callback owns the backlog decrement and the flight
-   * retirement — one callback per load, not one here plus one at the caller.
+   * @param cacheKeys the batch key source
+   * @return the initial map capacity
    */
-  private CompletableFuture<Object> submitReader(InFlight flight, Supplier<Object> reader) {
-    pendingLoads.incrementAndGet();
-    try {
-      CompletableFuture<Object> submitted = InterruptingAsync.supplyAsync(
-        reader,
-        executor,
-        timeoutSeconds,
-        TimeUnit.SECONDS
-      );
-      // Mark after a successful submission: a failed submit decrements below, and
-      // close() must not release a slot this load never held.
-      flight.claimPending();
-      return submitted;
-    } catch (RuntimeException | Error e) {
-      pendingLoads.decrementAndGet();
-      throw e;
-    }
+  private static int mapCapacity(Iterable<String> cacheKeys) {
+    return cacheKeys instanceof Collection<?> collection
+      ? CollectionSizing.capacity(collection.size())
+      : DEFAULT_BATCH_CAPACITY;
   }
 
   /**
-   * Drop the key's flight and mark it superseded: the leader still completes for its
-   * waiters but commits nothing, and a later caller starts a fresh load.
+   * Deduplication entry for one in-flight key, extending {@link CompletableFuture} directly so a
+   * cache miss allocates one shared object.
    *
-   * <p>The removal and the flag are separate on purpose — the flag must reach a
-   * flight a leader already holds, which removing the map entry cannot do.
+   * <p>Packs the write-path invalidation flag, single-settlement bit, backlog-counted bit, and
+   * 61-bit circuit breaker stamp into one {@code long} field manipulated via {@link VarHandle}.
    */
-  @Override
-  public void invalidate(String cacheKey) {
-    InFlight flight = inFlightLoads.asMap().remove(cacheKey);
-    if (flight != null) {
-      flight.markInvalidated();
-    }
-  }
+  private static final class InFlight extends CompletableFuture<Object> {
 
-  /** Whole-table kill: flag every live flight first, then drop the table. */
-  @Override
-  public void invalidateAll() {
-    inFlightLoads.asMap().values().forEach(InFlight::markInvalidated);
-    inFlightLoads.invalidateAll();
-  }
+    /** 61-bit mask for circuit breaker probe stamps. */
+    private static final long STAMP_MASK = (1L << 61) - 1;
 
-  /**
-   * Scoped kill: same contract as {@link #invalidate(String)} for every flight under the
-   * prefix. Weakly consistent, like the cache sweep that calls it: a flight inserted after
-   * the iteration starts belongs to a read that began after the clear and is left alone.
-   */
-  @Override
-  public void invalidatePrefix(String prefix) {
-    for (String key : inFlightLoads.asMap().keySet()) {
-      if (key.startsWith(prefix)) {
-        invalidate(key);
+    /** Sign bit flagging a write-path invalidation so {@link #isInvalidated()} is one compare. */
+    private static final long BIT_INVALIDATED = 1L << 63;
+
+    /** Single-settlement bit ensuring breaker outcome and leader commit run at most once. */
+    private static final long BIT_SETTLED = 1L << 62;
+
+    /** Bit set once {@link #pendingLoads} is incremented and cleared by the sole releaser. */
+    private static final long BIT_BACKLOG = 1L << 61;
+
+    private static final VarHandle STATE;
+
+    static {
+      try {
+        STATE = MethodHandles.lookup().findVarHandle(InFlight.class, "state", long.class);
+      } catch (ReflectiveOperationException e) {
+        throw new ExceptionInInitializerError(e);
       }
+    }
+
+    private final @Nullable CircuitBreaker breaker;
+
+    /** Thread ID currently executing the leader reader for re-entrancy detection, or {@code 0}. */
+    private volatile long runningThreadId;
+
+    /** The submitted executor task, retained so {@link #close()} can cancel a queued load. */
+    private volatile @Nullable CompletableFuture<Object> task;
+
+    /** Bit layout: [63]=invalidated | [62]=settled | [61]=backlog | [0..60]=breaker stamp. */
+    private volatile long state;
+
+    /**
+     * Creates a live flight bound to a circuit breaker and its admitted stamp.
+     *
+     * @param breaker the owning circuit breaker shard
+     * @param stamp   the admitted breaker stamp
+     */
+    private InFlight(@Nullable CircuitBreaker breaker, long stamp) {
+      this.breaker = breaker;
+      this.state = stamp & STAMP_MASK;
+    }
+
+    /**
+     * Creates a sentinel flight carrying no breaker, running thread, or stamp.
+     */
+    private InFlight() {
+      this.breaker = null;
+      this.state = 0L;
+      this.runningThreadId = 0L;
+    }
+
+    /**
+     * Records the executor task submitted for this flight so a concurrent {@link #close()} can
+     * cancel queued work instead of leaving its waiters blocked.
+     *
+     * @param submitted the task future returned by the executor submission
+     */
+    private void attachTask(CompletableFuture<Object> submitted) {
+      task = submitted;
+    }
+
+    /** Cancels the submitted task if it has not completed yet. */
+    private void cancelTask() {
+      CompletableFuture<Object> submitted = task;
+      if (submitted != null) {
+        submitted.cancel(true);
+      }
+    }
+
+    /**
+     * Records that this flight incremented {@link #pendingLoads}. The single bit makes the
+     * corresponding decrement idempotent: only the caller that clears the bit during settlement
+     * decrements the counter, so racing joiners cannot double-release the same backlog unit.
+     */
+    private void claimPending() {
+      STATE.getAndBitwiseOr(this, BIT_BACKLOG);
+    }
+
+    /**
+     * Atomically clears the backlog bit at most once.
+     *
+     * @return {@code true} if this call cleared the bit and must decrement {@link #pendingLoads}
+     */
+    private boolean tryReleasePending() {
+      return ((long) STATE.getAndBitwiseAnd(this, ~BIT_BACKLOG) & BIT_BACKLOG) != 0L;
+    }
+
+    /**
+     * Returns whether the leader's reader is currently executing on the calling thread.
+     *
+     * @return {@code true} on a re-entrant call from inside the leader's reader
+     */
+    private boolean isRunningOnCurrentThread() {
+      return runningThreadId == Thread.currentThread().getId();
+    }
+
+    /**
+     * Returns the circuit breaker shard bound to this flight, or {@code null} for sentinels.
+     *
+     * @return the owning circuit breaker, or {@code null}
+     */
+    private @Nullable CircuitBreaker breaker() {
+      return breaker;
+    }
+
+    /**
+     * Returns the 61-bit circuit breaker admission stamp stored in {@link #state}.
+     *
+     * @return the breaker stamp
+     */
+    private long stamp() {
+      return state & STAMP_MASK;
+    }
+
+    /**
+     * Returns whether this flight was marked invalidated by a concurrent write-path clear.
+     *
+     * @return {@code true} if invalidated
+     */
+    private boolean isInvalidated() {
+      return state < 0L;
+    }
+
+    /**
+     * Atomically claims the single settlement right for this flight so concurrent timeout and
+     * completion paths never double-settle the breaker or commit stale data.
+     *
+     * @return {@code true} if this caller won the settlement CAS
+     */
+    private boolean trySettle() {
+      return ((long) STATE.getAndBitwiseOr(this, BIT_SETTLED) & BIT_SETTLED) == 0L;
+    }
+
+    /**
+     * Permanently flags this flight as invalidated by a write-path operation. The bit is monotonic:
+     * once set, the leader's commit and every joiner's settlement observe it and discard the load
+     * result, so a write that raced an in-flight read always wins.
+     */
+    private void markInvalidated() {
+      STATE.getAndBitwiseOr(this, BIT_INVALIDATED);
+    }
+  }
+
+  /**
+   * Outcome of electing a flight for a key.
+   *
+   * @param flight the elected or joined flight (or a suppression sentinel)
+   * @param leader {@code true} only for the caller that inserted {@code flight}
+   */
+  private record Election(InFlight flight, boolean leader) {}
+
+  /**
+   * Stackless unchecked tag wrapping exceptions thrown by the user reader so join-side
+   * classification never confuses a reader-thrown {@link TimeoutException} or
+   * {@link RejectedExecutionException} with a coordinator suppression.
+   *
+   * <p>Extends {@link RuntimeException} rather than {@link CompletionException} so
+   * {@link CompletableFuture#get()} preserves the tag inside {@link ExecutionException}.
+   */
+  private static final class ReaderFailure extends RuntimeException {
+
+    @Serial
+    private static final long serialVersionUID = 1L;
+
+    /**
+     * Wraps a reader failure without capturing a redundant stack trace.
+     *
+     * @param cause the exception thrown by the leader reader
+     */
+    private ReaderFailure(Throwable cause) {
+      super(null, cause, false, false);
     }
   }
 }

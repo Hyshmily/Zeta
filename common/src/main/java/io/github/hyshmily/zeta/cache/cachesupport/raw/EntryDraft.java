@@ -15,55 +15,52 @@
  */
 package io.github.hyshmily.zeta.cache.cachesupport.raw;
 
-import io.github.hyshmily.zeta.model.DecisionStamp;
-import io.github.hyshmily.zeta.model.KeyState;
 import io.github.hyshmily.zeta.util.TimeSource;
 import org.jspecify.annotations.Nullable;
 
 /**
- * The mutable intermediate representation through which every {@link CacheEntry} is created
- * and modified: shape it, {@link #build()} it, discard it. One draft and one entry per
- * modification; the packed TTL/state fields decode and re-encode exactly once.
+ * The mutable intermediate representation through which every {@link CacheEntry} is created and
+ * modified: shape it, {@link #build()} it, discard it. One draft and one entry per modification;
+ * the packed TTL fields decode and re-encode exactly once.
  *
- * <p><b>Entry points.</b> {@code EntryLifecycle.newEntry()} (blank draft wired to the
- * manager's jitter-aware TTL arithmetic), {@code EntryLifecycle.editEntry(entry)} (seeded
- * copy-on-write with the same arithmetic), and {@link #of(CacheEntry)} /
- * {@link #blank(ExpiryArithmetic)} for callers without a manager.
+ * <p><b>Entry points.</b> {@code EntryLifecycle.newEntry()} (blank draft wired to the manager's
+ * jitter-aware arithmetic), {@code EntryLifecycle.editEntry(entry)} (seeded copy-on-write with
+ * the same arithmetic), and {@link #of(CacheEntry)} / {@link #blank(ExpiryArithmetic)} for
+ * callers without a manager.
  *
- * <p><b>Value discipline.</b> {@link #value} stores the value as passed (no codec), so
- * building inside a {@code compute} callback is always lock-safe.
+ * <p><b>Value discipline.</b> {@link #value} stores the value as passed (no codec), so building
+ * inside a {@code compute} callback is always lock-safe.
  *
- * <p><b>TTL semantics.</b> Durations passed to {@link #ttl}/{@link #softTtl} are already
- * resolved to their final intent; the computed expiry follows the {@link ExpiryArithmetic}
- * contract — hard {@code 0} or {@code Long.MAX_VALUE} is permanent, soft {@code <= 0} is
- * disabled. Callers that need a custom jitter ratio or an explicit deadline set the durations
- * first and override with {@link #hardExpiryAt}/{@link #softExpiryAt}/{@link #expiryAt}.
+ * <p><b>TTL semantics.</b> Durations passed to {@link #ttl}/{@link #softTtl} are already resolved
+ * to their final intent — hard is positive or {@link Long#MAX_VALUE} (permanent), soft is
+ * {@code 0} (disabled) or positive ({@link Long#MAX_VALUE} = never stale). A {@code 0} hard TTL
+ * is a caller bug and is rejected here: the declaration vocabulary ({@code 0} = inherit,
+ * {@code -1} = disabled) ends at the TTL resolution boundary. Callers that need an explicit
+ * deadline set the durations first and override with {@link #hardExpiryAt} /
+ * {@link #softExpiryAt} / {@link #expiryAt}.
+ *
+ * <p>A draft that never declares a TTL is permanent: its blank defaults are
+ * {@link Long#MAX_VALUE} for the hard duration and {@code 0} for the soft one, so a built entry
+ * is never in an "unset" state.
  *
  * <p>The draft is single-threaded by contract: create, shape, build on one thread.
  */
 public final class EntryDraft {
 
   /**
-   * Duration-to-timestamp arithmetic. {@link #SYSTEM} is the plain {@code now + ttl} form
-   * used by drafts with no manager (tests, explicit-timestamp rewrites); production drafts
-   * carry the cache's jitter-aware policy.
+   * Duration-to-timestamp arithmetic. {@link #SYSTEM} is the plain {@code now + ttl} form;
+   * production drafts carry the cache's jitter-aware policy.
    */
   public interface ExpiryArithmetic {
     /**
-     * The absolute hard-expiry timestamp for a hard TTL duration. {@code <= 0} and
-     * {@link Long#MAX_VALUE} mean permanent.
-     *
-     * @param hardTtlMs the hard TTL duration in milliseconds (already resolved)
-     * @return absolute epoch-ms hard expiry timestamp
+     * @param hardTtlMs the resolved hard TTL duration (positive)
+     * @return absolute epoch-ms hard expiry
      */
     long hardExpireAt(long hardTtlMs);
 
     /**
-     * The absolute soft-expiry timestamp for a soft TTL duration. {@code <= 0} means
-     * disabled ({@code 0}).
-     *
-     * @param softTtlMs the soft TTL duration in milliseconds (already resolved)
-     * @return absolute epoch-ms soft expiry timestamp, or {@code 0} for disabled
+     * @param softTtlMs the resolved soft TTL duration ({@code 0} = disabled)
+     * @return absolute epoch-ms soft expiry, or {@code 0}
      */
     long softExpireAt(long softTtlMs);
   }
@@ -72,7 +69,7 @@ public final class EntryDraft {
   public static final ExpiryArithmetic SYSTEM = new ExpiryArithmetic() {
     @Override
     public long hardExpireAt(long hardTtlMs) {
-      return hardTtlMs > 0 && hardTtlMs != Long.MAX_VALUE ? fromNow(hardTtlMs) : Long.MAX_VALUE;
+      return hardTtlMs == Long.MAX_VALUE ? Long.MAX_VALUE : fromNow(hardTtlMs);
     }
 
     @Override
@@ -83,6 +80,11 @@ public final class EntryDraft {
       return softTtlMs > 0 ? fromNow(softTtlMs) : 0L;
     }
 
+    /**
+     * Adds a resolved TTL to the current clock sample. The addition saturates: a wrap into the
+     * negative range is clamped to {@link Long#MAX_VALUE}, which the entry reads as permanent
+     * rather than as an already-expired instant in the past.
+     */
     private long fromNow(long ttlMs) {
       long at = TimeSource.currentTimeMillis() + ttlMs;
       return at < 0L ? Long.MAX_VALUE : at;
@@ -91,21 +93,11 @@ public final class EntryDraft {
 
   private final ExpiryArithmetic arithmetic;
 
-  private @Nullable DecisionStamp decision;
-  private @Nullable KeyState keyState;
   private @Nullable Object value;
-  private long normalHardTtlMs;
-  private long normalSoftTtlMs;
-  private long hardExpireAtMs;
+  private long hardExpireAtMs = Long.MAX_VALUE;
   private long softExpireAtMs;
-  /**
-   * Value-birth stamp (monotonic seconds-since-boot) — carried over from the
-   * source entry on a seeded draft; blank drafts start at {@code 0}
-   * (unknown ⇒ lease admits) unless shaped explicitly.
-   */
-  private int birthStampSec;
   private long dataVersion;
-  private long hardTtlMs;
+  private long hardTtlMs = Long.MAX_VALUE;
   private long softTtlMs;
 
   private EntryDraft(ExpiryArithmetic arithmetic) {
@@ -113,57 +105,39 @@ public final class EntryDraft {
   }
 
   /**
-   * A blank draft for creating a fresh entry. Production code goes through
-   * {@code EntryLifecycle.newEntry()} instead, which wires the TTL arithmetic.
-   *
-   * @param arithmetic the expiry arithmetic, or {@code null} for {@link #SYSTEM}
-   * @return a blank draft with all-logical-zero fields
+   * @param arithmetic expiry arithmetic, or {@code null} for {@link #SYSTEM}
+   * @return a blank draft
    */
   public static EntryDraft blank(@Nullable ExpiryArithmetic arithmetic) {
     return new EntryDraft(arithmetic != null ? arithmetic : SYSTEM);
   }
 
   /**
-   * A draft seeded from an existing entry using {@link #SYSTEM} arithmetic: every field
-   * starts as the source entry's. The manager-backed variant
-   * ({@code EntryLifecycle.editEntry}) is the production modification path and carries the
-   * jitter-aware policy instead.
-   *
-   * @param source the entry whose fields to seed from (not modified)
-   * @return a seeded draft
+   * @param source the entry to copy
+   * @return a seeded draft using {@link #SYSTEM}
    */
   public static EntryDraft of(CacheEntry source) {
     return of(source, SYSTEM);
   }
 
   /**
-   * A draft seeded from an existing entry with expiry arithmetic.
-   *
-   * @param source    the entry whose fields to seed from (not modified)
-   * @param arithmetic the expiry arithmetic, or {@code null} for {@link #SYSTEM}
+   * @param source     the entry to copy
+   * @param arithmetic expiry arithmetic, or {@code null} for {@link #SYSTEM}
    * @return a seeded draft
    */
   public static EntryDraft of(CacheEntry source, @Nullable ExpiryArithmetic arithmetic) {
     EntryDraft draft = new EntryDraft(arithmetic != null ? arithmetic : SYSTEM);
     draft.value = source.getValue();
     draft.dataVersion = source.getDataVersion();
-    draft.decision = source.decision();
-    draft.keyState = source.getKeyState();
     draft.hardTtlMs = source.getHardTtlMs();
     draft.hardExpireAtMs = source.getHardExpireAtMs();
     draft.softTtlMs = source.getSoftTtlMs();
     draft.softExpireAtMs = source.getSoftExpireAtMs();
-    draft.normalHardTtlMs = source.getNormalHardTtlMs();
-    draft.normalSoftTtlMs = source.getNormalSoftTtlMs();
-    draft.birthStampSec = source.getBirthStampSec();
     return draft;
   }
 
   /**
-   * Set the cached value (stored as-is, no codec) — see the
-   * class Javadoc's value discipline.
-   *
-   * @param storedValue the value in final stored form (may be {@code null})
+   * @param storedValue the value in stored form
    * @return this draft
    */
   public EntryDraft value(@Nullable Object storedValue) {
@@ -172,11 +146,7 @@ public final class EntryDraft {
   }
 
   /**
-   * Set the data stamp. Stamps are allocated by the node-local
-   * {@code StampClock} (design decisions: version stamps); {@code 0} is reserved for an unstamped
-   * entry ("unknown") and must never be used for a real write.
-   *
-   * @param dataVersion the positive data stamp for cross-instance sync ordering
+   * @param dataVersion the positive data stamp, or {@code 0} for unknown
    * @return this draft
    */
   public EntryDraft version(long dataVersion) {
@@ -185,129 +155,48 @@ public final class EntryDraft {
   }
 
   /**
-   * Set the Worker decision stamp. A {@code null} stamp is the local origin
-   * and equivalent to {@link #clearDecision()}. The immutable record is stored
-   * by reference, so a seeded draft carries the resident's stamp without copying
-   * its fields and a Worker decision costs one reference, not three fields.
+   * Sets both active durations and computes their deadlines through the injected arithmetic.
    *
-   * @param stamp the decision stamp, or {@code null} for a local entry
+   * <p>A soft TTL longer than the hard one is accepted, not rejected: the hard expiry evicts the
+   * entry before the soft window opens, so the soft deadline simply never triggers. Rejecting it
+   * would forbid the legitimate single-field update ({@link #softTtl}) that extends one side of a
+   * live entry.
+   *
+   * @param hardTtlMs the resolved hard TTL (positive, or {@link Long#MAX_VALUE})
+   * @param softTtlMs the resolved soft TTL ({@code 0} = disabled)
    * @return this draft
-   */
-  public EntryDraft decision(@Nullable DecisionStamp stamp) {
-    this.decision = stamp;
-    return this;
-  }
-
-  /**
-   * Clear the Worker decision stamp to the local origin — the demotion pattern.
-   * The lease belongs to the decision, not the entry, so clearing the decision
-   * drops it too.
-   *
-   * @return this draft
-   */
-  public EntryDraft clearDecision() {
-    this.decision = null;
-    return this;
-  }
-
-  /**
-   * Set the key state (NORMAL, HOT, COOL), or {@code null} for no state.
-   *
-   * @param state the key state
-   * @return this draft
-   */
-  public EntryDraft keyState(@Nullable KeyState state) {
-    this.keyState = state;
-    return this;
-  }
-
-  /**
-   * Set the active hard/soft TTL durations and compute their expire timestamps
-   * via the injected arithmetic, leaving the normal-state baseline untouched.
-   * Durations must be resolved to their final intent (see class Javadoc).
-   *
-   * <p>A soft TTL longer than the hard one is accepted, not rejected: the hard
-   * expiry evicts the entry before the soft window opens, so the soft deadline
-   * simply never triggers. Rejecting it would forbid the legitimate single-field
-   * update ({@link #softTtl}) that extends one side of a live entry.
-   *
-   * @param hardTtlMs the hard TTL ({@code 0} = permanent, stored as
-   *                  {@link Long#MAX_VALUE})
-   * @param softTtlMs the soft TTL ({@code 0} = disabled)
-   * @return this draft
-   * @throws IllegalArgumentException when a duration is negative
+   * @throws IllegalArgumentException when the hard duration is unresolved, or a duration is
+   *                                  negative or unencodable
    */
   public EntryDraft ttl(long hardTtlMs, long softTtlMs) {
-    requireEncodableTtls(hardTtlMs, softTtlMs);
-    this.hardTtlMs = normalizeHardTtl(hardTtlMs);
+    requireResolvedTtls(hardTtlMs, softTtlMs);
+    this.hardTtlMs = hardTtlMs;
     this.softTtlMs = softTtlMs;
-    this.hardExpireAtMs = computedHardExpiryAt(this.hardTtlMs);
+    this.hardExpireAtMs = computedHardExpiryAt(hardTtlMs);
     this.softExpireAtMs = computedSoftExpiryAt(softTtlMs);
     return this;
   }
 
   /**
-   * Set the active TTL durations without computing expire timestamps — for a rewrite that
-   * supplies its own deadlines (the demotion cap). Durations must already be resolved.
-   *
-   * @param hardTtlMs the active hard TTL ({@code 0} = permanent, stored as
-   *                  {@link Long#MAX_VALUE})
-   * @param softTtlMs the active soft TTL
-   * @return this draft
-   * @throws IllegalArgumentException when a duration is negative
-   */
-  public EntryDraft ttlDurations(long hardTtlMs, long softTtlMs) {
-    requireEncodableTtls(hardTtlMs, softTtlMs);
-    this.hardTtlMs = normalizeHardTtl(hardTtlMs);
-    this.softTtlMs = softTtlMs;
-    return this;
-  }
-
-  /**
-   * Validate one resolved hard/soft duration pair. Every TTL pair a draft sets
-   * passes through here, so a nonsensical pair cannot reach L1 even when it came
-   * from a lazily-evaluated TTL supplier or a SpEL expression rather than a
-   * literal.
+   * Validate one resolved hard/soft duration pair.
    *
    * @param hardTtlMs the resolved hard TTL
    * @param softTtlMs the resolved soft TTL
-   * @throws IllegalArgumentException when a duration is negative or above the packed maximum
-   *                                  other than {@link Long#MAX_VALUE}
    */
-  static void requireEncodableTtls(long hardTtlMs, long softTtlMs) {
-    CacheEntry.requireEncodableTtl(hardTtlMs, "hardTtlMs");
+  static void requireResolvedTtls(long hardTtlMs, long softTtlMs) {
+    CacheEntry.requireResolvedHardTtl(hardTtlMs, "hardTtlMs");
     CacheEntry.requireEncodableTtl(softTtlMs, "softTtlMs");
   }
 
   /**
-   * Set all four TTL fields at once — the active hard/soft durations with
-   * computed expire timestamps, plus the normal-state baseline recorded for
-   * HOT-to-NORMAL reversion. Durations must be resolved to their final intent.
+   * Sets only the soft duration and computes its deadline — the soft-refresh pattern. The hard
+   * deadline and duration are untouched, which is what keeps a caller's hard bound absolute
+   * across a stale-while-revalidate refresh.
    *
-   * @param hardTtlMs       the hard TTL ({@code 0} = permanent, stored as
-   *                        {@link Long#MAX_VALUE})
-   * @param softTtlMs       the soft TTL ({@code 0} = disabled)
-   * @param normalHardTtlMs the normal-state hard TTL baseline ({@code 0} = unset; a later
-   *                        transition resolves it to the configured default)
-   * @param normalSoftTtlMs the normal-state soft TTL baseline
+   * @param softTtlMs the resolved soft TTL ({@code 0} = disabled, {@link Long#MAX_VALUE} = never
+   *                  stale)
    * @return this draft
-   * @throws IllegalArgumentException when a duration is negative
-   */
-  public EntryDraft ttl(long hardTtlMs, long softTtlMs, long normalHardTtlMs, long normalSoftTtlMs) {
-    requireEncodableTtls(normalHardTtlMs, normalSoftTtlMs);
-    ttl(hardTtlMs, softTtlMs);
-    this.normalHardTtlMs = normalHardTtlMs;
-    this.normalSoftTtlMs = normalSoftTtlMs;
-    return this;
-  }
-
-  /**
-   * Set only the soft TTL duration and compute its expire timestamp — the
-   * background-refresh pattern (value + soft cadence, hard bound untouched).
-   *
-   * @param softTtlMs the soft TTL ({@code 0} = disabled)
-   * @return this draft
-   * @throws IllegalArgumentException when {@code softTtlMs} is negative
+   * @throws IllegalArgumentException when the value is negative or unencodable
    */
   public EntryDraft softTtl(long softTtlMs) {
     CacheEntry.requireEncodableTtl(softTtlMs, "softTtlMs");
@@ -317,26 +206,7 @@ public final class EntryDraft {
   }
 
   /**
-   * Set the value-birth stamp (monotonic seconds-since-boot, see
-   * {@link io.github.hyshmily.zeta.util.TimeSource#monotonicSecondsSinceBoot}).
-   * Seeded drafts carry the source entry's stamp over (lease preservation);
-   * fresh-value construction sites (loads, successful refreshes) stamp
-   * {@code now}.
-   *
-   * @param birthStampSec the birth stamp
-   * @return this draft
-   */
-  public EntryDraft birthStampSec(int birthStampSec) {
-    this.birthStampSec = birthStampSec;
-    return this;
-  }
-
-  /**
-   * Override the hard expire timestamp explicitly (custom jitter ratio, lease, or
-   * bound-capped scenarios). Call after {@link #ttl} to replace its computed value; the
-   * hard TTL duration is unaffected.
-   *
-   * @param hardExpireAtMs the absolute hard expiry timestamp
+   * @param hardExpireAtMs the absolute hard deadline
    * @return this draft
    */
   public EntryDraft hardExpiryAt(long hardExpireAtMs) {
@@ -345,10 +215,7 @@ public final class EntryDraft {
   }
 
   /**
-   * Override the soft expire timestamp explicitly. Call after {@link #ttl} or
-   * {@link #softTtl} to replace the computed value; the soft TTL duration is unaffected.
-   *
-   * @param softExpireAtMs the absolute soft expiry timestamp
+   * @param softExpireAtMs the absolute soft deadline
    * @return this draft
    */
   public EntryDraft softExpiryAt(long softExpireAtMs) {
@@ -357,11 +224,8 @@ public final class EntryDraft {
   }
 
   /**
-   * Set both expire timestamps explicitly — see {@link #hardExpiryAt} and
-   * {@link #softExpiryAt}.
-   *
-   * @param hardExpireAtMs the absolute hard expiry timestamp
-   * @param softExpireAtMs the absolute soft expiry timestamp
+   * @param hardExpireAtMs the absolute hard deadline
+   * @param softExpireAtMs the absolute soft deadline
    * @return this draft
    */
   public EntryDraft expiryAt(long hardExpireAtMs, long softExpireAtMs) {
@@ -371,52 +235,27 @@ public final class EntryDraft {
   }
 
   /**
-   * Recompute both expire timestamps from the current TTL durations, leaving
-   * the durations themselves untouched — the sync-refresh pattern (fresh
-   * value, same cadence, re-armed expiry).
+   * Recomputes both deadlines from the current durations, leaving the durations themselves
+   * untouched — the hard-renewal pattern: a fresh value starts its own lifetime under exactly
+   * the cadence the caller declared.
    *
    * @return this draft
    */
   public EntryDraft rearmExpiry() {
-    this.hardExpireAtMs = computedHardExpiryAt(this.hardTtlMs);
-    this.softExpireAtMs = computedSoftExpiryAt(this.softTtlMs);
+    this.hardExpireAtMs = computedHardExpiryAt(hardTtlMs);
+    this.softExpireAtMs = computedSoftExpiryAt(softTtlMs);
     return this;
   }
 
   /**
-   * Materialize the draft as an immutable {@link CacheEntry}. The draft has
-   * already rejected negative durations at the setters that accept them; the
-   * entry constructor owns the packed-field invariants (TTL range) and re-checks
-   * them once here.
+   * Materializes the draft as an immutable {@link CacheEntry}. The draft has already rejected
+   * negative durations at the setters that accept them; the entry constructor owns the packed
+   * invariants and re-checks them once here.
    *
-   * @return a new {@link CacheEntry} with the draft's logical fields
+   * @return a new immutable entry with the draft's logical fields
    */
   public CacheEntry build() {
-    return new CacheEntry(
-      value,
-      dataVersion,
-      decision,
-      hardTtlMs,
-      hardExpireAtMs,
-      softTtlMs,
-      softExpireAtMs,
-      keyState,
-      normalHardTtlMs,
-      normalSoftTtlMs,
-      birthStampSec
-    );
-  }
-
-  /**
-   * The draft-level permanent sentinel: every hard TTL setter stores
-   * {@link Long#MAX_VALUE} for {@code 0}, so a later rebuild that resolves the
-   * duration again cannot silently turn a permanent entry into a default-TTL one.
-   *
-   * @param hardTtlMs the resolved hard TTL ({@code 0} = permanent)
-   * @return the duration to store
-   */
-  private static long normalizeHardTtl(long hardTtlMs) {
-    return hardTtlMs == 0L ? Long.MAX_VALUE : hardTtlMs;
+    return new CacheEntry(value, dataVersion, hardTtlMs, hardExpireAtMs, softTtlMs, softExpireAtMs);
   }
 
   private long computedHardExpiryAt(long hardTtlMs) {

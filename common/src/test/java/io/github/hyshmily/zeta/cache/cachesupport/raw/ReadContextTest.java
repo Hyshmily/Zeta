@@ -56,7 +56,7 @@ class ReadContextTest {
     GetPolicy policy = new GetPolicy(
       () -> {
         evaluations.incrementAndGet();
-        return -1L;
+        return -2L;
       },
       () -> 0L,
       StalePolicy.SOFT_REFRESH,

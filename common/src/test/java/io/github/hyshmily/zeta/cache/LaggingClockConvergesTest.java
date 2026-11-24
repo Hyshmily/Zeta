@@ -32,10 +32,7 @@ class LaggingClockConvergesTest {
   @Test
   @DisplayName("a lagging node's next write outranks the stamp it observed")
   void observedFloor_raisesTheNextStamp() {
-    MonotonicStampClock clock = new MonotonicStampClock(
-      1L,
-      MonotonicStampClock.DEFAULT_MAX_FORWARD_DRIFT_MS
-    );
+    MonotonicStampClock clock = new MonotonicStampClock(1L, MonotonicStampClock.DEFAULT_MAX_FORWARD_DRIFT_MS);
     // A peer 30s ahead of local time: inside the 60s anti-drift bound, so the
     // floor still merges. A stamp beyond the bound is refused by contract.
     long observedTs = System.currentTimeMillis() - StampClock.EPOCH + 30_000L;
