@@ -16,6 +16,7 @@
 package io.github.hyshmily.zeta;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
@@ -39,6 +40,7 @@ import io.github.hyshmily.zeta.cache.cachesupport.loader.CacheLoader;
 import io.github.hyshmily.zeta.cache.cachesupport.policy.*;
 import io.github.hyshmily.zeta.cache.cachesupport.raw.CacheEntry;
 import io.github.hyshmily.zeta.exception.ZetaModeException;
+import io.github.hyshmily.zeta.heat.HeatView;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.Item;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.TopK;
 import io.github.hyshmily.zeta.model.ZetaCacheStats;
@@ -60,6 +62,7 @@ class ZetaTest {
 
   private HotKeyCache hotKeyCache;
   private TopK appDetector;
+  private HeatView heatView;
   private Zeta zeta;
 
   @BeforeEach
@@ -67,17 +70,18 @@ class ZetaTest {
   void setUp() {
     hotKeyCache = mock(HotKeyCache.class);
     appDetector = mock(TopK.class);
+    heatView = mock(HeatView.class);
     // Mirror the real TTL resolution so a lazily supplied Long.MAX_VALUE, and a
     // configuration that resolves to permanent, both reach requireSyncable.
     when(hotKeyCache.resolveSyncableHardTtl(anyLong())).thenAnswer(invocation -> invocation.getArgument(0));
-    zeta = new DefaultZeta(hotKeyCache, appDetector);
+    zeta = new DefaultZeta(hotKeyCache, appDetector, null, null, null, heatView);
   }
 
   @Test
-  void isLocalZeta_shouldDelegateToCache() {
-    when(hotKeyCache.isHot("key1")).thenReturn(true);
+  void isLocalZeta_shouldDelegateToHeatView() {
+    when(heatView.isLocalHot("key1")).thenReturn(true);
     assertThat(zeta.detector().isLocalHotKey("key1")).isTrue();
-    verify(hotKeyCache).isHot("key1");
+    verify(heatView).isLocalHot("key1");
   }
 
   @Test
@@ -222,7 +226,7 @@ class ZetaTest {
   @Test
   @SuppressWarnings("unchecked")
   void getAll_negativeTtl_shouldFailFastEvenForAnEmptyCollection() {
-    GetPolicy negative = new GetPolicy(() -> 0L, () -> -1L, StalePolicy.SOFT_REFRESH, true, false);
+    GetPolicy negative = new GetPolicy(() -> 0L, () -> -2L, StalePolicy.SOFT_REFRESH, true, false);
 
     assertThatThrownBy(() -> zeta.getAll(List.of(), k -> "v", negative))
       .isInstanceOf(IllegalArgumentException.class)
@@ -288,10 +292,11 @@ class ZetaTest {
   }
 
   @Test
-  void put_shouldRejectNegativeHardTtl() {
-    assertThatThrownBy(() -> zeta.put("k", "v", PutPolicy.of(-1L, 0L, false))).isInstanceOf(
+  void put_shouldRejectNegativeHardTtlOtherThanTheInheritSentinel() {
+    assertThatThrownBy(() -> zeta.put("k", "v", PutPolicy.of(-2L, 0L, false))).isInstanceOf(
       IllegalArgumentException.class
     );
+    assertThatCode(() -> zeta.put("k", "v", PutPolicy.of(-1L, 0L, false))).doesNotThrowAnyException();
   }
 
   @Test
@@ -337,19 +342,19 @@ class ZetaTest {
 
   @Test
   void put_shouldThrowInWorkerMode() {
-    Zeta workerOnly = new DefaultZeta(null, null);
+    Zeta workerOnly = new DefaultZeta(null, null, null, null, null, null);
     assertThatThrownBy(() -> workerOnly.put("k", "v", PutPolicy.defaults())).isInstanceOf(ZetaModeException.class);
   }
 
   @Test
   void putAll_empty_shouldStillThrowInWorkerMode() {
-    Zeta workerOnly = new DefaultZeta(null, null);
+    Zeta workerOnly = new DefaultZeta(null, null, null, null, null, null);
     assertThatThrownBy(() -> workerOnly.putAll(Map.of(), PutPolicy.defaults())).isInstanceOf(ZetaModeException.class);
   }
 
   @Test
   void refreshAll_empty_shouldStillThrowInWorkerMode() {
-    Zeta workerOnly = new DefaultZeta(null, null);
+    Zeta workerOnly = new DefaultZeta(null, null, null, null, null, null);
     assertThatThrownBy(() -> workerOnly.refreshAll(Map.of())).isInstanceOf(ZetaModeException.class);
   }
 
@@ -437,7 +442,7 @@ class ZetaTest {
 
   @Test
   void putAll_emptyWithANegativeDynamicTtl_shouldStillReject() {
-    PutPolicy negative = new PutPolicy(() -> -1L, () -> 0L, false);
+    PutPolicy negative = new PutPolicy(() -> -2L, () -> 0L, false);
 
     assertThatThrownBy(() -> zeta.putAll(Map.of(), negative)).isInstanceOf(IllegalArgumentException.class);
   }
@@ -515,7 +520,7 @@ class ZetaTest {
 
   @Test
   void unsafe_raw_shouldThrowInWorkerMode() {
-    Zeta workerOnly = new DefaultZeta(null, null);
+    Zeta workerOnly = new DefaultZeta(null, null, null, null, null, null);
     assertThatThrownBy(() -> workerOnly.unsafe().raw()).isInstanceOf(ZetaModeException.class);
   }
 
@@ -575,7 +580,7 @@ class ZetaTest {
   @Test
   void tagAll_empty_shouldStillCheckModeAndDeployment() {
     assertThatThrownBy(() -> zeta.tagAll(Map.of(), null)).isInstanceOf(NullPointerException.class);
-    Zeta workerOnly = new DefaultZeta(null, null);
+    Zeta workerOnly = new DefaultZeta(null, null, null, null, null, null);
     assertThatThrownBy(() -> workerOnly.tagAll(Map.of(), Zeta.TagMode.RECORD)).isInstanceOf(ZetaModeException.class);
   }
 
@@ -626,7 +631,7 @@ class ZetaTest {
 
   @Test
   void returnLocalTopNHotKeys_shouldReturnEmptyWhenDetectorNull() {
-    Zeta hk = new DefaultZeta(hotKeyCache, null);
+    Zeta hk = new DefaultZeta(hotKeyCache, null, null, null, null, null);
     assertThat(hk.detector().localTopKeys(5)).isEmpty();
   }
 
@@ -653,7 +658,7 @@ class ZetaTest {
 
   @Test
   void forgetDedup_emptyArray_shouldStillThrowInWorkerMode() {
-    Zeta workerOnly = new DefaultZeta(null, null);
+    Zeta workerOnly = new DefaultZeta(null, null, null, null, null, null);
     assertThatThrownBy(() -> workerOnly.unsafe().forgetDedup()).isInstanceOf(ZetaModeException.class);
   }
 
@@ -666,7 +671,7 @@ class ZetaTest {
 
   @Test
   void cacheMethods_shouldThrowInWorkerMode() {
-    Zeta workerOnly = new DefaultZeta(null, null);
+    Zeta workerOnly = new DefaultZeta(null, null, null, null, null, null);
     assertThatThrownBy(() -> workerOnly.get("k", () -> "v", GetPolicy.defaults())).isInstanceOf(
       ZetaModeException.class
     );
@@ -690,7 +695,7 @@ class ZetaTest {
 
   @Test
   void stats_shouldThrowInWorkerMode() {
-    Zeta workerOnly = new DefaultZeta(null, null);
+    Zeta workerOnly = new DefaultZeta(null, null, null, null, null, null);
     assertThatThrownBy(workerOnly::stats).isInstanceOf(ZetaModeException.class);
   }
 
@@ -728,7 +733,7 @@ class ZetaTest {
 
   @Test
   void refresh_shouldThrowInWorkerMode() {
-    Zeta workerOnly = new DefaultZeta(null, null);
+    Zeta workerOnly = new DefaultZeta(null, null, null, null, null, null);
     assertThatThrownBy(() -> workerOnly.refresh("k", () -> "v")).isInstanceOf(ZetaModeException.class);
   }
 
@@ -736,7 +741,7 @@ class ZetaTest {
   void refresh_partialWiring_cacheStillServes() {
     // The cache engine owns its detector by construction, so a facade wired
     // with a cache but no detector reference still serves the whole data plane.
-    Zeta partial = new DefaultZeta(hotKeyCache, null);
+    Zeta partial = new DefaultZeta(hotKeyCache, null, null, null, null, null);
     assertThat(partial.isCacheAvailable()).isTrue();
     when(hotKeyCache.peek("k")).thenReturn("v");
     String peeked = partial.peek("k");
@@ -760,9 +765,16 @@ class ZetaTest {
 
   @Test
   void refreshAll_singleEntry_shouldRunInlineWithoutTheExecutor() {
-    DefaultZeta facade = new DefaultZeta(hotKeyCache, appDetector, task -> {
-      throw new AssertionError("a single-entry refresh must not enter the fan-out");
-    });
+    DefaultZeta facade = new DefaultZeta(
+      hotKeyCache,
+      appDetector,
+      task -> {
+        throw new AssertionError("a single-entry refresh must not enter the fan-out");
+      },
+      null,
+      null,
+      null
+    );
 
     facade.refreshAll(Map.of("only", (Supplier<?>) () -> "v"));
 
@@ -780,15 +792,22 @@ class ZetaTest {
       .when(hotKeyCache)
       .refresh(anyString(), any(Supplier.class), anyBoolean());
     AtomicInteger submissions = new AtomicInteger();
-    DefaultZeta facade = new DefaultZeta(hotKeyCache, appDetector, task -> {
-      if (submissions.getAndIncrement() == 0) {
-        Thread worker = new Thread(task, "refresh-all-submission-error");
-        worker.setDaemon(true);
-        worker.start();
-      } else {
-        throw new AssertionError("submission failed");
-      }
-    });
+    DefaultZeta facade = new DefaultZeta(
+      hotKeyCache,
+      appDetector,
+      task -> {
+        if (submissions.getAndIncrement() == 0) {
+          Thread worker = new Thread(task, "refresh-all-submission-error");
+          worker.setDaemon(true);
+          worker.start();
+        } else {
+          throw new AssertionError("submission failed");
+        }
+      },
+      null,
+      null,
+      null
+    );
 
     assertThatThrownBy(() -> facade.refreshAll(Map.of("k1", (Supplier<?>) () -> "v1", "k2", (Supplier<?>) () -> "v2")))
       .isInstanceOf(AssertionError.class)
@@ -861,7 +880,7 @@ class ZetaTest {
 
   @Test
   void workerMode_shouldStillRejectNullKey() {
-    Zeta workerOnly = new DefaultZeta(null, null);
+    Zeta workerOnly = new DefaultZeta(null, null, null, null, null, null);
     assertThatThrownBy(() -> workerOnly.get(null, () -> "v", GetPolicy.defaults())).isInstanceOf(
       IllegalArgumentException.class
     );

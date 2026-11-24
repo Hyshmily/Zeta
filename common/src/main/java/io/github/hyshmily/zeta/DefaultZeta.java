@@ -18,16 +18,23 @@ package io.github.hyshmily.zeta;
 import static io.github.hyshmily.zeta.cache.CacheKeysPolicy.validKeys;
 
 import com.github.benmanes.caffeine.cache.Cache;
+import io.github.hyshmily.zeta.annotation.support.NamespaceKeys;
+import io.github.hyshmily.zeta.cache.CacheKeysPolicy;
 import io.github.hyshmily.zeta.cache.HotKeyCache;
+import io.github.hyshmily.zeta.cache.cachesupport.TransactionSupport;
 import io.github.hyshmily.zeta.cache.cachesupport.loader.CacheLoader;
 import io.github.hyshmily.zeta.cache.cachesupport.policy.GetPolicy;
 import io.github.hyshmily.zeta.cache.cachesupport.policy.InvalidatePolicy;
 import io.github.hyshmily.zeta.cache.cachesupport.policy.PutPolicy;
 import io.github.hyshmily.zeta.cache.cachesupport.raw.CacheEntry;
 import io.github.hyshmily.zeta.exception.ZetaModeException;
+import io.github.hyshmily.zeta.heat.HeatView;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.Item;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.TopK;
 import io.github.hyshmily.zeta.model.ZetaCacheStats;
+import io.github.hyshmily.zeta.policy.NamespacePolicyRegistry;
+import io.github.hyshmily.zeta.policy.ResolvedNamespacePolicy;
+import io.github.hyshmily.zeta.util.CollectionSizing;
 import io.github.hyshmily.zeta.util.Internal;
 import java.util.*;
 import java.util.concurrent.*;
@@ -78,34 +85,50 @@ public class DefaultZeta implements Zeta {
    * the common pool. The pool is shared and never shut down here.
    */
   private final @Nullable Executor refreshExecutor;
+  private final @Nullable NamespacePolicyRegistry policies;
+  private final @Nullable NamespaceKeys namespaceKeys;
+  private final @Nullable HeatView heatView;
+  private final Zeta.WarmPolicies warmPoliciesView = new WarmPoliciesView();
 
   /**
-   * Creates the facade without a bulk-refresh executor; a multi-key
-   * {@link #refreshAll} falls back to the common pool.
-   *
-   * @param hotKeyCache the cache engine, or {@code null} in Worker-only mode
-   * @param appTopK     the app-side detector, or {@code null} when not wired
-   */
-  @Internal
-  public DefaultZeta(@Nullable HotKeyCache hotKeyCache, @Nullable TopK appTopK) {
-    this(hotKeyCache, appTopK, null);
-  }
-
-  /**
-   * Creates the facade. Container wiring, not an extension point: the
-   * auto-configuration wires it ({@code ZetaFacadeAutoConfiguration});
-   * subclassing is not supported.
+   * Creates the facade with the plan-time namespace format registry.
    *
    * @param hotKeyCache     the cache engine, or {@code null} in Worker-only mode
    * @param appTopK         the app-side detector, or {@code null} when not wired
-   * @param refreshExecutor the dedicated bulk-refresh pool, or {@code null} to
-   *                        fall back to the common pool
+   * @param refreshExecutor the dedicated bulk-refresh pool, or {@code null}
+   * @param policies        the warming policy registry, or {@code null}
+   * @param namespaceKeys   the plan-time key-format registry, or {@code null}
+   * @param heatView        the heat query, or {@code null}
    */
   @Internal
-  public DefaultZeta(@Nullable HotKeyCache hotKeyCache, @Nullable TopK appTopK, @Nullable Executor refreshExecutor) {
+  public DefaultZeta(
+    @Nullable HotKeyCache hotKeyCache,
+    @Nullable TopK appTopK,
+    @Nullable Executor refreshExecutor,
+    @Nullable NamespacePolicyRegistry policies,
+    @Nullable NamespaceKeys namespaceKeys,
+    @Nullable HeatView heatView
+  ) {
     this.appTopK = appTopK;
     this.hotKeyCache = hotKeyCache;
     this.refreshExecutor = refreshExecutor;
+    this.policies = policies;
+    this.namespaceKeys = namespaceKeys;
+    this.heatView = heatView;
+  }
+
+  /**
+   * Returns the warming-policy view over the namespace registry.
+   *
+   * @return the warming policy view
+   * @throws ZetaModeException when no app-side cache/policy registry is available
+   */
+  @Override
+  public Zeta.WarmPolicies warmPolicies() {
+    if (policies == null || hotKeyCache == null) {
+      throw new ZetaModeException("warmPolicies", WORKER_ONLY_MODE, "an app-side cache");
+    }
+    return warmPoliciesView;
   }
 
   @Override
@@ -130,7 +153,7 @@ public class DefaultZeta implements Zeta {
     }
     // Snapshot while validating: prevents concurrent caller mutation from
     // injecting unchecked keys or non-positive counts into the engine.
-    Map<String, Long> snapshot = new LinkedHashMap<>((int) (keyCounts.size() / 0.75f) + 1);
+    Map<String, Long> snapshot = new LinkedHashMap<>(CollectionSizing.capacity(keyCounts.size()));
     for (Map.Entry<String, Long> entry : keyCounts.entrySet()) {
       String key = entry.getKey();
       Long count = entry.getValue();
@@ -201,7 +224,7 @@ public class DefaultZeta implements Zeta {
     // a concurrent map after this call starts.
     // Capacity for size entries at the default 0.75 load factor: `size` alone
     // would resize mid-put.
-    Map<String, Object> batch = new LinkedHashMap<>((int) (entries.size() / 0.75f) + 1);
+    Map<String, Object> batch = new LinkedHashMap<>(CollectionSizing.capacity(entries.size()));
     for (Map.Entry<String, ?> entry : entries.entrySet()) {
       String key = entry.getKey();
       Object value = entry.getValue();
@@ -243,6 +266,14 @@ public class DefaultZeta implements Zeta {
     Assert.hasText(prefix, "prefix must not be blank");
     InvalidatePolicy opts = orDefault(options, InvalidatePolicy.defaults());
     requireAppCache("clearPrefix").clearPrefix(prefix, opts);
+  }
+
+  @Override
+  public void clearNamespace(String cache, @Nullable InvalidatePolicy options) {
+    Assert.hasText(cache, "cache must not be blank");
+    String prefix =
+      namespaceKeys == null ? CacheKeysPolicy.namespacePrefix(cache) : namespaceKeys.physicalPrefixOf(cache);
+    clearPrefix(prefix, options);
   }
 
   @Override
@@ -320,6 +351,22 @@ public class DefaultZeta implements Zeta {
       }
       return;
     }
+    // The fan-out threads carry no transaction context; defer the whole batch to afterCommit so a
+    // rollback cannot publish or broadcast values the transaction never committed. Outside a
+    // transaction this runs inline, and the afterCommit-depth guard keeps the per-key refresh from
+    // deferring a second time.
+    TransactionSupport.run(false, () -> refreshAllFanOut(cache, validated, sync));
+  }
+
+  /**
+   * Fans one validated refresh batch out on the refresh executor and rethrows the first failure
+   * after joining every accepted task.
+   *
+   * @param cache     the L1 engine
+   * @param validated the validated key-to-loader snapshot
+   * @param sync      {@code true} to broadcast each refreshed value
+   */
+  private void refreshAllFanOut(HotKeyCache cache, List<Map.Entry<String, Supplier<?>>> validated, boolean sync) {
     // Independent per key: fan out so one slow loader cannot head-block the rest, and rethrow
     // the first failure after the fan-out settles. The injected refresh pool keeps this off the
     // JVM-global common pool; its admission policy owns back-pressure.
@@ -504,8 +551,8 @@ public class DefaultZeta implements Zeta {
     }
 
     private static ResolvedTtls of(long hardMs, long softMs) {
-      CacheEntry.requireEncodableTtl(hardMs, "hardTtlMs");
-      CacheEntry.requireEncodableTtl(softMs, "softTtlMs");
+      CacheEntry.requireDeclaredTtl(hardMs, "hardTtlMs");
+      CacheEntry.requireDeclaredTtl(softMs, "softTtlMs");
       return new ResolvedTtls(hardMs, softMs);
     }
   }
@@ -550,7 +597,22 @@ public class DefaultZeta implements Zeta {
     @Override
     public boolean isLocalHotKey(String cacheKey) {
       requireKey(cacheKey);
-      return requireAppCache("isLocalHotKey").isHot(cacheKey);
+      requireAppCache("isLocalHotKey");
+      return heatView != null && heatView.isLocalHot(cacheKey);
+    }
+
+    @Override
+    public boolean isClusterHotKey(String cacheKey) {
+      requireKey(cacheKey);
+      requireAppCache("isClusterHotKey");
+      return heatView != null && heatView.isClusterHot(cacheKey);
+    }
+
+    @Override
+    public boolean isHotKey(String cacheKey) {
+      requireKey(cacheKey);
+      requireAppCache("isHotKey");
+      return heatView != null && heatView.isHot(cacheKey);
     }
 
     @Override
@@ -559,6 +621,24 @@ public class DefaultZeta implements Zeta {
       // reject the same arguments.
       Assert.isTrue(limit >= 0, () -> "limit must be non-negative, but got: " + limit);
       return limit == 0 || appTopK == null ? List.of() : appTopK.listTopN(limit);
+    }
+  }
+
+  /** Read-only warming policy view over the namespace registry. */
+  private final class WarmPoliciesView implements Zeta.WarmPolicies {
+
+    /**
+     * Resolves the effective policy for a physical key.
+     *
+     * @param cacheKey the physical key
+     * @return the resolved policy
+     * @throws ZetaModeException when no app-side cache is available
+     */
+    @Override
+    public ResolvedNamespacePolicy resolve(String cacheKey) {
+      requireKey(cacheKey);
+      requireAppCache("resolve");
+      return policies.resolve(cacheKey);
     }
   }
 }

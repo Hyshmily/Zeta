@@ -18,13 +18,11 @@ package io.github.hyshmily.zeta;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.anyInt;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.*;
 
 import io.github.hyshmily.zeta.cache.HotKeyCache;
 import io.github.hyshmily.zeta.exception.ZetaModeException;
+import io.github.hyshmily.zeta.heat.HeatView;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.Item;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.TopK;
 import java.util.List;
@@ -40,20 +38,22 @@ class DetectorAdminTest {
 
   private HotKeyCache hotKeyCache;
   private TopK appDetector;
+  private HeatView heatView;
   private Zeta zeta;
 
   @BeforeEach
   void setUp() {
     hotKeyCache = mock(HotKeyCache.class);
     appDetector = mock(TopK.class);
-    zeta = new DefaultZeta(hotKeyCache, appDetector);
+    heatView = mock(HeatView.class);
+    zeta = new DefaultZeta(hotKeyCache, appDetector, null, null, null, heatView);
   }
 
   @Test
-  void detector_isLocalHotKey_shouldDelegateToCache() {
-    when(hotKeyCache.isHot("key1")).thenReturn(true);
+  void detector_isLocalHotKey_shouldDelegateToHeatView() {
+    when(heatView.isLocalHot("key1")).thenReturn(true);
     assertThat(zeta.detector().isLocalHotKey("key1")).isTrue();
-    verify(hotKeyCache).isHot("key1");
+    verify(heatView).isLocalHot("key1");
   }
 
   @Test
@@ -70,7 +70,7 @@ class DetectorAdminTest {
 
   @Test
   void detector_localTopKeys_shouldRejectANegativeLimitInEveryMode() {
-    Zeta workerOnly = new DefaultZeta(null, null);
+    Zeta workerOnly = new DefaultZeta(null, null, null, null, null, null);
 
     assertThatThrownBy(() -> workerOnly.detector().localTopKeys(-1)).isInstanceOf(IllegalArgumentException.class);
     assertThatThrownBy(() -> zeta.detector().localTopKeys(-1)).isInstanceOf(IllegalArgumentException.class);
@@ -79,7 +79,7 @@ class DetectorAdminTest {
 
   @Test
   void detector_localTopKeys_zero_shouldAnswerEmptyInEveryMode() {
-    Zeta workerOnly = new DefaultZeta(null, null);
+    Zeta workerOnly = new DefaultZeta(null, null, null, null, null, null);
 
     assertThat(zeta.detector().localTopKeys(0)).isEmpty();
     assertThat(workerOnly.detector().localTopKeys(0)).isEmpty();
@@ -88,14 +88,14 @@ class DetectorAdminTest {
 
   @Test
   void workerOnly_detectorFeeds_shouldThrow() {
-    Zeta workerOnly = new DefaultZeta(null, null);
+    Zeta workerOnly = new DefaultZeta(null, null, null, null, null, null);
     assertThatThrownBy(() -> workerOnly.tag("k", Zeta.TagMode.DETECT_ONLY)).isInstanceOf(ZetaModeException.class);
     assertThatThrownBy(() -> workerOnly.detector().isLocalHotKey("k")).isInstanceOf(ZetaModeException.class);
   }
 
   @Test
   void workerOnly_detectorQueries_shouldAnswerEmpty() {
-    Zeta workerOnly = new DefaultZeta(null, null);
+    Zeta workerOnly = new DefaultZeta(null, null, null, null, null, null);
     assertThat(workerOnly.detector().localTopKeys(5)).isEmpty();
   }
 }

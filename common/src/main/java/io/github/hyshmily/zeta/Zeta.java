@@ -25,6 +25,8 @@ import io.github.hyshmily.zeta.cache.cachesupport.raw.CacheEntry;
 import io.github.hyshmily.zeta.exception.ZetaModeException;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.Item;
 import io.github.hyshmily.zeta.model.ZetaCacheStats;
+import io.github.hyshmily.zeta.policy.ResolvedNamespacePolicy;
+import io.github.hyshmily.zeta.util.CollectionSizing;
 import java.util.*;
 import java.util.function.Function;
 import java.util.function.Supplier;
@@ -199,7 +201,7 @@ public interface Zeta {
   default void tagAll(Collection<String> cacheKeys, TagMode mode) {
     Objects.requireNonNull(cacheKeys, "cacheKeys must not be null");
     Objects.requireNonNull(mode, "mode must not be null");
-    Map<String, Long> counts = new LinkedHashMap<>((int) (cacheKeys.size() / 0.75f) + 1);
+    Map<String, Long> counts = new LinkedHashMap<>(CollectionSizing.capacity(cacheKeys.size()));
     for (String cacheKey : cacheKeys) {
       counts.merge(cacheKey, 1L, Long::sum);
     }
@@ -350,9 +352,9 @@ public interface Zeta {
    *
    * <p>
    * {@code put(key, null)} throws {@link NullPointerException} — null is
-   * never cached. On a Worker-managed (HOT/COOL) entry only the value is
-   * updated — the Worker's TTL regime is kept. Values are stored as-is (no
-   * value codec).
+   * never cached. A put re-declares the lifetime; the entry's previously stored
+   * durations are replaced by this call's TTLs, and heat has no vote. Values are
+   * stored as-is (no value codec).
    *
    * @param cacheKey the key to write
    * @param value    the value to cache (never {@code null})
@@ -729,6 +731,29 @@ public interface Zeta {
   boolean isCacheAvailable();
 
   /**
+   * Background warming policy inspection: the effective policy for a physical key.
+   *
+   * <p>All registration is startup-only and goes through {@link io.github.hyshmily.zeta.policy.ZetaWarmConfigurer};
+   * this view is read-only so a runtime caller cannot overwrite a loader or trigger after the
+   * registry froze.
+   *
+   * @return the warming policy view
+   * @throws ZetaModeException when no app-side cache is available
+   */
+  WarmPolicies warmPolicies();
+
+  /** Read-only warming policy view. */
+  interface WarmPolicies {
+    /**
+     * Resolve the effective policy for a physical key.
+     *
+     * @param cacheKey the physical key
+     * @return the resolved TTL, triggers, sources and loader
+     */
+    ResolvedNamespacePolicy resolve(String cacheKey);
+  }
+
+  /**
    * Raw escape hatch over the single L1 table (Caffeine's
    * {@code Cache.policy()} pattern). The facade stops one step short of the
    * Caffeine handle on purpose: everything the data verbs do not cover —
@@ -763,11 +788,11 @@ public interface Zeta {
    * nothing: the caller owns every guarantee {@link #raw()} says it skips.
    *
    * <p>Reading is unmodified — {@code getIfPresent} returns the live
-   * {@link CacheEntry} wrapper (unwrap the value yourself; a HOT entry past
-   * its soft TTL still reads as present until the async refresh lands). A write
-   * skips version allocation, peer broadcast, admission and the Worker
-   * decision stamp, so a raw write can diverge from peers until the entry's
-   * hard TTL expires. Do not build a second caching layer on top.
+   * {@link CacheEntry} wrapper (unwrap the value yourself; an entry past
+   * its soft TTL still reads as present until a refresh lands). A write
+   * skips version allocation, peer broadcast, admission and the decision
+   * plane, so a raw write can diverge from peers until the entry's hard TTL
+   * expires. Do not build a second caching layer on top.
    */
   interface UnsafeAdmin {
     /**
@@ -805,16 +830,31 @@ public interface Zeta {
    */
   interface DetectorAdmin {
     /**
-     * Check whether a key is currently hot on this instance — either resident
-     * in L1 with {@link io.github.hyshmily.zeta.model.KeyState#HOT} (and not
-     * logically expired) or tracked by the local TopK detector (promotable
-     * but possibly not yet resident).
+     * Check whether the local TopK currently tracks the key.
      *
      * @param cacheKey the key to inspect
-     * @return {@code true} if the key is L1-HOT or detector-tracked
+     * @return {@code true} if the local detector holds the key
      * @throws ZetaModeException when no cache is available (Worker-only mode)
      */
     boolean isLocalHotKey(String cacheKey);
+
+    /**
+     * Check whether a valid Worker lease currently holds the key.
+     *
+     * @param cacheKey the key to inspect
+     * @return {@code true} for a live cluster lease
+     * @throws ZetaModeException when no cache is available (Worker-only mode)
+     */
+    boolean isClusterHotKey(String cacheKey);
+
+    /**
+     * Check whether either heat source holds the key.
+     *
+     * @param cacheKey the key to inspect
+     * @return {@code true} for a live cluster lease or local TopK membership
+     * @throws ZetaModeException when no cache is available (Worker-only mode)
+     */
+    boolean isHotKey(String cacheKey);
 
     /**
      * Read-only snapshot of the top {@code limit} local hot keys, ordered by
