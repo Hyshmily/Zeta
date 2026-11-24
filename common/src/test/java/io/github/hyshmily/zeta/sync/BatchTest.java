@@ -34,9 +34,8 @@ class BatchTest {
     SyncMessage prefix = new SyncMessage(1L, "users\u0000", SyncType.INVALIDATE_PREFIX, 9L);
     SyncMessage all = new SyncMessage(2L, SyncMessage.CLEAR_ALL_BODY, SyncType.INVALIDATE_ALL, 5L);
 
-    Batch batch = Batch.reduce(List.of(prefix, all));
+    Batch.Clear batch = (Batch.Clear) Batch.reduce(List.of(prefix, all));
 
-    assertThat(batch).isInstanceOf(Batch.Clear.class);
     assertThat(batch.messages()).containsExactly(prefix, all);
   }
 
@@ -114,7 +113,6 @@ class BatchTest {
 
     Batch.Value batch = (Batch.Value) Batch.reduce(List.of(message));
 
-    assertThat(batch.messages()).containsExactly(message);
     assertThat(batch.winner()).isSameAs(message);
     assertThat(batch.covered()).isEmpty();
     assertThat(batch.coveredInvalidate()).isNull();

@@ -18,8 +18,8 @@ package io.github.hyshmily.zeta.sync;
 import static io.github.hyshmily.zeta.constants.ZetaConstants.Amqp.*;
 import static org.assertj.core.api.Assertions.assertThat;
 
+import io.github.hyshmily.zeta.model.DecisionKind;
 import io.github.hyshmily.zeta.sync.worker.WorkerDecision;
-import io.github.hyshmily.zeta.sync.worker.WorkerType;
 import java.nio.charset.StandardCharsets;
 import org.junit.jupiter.api.Test;
 import org.springframework.amqp.core.Message;
@@ -37,14 +37,14 @@ class WorkerDecisionTest {
   @Test
   void from_shouldParseHotMessage() {
     MessageProperties props = new MessageProperties();
-    props.setHeader(HEADER_TYPE, WorkerType.HOT.code());
+    props.setHeader(HEADER_TYPE, DecisionKind.HOT.code());
     props.setHeader(HEADER_VERSION, 10L);
     props.setHeader(HEADER_NODE_ID, "worker-1");
     Message msg = new Message("cacheKey".getBytes(StandardCharsets.UTF_8), props);
     WorkerDecision decision = WorkerDecision.from(msg);
     assertThat(decision).isNotNull();
     assertThat(decision.cacheKey()).isEqualTo("cacheKey");
-    assertThat(decision.type()).isEqualTo(WorkerType.HOT);
+    assertThat(decision.kind()).isEqualTo(DecisionKind.HOT);
     assertThat(decision.stamp().decisionVersion()).isEqualTo(10L);
   }
 
@@ -52,7 +52,7 @@ class WorkerDecisionTest {
   @Test
   void from_coolMessage_shouldCarryCoolKind() {
     MessageProperties props = new MessageProperties();
-    props.setHeader(HEADER_TYPE, WorkerType.COOL.code());
+    props.setHeader(HEADER_TYPE, DecisionKind.COOL.code());
     props.setHeader(HEADER_VERSION, 10L);
     Message msg = new Message("key".getBytes(StandardCharsets.UTF_8), props);
 
@@ -75,7 +75,7 @@ class WorkerDecisionTest {
   @Test
   void from_shouldReturnNullForBlankKey() {
     MessageProperties props = new MessageProperties();
-    props.setHeader(HEADER_TYPE, WorkerType.HOT.code());
+    props.setHeader(HEADER_TYPE, DecisionKind.HOT.code());
     Message msg = new Message("   ".getBytes(StandardCharsets.UTF_8), props);
     assertThat(WorkerDecision.from(msg)).isNull();
   }
@@ -87,7 +87,7 @@ class WorkerDecisionTest {
   @Test
   void from_shouldReturnNullWhenVersionMissingOrNonPositive() {
     MessageProperties props = new MessageProperties();
-    props.setHeader(HEADER_TYPE, WorkerType.COOL.code());
+    props.setHeader(HEADER_TYPE, DecisionKind.COOL.code());
     Message missing = new Message("key".getBytes(StandardCharsets.UTF_8), props);
     assertThat(WorkerDecision.from(missing)).isNull();
 
@@ -102,8 +102,8 @@ class WorkerDecisionTest {
    */
   @Test
   void shouldHaveExpectedTypeConstants() {
-    assertThat(WorkerType.HOT.code()).isEqualTo("HOT");
-    assertThat(WorkerType.COOL.code()).isEqualTo("COOL");
+    assertThat(DecisionKind.HOT.code()).isEqualTo("HOT");
+    assertThat(DecisionKind.COOL.code()).isEqualTo("COOL");
   }
 
   /**
@@ -112,7 +112,7 @@ class WorkerDecisionTest {
   @Test
   void from_withNodeId_shouldParse() {
     MessageProperties props = new MessageProperties();
-    props.setHeader(HEADER_TYPE, WorkerType.HOT.code());
+    props.setHeader(HEADER_TYPE, DecisionKind.HOT.code());
     props.setHeader(HEADER_VERSION, 10L);
     props.setHeader(HEADER_NODE_ID, "worker-1");
     Message msg = new Message("key".getBytes(StandardCharsets.UTF_8), props);
@@ -126,7 +126,7 @@ class WorkerDecisionTest {
   @Test
   void from_withMissingNodeId_shouldDefault() {
     MessageProperties props = new MessageProperties();
-    props.setHeader(HEADER_TYPE, WorkerType.HOT.code());
+    props.setHeader(HEADER_TYPE, DecisionKind.HOT.code());
     props.setHeader(HEADER_VERSION, 10L);
     Message msg = new Message("key".getBytes(StandardCharsets.UTF_8), props);
     WorkerDecision decision = WorkerDecision.from(msg);
@@ -139,7 +139,7 @@ class WorkerDecisionTest {
   @Test
   void from_withVersionAsInteger_shouldHandle() {
     MessageProperties props = new MessageProperties();
-    props.setHeader(HEADER_TYPE, WorkerType.HOT.code());
+    props.setHeader(HEADER_TYPE, DecisionKind.HOT.code());
     props.setHeader(HEADER_VERSION, 42);
     props.setHeader(HEADER_NODE_ID, "worker-1");
     Message msg = new Message("key".getBytes(StandardCharsets.UTF_8), props);
@@ -155,7 +155,7 @@ class WorkerDecisionTest {
   @Test
   void from_withEpoch_shouldParse() {
     MessageProperties props = new MessageProperties();
-    props.setHeader(HEADER_TYPE, WorkerType.HOT.code());
+    props.setHeader(HEADER_TYPE, DecisionKind.HOT.code());
     props.setHeader(HEADER_VERSION, 10L);
     props.setHeader(HEADER_EPOCH, 3L);
     props.setHeader(HEADER_NODE_ID, "worker-1");
@@ -171,7 +171,7 @@ class WorkerDecisionTest {
   @Test
   void from_withMissingEpoch_shouldDefaultToZero() {
     MessageProperties props = new MessageProperties();
-    props.setHeader(HEADER_TYPE, WorkerType.HOT.code());
+    props.setHeader(HEADER_TYPE, DecisionKind.HOT.code());
     props.setHeader(HEADER_VERSION, 10L);
     props.setHeader(HEADER_NODE_ID, "worker-1");
     Message msg = new Message("key".getBytes(StandardCharsets.UTF_8), props);
@@ -185,7 +185,7 @@ class WorkerDecisionTest {
   @Test
   void from_withEpochAsInteger_shouldHandle() {
     MessageProperties props = new MessageProperties();
-    props.setHeader(HEADER_TYPE, WorkerType.HOT.code());
+    props.setHeader(HEADER_TYPE, DecisionKind.HOT.code());
     props.setHeader(HEADER_VERSION, 10L);
     props.setHeader(HEADER_EPOCH, 2);
     props.setHeader(HEADER_NODE_ID, "worker-1");
@@ -197,21 +197,21 @@ class WorkerDecisionTest {
   /** The parser switch is exhaustive over the enum's wire codes; unknown values are null. */
   @Test
   void decisionTypeRoundTripsEveryWireCode() {
-    for (WorkerType type : WorkerType.values()) {
-      assertThat(WorkerType.parse(type.code())).isSameAs(type);
+    for (DecisionKind type : DecisionKind.values()) {
+      assertThat(DecisionKind.parse(type.code())).isSameAs(type);
     }
-    assertThat(WorkerType.parse("UNKNOWN")).isNull();
-    assertThat(WorkerType.parse(new StringBuilder("HOT"))).isSameAs(WorkerType.HOT);
-    assertThat(WorkerType.parse(3)).isNull();
-    assertThat(WorkerType.parse(null)).isNull();
+    assertThat(DecisionKind.parse("UNKNOWN")).isNull();
+    assertThat(DecisionKind.parse(new StringBuilder("HOT"))).isSameAs(DecisionKind.HOT);
+    assertThat(DecisionKind.parse(3)).isNull();
+    assertThat(DecisionKind.parse(null)).isNull();
   }
 
   /** HOT needs the start-jitter loader park; COOL is the budget-exempt control signal. */
   @Test
   void decisionTypeFlagsMatchTheAdmissionContract() {
-    assertThat(WorkerType.HOT.isControl()).isFalse();
-    assertThat(WorkerType.HOT.needsJitter()).isTrue();
-    assertThat(WorkerType.COOL.isControl()).isTrue();
-    assertThat(WorkerType.COOL.needsJitter()).isFalse();
+    assertThat(DecisionKind.HOT.isControl()).isFalse();
+    assertThat(DecisionKind.HOT.needsJitter()).isTrue();
+    assertThat(DecisionKind.COOL.isControl()).isTrue();
+    assertThat(DecisionKind.COOL.needsJitter()).isFalse();
   }
 }

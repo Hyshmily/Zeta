@@ -43,10 +43,11 @@ class WorkerHeartbeatMessageTest {
   }
 
   @Test
-  void toMessage_bodyShouldBeWorkerIdBytes() {
+  void toMessage_bodyShouldBeEmpty() {
     WorkerHeartbeatMessage hb = new WorkerHeartbeatMessage(0L, "worker-x", 1L, false, null);
     Message msg = hb.toMessage();
-    assertThat(new String(msg.getBody(), StandardCharsets.UTF_8)).isEqualTo("worker-x");
+    // The node id travels only in HEADER_NODE_ID; a body copy would be a second source of truth.
+    assertThat(msg.getBody()).isEmpty();
   }
 
   @Test
@@ -92,12 +93,22 @@ class WorkerHeartbeatMessageTest {
   void from_missingHeaders_shouldUseDefaults() {
     MessageProperties props = new MessageProperties();
     props.setHeader(HEADER_TYPE, WorkerHeartbeatMessage.TYPE);
-    Message msg = new Message("any".getBytes(StandardCharsets.UTF_8), props);
+    props.setHeader(HEADER_NODE_ID, "any");
+    Message msg = new Message(new byte[0], props);
     WorkerHeartbeatMessage hb = WorkerHeartbeatMessage.from(msg);
     assertThat(hb.id()).isZero();
-    assertThat(hb.workerId()).as("the body is the identity fallback").isEqualTo("any");
+    assertThat(hb.workerId()).isEqualTo("any");
     assertThat(hb.epoch()).isZero();
     assertThat(hb.readyToServe()).isFalse();
+  }
+
+  @Test
+  void from_workerIdOnlyInBody_isDropped() {
+    MessageProperties props = new MessageProperties();
+    props.setHeader(HEADER_TYPE, WorkerHeartbeatMessage.TYPE);
+    Message msg = new Message("worker-x".getBytes(StandardCharsets.UTF_8), props);
+
+    assertThat(WorkerHeartbeatMessage.from(msg)).isNull();
   }
 
   /** A padded id is one Worker on the wire, whether it came from the header or the body. */
@@ -139,7 +150,8 @@ class WorkerHeartbeatMessageTest {
   void from_longStringTypeHeader_isAccepted() {
     MessageProperties props = new MessageProperties();
     props.setHeader(HEADER_TYPE, LongStringHelper.asLongString(WorkerHeartbeatMessage.TYPE));
-    Message msg = new Message("worker".getBytes(StandardCharsets.UTF_8), props);
+    props.setHeader(HEADER_NODE_ID, "worker");
+    Message msg = new Message(new byte[0], props);
 
     assertThat(WorkerHeartbeatMessage.from(msg)).isNotNull();
   }

@@ -22,7 +22,9 @@ import java.util.Objects;
  * leave the entry untouched. The framework still owns the version guard, the loader
  * admission re-check and the terminal hook.
  */
-public sealed interface SyncValueAction permits SyncValueAction.Apply, SyncValueAction.Invalidate, SyncValueAction.Skip {
+public sealed interface SyncValueAction
+  permits SyncValueAction.Apply, SyncValueAction.Invalidate, SyncValueAction.Skip
+{
   /**
    * Write the given value at the event's version.
    *
@@ -42,4 +44,15 @@ public sealed interface SyncValueAction permits SyncValueAction.Apply, SyncValue
 
   SyncValueAction INVALIDATE = new Invalidate();
   SyncValueAction SKIP = new Skip();
+
+  /**
+   * Write {@code value} at the event's version, in the same style as {@link #INVALIDATE} and
+   * {@link #SKIP}.
+   *
+   * @param value the value to write; never {@code null}
+   * @return the apply action
+   */
+  static SyncValueAction apply(Object value) {
+    return new Apply(value);
+  }
 }

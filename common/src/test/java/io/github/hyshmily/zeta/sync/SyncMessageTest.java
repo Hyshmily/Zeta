@@ -197,16 +197,14 @@ class SyncMessageTest {
   }
 
   @Test
-  void parseBatch_skipsMalformedEntriesWithoutEatingTheRest() {
+  void parseBatch_dropsAStructurallyMalformedBody() {
     byte[] body = "[[] , [\"a\"], [\"b\", 5], [[\"nested\"], 6], [\"c\", 7], [\"d\", 8]]".getBytes(
       StandardCharsets.UTF_8
     );
     MessageProperties props = new MessageProperties();
     props.setHeader(HEADER_TYPE, SyncType.INVALIDATE_BATCH.code());
-    SyncMessage.ParsedBatch batch = SyncMessage.parseBatch(new Message(body, props));
 
-    assertThat(batch).isNotNull();
-    assertThat(batch.entries()).extracting(SyncMessage::cacheKey).containsExactly("b", "c", "d");
+    assertThat(SyncMessage.parseBatch(new Message(body, props))).isNull();
   }
 
   /** The parser switch is exhaustive over the enum's wire codes; unknown values are null. */

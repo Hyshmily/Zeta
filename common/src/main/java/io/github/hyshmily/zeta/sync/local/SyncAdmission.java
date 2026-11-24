@@ -19,25 +19,18 @@ package io.github.hyshmily.zeta.sync.local;
  * The admission decision for one effective sync event, taken before a PUT payload is
  * decoded or a REFRESH loader read runs.
  *
- * <p>{@link InvalidateLocal} is meaningful only for a PUT/REFRESH: it drops the value path and
- * applies the framework's versioned local invalidation. For an INVALIDATE it is redundant and is
- * settled as {@link SyncSkipReason#POLICY_FAILED}; for a clear it is treated as
- * {@link Proceed} because the clear already sweeps the local table.
+ * <p>{@link #INVALIDATE_LOCAL} drops a value path and applies the framework's versioned local
+ * invalidation. On a PUT/REFRESH that is a real degradation; on an INVALIDATE or a clear it is
+ * treated as {@link #PROCEED}, because those operations already remove the local copy — refusing
+ * the event there would leave a stale entry behind.
  */
-public sealed interface SyncAdmission permits SyncAdmission.Proceed, SyncAdmission.InvalidateLocal, SyncAdmission.Skip {
+public enum SyncAdmission {
   /** Continue with the normal pipeline. */
-  record Proceed() implements SyncAdmission {}
+  PROCEED,
 
-  /**
-   * Drop the value path and invalidate locally: no payload decode, no loader read. Valid
-   * only for PUT/REFRESH.
-   */
-  record InvalidateLocal() implements SyncAdmission {}
+  /** Drop the value path and invalidate locally: no payload decode, no loader read. */
+  INVALIDATE_LOCAL,
 
   /** Leave the local entry untouched. */
-  record Skip() implements SyncAdmission {}
-
-  SyncAdmission PROCEED = new Proceed();
-  SyncAdmission INVALIDATE_LOCAL = new InvalidateLocal();
-  SyncAdmission SKIP = new Skip();
+  SKIP,
 }

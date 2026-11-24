@@ -46,4 +46,16 @@ public enum SyncSkipReason {
 
   /** The policy asked to drop the value path; the framework invalidated locally instead. */
   DEGRADED_TO_INVALIDATE,
+
+  /** A peer REFRESH targeted an absent key that is not eligible for cold prewarm. */
+  ABSENT_NOT_PREWARMABLE,
+
+  /** An absent key belongs to a dynamic-TTL namespace with no static TTL baseline. */
+  TTL_NOT_PREWARMABLE,
+
+  /** The async refresh executor rejected the load under backpressure; degraded locally. */
+  REFRESH_REJECTED,
+
+  /** A peer REFRESH loader threw; the value event was degraded locally instead of retried. */
+  REFRESH_FAILED,
 }

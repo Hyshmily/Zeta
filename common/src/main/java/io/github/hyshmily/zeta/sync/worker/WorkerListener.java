@@ -15,101 +15,87 @@
  */
 package io.github.hyshmily.zeta.sync.worker;
 
-import static io.github.hyshmily.zeta.constants.ZetaConstants.Amqp.HEADER_TYPE;
-
 import com.rabbitmq.client.Channel;
-import io.github.hyshmily.zeta.cache.EntryView;
+import io.github.hyshmily.zeta.heat.*;
+import io.github.hyshmily.zeta.model.DecisionKind;
+import io.github.hyshmily.zeta.model.DecisionStamp;
+import io.github.hyshmily.zeta.scheduler.WarmScheduler;
+import io.github.hyshmily.zeta.sync.DecisionPlaneSupport;
 import io.github.hyshmily.zeta.sync.dispatcher.KeyDispatcher;
-import io.github.hyshmily.zeta.sync.local.CacheSyncListener;
 import io.github.hyshmily.zeta.util.Internal;
 import io.github.hyshmily.zeta.util.amqp.AmqpConsume;
-import io.github.hyshmily.zeta.util.amqp.AmqpMessageReader;
 import io.github.hyshmily.zeta.util.amqp.AmqpMessageReader.AppIsolationFilter;
+import io.github.hyshmily.zeta.util.version.VersionGuard;
 import jakarta.annotation.PreDestroy;
 import java.io.IOException;
 import java.util.List;
+import java.util.Objects;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.atomic.LongAdder;
+import java.util.function.Consumer;
 import lombok.extern.slf4j.Slf4j;
 import org.jspecify.annotations.Nullable;
 import org.springframework.amqp.core.Message;
-import org.springframework.amqp.core.MessageProperties;
 
 /**
- * Listens for Worker hot/cool decisions via the {@code zeta.send.exchange} direct
- * exchange (bound under {@code send.<appName>}) and applies them to the local Caffeine L1
- * cache through {@link WorkerPolicy} and the framework-owned {@link DefaultWorkerContext}.
+ * Inbound listener for Worker HOT/COOL heat decisions, applying them to {@link HeatDirectory}
+ * through a per-key ordered {@link KeyDispatcher}.
  *
- * <p>Incoming AMQP messages are deserialized into {@link WorkerDecision} records and routed
- * by {@link WorkerType}: HOT goes through {@link WorkerPolicy#hot}, COOL through
- * {@link WorkerPolicy#cool}. A decision is acknowledged once it is decoded and submitted;
- * the ordered dispatcher applies it asynchronously. A COOL the dispatcher refuses at submit
- * time is applied inline on the consumer thread (see {@link #onDispatchRejected}), while a
- * refused HOT is dropped.
+ * <p>Decisions are acknowledged at the AMQP boundary once submitted; {@link HeatDirectory} owns
+ * version, epoch, incarnation, and ghost-COOL guards, {@link HotKeyHandler} runs optional business
+ * actions, and {@link HotKeyListener}s observe settled transitions. Nothing on this plane alters
+ * an entry's TTL.
  *
- * @see WorkerDecision
- * @see WorkerPolicy
- * @see DefaultWorkerContext
- * @see CacheSyncListener
+ * <p><b>Best-effort delivery.</b> Workers broadcast each decision once. When the ordered dispatcher
+ * refuses a COOL decision, its lease is still revoked inline on the consumer thread (without user
+ * callbacks to keep the AMQP thread non-blocking); a refused HOT decision is dropped.
  */
 @Slf4j
 @Internal
 public class WorkerListener {
 
-  /**
-   * Cumulative COOL decisions the per-key ordered dispatcher refused (per-key
-   * queue full or dispatcher closed). Each one is applied inline on the
-   * consumer thread (see {@link #onDispatchRejected}), so a growing count signals
-   * dispatcher saturation — degraded ordering, not data loss.
-   */
-  private final LongAdder coolDispatchRejections = new LongAdder();
-
-  /**
-   * Per-key FIFO dispatcher for ordered cache mutation execution. Built in the
-   * constructor and {@code final}: the AMQP consumer threads must never be able
-   * to observe a null dispatcher.
-   */
   private final KeyDispatcher<WorkerDecision> dispatcher;
-
-  /** Strategy that decides HOT and COOL outcomes. */
-  private final WorkerPolicy policy;
-
-  /** Framework-owned guarded write path and batch reducer. */
-  private final DefaultWorkerContext context;
-
-  /**
-   * Shared-broker appName isolation (design decisions: sync messages, see {@link AppIsolationFilter}):
-   * decisions carrying a foreign {@code appName} header are dropped before
-   * dispatch. {@code null}/blank local appName disables the filter (all
-   * decisions processed); decisions <em>without</em> the header are always processed.
-   */
+  private final HeatDirectory heatDirectory;
+  private final HotKeyHandler handler;
+  private final List<HotKeyListener> listeners;
+  private final HotKeyContextFactory contexts;
+  private final @Nullable WarmScheduler warmScheduler;
   private final AppIsolationFilter isolation;
 
+  private final LongAdder coolDispatchRejections = new LongAdder();
+  private volatile boolean closed;
+
   /**
-   * Creates a listener. {@code appName} may be {@code null}/blank to disable
-   * the foreign-app filter (rolling-upgrade behavior).
+   * Creates a Worker decision listener and wires the passive lease-end callback on
+   * {@code heatDirectory}.
    *
-   * <p>Also builds the per-key ordered dispatcher that guarantees FIFO
-   * processing of Worker decisions per cache key and spreads cluster-loader load via a
-   * start-jitter park of {@code jitterMs} on each key's first cycle.
-   *
-   * @param properties      the Worker listener configuration
-   * @param scheduler       executor shared by the ordered dispatcher's cycle execution and
-   *                        its start-jitter park
-   * @param policy   strategy that decides HOT and COOL outcomes
-   * @param context  framework-owned guarded write path and batch reducer
-   * @param appName  this application's {@code zeta.app-name}; {@code null}/blank
-   *                 disables foreign-app filtering
+   * @param properties    listener configuration supplying dispatcher bounds and start jitter
+   * @param scheduler     scheduler driving ordered per-key dispatch cycles
+   * @param heatDirectory cluster lease table owning ordering and incarnation guards
+   * @param handler       replaceable HOT/COOL business handler
+   * @param listeners     best-effort lifecycle observers
+   * @param contexts      factory creating a guarded {@link HotKeyContext} for one applied decision
+   * @param warmScheduler the local renewal scheduler, or {@code null} when warming is unavailable
+   * @param appName       application name for shared-broker isolation, or {@code null}/blank to disable
+   * @throws NullPointerException if any required collaborator is {@code null}
    */
   public WorkerListener(
     WorkerListenerProperties properties,
     ScheduledExecutorService scheduler,
-    WorkerPolicy policy,
-    DefaultWorkerContext context,
-    String appName
+    HeatDirectory heatDirectory,
+    HotKeyHandler handler,
+    List<HotKeyListener> listeners,
+    HotKeyContextFactory contexts,
+    @Nullable WarmScheduler warmScheduler,
+    @Nullable String appName
   ) {
-    this.context = context;
-    this.policy = policy;
+    Objects.requireNonNull(properties, "properties must not be null");
+    Objects.requireNonNull(scheduler, "scheduler must not be null");
+    this.heatDirectory = Objects.requireNonNull(heatDirectory, "heatDirectory must not be null");
+    this.handler = Objects.requireNonNull(handler, "handler must not be null");
+    this.listeners = List.copyOf(Objects.requireNonNull(listeners, "listeners must not be null"));
+    this.contexts = Objects.requireNonNull(contexts, "contexts must not be null");
+    this.warmScheduler = warmScheduler;
     this.isolation = new AppIsolationFilter(appName);
     this.dispatcher = new KeyDispatcher<>(
       scheduler,
@@ -118,230 +104,256 @@ public class WorkerListener {
       properties.getMaxPendingUnits(),
       properties.getJitterMs()
     );
+    heatDirectory.setPassiveEndSink((lease, reason) -> {
+      if (!closed) {
+        cancelColdRenewal(lease.key());
+        notifyCool(lease, reason);
+      }
+    });
   }
 
-  /**
-   * Closes the ordered dispatcher at context shutdown: queued decisions are dropped and a
-   * start-jitter park is cancelled, so a parked first cycle does not pin its payload.
-   *
-   * <p>A queued COOL is never replayed and a dropped HOT leaves the entry at its normal TTL
-   * until the key changes phase again. Refusals caused by this close reach
-   * {@link #onDispatchRejected} like any other submit refusal.
-   */
+  /** Closes the ordered dispatcher and detaches the lease table's passive-end callback. */
   @PreDestroy
   public void destroy() {
+    closed = true;
+    heatDirectory.setPassiveEndSink(null);
     dispatcher.close();
   }
 
   /**
-   * Cumulative foreign-app decision drops (design decisions: sync messages). Non-zero means
-   * this instance is discarding another application's decisions — or, when paired with
-   * missing prewarming, that the local {@code app-name} is misconfigured.
+   * AMQP consumer callback handling incoming Worker heat decisions, acknowledging on completion
+   * and nacking with {@code requeue=false} on processing failures.
    *
-   * @return the total foreign-app drops since startup
-   */
-  public long foreignAppDrops() {
-    return isolation.drops();
-  }
-
-  /**
-   * The most recently observed foreign sender appName, or {@code null} when no foreign
-   * decision has been dropped yet.
-   *
-   * @return the last foreign appName, or {@code null}
-   */
-  public @Nullable String lastForeignApp() {
-    return isolation.lastForeignApp();
-  }
-
-  /**
-   * RabbitMQ message callback for incoming Worker decisions. Decodes and submits the
-   * decision, then acknowledges the message; an accepted decision runs on the ordered
-   * dispatcher (with an optional start-jitter park for a HOT), while a refused COOL is
-   * applied inline before the ack.
-   *
-   * <p>If processing fails with an exception, the message is negatively acknowledged with
-   * {@code requeue=false} to prevent poison-message loops. Neither decision type is
-   * re-driven — the Worker sends each one exactly once (design decisions: sync messages) — so
-   * a lost HOT leaves the entry at its normal TTL and a lost COOL stays bounded by the hot
-   * hard TTL.
-   *
-   * @param channel the AMQP channel used for ack/nack operations
-   * @param msg     the raw AMQP message containing the Worker decision; must not be null
-   * @throws IOException if the channel's basicAck or basicNack call fails
+   * @param channel the AMQP channel used for ack/nack
+   * @param msg     the inbound AMQP message
+   * @throws IOException if {@code basicAck} or {@code basicNack} fails
    */
   public void onMessage(Channel channel, Message msg) throws IOException {
     AmqpConsume.ackOrNack(channel, msg, log, "Worker message", () -> process(msg));
   }
 
+  /** Returns the cumulative count of foreign-application Worker decisions dropped since startup. */
+  public long foreignAppDrops() {
+    return isolation.drops();
+  }
+
+  /** Returns the most recently dropped foreign sender app name, or {@code null} if none. */
+  public @Nullable String lastForeignApp() {
+    return isolation.lastForeignApp();
+  }
+
+  /** Returns the cumulative count of COOL decisions refused by the dispatcher and revoked inline. */
+  public long coolDispatchRejections() {
+    return coolDispatchRejections.sum();
+  }
+
   /**
-   * Decodes the raw AMQP message into a {@link WorkerDecision} and submits it to the ordered
-   * dispatcher.
-   *
-   * @param msg the raw AMQP message; may have null or empty body, in which case the message
-   *            is dropped without scheduling a task
+   * Filters, decodes, and submits one AMQP decision message to {@link #dispatcher}, falling back
+   * to {@link #onDispatchRejected} if refused.
    */
   private void process(Message msg) {
-    MessageProperties props = msg.getMessageProperties();
     if (isolation.dropIfForeign(msg, log, "worker decision")) {
       return;
     }
-
-    Object typeHeader = props.getHeader(HEADER_TYPE);
-    WorkerType type = WorkerType.parse(typeHeader);
-    if (type == null) {
-      AmqpMessageReader.logUnknownType(log, "worker decision", typeHeader, msg);
-      return;
-    }
-
-    WorkerDecision decision = WorkerDecision.from(msg, type);
+    WorkerDecision decision = WorkerDecision.from(msg);
     if (decision == null) {
-      log.debug("Received worker message with an empty body, an invalid key or a non-positive decision version");
       return;
     }
-    boolean accepted = type.isControl()
+    DecisionKind kind = decision.kind();
+    boolean accepted = kind.isControl()
       ? dispatcher.submitControl(decision.cacheKey(), decision)
-      : dispatcher.submit(decision.cacheKey(), decision, 1, type.needsJitter());
+      : dispatcher.submit(decision.cacheKey(), decision, 1, kind.needsJitter());
     if (!accepted) {
       onDispatchRejected(decision);
     }
   }
 
   /**
-   * Runs one granted batch: the queued decisions of one key, applied in arrival order. A run
-   * of consecutive COOL decisions is reduced to the decision that survives the version guard;
-   * covered decisions are reported as skipped and the policy sees only the effective ones. A
-   * failing decision is logged and does not strand the rest of the batch.
+   * Applies one granted per-key decision batch, folding same-node runs down to at most one COOL
+   * followed by one HOT so redundant prewarms and duplicate cool callbacks are avoided.
    *
-   * @param batch the granted batch, in submission order
+   * <p>Cross-node or anonymous batches are non-comparable and execute verbatim in arrival order.
+   * Stale candidates report {@link DecisionSkipReason#VERSION_STALE}; superseded kept candidates
+   * report {@link DecisionSkipReason#COVERED_BY_NEWER_DECISION}.
+   *
+   * @param batch non-empty list of decisions for one key in arrival order
    */
   private void dispatchBatch(List<WorkerDecision> batch) {
-    int index = 0;
-    while (index < batch.size()) {
-      WorkerDecision decision = batch.get(index);
-      if (decision.type() == WorkerType.HOT) {
-        invokeHot(decision);
-        index++;
-        continue;
-      }
-
-      int end = index + 1;
-      while (end < batch.size() && batch.get(end).type() == WorkerType.COOL) {
-        end++;
-      }
-      if (end == index + 1) {
-        invokeCool(decision);
-      } else {
-        try {
-          for (WorkerDecision effective : context.reduceCool(batch.subList(index, end))) {
-            invokeCool(effective);
-          }
-        } catch (Exception e) {
-          logDispatchFailure(decision, e);
-        }
-      }
-      index = end;
+    if (batch.size() == 1) {
+      applyDecision(batch.get(0));
+      return;
     }
-  }
-
-  private void invokeHot(WorkerDecision decision) {
-    try {
-      HotAction prepared = context.resolveHot(decision);
-      HotAction action;
-      if (prepared instanceof HotAction.Skip) {
-        action = prepared;
-      } else {
-        HotValue candidate = ((HotAction.Promote) prepared).value();
-        try {
-          action = policy.hot(decision, candidate, context.view(decision.cacheKey()));
-        } catch (Exception e) {
-          logDispatchFailure(decision, e);
-          action = new HotAction.Skip(HotSkipReason.POLICY_FAILED);
-        }
-        if (action == null) {
-          warnNullAction(decision, "hot");
-          action = new HotAction.Skip(HotSkipReason.POLICY_FAILED);
-        }
+    if (!isSameIncarnationBatch(batch)) {
+      for (WorkerDecision decision : batch) {
+        applyDecision(decision);
       }
-      context.settleHot(decision, action);
-    } catch (Exception e) {
-      logDispatchFailure(decision, e);
-    }
-  }
-
-  private void invokeCool(WorkerDecision decision) {
-    try {
-      CoolSkipReason precheck = context.preCheckCool(decision);
-      if (precheck != null) {
-        context.settleCool(decision, new CoolAction.Skip(precheck));
-        return;
-      }
-      EntryView current = context.view(decision.cacheKey());
-      CoolAction action;
-      try {
-        action = policy.cool(decision, current);
-      } catch (Exception e) {
-        logDispatchFailure(decision, e);
-        action = new CoolAction.Skip(CoolSkipReason.POLICY_FAILED);
-      }
-      if (action == null) {
-        warnNullAction(decision, "cool");
-        action = new CoolAction.Skip(CoolSkipReason.POLICY_FAILED);
-      }
-      context.settleCool(decision, action);
-    } catch (Exception e) {
-      logDispatchFailure(decision, e);
-    }
-  }
-
-  private void warnNullAction(WorkerDecision decision, String method) {
-    log.warn("WorkerPolicy.{} returned null; settling as POLICY_FAILED: key={}", method, decision.cacheKey());
-  }
-
-  private void logDispatchFailure(WorkerDecision decision, Exception e) {
-    log.warn(
-      "Error processing WorkerDecision: cacheKey={}, type={}, decisionVersion={}, nodeId={}, epoch={}",
-      decision.cacheKey(),
-      decision.type(),
-      decision.stamp().decisionVersion(),
-      decision.stamp().decisionNodeId(),
-      decision.stamp().decisionEpoch(),
-      e
-    );
-  }
-
-  /**
-   * Cumulative COOL decisions the per-key ordered dispatcher refused; each was re-applied
-   * inline on the consumer thread. Monotonic; safe to read from any thread.
-   *
-   * @return the total dispatcher-refused COOL decisions since startup
-   */
-  public long coolDispatchRejections() {
-    return coolDispatchRejections.sum();
-  }
-
-  /**
-   * Fallback for a decision the ordered dispatcher refused at submit time (per-key queue
-   * full or dispatcher closed).
-   *
-   * <p>A COOL is applied inline by the framework context (a pure in-memory compute with no
-   * hooks): the Worker sends each decision once, and a dropped COOL pins the entry at its HOT
-   * TTL until hard expiry. A refused HOT stays a DEBUG drop — inlining it would run the
-   * cluster-loader load on the AMQP consumer thread.
-   *
-   * @param decision the decision whose dispatcher submission was refused
-   */
-  private void onDispatchRejected(WorkerDecision decision) {
-    if (decision.type() != WorkerType.COOL) {
-      log.debug(
-        "Worker decision dispatcher refused a HOT for key={} (dropped: nothing re-sends it)",
-        decision.cacheKey()
-      );
       return;
     }
 
+    // Fold against the same liveness rule grant() applies so a dead incarnation's stamp cannot
+    // suppress decisions from the replacement incarnation.
+    DecisionStamp effective = heatDirectory.liveStampOf(batch.get(0).cacheKey());
+    WorkerDecision cool = null;
+    WorkerDecision hot = null;
+    for (WorkerDecision candidate : batch) {
+      if (VersionGuard.shouldSkipForWorker(effective, candidate.stamp())) {
+        notifySkipped(candidate, DecisionSkipReason.VERSION_STALE);
+        continue;
+      }
+      if (candidate.isHot()) {
+        if (hot != null) {
+          notifySkipped(hot, DecisionSkipReason.COVERED_BY_NEWER_DECISION);
+        }
+        hot = candidate;
+      } else {
+        // A newer COOL supersedes both any preceding HOT and any earlier COOL in this batch.
+        if (hot != null) {
+          notifySkipped(hot, DecisionSkipReason.COVERED_BY_NEWER_DECISION);
+          hot = null;
+        }
+        if (cool != null) {
+          notifySkipped(cool, DecisionSkipReason.COVERED_BY_NEWER_DECISION);
+        }
+        cool = candidate;
+      }
+      effective = candidate.stamp();
+    }
+    if (cool != null) {
+      applyDecision(cool);
+    }
+    if (hot != null) {
+      applyDecision(hot);
+    }
+  }
+
+  /**
+   * Applies one HOT or COOL decision to {@link #heatDirectory}, invokes {@link #handler}, and
+   * notifies listeners in strict causal order so a replaced dead lease's {@code onCool} always
+   * precedes the new lease's {@code onHot}.
+   *
+   * @param decision the decision to apply
+   */
+  private void applyDecision(WorkerDecision decision) {
+    try {
+      HeatDirectory.LeaseOutcome result = decision.isHot()
+        ? heatDirectory.grant(decision)
+        : heatDirectory.revoke(decision);
+      if (!result.applied()) {
+        notifySkipped(decision, result.skipReason());
+        return;
+      }
+
+      HeatLease endedLease = result.endedLease();
+      HeatLease.EndReason endReason = result.endReason();
+      if (decision.isHot()) {
+        // End any replaced dead lease first so its onCool never wipes state created by onHot.
+        if (endedLease != null && endReason != null) {
+          notifyCool(endedLease, endReason);
+        }
+
+        invokeHandler(decision, result.newlyHot());
+        if (!listeners.isEmpty()) {
+          fireListeners("onHot", decision.cacheKey(), listener -> listener.onHot(decision, result.newlyHot()));
+        }
+      } else {
+        invokeHandler(decision, false);
+        if (endedLease != null && endReason != null) {
+          notifyCool(endedLease, endReason);
+        }
+      }
+    } catch (Exception e) {
+      log.warn("Error processing WorkerDecision: {}", decision, e);
+    }
+  }
+
+  /**
+   * Consumer-thread fallback when {@link #dispatcher} refuses a decision: revokes a COOL lease
+   * inline and cancels keep-warm without running user hooks; drops refused HOT decisions so
+   * prewarm work never runs on the AMQP thread.
+   */
+  private void onDispatchRejected(WorkerDecision decision) {
+    if (decision.isHot()) {
+      return;
+    }
     coolDispatchRejections.increment();
-    log.debug("Worker decision dispatcher refused a COOL for key={}; applying inline", decision.cacheKey());
-    context.coolNow(decision);
+    if (heatDirectory.revoke(decision).endedLease() != null) {
+      // A COOL leaves the value resident but stops justifying background warming; cancelling keeps
+      // a scheduled task from reloading a key the control plane just classified as cold.
+      cancelColdRenewal(decision.cacheKey());
+    }
+  }
+
+  /** Cancels the key's renewal when the namespace policy no longer accepts it as cold. */
+  private void cancelColdRenewal(String key) {
+    if (warmScheduler != null) {
+      warmScheduler.cancelIfCold(key);
+    }
+  }
+
+  /**
+   * Returns {@code true} if every decision in {@code batch} originates from one Worker incarnation.
+   *
+   * <p>The epoch is part of the identity: after a restart the version counter restarts too, so a
+   * batch mixing both incarnations of one node carries two incomparable version spaces. Such a batch
+   * runs verbatim, leaving each decision to the lease table's incarnation and version guards.
+   */
+  private static boolean isSameIncarnationBatch(List<WorkerDecision> batch) {
+    DecisionStamp first = batch.get(0).stamp();
+    String nodeId = first.decisionNodeId();
+    if (nodeId == null || nodeId.isBlank()) {
+      return false;
+    }
+    long epoch = first.decisionEpoch();
+    for (int i = 1; i < batch.size(); i++) {
+      DecisionStamp stamp = batch.get(i).stamp();
+      if (!nodeId.equals(stamp.decisionNodeId()) || stamp.decisionEpoch() != epoch) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  /**
+   * Invokes {@link #handler} after the lease transition, containing failures so registered
+   * listeners still run. The context is built from the post-transition lease, so a handler always
+   * observes the HOT or COOL state that the decision just established; a throwing handler is
+   * logged and swallowed rather than aborting notification of the other listeners.
+   */
+  private void invokeHandler(WorkerDecision decision, boolean newlyHot) {
+    try {
+      HotKeyContext context = contexts.create(decision, newlyHot);
+      if (decision.isHot()) {
+        handler.onHot(context);
+      } else {
+        handler.onCool(context);
+      }
+    } catch (RuntimeException e) {
+      log.warn("HotKeyHandler.{} failed: {}", decision.isHot() ? "onHot" : "onCool", decision, e);
+    }
+  }
+
+  /** Reports a skipped or folded-away decision to registered listeners. */
+  private void notifySkipped(WorkerDecision decision, @Nullable DecisionSkipReason reason) {
+    if (reason == null || listeners.isEmpty()) {
+      return;
+    }
+    if (decision.isHot()) {
+      fireListeners("onHotSkipped", decision.cacheKey(), listener -> listener.onHotSkipped(decision, reason));
+    } else {
+      fireListeners("onCoolSkipped", decision.cacheKey(), listener -> listener.onCoolSkipped(decision, reason));
+    }
+  }
+
+  /** Notifies registered listeners that a heat lease ended. */
+  private void notifyCool(HeatLease lease, HeatLease.EndReason reason) {
+    if (listeners.isEmpty()) {
+      return;
+    }
+    fireListeners("onCool", lease.key(), listener -> listener.onCool(lease, reason));
+  }
+
+  /** Dispatches a listener callback safely through {@link DecisionPlaneSupport#fireHooks}. */
+  private void fireListeners(String hookName, String key, Consumer<HotKeyListener> callback) {
+    DecisionPlaneSupport.fireHooks(listeners, "HotKeyListener", hookName, key, callback, log);
   }
 }

@@ -17,8 +17,8 @@ package io.github.hyshmily.zeta.tests;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-import io.github.hyshmily.zeta.sharding.HealthView;
 import io.github.hyshmily.zeta.sharding.ClusterHealth;
+import io.github.hyshmily.zeta.sharding.HealthView;
 import io.github.hyshmily.zeta.sync.worker.WorkerHeartbeatMessage;
 import io.github.hyshmily.zeta.util.TimeSource;
 import org.junit.jupiter.api.AfterEach;

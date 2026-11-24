@@ -34,9 +34,10 @@ import java.util.List;
  * reaches {@link #onSkipped} with {@link SyncSkipReason#COVERED_BY_NEWER_EVENT}. A policy that
  * refuses or throws is settled as a skip.
  *
- * <p>Hooks run only on the cache-sync ordered dispatcher, never on the AMQP consumer
- * thread. A message the dispatcher refuses at submit time is applied by the no-hook
- * rejection fallback, so a slow hook can never delay the broker ack.
+ * <p>Hooks run on the cache-sync ordered dispatcher, or on the dedicated refresh executor for
+ * the settle/write of a peer REFRESH; never on the AMQP consumer thread. A message the dispatcher
+ * refuses at submit time is applied by the no-hook rejection fallback, so a slow hook can never
+ * delay the broker ack.
  *
  * <p>All methods are {@code default} no-ops — implement only the ones you need.
  * Exceptions thrown by a hook are caught and logged; they never propagate.
@@ -53,12 +54,18 @@ public interface SyncHook {
 
   /**
    * Called after a peer value event was applied as a local invalidation because it had no
-   * writable value or the policy declined it.
+   * writable value or the policy declined it. The framework removed the resident at the event's
+   * version instead of writing a value.
    *
    * @param event  the value event that was degraded
-   * @param reason why the value was not written ({@code VALUE_NOT_FOUND},
-   *               {@code PAYLOAD_UNREADABLE}, {@code VALUE_DECLINED_BY_LOADER} or
-   *               {@code DEGRADED_TO_INVALIDATE})
+   * @param reason why the value was not written: {@code VALUE_NOT_FOUND} (the loader returned
+   *               nothing), {@code PAYLOAD_UNREADABLE} (a PUT body that did not decode),
+   *               {@code VALUE_DECLINED_BY_LOADER} (the loader's {@code isCacheable} refused),
+   *               {@code DEGRADED_TO_INVALIDATE} (the policy asked for local invalidation),
+   *               {@code ABSENT_NOT_PREWARMABLE} (a cold REFRESH the prewarm trigger refuses),
+   *               {@code TTL_NOT_PREWARMABLE} (no static TTL baseline for an absent entry),
+   *               {@code REFRESH_REJECTED} (the refresh executor was saturated) or
+   *               {@code REFRESH_FAILED} (the loader threw)
    */
   default void afterValueDegraded(SyncEvent event, SyncSkipReason reason) {}
 

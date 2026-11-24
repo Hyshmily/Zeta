@@ -16,134 +16,164 @@
 package io.github.hyshmily.zeta.sync.local;
 
 import com.fasterxml.jackson.annotation.JsonTypeInfo;
-import com.fasterxml.jackson.databind.DatabindContext;
 import com.fasterxml.jackson.databind.JavaType;
-import com.fasterxml.jackson.databind.JsonMappingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.ObjectReader;
+import com.fasterxml.jackson.databind.ObjectWriter;
 import com.fasterxml.jackson.databind.cfg.MapperConfig;
 import com.fasterxml.jackson.databind.json.JsonMapper;
-import com.fasterxml.jackson.databind.jsontype.BasicPolymorphicTypeValidator;
-import com.fasterxml.jackson.databind.jsontype.NamedType;
 import com.fasterxml.jackson.databind.jsontype.PolymorphicTypeValidator;
-import com.fasterxml.jackson.databind.jsontype.PolymorphicTypeValidator.Validity;
-import com.fasterxml.jackson.databind.jsontype.TypeIdResolver;
 import io.github.hyshmily.zeta.util.Internal;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.Serial;
-import java.util.ArrayList;
-import java.util.Collection;
-import java.util.EnumMap;
-import java.util.EnumSet;
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.Hashtable;
-import java.util.LinkedHashMap;
-import java.util.LinkedHashSet;
-import java.util.LinkedList;
-import java.util.List;
-import java.util.Map;
-import java.util.Properties;
-import java.util.Set;
-import java.util.TreeMap;
-import java.util.TreeSet;
+import java.util.*;
 import lombok.extern.slf4j.Slf4j;
 import org.jspecify.annotations.NonNull;
 import org.jspecify.annotations.Nullable;
 
 /**
- * The value-carrying {@code PUT} payload codec: one configured Jackson mapper for both
- * the outbound serialization and the inbound deserialization, with a bounded write buffer
- * so an oversized business value degrades to REFRESH without materializing beyond
- * {@code zeta.sync.put-max-bytes}.
+ * Value-carrying {@code PUT} payload codec using a single Jackson {@link ObjectMapper} for
+ * outbound serialization and inbound deserialization, paired with a bounded write buffer so
+ * oversized values degrade to REFRESH without allocating beyond {@code zeta.sync.put-max-bytes}.
  *
- * <p>Default typing is on for <b>every</b> type ({@code EVERYTHING} +
- * {@code WRAPPER_ARRAY}), so a final type such as {@code Long}, {@code BigDecimal} or
- * {@code byte[]} carries its type marker and round-trips as the exact runtime class the
- * writer stored. Deserialization enforces a polymorphic whitelist — JDK value types, JDK
- * {@link Collection}/{@link Map} implementations in {@code java.util} (other packages and the
- * legacy {@link Properties} and {@link Hashtable} containers are denied), arrays whose
- * component type the whitelist admits, {@code io.github.hyshmily.zeta.model.*} plus the
- * configured {@code zeta.sync.put-allowed-packages}; a business DTO outside it fails closed
- * and the receiver degrades to a versioned INVALIDATE.
+ * <p>Default typing ({@link ObjectMapper.DefaultTyping#NON_FINAL}) over an {@code Object} root type
+ * preserves runtime types across value classes such as {@code Long}, {@code BigDecimal},
+ * {@code Instant} and {@code byte[]}. Deserialization fails closed against a
+ * {@link PolymorphicTypeValidator} that admits an explicit set of JDK value and container classes,
+ * the {@code java.time}/{@code java.math} packages, {@code io.github.hyshmily.zeta.model.*}, arrays
+ * of admitted types, and configured {@code zeta.sync.put-allowed-packages}; a container is admitted
+ * only together with its generic arguments, so a type id cannot smuggle an unlisted element type
+ * through an allowed raw class. {@code java.lang} and {@code java.util} are never admitted as whole
+ * prefixes: those packages hold side-effecting types such as {@code Thread},
+ * {@code ProcessBuilder}, {@code Timer} and {@code FileHandler} that a compromised broker writer
+ * must not be able to name.
  *
- * <p>A JDK collection implementation that the receiver cannot instantiate (an immutable
- * {@code List.of} family, a {@code Collections} view, {@code Arrays.asList}) is written under
- * the type id of a standard {@code ArrayList}/{@code HashSet}/{@code HashMap}, so it
- * round-trips without widening the receiver's allowlist. An {@code EnumSet}/{@code EnumMap}
- * cannot be reconstructed that way (the element type would be lost), so a root value of either
- * degrades to REFRESH. A root value the receiver would deny — the legacy containers or a
- * {@code Collection}/{@code Map} outside {@code java.util} — is not serialized at all:
- * {@link #encode} returns {@code null} and the write degrades to REFRESH.
- *
- * <p>The root-container check is shallow. An {@code EnumSet}/{@code EnumMap} or a non-{@code
- * java.util} container nested inside a DTO is not detected on the writer; the receiver applies the
- * same allowlist to every nested type, fails closed, and degrades that PUT to a versioned
- * INVALIDATE. The value still converges through the peer's loader.
+ * <p>Root JDK immutable collections and views ({@code List.of}, {@code Set.of},
+ * {@code Arrays.asList}, {@code Collections} wrappers) are normalized into standard mutable
+ * containers prior to encoding so receivers can instantiate them; nested immutable collections
+ * inside DTOs are not normalized and may degrade to INVALIDATE if non-instantiable.
  */
 @Slf4j
 @Internal
 public final class PutPayloadCodec {
 
-  private final ObjectMapper mapper;
+  /** Initial byte-buffer cap so small payloads do not pre-allocate {@link #maxBytes}. */
+  private static final int INITIAL_BUFFER_SIZE = 1024;
+
+  /**
+   * Exact JDK value and container classes admitted without opening all of {@code java.lang} or
+   * {@code java.util}. Anything else in those packages — a thread, a process builder, a logging
+   * handler, a timer — stays unreachable from a payload type id.
+   */
+  private static final Set<String> DEFAULT_ALLOWED_CLASSES = Set.of(
+    "java.lang.Object",
+    "java.lang.String",
+    "java.lang.Boolean",
+    "java.lang.Byte",
+    "java.lang.Short",
+    "java.lang.Integer",
+    "java.lang.Long",
+    "java.lang.Float",
+    "java.lang.Double",
+    "java.lang.Character",
+    "java.lang.StringBuilder",
+    "java.lang.StringBuffer",
+    "java.util.ArrayList",
+    "java.util.LinkedList",
+    "java.util.HashSet",
+    "java.util.LinkedHashSet",
+    "java.util.TreeSet",
+    "java.util.HashMap",
+    "java.util.LinkedHashMap",
+    "java.util.TreeMap",
+    "java.util.UUID",
+    "java.util.Date",
+    "java.util.Currency",
+    "java.util.Locale",
+    "java.util.BitSet",
+    "java.util.Optional",
+    // JDK collection views that a DTO field can carry on the wire; Jackson maps each back to a
+    // standard mutable container through its collection fallbacks.
+    "java.util.Arrays$ArrayList",
+    "java.util.Collections$EmptyList",
+    "java.util.Collections$EmptySet",
+    "java.util.Collections$EmptyMap",
+    "java.util.Collections$SingletonList",
+    "java.util.Collections$SingletonSet",
+    "java.util.Collections$SingletonMap",
+    "java.util.Collections$UnmodifiableList",
+    "java.util.Collections$UnmodifiableRandomAccessList",
+    "java.util.Collections$UnmodifiableSet",
+    "java.util.Collections$UnmodifiableMap",
+    "java.util.ImmutableCollections$List12",
+    "java.util.ImmutableCollections$ListN",
+    "java.util.ImmutableCollections$SubList",
+    "java.util.ImmutableCollections$Set12",
+    "java.util.ImmutableCollections$SetN",
+    "java.util.ImmutableCollections$Map1",
+    "java.util.ImmutableCollections$MapN"
+  );
+
+  /** Package prefixes always admitted by the polymorphic type validator. */
+  private static final List<String> DEFAULT_ALLOWED_PREFIXES = List.of(
+    "java.time.",
+    "java.math.",
+    "io.github.hyshmily.zeta.model."
+  );
+
+  private final ObjectWriter rootWriter;
+  private final ObjectReader rootReader;
   private final int maxBytes;
 
   /**
-   * Creates the codec from the sync configuration.
+   * Creates a codec from sync configuration properties.
    *
-   * @param properties the sync properties carrying the payload cap and allowlist
+   * @param properties sync properties supplying the payload size cap and package allowlist
+   * @throws NullPointerException if {@code properties} is {@code null}
    */
   public PutPayloadCodec(CacheSyncProperties properties) {
-    this(properties.getPutMaxBytes(), properties.getPutAllowedPackages());
+    this(
+      Objects.requireNonNull(properties, "properties must not be null").getPutMaxBytes(),
+      properties.getPutAllowedPackages()
+    );
   }
 
   /**
-   * Creates the codec from explicit settings.
+   * Creates a codec from explicit size-cap and allowlist settings.
    *
-   * @param maxBytes       maximum serialized payload size; non-positive disables PUT payloads
-   * @param allowedPackages extra package prefixes admitted by the polymorphic validator; a
-   *                        trailing {@code .} is added when absent
+   * @param maxBytes        maximum serialized payload size in bytes; non-positive disables PUT payloads
+   * @param allowedPackages extra package prefixes admitted during polymorphic deserialization
+   *                        (a trailing {@code '.'} is appended when absent); may be {@code null}
    */
   public PutPayloadCodec(int maxBytes, @Nullable List<String> allowedPackages) {
     this.maxBytes = maxBytes;
-    this.mapper = buildMapper(allowedPackages);
+    ObjectMapper mapper = buildMapper(allowedPackages);
+    // Both ends declare Object.class so default typing applies to the root value: a final runtime
+    // type (Long, Instant, byte[], a record) is otherwise written without its type id.
+    this.rootWriter = mapper.writerFor(Object.class);
+    this.rootReader = mapper.readerFor(Object.class);
   }
 
   /**
-   * Serializes one value into an immutable payload, or returns {@code null} when it must
-   * degrade to a value-less REFRESH (not serializable, or above the configured cap).
+   * Serializes {@code value} into an immutable byte payload bounded by {@link #maxBytes}, or
+   * returns {@code null} when the value cannot be serialized or exceeds the size cap (signaling
+   * callers to degrade to a value-less REFRESH).
    *
-   * @param value the freshly written value; {@code null} yields {@code null}
-   * @return the payload bytes, or {@code null}
+   * @param value the freshly written cache value, or {@code null}
+   * @return the serialized payload bytes, or {@code null} on skip/failure
    */
   public byte@Nullable [] encode(@Nullable Object value) {
     if (value == null || maxBytes <= 0) {
       return null;
     }
-    if (cannotCarryContainer(value)) {
-      log.debug(
-        "Put payload root {} is not a receiver-instantiable java.util container, degrading to REFRESH",
-        value.getClass().getName()
-      );
-      return null;
-    }
-    // byte[] travels Base64-encoded (4/3× expansion), so the exact pre-encoding
-    // limit is 3/4 of the cap; a String's UTF-8 form is never shorter than its
-    // char count, so that count is the conservative bound.
-    if (value instanceof byte[] bytes && bytes.length > (maxBytes * 3L) / 4L) {
-      log.debug("Put payload byte[] length {} exceeds put-max-bytes {}, degrading to REFRESH", bytes.length, maxBytes);
-      return null;
-    }
-    if (value instanceof String text && text.length() > maxBytes) {
-      log.debug("Put payload String length {} exceeds put-max-bytes {}, degrading to REFRESH", text.length(), maxBytes);
-      return null;
-    }
-
-    BoundedByteArrayOutputStream buffer = new BoundedByteArrayOutputStream(maxBytes);
+    BoundedBuffer buffer = new BoundedBuffer(maxBytes);
     try {
-      mapper.writeValue(buffer, value);
+      rootWriter.writeValue(buffer, normalizeRoot(value));
       return buffer.toByteArray();
     } catch (RuntimeException | IOException e) {
+      // Check buffer.exceeded rather than catching PayloadTooLargeException directly because
+      // Jackson may wrap OutputStream failures in a JsonMappingException.
       if (buffer.exceeded) {
         log.debug("Put payload exceeds put-max-bytes {}, degrading to REFRESH", maxBytes);
       } else {
@@ -154,265 +184,185 @@ public final class PutPayloadCodec {
   }
 
   /**
-   * Deserializes a received PUT payload into its original runtime type.
+   * Deserializes a received PUT payload back into its original runtime type.
    *
-   * @param payload the raw AMQP body; {@code null}/empty yields {@code null}
-   * @return the value, or {@code null} when it cannot be read
+   * @param payload the raw AMQP body bytes; {@code null} or empty returns {@code null}
+   * @return the decoded value, or {@code null} if deserialization or type validation fails
    */
   public @Nullable Object decode(byte@Nullable [] payload) {
     if (payload == null || payload.length == 0) {
       return null;
     }
     try {
-      return mapper.readValue(payload, Object.class);
+      return rootReader.readValue(payload);
     } catch (RuntimeException | IOException e) {
       log.debug("Put payload value deserialization failed, degrading to INVALIDATE: {}", e.toString());
       return null;
     }
   }
 
-  @SuppressWarnings("java:S5135")
+  /**
+   * Copies non-standard root collection/map views into standard mutable containers that receivers
+   * can reconstruct; already-standard containers pass through unchanged.
+   *
+   * <p>The comparison is exact on purpose. A framework map subclass or a double-brace initializer
+   * is neither admitted by the type validator nor instantiable by it, so encoding it would degrade
+   * the peer to INVALIDATE; normalizing every non-standard root keeps the PUT.
+   */
+  private static Object normalizeRoot(Object value) {
+    Class<?> type = value.getClass();
+    if (value instanceof List<?> list && type != ArrayList.class && type != LinkedList.class) {
+      return new ArrayList<>(list);
+    }
+    if (value instanceof Set<?> set && type != HashSet.class && type != LinkedHashSet.class && type != TreeSet.class) {
+      return new LinkedHashSet<>(set);
+    }
+    if (
+      value instanceof Map<?, ?> map && type != HashMap.class && type != LinkedHashMap.class && type != TreeMap.class
+    ) {
+      return new LinkedHashMap<>(map);
+    }
+    return value;
+  }
+
+  /**
+   * Builds a Jackson {@link ObjectMapper} with fail-closed polymorphic typing enabled. The default
+   * package set is always admitted; configured packages are normalized with a trailing dot so a
+   * prefix cannot admit a sibling package by accident. Every type id is then checked by
+   * {@link SafePolymorphicTypeValidator} before Jackson loads a class, so an untrusted PUT payload
+   * cannot instantiate an arbitrary type on the receiving node.
+   *
+   * @param allowedPackages additional package prefixes from configuration, or {@code null}
+   * @return the mapper shared by encoding and decoding
+   */
   private static ObjectMapper buildMapper(@Nullable List<String> allowedPackages) {
-    BasicPolymorphicTypeValidator.Builder ptv = BasicPolymorphicTypeValidator.builder()
-      .allowIfSubType(String.class)
-      .allowIfSubType(StringBuilder.class)
-      .allowIfSubType(StringBuffer.class)
-      .allowIfSubType(Byte.class)
-      .allowIfSubType(Short.class)
-      .allowIfSubType(Integer.class)
-      .allowIfSubType(Long.class)
-      .allowIfSubType(Float.class)
-      .allowIfSubType(Double.class)
-      .allowIfSubType(Boolean.class)
-      .allowIfSubType(Character.class)
-      .allowIfSubType(java.util.Optional.class)
-      .allowIfSubType(java.util.UUID.class)
-      .allowIfSubType(java.util.Date.class)
-      .allowIfSubType(Collection.class)
-      .allowIfSubType(Map.class)
-      .allowIfSubType("java.time.")
-      .allowIfSubType("java.math.")
-      .allowIfSubType("io.github.hyshmily.zeta.model.")
-      .allowIfSubTypeIsArray();
+    List<String> prefixes = new ArrayList<>(DEFAULT_ALLOWED_PREFIXES);
     if (allowedPackages != null) {
       for (String pkg : allowedPackages) {
         if (pkg != null && !pkg.isBlank()) {
-          String prefix = pkg.trim();
-          ptv.allowIfSubType(prefix.endsWith(".") ? prefix : prefix + ".");
+          String prefix = pkg.strip();
+          // Ensure a trailing dot so "com.foo" does not accidentally admit "com.foobar".
+          prefixes.add(prefix.endsWith(".") ? prefix : prefix + ".");
         }
       }
     }
-    ObjectMapper.DefaultTypeResolverBuilder typing = new NormalizingTypeResolverBuilder(
-      new PayloadTypeValidator(ptv.build())
-    );
-    typing.init(JsonTypeInfo.Id.CLASS, null);
-    typing.inclusion(JsonTypeInfo.As.WRAPPER_ARRAY);
-
-    return JsonMapper.builder().findAndAddModules().setDefaultTyping(typing).build();
+    return JsonMapper.builder()
+      .findAndAddModules()
+      .build()
+      .activateDefaultTyping(
+        new SafePolymorphicTypeValidator(List.copyOf(prefixes)),
+        ObjectMapper.DefaultTyping.NON_FINAL,
+        JsonTypeInfo.As.WRAPPER_ARRAY
+      );
   }
 
   /**
-   * Whether the receiver would deny this root container: the legacy types and any
-   * {@link Collection}/{@link Map} outside {@code java.util}. Serializing it would only spend
-   * the payload before the receiver degrades the PUT to an INVALIDATE.
+   * Fail-closed validator that judges every resolved type — raw class, array component and generic
+   * arguments — and admits {@code java.lang}/{@code java.util} only through the explicit
+   * value/container set.
+   *
+   * <p>{@code validateSubClassName} receives the type id truncated at the first {@code '<'}, and
+   * Jackson only consults {@code validateSubType} when that name check is not a plain {@code ALLOWED}.
+   * An admitted raw name therefore answers {@link Validity#INDETERMINATE}, which makes the
+   * constructed {@link JavaType} — type arguments included — pass through
+   * {@code validateSubType} before any value is bound. Answering {@code ALLOWED} there would leave
+   * {@code ArrayList<com.example.Gadget>} unjudged, because the truncated name alone cannot show its
+   * arguments.
    */
-  private static boolean cannotCarryContainer(Object value) {
-    if (value instanceof Properties || value instanceof Hashtable) {
-      return true;
-    }
-    if (value instanceof EnumSet<?> || value instanceof EnumMap<?, ?>) {
-      // The runtime classes are package-private / have no no-arg constructor, and normalizing
-      // to a HashSet/HashMap would drop the enum element type.
-      return true;
-    }
-    return (
-      (value instanceof Collection<?> || value instanceof Map<?, ?>) &&
-      !"java.util".equals(value.getClass().getPackageName())
-    );
-  }
+  private static final class SafePolymorphicTypeValidator extends PolymorphicTypeValidator.Base {
 
-  /**
-   * Maps a {@code java.util} collection implementation the receiver cannot instantiate to a
-   * standard mutable container. Other packages and the denied {@link Properties}/{@link Hashtable}
-   * keep their own id so the existing type rules still apply.
-   */
-  private static @Nullable String normalizedContainerName(Object value) {
-    Class<?> type = value.getClass();
-    if (!"java.util".equals(type.getPackageName()) || value instanceof Properties || value instanceof Hashtable) {
-      return null;
-    }
-    if (value instanceof List<?> && !(value instanceof ArrayList || value instanceof LinkedList)) {
-      return ArrayList.class.getName();
-    }
-    if (
-      value instanceof Set<?> &&
-      !(value instanceof HashSet ||
-        value instanceof LinkedHashSet ||
-        value instanceof TreeSet ||
-        value instanceof EnumSet)
-    ) {
-      return HashSet.class.getName();
-    }
-    if (
-      value instanceof Map<?, ?> &&
-      !(value instanceof HashMap ||
-        value instanceof LinkedHashMap ||
-        value instanceof TreeMap ||
-        value instanceof EnumMap)
-    ) {
-      return HashMap.class.getName();
-    }
-    return null;
-  }
+    private static final long serialVersionUID = 1L;
 
-  /**
-   * Installs the normalizing resolver on the serialization side only; deserialization keeps
-   * the standard class-name resolver, so a wire id is gated by the same polymorphic validator
-   * as before. {@code NON_FINAL} is only the superclass's applicability marker: {@link #useForType}
-   * decides every non-primitive type, including the final value types that
-   * {@code DefaultTyping.EVERYTHING} used to cover.
-   */
-  private static final class NormalizingTypeResolverBuilder extends ObjectMapper.DefaultTypeResolverBuilder {
+    private final List<String> allowedPrefixes;
 
-    private NormalizingTypeResolverBuilder(PolymorphicTypeValidator subtypeValidator) {
-      super(ObjectMapper.DefaultTyping.NON_FINAL, subtypeValidator);
+    private SafePolymorphicTypeValidator(List<String> allowedPrefixes) {
+      this.allowedPrefixes = allowedPrefixes;
+    }
+
+    @Override
+    public Validity validateSubClassName(MapperConfig<?> config, JavaType baseType, String subClassName) {
+      return isAllowedTypeName(subClassName) ? Validity.INDETERMINATE : Validity.DENIED;
+    }
+
+    @Override
+    public Validity validateSubType(MapperConfig<?> config, JavaType baseType, JavaType subType) {
+      return isAllowedJavaType(subType) ? Validity.ALLOWED : Validity.DENIED;
     }
 
     /**
-     * Default typing applies to every non-primitive value, so a final {@code Long},
-     * {@code BigDecimal} or {@code byte[]} still carries its type marker on the wire.
+     * Whether one resolved type and everything it is parameterized by is admitted.
      *
-     * @param type the declared type
-     * @return {@code true} unless the type is primitive
+     * @param type the type to judge
+     * @return {@code true} when the raw class, every generic argument and every array component admit
      */
-    @Override
-    public boolean useForType(JavaType type) {
-      return !type.isPrimitive();
-    }
-
-    @Override
-    protected TypeIdResolver idResolver(
-      MapperConfig<?> config,
-      JavaType baseType,
-      PolymorphicTypeValidator subtypeValidator,
-      Collection<NamedType> subtypes,
-      boolean forSer,
-      boolean forDeser
-    ) {
-      TypeIdResolver delegate = super.idResolver(config, baseType, subtypeValidator, subtypes, forSer, forDeser);
-      return forSer ? new NormalizingIdResolver(delegate) : delegate;
-    }
-  }
-
-  /** Delegates every resolver operation; only the two outbound id methods are normalized. */
-  private static final class NormalizingIdResolver implements TypeIdResolver {
-
-    private final TypeIdResolver delegate;
-
-    private NormalizingIdResolver(TypeIdResolver delegate) {
-      this.delegate = delegate;
-    }
-
-    @Override
-    public void init(JavaType baseType) {
-      delegate.init(baseType);
-    }
-
-    @Override
-    public String idFromValue(Object value) {
-      String normalized = value == null ? null : normalizedContainerName(value);
-      return normalized != null ? normalized : delegate.idFromValue(value);
-    }
-
-    @Override
-    public String idFromValueAndType(Object value, Class<?> suggestedType) {
-      String normalized = value == null ? null : normalizedContainerName(value);
-      return normalized != null ? normalized : delegate.idFromValueAndType(value, suggestedType);
-    }
-
-    @Override
-    public String idFromBaseType() {
-      return delegate.idFromBaseType();
-    }
-
-    @Override
-    public JavaType typeFromId(DatabindContext context, String id) throws IOException {
-      return delegate.typeFromId(context, id);
-    }
-
-    @Override
-    public String getDescForKnownTypeIds() {
-      return delegate.getDescForKnownTypeIds();
-    }
-
-    @Override
-    public JsonTypeInfo.Id getMechanism() {
-      return delegate.getMechanism();
-    }
-  }
-
-  /**
-   * Denies the legacy {@link Properties} and {@link Hashtable} containers by name, and keeps
-   * every allowlisted name {@link Validity#INDETERMINATE} so the resolved class is always
-   * checked. {@link #validateSubType} then denies those containers, any
-   * {@link Collection}/{@link Map} implementation outside {@code java.util}, and every class
-   * the allowlist does not admit; a plain {@code Map}/{@code Collection} rule would otherwise
-   * admit every implementation on the classpath.
-   */
-  private static final class PayloadTypeValidator extends PolymorphicTypeValidator.Base {
-
-    private final PolymorphicTypeValidator delegate;
-
-    private PayloadTypeValidator(PolymorphicTypeValidator delegate) {
-      this.delegate = delegate;
-    }
-
-    @Override
-    public Validity validateSubClassName(MapperConfig<?> config, JavaType baseType, String subClassName)
-      throws JsonMappingException {
-      if (Properties.class.getName().equals(subClassName) || Hashtable.class.getName().equals(subClassName)) {
-        return Validity.DENIED;
+    private boolean isAllowedJavaType(JavaType type) {
+      // Primitive components of int[]/byte[] and friends have no class name in the allowlist.
+      if (type.isPrimitive()) {
+        return true;
       }
-      return delegate.validateSubClassName(config, baseType, subClassName) == Validity.DENIED
-        ? Validity.DENIED
-        : Validity.INDETERMINATE;
-    }
-
-    @Override
-    public Validity validateSubType(MapperConfig<?> config, JavaType baseType, JavaType subType)
-      throws JsonMappingException {
-      // An array's component type is the loadable class: validate it as if it were the
-      // sub-type, or allowIfSubTypeIsArray() would admit an array of any classpath type.
-      JavaType target = subType;
-      while (target.isArrayType()) {
-        JavaType content = target.getContentType();
-        if (content == null) {
-          return Validity.DENIED;
+      // An array's raw class name is its JVM descriptor ("[Ljava.lang.String;"), which the scalar
+      // set never holds; the component type is what the name rule judges.
+      if (type.isArrayType()) {
+        JavaType component = type.getContentType();
+        return component != null && isAllowedJavaType(component);
+      }
+      if (!isAllowedScalarName(type.getRawClass().getName())) {
+        return false;
+      }
+      for (JavaType parameter : type.getBindings().getTypeParameters()) {
+        if (!isAllowedJavaType(parameter)) {
+          return false;
         }
-        target = content;
       }
-      Class<?> raw = target.getRawClass();
-      if (raw.isPrimitive() || raw == Object.class) {
-        return Validity.ALLOWED;
-      }
-      if (raw == Properties.class || raw == Hashtable.class || isNonJdkContainer(raw)) {
-        return Validity.DENIED;
-      }
-      return delegate.validateSubClassName(config, baseType, raw.getName()) == Validity.ALLOWED
-        ? Validity.ALLOWED
-        : delegate.validateSubType(config, baseType, target);
+      return true;
     }
 
-    /** A Collection/Map implementation outside {@code java.util} is not a payload value type. */
-    private static boolean isNonJdkContainer(Class<?> type) {
-      return (
-        (Collection.class.isAssignableFrom(type) || Map.class.isAssignableFrom(type)) &&
-        !"java.util".equals(type.getPackageName())
-      );
+    /**
+     * Returns whether one type id names an admitted class after stripping array dimensions.
+     *
+     * @param typeName the JVM type id, optionally in array descriptor form
+     * @return {@code true} if the scalar type is admitted
+     */
+    private boolean isAllowedTypeName(String typeName) {
+      if (!typeName.startsWith("[")) {
+        return isAllowedScalarName(typeName);
+      }
+      int i = 0;
+      while (i < typeName.length() && typeName.charAt(i) == '[') {
+        i++;
+      }
+      if (i == typeName.length() - 1) {
+        return switch (typeName.charAt(i)) {
+          case 'Z', 'B', 'C', 'S', 'I', 'J', 'F', 'D' -> true;
+          default -> false;
+        };
+      }
+      if (i < typeName.length() - 2 && typeName.charAt(i) == 'L' && typeName.charAt(typeName.length() - 1) == ';') {
+        return isAllowedScalarName(typeName.substring(i + 1, typeName.length() - 1));
+      }
+      return false;
+    }
+
+    /**
+     * Returns whether one scalar class name is admitted by the explicit set or a configured prefix.
+     *
+     * @param className the binary class name
+     * @return {@code true} if admitted
+     */
+    private boolean isAllowedScalarName(String className) {
+      if (DEFAULT_ALLOWED_CLASSES.contains(className)) {
+        return true;
+      }
+      for (String prefix : allowedPrefixes) {
+        if (className.startsWith(prefix)) {
+          return true;
+        }
+      }
+      return false;
     }
   }
 
-  /** Stackless control-flow exception: the caller discards it and degrades to REFRESH. */
+  /** Stackless control-flow exception aborting Jackson encoding once {@link #maxBytes} is exceeded. */
   private static final class PayloadTooLargeException extends RuntimeException {
 
     @Serial
@@ -426,18 +376,16 @@ public final class PutPayloadCodec {
   }
 
   /**
-   * A byte-array output stream that refuses to grow past {@code limit}. Only
-   * {@link #write(int)} and {@link #write(byte[], int, int)} need the guard:
-   * {@link ByteArrayOutputStream#writeBytes(byte[])} delegates to the latter, so
-   * overriding it would check every write twice.
+   * Bounded {@link ByteArrayOutputStream} that aborts serialization via
+   * {@link PayloadTooLargeException} before growing past {@code limit}.
    */
-  private static final class BoundedByteArrayOutputStream extends ByteArrayOutputStream {
+  private static final class BoundedBuffer extends ByteArrayOutputStream {
 
     private final int limit;
     private boolean exceeded;
 
-    BoundedByteArrayOutputStream(int limit) {
-      super(Math.min(limit, 1024));
+    private BoundedBuffer(int limit) {
+      super(Math.min(limit, INITIAL_BUFFER_SIZE));
       this.limit = limit;
     }
 
@@ -448,13 +396,15 @@ public final class PutPayloadCodec {
     }
 
     @Override
-    public void write(byte@NonNull [] b, int off, int len) {
-      guard(len);
-      super.write(b, off, len);
+    public void write(byte@NonNull [] bytes, int offset, int length) {
+      guard(length);
+      super.write(bytes, offset, length);
     }
 
-    private void guard(int len) {
-      if (count + len > limit) {
+    /** Aborts before writing if {@code length} exceeds the remaining byte budget. */
+    private void guard(int length) {
+      // Subtraction form avoids integer overflow if length is large.
+      if (length > limit - count) {
         exceeded = true;
         throw PayloadTooLargeException.INSTANCE;
       }

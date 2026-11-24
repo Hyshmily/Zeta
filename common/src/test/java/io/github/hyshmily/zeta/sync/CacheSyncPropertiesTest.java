@@ -46,7 +46,7 @@ class CacheSyncPropertiesTest {
     CacheSyncProperties props = new CacheSyncProperties();
     assertThat(props.getConcurrentConsumers()).isEqualTo(3);
     assertThat(props.getSchedulerPoolSize()).isEqualTo(4);
-    assertThat(props.getPrefetchCount()).isEqualTo(5);
+    assertThat(props.getPrefetchCount()).isEqualTo(32);
     assertThat(props.isAutoStartup()).isTrue();
   }
 

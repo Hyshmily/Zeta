@@ -16,7 +16,7 @@
 package io.github.hyshmily.zeta.sync.worker;
 
 import io.github.hyshmily.zeta.constants.ZetaConstants;
-import io.github.hyshmily.zeta.sync.AbstractAmqpConsumerProperties;
+import io.github.hyshmily.zeta.sync.AmqpConsumerProperties;
 import io.github.hyshmily.zeta.util.Internal;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.validation.annotation.Validated;
@@ -37,13 +37,14 @@ import org.springframework.validation.annotation.Validated;
 @Validated
 @ConfigurationProperties(prefix = "zeta.worker-listener")
 @Internal
-public class WorkerListenerProperties extends AbstractAmqpConsumerProperties {
+public class WorkerListenerProperties extends AmqpConsumerProperties {
 
   public WorkerListenerProperties() {
     setExchangeName(ZetaConstants.Exchange.BROADCAST);
     setQueuePrefix("zeta.worker");
-    setJitterMs(0);
+    setJitterMs(50);
     setConcurrentConsumers(2);
+    setPrefetchCount(100);
     setMaxPendingUnits(200_000);
   }
 }

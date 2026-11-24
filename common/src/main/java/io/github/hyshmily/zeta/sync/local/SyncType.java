@@ -20,53 +20,69 @@ import org.jspecify.annotations.Nullable;
 /**
  * The wire operation of a {@link SyncMessage}, parsed once at the AMQP boundary.
  *
- * <p>Every downstream decision reads a flag instead of re-comparing the header string:
+ * <p>Every downstream decision reads a predicate instead of re-comparing the header string:
  * <ul>
- *   <li>{@link #ignoresSelf()} — the fanout copy of this instance's own broadcast carries
- *       no information (the sender already applied it); only the single-key and batched
- *       INVALIDATE operations are re-applied.</li>
- *   <li>{@link #isClear()} — an O(n) table/namespace sweep, the control-plane family that
- *       shares one dispatcher channel and bypasses the global payload budget.</li>
- *   <li>{@link #needsJitter()} — the operation runs a cluster-loader read and must be
- *       spread across peers.</li>
+ *   <li>{@link #ignoresSelf()} — the fanout copy of this instance's own broadcast carries no
+ *       information (the sender already applied it); only the single-key and batched INVALIDATE
+ *       operations are re-applied.</li>
+ *   <li>{@link #isClear()} — an O(n) table/namespace sweep, the control-plane family that shares
+ *       one dispatcher channel and bypasses the global payload budget.</li>
+ *   <li>{@link #isControl()} — an O(1) removal or clear that must survive a value-payload storm;
+ *       it bypasses the global pending budget without leaving the per-key ordered channel.</li>
+ *   <li>{@link #isValue()} — the operation carries a value path (PUT or REFRESH), the only two
+ *       operations that decode a payload or run a loader read.</li>
+ *   <li>{@link #needsJitter()} — the operation runs a cluster-loader read and must be spread
+ *       across peers.</li>
  * </ul>
  *
- * <p>The enum name is the wire value; {@link #parse(Object)} is the one place the header
- * value becomes an operation.
+ * <p>The enum name is the wire value; {@link #parse(Object)} is the one place the header value
+ * becomes an operation.
  */
 public enum SyncType {
-  INVALIDATE(0),
-  REFRESH(SyncType.IGNORES_SELF | SyncType.NEEDS_JITTER),
-  PUT(SyncType.IGNORES_SELF),
-  INVALIDATE_ALL(SyncType.IGNORES_SELF | SyncType.CLEAR),
-  INVALIDATE_PREFIX(SyncType.IGNORES_SELF | SyncType.CLEAR),
-  INVALIDATE_BATCH(0);
-
-  // Compile-time constants: the enum-constant arguments above are evaluated before these
-  // fields are initialized, so they must stay constant expressions.
-  private static final byte IGNORES_SELF = 1;
-  private static final byte CLEAR = 2;
-  private static final byte NEEDS_JITTER = 4;
-
-  private final byte flags;
-
-  SyncType(int flags) {
-    this.flags = (byte) flags;
-  }
+  INVALIDATE,
+  REFRESH,
+  PUT,
+  INVALIDATE_ALL,
+  INVALIDATE_PREFIX,
+  INVALIDATE_BATCH;
 
   /** Whether the fanout copy of this instance's own broadcast is discarded unread. */
   public boolean ignoresSelf() {
-    return (flags & IGNORES_SELF) != 0;
+    return this == REFRESH || this == PUT || isClear();
   }
 
   /** Whether applying the operation sweeps the cache table or a key namespace. */
   public boolean isClear() {
-    return (flags & CLEAR) != 0;
+    return this == INVALIDATE_ALL || this == INVALIDATE_PREFIX;
+  }
+
+  /** Whether the operation is an O(1) control message exempt from the global pending budget. */
+  public boolean isControl() {
+    return this == INVALIDATE || isClear();
+  }
+
+  /** Whether the operation carries a value path: a PUT payload or a peer REFRESH reload. */
+  public boolean isValue() {
+    return this == PUT || this == REFRESH;
   }
 
   /** Whether applying the operation may run a cluster-loader read. */
   public boolean needsJitter() {
-    return (flags & NEEDS_JITTER) != 0;
+    return this == REFRESH;
+  }
+
+  /**
+   * The receive-side tie-break rank at one data version: INVALIDATE outranks PUT, and PUT outranks
+   * REFRESH. The publisher claim and the batch reducer share this order.
+   *
+   * @return the rank; a non-key type ranks below every key operation
+   */
+  public int priority() {
+    return switch (this) {
+      case INVALIDATE -> 2;
+      case PUT -> 1;
+      default -> 0;
+    };
   }
 
   /** The wire value written to the AMQP type header. */

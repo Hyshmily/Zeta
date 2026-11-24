@@ -16,7 +16,7 @@
 package io.github.hyshmily.zeta.sync.local;
 
 import io.github.hyshmily.zeta.constants.ZetaConstants;
-import io.github.hyshmily.zeta.sync.AbstractAmqpConsumerProperties;
+import io.github.hyshmily.zeta.sync.AmqpConsumerProperties;
 import io.github.hyshmily.zeta.util.Internal;
 import jakarta.validation.constraints.Positive;
 import jakarta.validation.constraints.PositiveOrZero;
@@ -46,7 +46,7 @@ import org.springframework.validation.annotation.Validated;
 @Validated
 @ConfigurationProperties(prefix = "zeta.sync")
 @Internal
-public class CacheSyncProperties extends AbstractAmqpConsumerProperties {
+public class CacheSyncProperties extends AmqpConsumerProperties {
 
   /**
    * Delay (ms) before pending sync records are flushed to the sync publisher.
@@ -106,6 +106,8 @@ public class CacheSyncProperties extends AbstractAmqpConsumerProperties {
     setQueuePrefix("zeta.sync");
     setJitterMs(50);
     setConcurrentConsumers(3);
+    // A delivery can carry a put-max-bytes payload, so the sync window is narrower than the Worker's.
+    setPrefetchCount(32);
     setMaxPendingUnits(50_000);
   }
 }

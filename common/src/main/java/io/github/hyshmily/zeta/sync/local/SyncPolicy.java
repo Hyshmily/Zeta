@@ -35,9 +35,10 @@ import org.jspecify.annotations.Nullable;
  * local invalidation fallback. A resolution that raced a newer resident or an invalidation
  * is settled as a skip before {@code settle} is called.
  *
- * <p>A policy runs on the cache-sync ordered dispatcher, never on the AMQP consumer
- * thread. The {@link EntryView} is a read-only snapshot; the framework re-checks every
- * version and tombstone when it applies the action.
+ * <p>{@link #admit} runs on the cache-sync ordered dispatcher. For a REFRESH, {@link #settle}
+ * runs on the dedicated refresh executor after the loader returned; a PUT settles on the
+ * dispatcher. Neither runs on the AMQP consumer thread. The {@link EntryView} is a read-only
+ * snapshot; the framework re-checks every version and tombstone when it applies the action.
  *
  * <p>Implement this interface and expose it as a Spring {@code @Bean} to replace the
  * default behaviour; {@code @ConditionalOnMissingBean} wires it.
@@ -47,10 +48,11 @@ public interface SyncPolicy {
    * Decide whether the effective event should continue.
    *
    * <p>Called after the framework's cheap version/tombstone pre-check, so an event that is
-   * already stale never reaches the policy. {@link SyncAdmission#INVALIDATE_LOCAL} is meaningful
-   * only for a PUT/REFRESH; for an INVALIDATE it is settled as
-   * {@link SyncSkipReason#POLICY_FAILED}, and for a clear it is treated as
-   * {@link SyncAdmission#PROCEED} because the clear already sweeps locally.
+   * already stale never reaches the policy. {@link SyncAdmission#INVALIDATE_LOCAL} drops a value
+   * path: on a PUT/REFRESH it is settled as a versioned local invalidation, while on an
+   * INVALIDATE or a clear it is treated as {@link SyncAdmission#PROCEED} because those already
+   * remove the local copy. Returning an admission that does not fit the event never leaves a
+   * stale entry behind.
    *
    * @param event   the effective event; never {@code null}
    * @param current the resident snapshot for a key event, or {@code null} for an absent key

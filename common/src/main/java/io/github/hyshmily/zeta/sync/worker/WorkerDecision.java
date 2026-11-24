@@ -16,6 +16,7 @@
 package io.github.hyshmily.zeta.sync.worker;
 
 import static io.github.hyshmily.zeta.cache.CacheKeysPolicy.invalidCacheKey;
+import static io.github.hyshmily.zeta.cache.CacheKeysPolicy.logicalNamespaceOf;
 import static io.github.hyshmily.zeta.constants.ZetaConstants.Amqp.*;
 import static io.github.hyshmily.zeta.constants.ZetaConstants.Version.VERSION_DEFAULT;
 
@@ -24,69 +25,74 @@ import io.github.hyshmily.zeta.model.DecisionStamp;
 import io.github.hyshmily.zeta.util.amqp.AmqpMessageReader;
 import java.nio.charset.StandardCharsets;
 import java.util.Objects;
+import lombok.extern.slf4j.Slf4j;
 import org.jspecify.annotations.Nullable;
 import org.springframework.amqp.core.Message;
 import org.springframework.amqp.core.MessageProperties;
 
 /**
- * One Worker HOT/COOL decision for a single cache key.
+ * One Worker HOT/COOL lifecycle decision for a single cache key.
  *
- * <p>Each decision carries the Worker's monotonically increasing {@link DecisionStamp}: the
- * decision version orders decisions idempotently, while {@code nodeId} and {@code epoch}
- * partition the version space per Worker incarnation. This version space is orthogonal to the
- * application-level {@code dataVersion} (design decisions: version stamps).
+ * <p>Each decision carries the originating Worker's monotonic {@link DecisionStamp}: the decision
+ * version orders decisions idempotently while {@code nodeId} and {@code epoch} partition the
+ * version space per Worker incarnation. This control-plane version space is orthogonal to the
+ * application-level {@code dataVersion} allocated locally by the receiving node's stamp clock.
  *
- * <p>The decision carries no data stamp: the Worker-path guard orders on the decision stamp
- * only, and {@code dataVersion} is allocated independently by the receiving node's stamp
- * clock (design decisions: version stamps).
- *
- * @param id       message trace identifier — cached wall-clock value from the originating
- *                 Worker; time-sortable but orders nothing and may coincide across messages
- *                 in one millisecond; 0L if the header was missing or non-numeric
- * @param cacheKey the affected cache key; must not be null
- * @param type     the decision type; never {@code null}
- * @param stamp    the Worker decision stamp (version, node id and epoch)
+ * @param id       time-sortable message trace identifier (originating Worker wall-clock ms;
+ *                 {@code 0L} when missing or non-numeric)
+ * @param cacheKey the affected physical cache key; never {@code null}
+ * @param stamp    the Worker decision stamp (version, node id, epoch, and {@link DecisionKind})
  */
-public record WorkerDecision(long id, String cacheKey, WorkerType type, DecisionStamp stamp) {
-  /** The type and the lease kind are one contract, not two independently writable facts. */
+@Slf4j
+public record WorkerDecision(long id, String cacheKey, DecisionStamp stamp) {
+  /** Validates that {@code cacheKey} and {@code stamp} are non-null. */
   public WorkerDecision {
     Objects.requireNonNull(cacheKey, "cacheKey must not be null");
-    Objects.requireNonNull(type, "type must not be null");
     Objects.requireNonNull(stamp, "stamp must not be null");
-    if ((type == WorkerType.HOT) != stamp.isHot()) {
-      throw new IllegalArgumentException("WorkerDecision type and DecisionStamp kind disagree");
-    }
+  }
+
+  /** Returns the decision operation from {@link #stamp()}. */
+  public DecisionKind kind() {
+    return stamp.kind();
+  }
+
+  /** Returns {@code true} if this decision grants a HOT lease. */
+  public boolean isHot() {
+    return stamp.isHot();
   }
 
   /**
-   * Deserializes a {@code WorkerDecision} from an AMQP message body and headers.
+   * The logical name of the affected key's namespace, with its encoding delimiter removed:
+   * {@code users} for both {@code users\u0000u-1} (TYPED) and {@code users:u-1} (PLAIN). A
+   * listener can tag or partition by namespace without parsing the physical key.
    *
-   * @param msg the incoming AMQP message; must not be null
-   * @return a parsed decision, or {@code null} if the body is empty, the cache key is
-   *         invalid, the type header is unknown or the message has no properties
+   * @return the namespace name, or {@code null} when the key carries none
+   */
+  public @Nullable String namespace() {
+    return logicalNamespaceOf(cacheKey);
+  }
+
+  /**
+   * Deserializes a {@link WorkerDecision} from an AMQP message.
+   *
+   * <p>Serves as the decision plane's validation boundary: the type header is parsed once here, and
+   * a non-positive {@code decisionVersion} is dropped before the body is decoded into a key, so
+   * downstream handlers only observe positive, orderable stamps.
+   *
+   * @param msg the incoming AMQP message; must not be {@code null}
+   * @return the decoded decision, or {@code null} if properties are missing, the type header is
+   *         unknown, the version is non-positive, or the body/key is invalid
    */
   public static @Nullable WorkerDecision from(Message msg) {
+    Objects.requireNonNull(msg, "msg must not be null");
     MessageProperties props = msg.getMessageProperties();
-    return props == null ? null : from(msg, WorkerType.parse(props.getHeader(HEADER_TYPE)));
-  }
-
-  /**
-   * Deserializes a message whose type was already parsed at the listener boundary, so the
-   * header string is converted once per delivery.
-   *
-   * <p>This is the decision plane's validation boundary: a message that survives it is
-   * orderable. A non-positive {@code decisionVersion} is unorderable and is dropped here,
-   * before the body is decoded or the message enters the per-key dispatcher — the context
-   * below assumes a positive stamp. A missing node id is accepted on arrival against a
-   * named node: epoch and version counters are node-local and not comparable across nodes.
-   *
-   * @param msg  the incoming AMQP message; must not be null
-   * @param type the parsed type; {@code null} for an unknown/missing header
-   * @return the decoded decision, or {@code null} when the type is null, the decision
-   *         version is non-positive, or the body or cache key is invalid
-   */
-  public static @Nullable WorkerDecision from(Message msg, @Nullable WorkerType type) {
-    if (type == null) {
+    if (props == null) {
+      return null;
+    }
+    Object typeHeader = props.getHeader(HEADER_TYPE);
+    DecisionKind kind = DecisionKind.parse(typeHeader);
+    if (kind == null) {
+      AmqpMessageReader.logUnknownType(log, "worker decision", typeHeader, msg);
       return null;
     }
     byte[] body = msg.getBody();
@@ -94,9 +100,7 @@ public record WorkerDecision(long id, String cacheKey, WorkerType type, Decision
       return null;
     }
 
-    MessageProperties props = msg.getMessageProperties();
-    // Header first: a non-positive version is unorderable, so decoding the body for it
-    // would only allocate a key that no guard could ever apply.
+    // Validate the version header first so an unorderable message avoids UTF-8 key allocation.
     long decisionVersion = AmqpMessageReader.readLongHeader(props, HEADER_VERSION, VERSION_DEFAULT);
     if (decisionVersion <= 0L) {
       return null;
@@ -105,11 +109,15 @@ public record WorkerDecision(long id, String cacheKey, WorkerType type, Decision
     if (invalidCacheKey(cacheKey)) {
       return null;
     }
-    String nodeId = AmqpMessageReader.readStringHeader(props, HEADER_NODE_ID);
-    long epoch = AmqpMessageReader.readLongHeader(props, HEADER_EPOCH, 0L);
-    long id = AmqpMessageReader.readLongHeader(props, HEADER_MESSAGE_ID, 0L);
-
-    DecisionKind kind = type == WorkerType.HOT ? DecisionKind.HOT : DecisionKind.COOL;
-    return new WorkerDecision(id, cacheKey, type, new DecisionStamp(decisionVersion, nodeId, epoch, kind));
+    return new WorkerDecision(
+      AmqpMessageReader.readLongHeader(props, HEADER_MESSAGE_ID, 0L),
+      cacheKey,
+      new DecisionStamp(
+        decisionVersion,
+        AmqpMessageReader.readStringHeader(props, HEADER_NODE_ID),
+        AmqpMessageReader.readLongHeader(props, HEADER_EPOCH, 0L),
+        kind
+      )
+    );
   }
 }

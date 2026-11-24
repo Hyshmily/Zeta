@@ -21,6 +21,7 @@ import com.example.dto.AllowedContainer;
 import com.example.dto.AllowedDto;
 import com.example.dto.CollectionDto;
 import com.example.dtoOther.DeniedDto;
+import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.util.ArrayList;
@@ -31,6 +32,7 @@ import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Hashtable;
+import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
@@ -130,64 +132,134 @@ class PutPayloadCodecTest {
     assertThat(codec.decode(codec.encode(dto))).isEqualTo(dto);
   }
 
-  /** Properties and Hashtable are Maps, but neither is a payload value type. */
+  /** A legacy Map root is copied to a standard Map and round-trips as data. */
   @Test
-  void legacyMapContainersAreDenied() {
+  void legacyMapRootsBecomeStandardMaps() {
     PutPayloadCodec codec = new PutPayloadCodec(4_096, List.of());
 
-    assertThat(codec.decode(codec.encode(new Properties()))).isNull();
-    assertThat(codec.decode(codec.encode(new Hashtable<>()))).isNull();
+    assertThat(codec.decode(codec.encode(new Properties()))).isEqualTo(Map.of());
+
+    Hashtable<String, String> table = new Hashtable<>();
+    table.put("k", "v");
+    assertThat(codec.decode(codec.encode(table))).isEqualTo(Map.of("k", "v"));
   }
 
   /**
-   * Only {@code java.util} Collection/Map implementations are payload value types: a third-party
-   * Map must not become instantiable from a broker-writable sender, and the sender degrades it to
-   * REFRESH instead of spending a payload the receiver would deny.
+   * A Map subclass outside the allowlist is data, not identity: the root is normalized to a
+   * standard map and round-trips by value instead of degrading the PUT to an INVALIDATE.
    */
   @Test
-  void nonJdkMapImplementationsAreDenied() {
+  void foreignMapSubclassRootRoundTripsAsData() {
     PutPayloadCodec codec = new PutPayloadCodec(4_096, List.of());
     ThirdPartyMap map = new ThirdPartyMap();
     map.put("k", "v");
 
-    assertThat(codec.encode(map)).isNull();
+    assertThat(codec.decode(codec.encode(map))).isEqualTo(Map.of("k", "v"));
   }
 
   /**
-   * A package prefix admits a name, not every subtype: a Map implementation inside the allowed
-   * package still fails the JDK-container rule, so its payload is not built at all.
+   * An array type id is judged on its component: the array form of an admitted class round-trips,
+   * while the array form of a denied class is rejected. An {@code isArray()} shortcut admits both.
    */
   @Test
-  void aContainerInAnAllowedPackageIsStillDenied() {
+  void arrayTypeIdIsJudgedOnItsComponent() {
+    PutPayloadCodec codec = new PutPayloadCodec(4_096, List.of("com.example.dto"));
+    String admitted = "[\"[L" + AllowedDto.class.getName() + ";\",[]]";
+    String denied = "[\"[L" + DeniedDto.class.getName() + ";\",[]]";
+
+    assertThat(codec.decode(admitted.getBytes(StandardCharsets.UTF_8))).isInstanceOf(AllowedDto[].class);
+    assertThat(codec.decode(denied.getBytes(StandardCharsets.UTF_8))).isNull();
+  }
+
+  /** {@code java.lang} and {@code java.util} admit value classes only, never side-effecting ones. */
+  @Test
+  void sideEffectingJdkTypesAreNeverInstantiated() {
+    PutPayloadCodec codec = new PutPayloadCodec(4_096, List.of());
+
+    assertThat(codec.decode("[\"java.lang.Thread\",{}]".getBytes(StandardCharsets.UTF_8))).isNull();
+    assertThat(codec.decode("[\"java.util.Timer\",{}]".getBytes(StandardCharsets.UTF_8))).isNull();
+    assertThat(codec.decode("[\"java.util.logging.FileHandler\",{}]".getBytes(StandardCharsets.UTF_8))).isNull();
+    assertThat(codec.decode("[\"[Ljava.lang.ProcessBuilder;\",[]]".getBytes(StandardCharsets.UTF_8))).isNull();
+  }
+
+  /** A JDK immutable collection type id still decodes into a standard container. */
+  @Test
+  void jdkImmutableCollectionTypeIdsAreAdmittedByExactName() {
+    PutPayloadCodec codec = new PutPayloadCodec(4_096, List.of());
+
+    assertThat(
+      codec.decode("[\"java.util.ImmutableCollections$List12\",[\"a\"]]".getBytes(StandardCharsets.UTF_8))
+    ).isEqualTo(List.of("a"));
+  }
+
+  /** A container in an allowed package is a normal allowlisted value. */
+  @Test
+  void aContainerInAnAllowedPackageRoundTrips() {
     PutPayloadCodec codec = new PutPayloadCodec(4_096, List.of("com.example.dto"));
     AllowedContainer container = new AllowedContainer();
     container.put("k", "v");
 
-    assertThat(codec.encode(container)).isNull();
+    assertThat(codec.decode(codec.encode(container))).isEqualTo(Map.of("k", "v"));
   }
 
-  /** EnumSet/EnumMap cannot be reconstructed without losing the enum type: degrade at the source. */
+  /** An EnumSet/EnumMap root is copied to a standard container; the enum value keeps its type. */
   @Test
-  void enumContainersDegradeToRefresh() {
+  void enumContainersRoundTripAsStandardContainers() {
     PutPayloadCodec codec = new PutPayloadCodec(4_096, List.of());
 
-    assertThat(codec.encode(EnumSet.of(java.time.DayOfWeek.MONDAY))).isNull();
+    assertThat(codec.decode(codec.encode(EnumSet.of(java.time.DayOfWeek.MONDAY)))).isEqualTo(
+      Set.of(java.time.DayOfWeek.MONDAY)
+    );
 
     Map<java.time.DayOfWeek, String> enumMap = new EnumMap<>(java.time.DayOfWeek.class);
     enumMap.put(java.time.DayOfWeek.MONDAY, "start");
-    assertThat(codec.encode(enumMap)).isNull();
+    assertThat(codec.decode(codec.encode(enumMap))).isEqualTo(Map.of("MONDAY", "start"));
   }
 
-  /** An array is admitted only when its component type is: the element is the loadable class. */
+  /**
+   * A type id naming an allowed container together with an unlisted element type must be refused:
+   * the element type is not a value this codec may instantiate.
+   */
   @Test
-  void arrayComponentTypesAreValidated() {
+  void anAllowedContainerCannotSmuggleAnUnlistedTypeArgument() {
+    PutPayloadCodec codec = new PutPayloadCodec(4_096, List.of());
+    String denied = TestPayload.class.getName();
+
+    assertThat(
+      codec.decode(("[\"java.util.ArrayList<" + denied + ">\",[{\"value\":\"x\"}]]").getBytes(StandardCharsets.UTF_8))
+    ).isNull();
+    String mapTypeId = "[\"java.util.HashMap<java.lang.String," + denied + ">\",{}]";
+    assertThat(codec.decode(mapTypeId.getBytes(StandardCharsets.UTF_8))).isNull();
+  }
+
+  /** A primitive array's component has no allowlisted class name and must still be admitted. */
+  @Test
+  void primitiveArraysKeepTheirComponentType() {
+    PutPayloadCodec codec = new PutPayloadCodec(4_096, List.of());
+
+    Object bytes = codec.decode(codec.encode(new byte[] { 1, 2, 3 }));
+    assertThat(bytes).isInstanceOf(byte[].class);
+    assertThat((byte[]) bytes).containsExactly(1, 2, 3);
+
+    assertThat(codec.decode(codec.encode(new int[] { 7 }))).isInstanceOf(int[].class);
+  }
+
+  /** A root LinkedList is a standard container and keeps its runtime type instead of being copied. */
+  @Test
+  void aLinkedListRootKeepsItsType() {
+    PutPayloadCodec codec = new PutPayloadCodec(4_096, List.of());
+
+    assertThat(codec.decode(codec.encode(new LinkedList<>(List.of("a"))))).isInstanceOf(LinkedList.class);
+  }
+
+  /** An array keeps its component type on the wire. */
+  @Test
+  void arrayTypesRoundTrip() {
     PutPayloadCodec codec = new PutPayloadCodec(4_096, List.of());
 
     Object strings = codec.decode(codec.encode(new String[] { "a", "b" }));
     assertThat(strings).isInstanceOf(String[].class);
     assertThat((String[]) strings).containsExactly("a", "b");
-
-    assertThat(codec.decode(codec.encode(new Properties[] { new Properties() }))).isNull();
   }
 
   /** The built-in allowlist admits {@code io.github.hyshmily.zeta.model.*}, not the whole framework. */

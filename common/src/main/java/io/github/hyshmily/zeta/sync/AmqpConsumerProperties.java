@@ -16,80 +16,68 @@
 package io.github.hyshmily.zeta.sync;
 
 import io.github.hyshmily.zeta.util.Internal;
+import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.Positive;
+import jakarta.validation.constraints.PositiveOrZero;
+import lombok.Getter;
+import lombok.Setter;
 
 /**
- * The consumer-plane configuration shared by the cache-sync and Worker-decision
- * AMQP listeners: the exchange and per-instance queue prefix, consumer concurrency,
- * prefetch, the jitter-scheduler pool size and the auto-startup flag.
+ * The consumer-plane fields shared by the cache-sync and Worker-decision listeners: enablement,
+ * the exchange and per-instance queue prefix, consumer concurrency, prefetch, the jitter-scheduler
+ * pool size, the pending-unit budget and the auto-startup flag.
  *
- * <p>The shared fields and validation live in {@link AbstractAmqpConsumerProperties};
- * {@link io.github.hyshmily.zeta.sync.local.CacheSyncProperties} and
- * {@link io.github.hyshmily.zeta.sync.worker.WorkerListenerProperties} extend it so the
- * auto-configuration builds both listener containers and their schedulers from one shape.
+ * <p>Each concrete {@code @ConfigurationProperties} class supplies its own exchange, queue prefix
+ * and defaults in its constructor; binding and Bean Validation walk the inherited bean properties
+ * exactly as they do the subclass fields.
  */
+@Getter
+@Setter
 @Internal
-public interface AmqpConsumerProperties {
-  /**
-   * Whether this listener is enabled.
-   *
-   * @return {@code true} when the listener is enabled
-   */
-  boolean isEnabled();
+public abstract class AmqpConsumerProperties {
 
-  /**
-   * The exchange the listener's queue is bound to.
-   *
-   * @return the exchange name (never {@code null})
-   */
-  String getExchangeName();
+  /** Whether this listener is enabled. */
+  private boolean enabled = false;
 
-  /**
-   * Prefix for the per-instance queue name.
-   *
-   * @return the queue-name prefix (never {@code null})
-   */
-  String getQueuePrefix();
+  /** The exchange the listener's queue is bound to. */
+  @NotBlank
+  private String exchangeName;
 
-  /**
-   * Number of concurrent AMQP consumers.
-   *
-   * @return the configured consumer count (positive)
-   */
-  int getConcurrentConsumers();
+  /** Prefix for the per-instance queue name; the auto-configuration appends the instance id. */
+  @NotBlank
+  private String queuePrefix;
 
-  /**
-   * Maximum unacknowledged messages per consumer.
-   *
-   * @return the configured prefetch count (positive)
-   */
-  int getPrefetchCount();
-
-  /**
-   * Configured minimum size of the jitter-task scheduler pool.
-   *
-   * @return the configured pool size (positive)
-   */
-  int getSchedulerPoolSize();
-
-  /**
-   * Global cap (in weighted units) on tasks pending in the per-key ordered dispatcher.
-   *
-   * @return the configured pending-unit budget (positive)
-   */
-  int getMaxPendingUnits();
+  /** Whether the RabbitMQ listener container starts automatically with the application context. */
+  private boolean autoStartup = true;
 
   /**
    * Maximum random start-jitter (milliseconds) parked before a key's first dispatcher
    * cycle; {@code 0} disables the park.
-   *
-   * @return the configured jitter bound (non-negative)
    */
-  int getJitterMs();
+  @PositiveOrZero
+  private int jitterMs;
+
+  /** Number of concurrent AMQP consumers. */
+  @Positive
+  private int concurrentConsumers;
 
   /**
-   * Whether the listener container starts with the application context.
-   *
-   * @return {@code true} when the container starts automatically
+   * Minimum pool size for the scheduled executor that runs jittered tasks. The effective
+   * pool is {@code max(this, concurrentConsumers × 2)}.
    */
-  boolean isAutoStartup();
+  @Positive
+  private int schedulerPoolSize = 4;
+
+  /**
+   * Maximum unacknowledged messages per consumer. Both listeners do O(1) non-blocking work on the
+   * AMQP thread before acknowledging, so the window bounds in-flight work rather than processing
+   * time. A subclass overrides it for its own message size: the sync listener holds fewer because a
+   * delivery can carry a whole PUT payload.
+   */
+  @Positive
+  private int prefetchCount = 64;
+
+  /** Global cap (in weighted units) on tasks pending in the per-key ordered dispatcher. */
+  @Positive
+  private int maxPendingUnits;
 }

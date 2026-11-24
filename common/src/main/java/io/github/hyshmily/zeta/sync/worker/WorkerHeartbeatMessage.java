@@ -19,7 +19,6 @@ import static io.github.hyshmily.zeta.constants.ZetaConstants.Amqp.*;
 
 import io.github.hyshmily.zeta.util.Internal;
 import io.github.hyshmily.zeta.util.amqp.AmqpMessageReader;
-import java.nio.charset.StandardCharsets;
 import java.util.Objects;
 import org.jspecify.annotations.Nullable;
 import org.springframework.amqp.core.Message;
@@ -40,7 +39,8 @@ import org.springframework.amqp.core.MessageProperties;
  *       with an empty HOT set.</li>
  * </ul>
  *
- * <p>Serialization is header-based: the body carries only the {@code workerId} as UTF-8 bytes.
+ * <p>Serialization is header-based: the {@code workerId} travels only in {@code HEADER_NODE_ID},
+ * and the body is empty.
  *
  * @param id           time-sortable message trace ID; {@code 0} when the header was
  *                     missing or non-numeric
@@ -60,6 +60,9 @@ public record WorkerHeartbeatMessage(
 ) {
   /** Message type discriminator for heartbeat messages ({@value}). */
   public static final String TYPE = "WORKER_HB";
+
+  /** Heartbeats carry every field in the headers, so the body is always empty. */
+  private static final byte[] EMPTY_BODY = new byte[0];
 
   public WorkerHeartbeatMessage {
     workerId = Objects.requireNonNull(workerId, "workerId must not be null").trim();
@@ -82,11 +85,11 @@ public record WorkerHeartbeatMessage(
     props.setHeader(HEADER_HEARTBEAT_READY, readyToServe);
     props.setHeader(HEADER_NODE_ID, workerId);
     props.setHeader(HEADER_MESSAGE_ID, id);
-    if (appName != null && !appName.isBlank()) {
+    if (appName != null) {
       props.setHeader(HEADER_APP_NAME, appName);
     }
 
-    return new Message(workerId.getBytes(StandardCharsets.UTF_8), props);
+    return new Message(EMPTY_BODY, props);
   }
 
   /**
@@ -95,9 +98,9 @@ public record WorkerHeartbeatMessage(
    * <p>Missing or malformed headers are defaulted rather than failing the parse: a heartbeat is a
    * liveness signal, and dropping one because a field is absent would make a healthy Worker look
    * dead. The one exception is the Worker identity: a heartbeat without one cannot be recorded
-   * (an empty id would enter the health table and the hash ring), so the node-id header — read
-   * through the shared string-header reader, which accepts a {@code LongString}/other
-   * {@code CharSequence} — falls back to the body, and a blank result drops the message.
+   * (an empty id would enter the health table and the hash ring), so a blank node id drops the
+   * message. The header is read through the shared string reader, which accepts a
+   * {@code LongString}/other {@code CharSequence}.
    *
    * @param msg the incoming message
    * @return the heartbeat, or {@code null} when the type header does not match or the
@@ -113,23 +116,18 @@ public record WorkerHeartbeatMessage(
       return null;
     }
 
-    String headerNodeId = AmqpMessageReader.readStringHeader(props, HEADER_NODE_ID);
-    String workerId = headerNodeId != null && !headerNodeId.isBlank() ? headerNodeId : bodyWorkerId(msg.getBody());
+    String workerId = AmqpMessageReader.readStringHeader(props, HEADER_NODE_ID);
     if (workerId == null || workerId.isBlank()) {
       return null;
     }
 
-    String appName = AmqpMessageReader.readStringHeader(props, HEADER_APP_NAME);
     return new WorkerHeartbeatMessage(
       AmqpMessageReader.readLongHeader(props, HEADER_MESSAGE_ID, 0L),
       workerId,
       AmqpMessageReader.readLongHeader(props, HEADER_HEARTBEAT_EPOCH, 0L),
       Boolean.TRUE.equals(props.getHeader(HEADER_HEARTBEAT_READY)),
-      appName == null || appName.isBlank() ? null : appName
+      // The constructor is the one place a blank appName becomes null.
+      AmqpMessageReader.readStringHeader(props, HEADER_APP_NAME)
     );
-  }
-
-  private static @Nullable String bodyWorkerId(byte@Nullable [] body) {
-    return body == null || body.length == 0 ? null : new String(body, StandardCharsets.UTF_8).trim();
   }
 }
