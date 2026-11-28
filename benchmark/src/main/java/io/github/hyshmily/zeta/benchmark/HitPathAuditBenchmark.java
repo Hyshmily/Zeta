@@ -214,7 +214,7 @@ public class HitPathAuditBenchmark {
       props.effectiveRefreshMaxPools(),
       props.getRefreshTimeoutMs()
     );
-    BroadcastBuffer broadcast = new BroadcastBuffer(scheduler, null, 500, 2_000, null);
+    BroadcastBuffer broadcast = new BroadcastBuffer(scheduler, null, 500, null);
     accessCounter = new AccessCounter(detector, null, scheduler, 50L, 500L);
     accessCounter.afterPropertiesSet();
     MonotonicStampClock clock = new MonotonicStampClock(1L, MonotonicStampClock.DEFAULT_MAX_FORWARD_DRIFT_MS);
@@ -228,7 +228,7 @@ public class HitPathAuditBenchmark {
       clock
     );
 
-    long now = TimeSource.currentTimeMillis();
+    long now = TimeSource.monotonicMillis();
     keys = new String[keySpace];
     for (int i = 0; i < keySpace; i++) {
       String key = "bench:key:" + i;
@@ -287,7 +287,7 @@ public class HitPathAuditBenchmark {
     if (hardExpireAtMs == Long.MAX_VALUE) {
       return Long.MAX_VALUE;
     }
-    long remainingMs = hardExpireAtMs - TimeSource.currentTimeMillis();
+    long remainingMs = hardExpireAtMs - TimeSource.monotonicMillis();
     return TimeUnit.MILLISECONDS.toNanos(Math.max(1, remainingMs));
   }
 

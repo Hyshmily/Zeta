@@ -118,7 +118,7 @@ public class CaffeineFloorBenchmark {
   public void setup() {
     TimeSource.start();
     cache = build(recordStats, variableExpiry, new ZetaProperties().getCache().getMaxSize());
-    long now = TimeSource.currentTimeMillis();
+    long now = TimeSource.monotonicMillis();
     keys = new String[KEY_SPACE];
     for (int i = 0; i < KEY_SPACE; i++) {
       String key = "floor:key:" + i;
@@ -199,7 +199,7 @@ public class CaffeineFloorBenchmark {
     if (hardExpireAtMs == Long.MAX_VALUE) {
       return Long.MAX_VALUE;
     }
-    long remainingMs = hardExpireAtMs - TimeSource.currentTimeMillis();
+    long remainingMs = hardExpireAtMs - TimeSource.monotonicMillis();
     return TimeUnit.MILLISECONDS.toNanos(Math.max(1, remainingMs));
   }
 }

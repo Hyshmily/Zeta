@@ -39,6 +39,7 @@ import io.github.hyshmily.zeta.sharding.ClusterHealth;
 import io.github.hyshmily.zeta.sharding.ConsistentHashRing;
 import io.github.hyshmily.zeta.sharding.HashRing;
 import io.github.hyshmily.zeta.sharding.HealthView;
+import io.github.hyshmily.zeta.util.TimeSource;
 import io.github.hyshmily.zeta.util.clock.MonotonicStampClock;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -201,7 +202,7 @@ public class HotHitBenchmark {
       10,
       zetaProps.getRefreshTimeoutMs()
     );
-    BroadcastBuffer broadcast = new BroadcastBuffer(scheduler, null, 500, 2_000, null);
+    BroadcastBuffer broadcast = new BroadcastBuffer(scheduler, null, 500, null);
     ConsistentHashRing ring = new HashRing(150);
     KeyReporter reporter = new KeyReporterImpl(new DropPublisher(), "bench", 1000, 100, 1, ring, healthView);
     reporter.start();
@@ -213,7 +214,7 @@ public class HotHitBenchmark {
     SingleFlight flight = new PassThroughFlight();
     cachePlain = new HotKeyCache(caffeine, flight, entryLifecycle, refresher, accessCounter, broadcast, stampClock);
 
-    long farFuture = System.currentTimeMillis() + 300_000;
+    long farFuture = TimeSource.monotonicMillis() + 300_000;
     keys = new String[KEY_SPACE];
     for (int k = 0; k < KEY_SPACE; k++) {
       keys[k] = "bench:key:" + k;
