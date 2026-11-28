@@ -131,9 +131,8 @@ public class CacheSyncListener {
   /**
    * AMQP consumer callback handling inbound peer sync deliveries.
    *
-   * <p>Applies app-name isolation, parses the message type header, drops self-originated
-   * REFRESH/PUT/clear broadcasts (retaining self INVALIDATE/INVALIDATE_BATCH to heal
-   * invalidate-vs-reload races), checks for peer node-id collisions, and dispatches the decoded
+   * <p>Applies app-name isolation, drops every echo of this instance's own fanout broadcast, parses
+   * the message type header, checks for peer node-id collisions, and dispatches the decoded
    * message. Acknowledges on success and nacks with {@code requeue=false} on processing errors.
    *
    * @param channel the AMQP channel used for ack/nack
@@ -147,6 +146,14 @@ public class CacheSyncListener {
         return;
       }
 
+      // Every fanout echo of this instance's own broadcast is dropped unread. The local mutation
+      // already recorded its tombstone and removed the entry under the bin lock, and a
+      // Scope.REMOTE invalidation intentionally leaves local L1 untouched on the sending node.
+      String origin = AmqpMessageReader.readStringHeader(props, HEADER_ORIGIN_INSTANCE);
+      if (origin != null && identity.instanceId().equals(origin)) {
+        return;
+      }
+
       Object typeHeader = props.getHeader(HEADER_TYPE);
       SyncType type = SyncType.parse(typeHeader);
       if (type == null) {
@@ -154,16 +161,7 @@ public class CacheSyncListener {
         return;
       }
 
-      // Fanout echoes self-broadcasts: skip REFRESH/PUT/clear already applied locally,
-      // but keep INVALIDATE/INVALIDATE_BATCH to heal invalidate-vs-reload repopulation.
-      String origin = AmqpMessageReader.readStringHeader(props, HEADER_ORIGIN_INSTANCE);
-      boolean own = origin != null && identity.instanceId().equals(origin);
-      if (own && type.ignoresSelf()) {
-        return;
-      }
-      if (!own) {
-        detectNodeIdCollision(props, origin);
-      }
+      detectNodeIdCollision(props, origin);
       process(msg, type);
     });
   }

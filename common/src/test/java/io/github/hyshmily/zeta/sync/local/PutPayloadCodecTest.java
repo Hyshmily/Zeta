@@ -194,6 +194,25 @@ class PutPayloadCodecTest {
 
   /** A container in an allowed package is a normal allowlisted value. */
   @Test
+  void aRootContainerTooLargeForTheCapIsRefusedBeforeItIsCopied() {
+    PutPayloadCodec codec = new PutPayloadCodec(4_096, List.of());
+    List<Integer> largeList = new ArrayList<>();
+    Map<String, Object> largeMap = new HashMap<>();
+    for (int i = 0; i < 3_000; i++) {
+      largeList.add(i);
+    }
+    for (int i = 0; i < 1_000; i++) {
+      largeMap.put("k" + i, i);
+    }
+
+    // WRAPPER_ARRAY spends at least 23 bytes on the wrapper plus 2 per list element and 5 per map
+    // entry, so these shapes cannot fit 4 KiB and must be refused without materializing a copy.
+    assertThat(codec.encode(Collections.unmodifiableList(largeList))).isNull();
+    assertThat(codec.encode(Collections.unmodifiableMap(largeMap))).isNull();
+    assertThat(codec.decode(codec.encode(List.of(1, 2, 3)))).isEqualTo(List.of(1, 2, 3));
+  }
+
+  @Test
   void aContainerInAnAllowedPackageRoundTrips() {
     PutPayloadCodec codec = new PutPayloadCodec(4_096, List.of("com.example.dto"));
     AllowedContainer container = new AllowedContainer();

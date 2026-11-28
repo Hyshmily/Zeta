@@ -17,6 +17,10 @@ package io.github.hyshmily.zeta.tests;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import io.github.hyshmily.zeta.autoconfigure.ZetaProperties;
+import io.github.hyshmily.zeta.cache.cachesupport.lifecycle.TtlPolicy;
+import io.github.hyshmily.zeta.cache.cachesupport.raw.CacheEntry;
+import io.github.hyshmily.zeta.cache.cachesupport.raw.EntryDraft;
 import io.github.hyshmily.zeta.sharding.ClusterHealth;
 import io.github.hyshmily.zeta.sharding.HealthView;
 import io.github.hyshmily.zeta.sync.worker.WorkerHeartbeatMessage;
@@ -26,10 +30,10 @@ import org.junit.jupiter.api.Test;
 
 /**
  * Regression tests for wall-clock jump resilience (I27): NTP steps and container
- * clock drift must not break delta computations. All delta-based components
- * (such as heartbeat timeouts) use {@link TimeSource#monotonicMillis()},
- * which ignores wall-clock jumps; absolute expiry timestamps still use the wall
- * clock by design.
+ * clock drift must not break delta or deadline computations. Every duration-based
+ * component — heartbeat timeouts, TTL deadlines, keep-warm windows — runs on
+ * {@link TimeSource#monotonicMillis()}, which ignores wall-clock jumps; the cached wall
+ * clock is left to time-sortable stamps and trace IDs.
  */
 class TimeJumpTest {
 
@@ -60,14 +64,51 @@ class TimeJumpTest {
   }
 
   /**
-   * Verifies that the wall-clock axis still moves with a forward jump — TTL
-   * expiry semantics are intentionally wall-clock based.
+   * Verifies that the wall-clock axis still moves with a forward jump — it is the
+   * axis stamps and trace IDs need, and the one no TTL deadline depends on.
    */
   @Test
   void currentTimeMillis_shouldReflectWallJump() {
     TimeSource.setTimeOffsetForTest(60_000, 0);
     long ts = TimeSource.currentTimeMillis();
     assertThat(Math.abs(ts - System.currentTimeMillis())).isGreaterThan(50_000);
+  }
+
+  // ── TTL deadlines ──
+
+  /**
+   * Verifies that a deadline is minted on the monotonic axis: with a +60 s wall offset already in
+   * place, a 30 s deadline must still land inside the monotonic window, not 60 s later on the wall
+   * clock. A wall-clock mint here is the silent half of a mixed-axis regression — every deadline
+   * would be offset by the machine's uptime relative to the wall clock.
+   */
+  @Test
+  void ttlDeadline_shouldBeMintedOnTheMonotonicAxis() {
+    TtlPolicy ttlPolicy = new TtlPolicy(new ZetaProperties());
+    TimeSource.setTimeOffsetForTest(60_000, 0);
+    long mono = TimeSource.monotonicMillis();
+
+    CacheEntry entry = EntryDraft.blank(ttlPolicy).value("v").version(1L).ttl(30_000L, 0L).build();
+
+    assertThat(entry.getHardExpireAtMs()).isBetween(mono, mono + 30_000L);
+    assertThat(entry.getHardExpireAtMs()).isLessThan(TimeSource.currentTimeMillis());
+  }
+
+  /**
+   * Verifies that a wall step after the entry exists cannot expire it: a +60 s jump puts the 30 s
+   * deadline behind the wall clock, and the entry must still be live. A wall-clock judgment here is
+   * the other half of the regression — an NTP step silently rewriting every resident's lifetime.
+   */
+  @Test
+  void wallJumpAfterTheBuild_shouldNotExpireAStoredEntry() {
+    TtlPolicy ttlPolicy = new TtlPolicy(new ZetaProperties());
+    CacheEntry entry = EntryDraft.blank(ttlPolicy).value("v").version(1L).ttl(30_000L, 0L).build();
+
+    TimeSource.setTimeOffsetForTest(60_000, 0);
+
+    assertThat(entry.getHardExpireAtMs()).isLessThan(TimeSource.currentTimeMillis());
+    assertThat(ttlPolicy.isLogicallyExpired(entry)).isFalse();
+    assertThat(ttlPolicy.isLive(entry)).isTrue();
   }
 
   // ── Heartbeat health ──

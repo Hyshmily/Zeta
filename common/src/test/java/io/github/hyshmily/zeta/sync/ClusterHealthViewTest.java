@@ -22,6 +22,7 @@ import io.github.hyshmily.zeta.sharding.ClusterHealth;
 import io.github.hyshmily.zeta.sharding.HealthView;
 import io.github.hyshmily.zeta.sync.worker.WorkerHeartbeatMessage;
 import io.github.hyshmily.zeta.util.TimeSource;
+import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -255,6 +256,32 @@ class ClusterHealthViewTest {
     view.onHeartbeat(hb("w2", 1, false));
     view.onHeartbeat(hb("w3", 1, false));
     assertThat(view.getAliveWorkerIds()).containsExactly("w1");
+  }
+
+  // ── matchesAliveWorkers (allocation-free equality probe used by the ring rebuild) ──
+
+  @Test
+  void matchesAliveWorkers_shouldAgreeWithTheAliveSet() {
+    view.onHeartbeat(hb("w1", 1, true));
+    view.onHeartbeat(hb("w2", 1, true));
+    view.onHeartbeat(hb("w3", 1, false));
+    assertThat(view.matchesAliveWorkers(Set.of("w1", "w2"))).isTrue();
+
+    // A missing alive Worker, an extra expected ID and an unready Worker are all inequality.
+    assertThat(view.matchesAliveWorkers(Set.of("w1"))).isFalse();
+    assertThat(view.matchesAliveWorkers(Set.of("w1", "w2", "w3"))).isFalse();
+    assertThat(view.matchesAliveWorkers(Set.of("w1", "w2", "w9"))).isFalse();
+  }
+
+  /** The probe must track liveness, not merely the record set: an unready Worker drops out. */
+  @Test
+  void matchesAliveWorkers_shouldFollowTheLivenessVerdict() {
+    view.onHeartbeat(hb("w1", 1, true));
+    assertThat(view.matchesAliveWorkers(Set.of("w1"))).isTrue();
+
+    view.onHeartbeat(hb("w1", 1, false));
+    assertThat(view.matchesAliveWorkers(Set.of("w1"))).isFalse();
+    assertThat(view.matchesAliveWorkers(Set.of())).isTrue();
   }
 
   // ── getAllWorkerIds ──

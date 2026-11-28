@@ -347,6 +347,30 @@ public class ClusterHealth implements HealthView {
   }
 
   /**
+   * Comparison-only form of {@link #getAliveWorkerIds()} (see
+   * {@link HealthView#matchesAliveWorkers}): one clock sample and one walk over the records, with
+   * no set allocation on the steady-state path where the answer is {@code true}. A record cannot
+   * appear twice in the map, so {@code alive ⊆ expected} plus equal cardinality is set equality.
+   *
+   * @param expected the Worker-ID set to compare the alive set against; never {@code null}
+   * @return {@code true} if the alive set equals {@code expected}
+   */
+  @Override
+  public boolean matchesAliveWorkers(Set<String> expected) {
+    long now = TimeSource.monotonicMillis();
+    int aliveCount = 0;
+    for (WorkerHealthRecord record : records.values()) {
+      if (aliveAt(record, now)) {
+        if (!expected.contains(record.workerId)) {
+          return false;
+        }
+        aliveCount++;
+      }
+    }
+    return aliveCount == expected.size();
+  }
+
+  /**
    * Returns the set of all Worker IDs that have ever been seen by this health view
    * and not yet confirmed dead.
    *

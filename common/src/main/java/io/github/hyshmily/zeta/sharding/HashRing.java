@@ -293,10 +293,11 @@ public class HashRing implements ConsistentHashRing {
    * Rebuild the ring from the alive-Worker set of the given health view when it
    * differs from the current node set; a no-op (and no log) when unchanged.
    *
-   * <p>The unchanged-set fast path is lock-free: the alive set is materialised and compared
-   * with the published snapshot before the monitor is taken, so a report flush or a COOL probe
-   * that finds no membership change never serialises on the rebuild lock. Only a real change
-   * enters the monitor and re-checks against the snapshot another writer may have published.
+   * <p>The unchanged-set fast path is lock-free and allocation-free: the health view compares its
+   * alive records against the published snapshot without materialising a set, so a report flush or
+   * a COOL probe that finds no membership change neither allocates nor serialises on the rebuild
+   * lock. Only a real change enters the monitor and re-checks against the snapshot another writer
+   * may have published.
    *
    * <p>The node-ID sample in the rebuild log is taken from the snapshot's already-sorted
    * {@code nodes} and capped at {@code REBUILD_LOG_MAX_NODE_IDS} — the Worker counts in the
@@ -310,9 +311,8 @@ public class HashRing implements ConsistentHashRing {
    */
   @Override
   public Set<String> rebuildIfPossible(HealthView healthView) {
-    Set<String> alive = healthView.getAliveWorkerIds();
     RingState ring = currentState.get();
-    if (alive.equals(ring.live)) {
+    if (healthView.matchesAliveWorkers(ring.live)) {
       return ring.live;
     }
 
@@ -322,7 +322,7 @@ public class HashRing implements ConsistentHashRing {
       // between the lock-free probe and this point. Publishing the pre-lock sample would
       // overwrite that newer snapshot with an older membership, and returning it would skip a
       // membership change the health view already observed.
-      alive = healthView.getAliveWorkerIds();
+      Set<String> alive = healthView.getAliveWorkerIds();
       if (alive.equals(ring.live)) {
         return ring.live;
       }

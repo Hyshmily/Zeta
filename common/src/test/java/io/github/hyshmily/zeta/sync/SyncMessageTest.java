@@ -219,24 +219,19 @@ class SyncMessageTest {
     assertThat(SyncType.parse(null)).isNull();
   }
 
-  /** The byte flags encode the self-ignore, clear-family and jitter contract per type. */
+  /** The byte flags encode the clear-family and jitter contract per type. */
   @Test
   void syncTypeFlagsMatchTheWireContract() {
-    assertThat(SyncType.INVALIDATE.ignoresSelf()).isFalse();
     assertThat(SyncType.INVALIDATE.isClear()).isFalse();
     assertThat(SyncType.INVALIDATE.needsJitter()).isFalse();
 
-    assertThat(SyncType.REFRESH.ignoresSelf()).isTrue();
     assertThat(SyncType.REFRESH.isClear()).isFalse();
     assertThat(SyncType.REFRESH.needsJitter()).isTrue();
 
-    assertThat(SyncType.PUT.ignoresSelf()).isTrue();
     assertThat(SyncType.PUT.isClear()).isFalse();
 
-    assertThat(SyncType.INVALIDATE_ALL.ignoresSelf()).isTrue();
     assertThat(SyncType.INVALIDATE_ALL.isClear()).isTrue();
     assertThat(SyncType.INVALIDATE_PREFIX.isClear()).isTrue();
     assertThat(SyncType.INVALIDATE_BATCH.isClear()).isFalse();
-    assertThat(SyncType.INVALIDATE_BATCH.ignoresSelf()).isFalse();
   }
 }

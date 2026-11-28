@@ -17,6 +17,8 @@ package io.github.hyshmily.zeta.sync.dispatcher;
 
 import io.github.hyshmily.zeta.exception.ZetaExceptionHandler;
 import io.github.hyshmily.zeta.util.Internal;
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.VarHandle;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.List;
@@ -254,6 +256,11 @@ public class KeyDispatcher<T> implements AutoCloseable {
       if (!closed) {
         return true;
       }
+      // Refuse only a first cycle no worker thread has claimed: after the claim the batch will run
+      // (or already has), and the caller must not apply a fallback over a write that landed.
+      if (!outcome.created.abortFirst()) {
+        return true;
+      }
       queues.remove(key, outcome.created);
       outcome.created.cancelJitter();
       return false;
@@ -265,9 +272,14 @@ public class KeyDispatcher<T> implements AutoCloseable {
    * Schedules a new worker's first cycle under the key's bin lock, applying optional start jitter
    * and falling back to immediate execution if delayed scheduling is rejected.
    *
+   * <p>When {@link #close()} wins the publication race the cycle is refused only if no worker
+   * thread has claimed it yet. A claimed cycle is reported as accepted: it may already have run its
+   * batch, and a caller that treats it as refused would apply an inline removal over the value that
+   * batch just wrote.
+   *
    * @param worker the newly created worker
    * @param jitter whether start jitter is enabled for this submission
-   * @return {@code true} if the executor accepted the cycle while the dispatcher remained open
+   * @return {@code true} if the cycle was dispatched and not refused by a concurrent close
    */
   private boolean startWorker(KeyWorker worker, boolean jitter) {
     if (closed) {
@@ -279,7 +291,7 @@ public class KeyDispatcher<T> implements AutoCloseable {
         try {
           ScheduledFuture<?> future = executor.schedule(worker, delayMs, TimeUnit.MILLISECONDS);
           worker.jitterFuture = future;
-          if (closed) {
+          if (closed && worker.abortFirst()) {
             future.cancel(false);
             return false;
           }
@@ -294,7 +306,7 @@ public class KeyDispatcher<T> implements AutoCloseable {
     }
     try {
       executor.execute(worker);
-      return !closed;
+      return !(closed && worker.abortFirst());
     } catch (RejectedExecutionException ignored) {
       return false;
     }
@@ -320,6 +332,11 @@ public class KeyDispatcher<T> implements AutoCloseable {
    * {@link ZetaExceptionHandler}, releases batch weight, and atomically either schedules the next
    * cycle or retires the worker.
    *
+   * <p>The first cycle runs only for the thread that wins {@link KeyWorker#claimFirst()}: a
+   * concurrent {@link #close()} that already refused the submission must not also let the batch
+   * run, and a batch that did start must not be reported as refused. Every exit above that claim
+   * leaves it unclaimed, so the refusing caller observes {@code false} truthfully.
+   *
    * @param worker the active key worker
    */
   @SuppressWarnings("java:S1181")
@@ -333,7 +350,8 @@ public class KeyDispatcher<T> implements AutoCloseable {
       return;
     }
 
-    if (worker.first && worker.hasQueued) {
+    boolean firstCycle = worker.first;
+    if (firstCycle && worker.hasQueued) {
       if (!coalesceFirstBatch(worker)) {
         return;
       }
@@ -342,7 +360,7 @@ public class KeyDispatcher<T> implements AutoCloseable {
     }
     worker.grantTasks = null;
     worker.first = false;
-    if (closed || tasks == null) {
+    if (closed || tasks == null || (firstCycle && !worker.claimFirst())) {
       queues.remove(worker.key, worker);
       return;
     }
@@ -473,6 +491,25 @@ public class KeyDispatcher<T> implements AutoCloseable {
 
     private static final int INITIAL_QUEUE_SIZE = 8;
 
+    /** No thread owns the pre-granted first cycle yet. */
+    private static final int FIRST_PENDING = 0;
+
+    /** A worker thread is running (or has run) the pre-granted first cycle. */
+    private static final int FIRST_CLAIMED = 1;
+
+    /** {@link #close()} refused the first cycle before a worker thread could claim it. */
+    private static final int FIRST_ABORTED = 2;
+
+    private static final VarHandle FIRST_STATE;
+
+    static {
+      try {
+        FIRST_STATE = MethodHandles.lookup().findVarHandle(KeyWorker.class, "firstState", int.class);
+      } catch (ReflectiveOperationException e) {
+        throw new ExceptionInInitializerError(e);
+      }
+    }
+
     final Object key;
 
     @Nullable
@@ -483,6 +520,12 @@ public class KeyDispatcher<T> implements AutoCloseable {
     volatile boolean first;
     volatile boolean hasQueued;
     volatile @Nullable ScheduledFuture<?> jitterFuture;
+
+    /**
+     * Ownership of the pre-granted first cycle, so {@link #close()} either prevents the batch from
+     * running or reports it as accepted — never both.
+     */
+    private volatile int firstState = FIRST_PENDING;
 
     /** Creates a worker with its initial single-task batch pre-granted. */
     private KeyWorker(Object key, T firstTask, int firstWeight) {
@@ -495,6 +538,24 @@ public class KeyDispatcher<T> implements AutoCloseable {
     @Override
     public void run() {
       KeyDispatcher.this.run(this);
+    }
+
+    /**
+     * Claims the right to run the pre-granted first cycle.
+     *
+     * @return {@code false} when {@link #close()} already refused this cycle
+     */
+    private boolean claimFirst() {
+      return FIRST_STATE.compareAndSet(this, FIRST_PENDING, FIRST_CLAIMED);
+    }
+
+    /**
+     * Refuses the pre-granted first cycle unless a worker thread already claimed it.
+     *
+     * @return {@code true} when this call owns the refusal and the batch will not run
+     */
+    private boolean abortFirst() {
+      return FIRST_STATE.compareAndSet(this, FIRST_PENDING, FIRST_ABORTED);
     }
 
     /** Cancels a parked first-cycle jitter future if still present. */

@@ -167,9 +167,14 @@ public final class PutPayloadCodec {
     if (value == null || maxBytes <= 0) {
       return null;
     }
+    Object normalized = normalizeRoot(value, maxBytes);
+    if (normalized == null) {
+      log.debug("Put payload exceeds put-max-bytes {}, degrading to REFRESH", maxBytes);
+      return null;
+    }
     BoundedBuffer buffer = new BoundedBuffer(maxBytes);
     try {
-      rootWriter.writeValue(buffer, normalizeRoot(value));
+      rootWriter.writeValue(buffer, normalized);
       return buffer.toByteArray();
     } catch (RuntimeException | IOException e) {
       // Check buffer.exceeded rather than catching PayloadTooLargeException directly because
@@ -208,19 +213,40 @@ public final class PutPayloadCodec {
    * <p>The comparison is exact on purpose. A framework map subclass or a double-brace initializer
    * is neither admitted by the type validator nor instantiable by it, so encoding it would degrade
    * the peer to INVALIDATE; normalizing every non-standard root keeps the PUT.
+   *
+   * <p>A container whose encoded form cannot fit the cap is refused before the copy. Under
+   * {@code WRAPPER_ARRAY} a list or set spends at least 23 bytes on the wrapper plus 2 per element
+   * and a map at least 23 plus 5 per entry, so the size bounds below prove the payload exceeds
+   * {@code maxBytes}; returning {@code null} costs nothing and keeps a multi-megabyte view from
+   * being copied on the caller's write thread only for Jackson to abort 32 KiB in.
+   *
+   * @param value    the value being encoded
+   * @param maxBytes the payload cap in bytes
+   * @return the normalized root, or {@code null} when its shape alone exceeds the cap
    */
-  private static Object normalizeRoot(Object value) {
+  private static @Nullable Object normalizeRoot(Object value, int maxBytes) {
     Class<?> type = value.getClass();
-    if (value instanceof List<?> list && type != ArrayList.class && type != LinkedList.class) {
-      return new ArrayList<>(list);
+    if (value instanceof List<?> list) {
+      if (list.size() > maxBytes / 2) {
+        return null;
+      }
+      return (type == ArrayList.class || type == LinkedList.class) ? list : new ArrayList<>(list);
     }
-    if (value instanceof Set<?> set && type != HashSet.class && type != LinkedHashSet.class && type != TreeSet.class) {
-      return new LinkedHashSet<>(set);
+    if (value instanceof Set<?> set) {
+      if (set.size() > maxBytes / 2) {
+        return null;
+      }
+      return (type == HashSet.class || type == LinkedHashSet.class || type == TreeSet.class)
+        ? set
+        : new LinkedHashSet<>(set);
     }
-    if (
-      value instanceof Map<?, ?> map && type != HashMap.class && type != LinkedHashMap.class && type != TreeMap.class
-    ) {
-      return new LinkedHashMap<>(map);
+    if (value instanceof Map<?, ?> map) {
+      if (map.size() > maxBytes / 5) {
+        return null;
+      }
+      return (type == HashMap.class || type == LinkedHashMap.class || type == TreeMap.class)
+        ? map
+        : new LinkedHashMap<>(map);
     }
     return value;
   }

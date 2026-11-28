@@ -58,14 +58,6 @@ public class CacheSyncProperties extends AmqpConsumerProperties {
   private long flushDelayMs = 50;
 
   /**
-   * Maximum deferral (ms) before a pending flush is forced to fire, even
-   * when new records keep arriving within the {@link #flushDelayMs} window.
-   * Prevents indefinite debounce starvation under continuous writes.
-   */
-  @Positive
-  private long maxDeferMs = 500;
-
-  /**
    * Upper bound (bytes) for a single PUT broadcast payload (the JSON-serialized
    * put value). A write whose serialized value exceeds this bound is degraded to
    * a value-less REFRESH (same buffer, peer reloads through the cluster loader) — big values

@@ -36,15 +36,14 @@ import io.github.hyshmily.zeta.util.Internal;
 import io.github.hyshmily.zeta.util.TimeSource;
 import io.github.hyshmily.zeta.util.clock.StampClock;
 import io.github.hyshmily.zeta.util.version.VersionGuard;
-import lombok.extern.slf4j.Slf4j;
-import org.jspecify.annotations.Nullable;
-
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executor;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
+import lombok.extern.slf4j.Slf4j;
+import org.jspecify.annotations.Nullable;
 
 /**
  * Applies granted sync batches through {@link SyncPolicy} decisions and framework-owned version,
@@ -197,6 +196,8 @@ public class DefaultSyncContext {
     String key = event.key();
     long version = event.version();
     EntryView current = view(key);
+    // The tombstone only decides the no-resident case: with a live resident the version guard
+    // already orders the event against it, and a tombstone at or above the resident cannot exist.
     SyncSkipReason stale = staleReason(key, current, version, false);
     if (stale != null) {
       fireOnSkipped(event, stale);
@@ -214,8 +215,13 @@ public class DefaultSyncContext {
     // INVALIDATE_LOCAL is redundant for an INVALIDATE: the event already removes the local copy,
     // so it proceeds instead of settling as a policy failure that would leave the entry behind.
 
-    if (!evict(key, version, false)) {
+    int outcome = evict(key, version, false);
+    if (outcome == EVICT_STALE) {
       fireOnSkipped(event, SyncSkipReason.VERSION_STALE);
+      return;
+    }
+    if (outcome == EVICT_STALE_TOMBSTONE) {
+      fireOnSkipped(event, SyncSkipReason.INVALIDATION_TOMBSTONE);
       return;
     }
     fireAfterInvalidate(event);
@@ -237,7 +243,13 @@ public class DefaultSyncContext {
     EntryView current = view(key);
     SyncSkipReason stale = staleReason(key, current, version, true);
     if (stale != null) {
-      fireOnSkipped(event, stale);
+      // A tombstone refuses the value, not the removal the batch carries: the covered INVALIDATE
+      // still has to land as a hard eviction.
+      if (stale == SyncSkipReason.INVALIDATION_TOMBSTONE) {
+        rejectValue(event, key, stale, coveredVersion);
+      } else {
+        fireOnSkipped(event, stale);
+      }
       return;
     }
 
@@ -281,7 +293,7 @@ public class DefaultSyncContext {
         degradeToInvalidate(batch, event, key, version, SyncSkipReason.PAYLOAD_UNREADABLE);
         return;
       }
-      finishValue(batch, event, key, version, true, decoded, resolvedPolicy, loader, policy, coveredVersion);
+      finishValue(batch, event, key, version, true, decoded, resolvedPolicy, loader, policy, coveredVersion, null);
       return;
     }
     if (loader == null) {
@@ -298,8 +310,14 @@ public class DefaultSyncContext {
    *
    * @param isPut          {@code true} for a payload-bearing PUT, {@code false} for a REFRESH
    * @param coveredVersion effective stamp of a covered INVALIDATE, or {@code 0}
+   * @param slot           the coalescing slot when the settle runs inside a refresh task, else
+   *                       {@code null}
+   * @return the highest covered stamp this settle satisfied: the write version when the value
+   *         landed or lost to a newer resident, the covered stamp after a hard removal the settle
+   *         performed for the batch, and {@code 0} when a replacement task owns the outcome and the
+   *         obligation must travel with the slot
    */
-  private void finishValue(
+  private long finishValue(
     Batch.Value batch,
     SyncEvent event,
     String key,
@@ -309,31 +327,51 @@ public class DefaultSyncContext {
     @Nullable ResolvedNamespacePolicy resolvedPolicy,
     @Nullable CacheLoader<String, Object> loader,
     SyncPolicy policy,
-    long coveredVersion
+    long coveredVersion,
+    @Nullable RefreshSlot slot
   ) {
     EntryView resolvedView = view(key);
     SyncSkipReason staleAfterResolution = staleReason(key, resolvedView, version, true);
     if (staleAfterResolution != null) {
-      fireOnSkipped(event, staleAfterResolution);
-      return;
+      return settleStaleValue(event, key, version, staleAfterResolution, coveredVersion, slot);
     }
 
+    long[] rejectedCovered = { 0L };
     SyncValueAction action = callPolicy(
       event,
       "settle",
       () -> policy.settle(event, value, resolvedView),
-      () -> applyCoveredInvalidateFallback(key, coveredVersion)
+      () -> {
+        if (slot == null || !isSuperseded(slot, version)) {
+          long covered = effectiveCovered(coveredVersion, slot);
+          applyCoveredInvalidateFallback(key, covered);
+          rejectedCovered[0] = covered;
+        }
+      }
     );
     if (action == null) {
-      return;
+      return rejectedCovered[0];
     }
     if (action instanceof SyncValueAction.Skip) {
-      rejectValue(event, key, SyncSkipReason.POLICY_REJECTED, coveredVersion);
-      return;
+      if (slot != null && isSuperseded(slot, version)) {
+        // The replacement task owns the key's outcome; the covered removal travels with the slot.
+        fireOnSkipped(event, SyncSkipReason.POLICY_REJECTED);
+        return 0L;
+      }
+      long covered = effectiveCovered(coveredVersion, slot);
+      rejectValue(event, key, SyncSkipReason.POLICY_REJECTED, covered);
+      return covered;
     }
     if (action instanceof SyncValueAction.Invalidate) {
-      degradeToInvalidate(batch, event, key, version, SyncSkipReason.DEGRADED_TO_INVALIDATE);
-      return;
+      return degradeOrYieldIfSuperseded(
+        batch,
+        event,
+        key,
+        version,
+        SyncSkipReason.DEGRADED_TO_INVALIDATE,
+        coveredVersion,
+        slot
+      );
     }
 
     // SyncValueAction is sealed to Skip, Invalidate and Apply, so this is the apply case.
@@ -341,8 +379,15 @@ public class DefaultSyncContext {
     // Skip redundant loader admission on an unchanged REFRESH value (already admitted by the
     // refresh task before it resolved the value).
     if ((isPut || resolved != value) && !admitsValue(loader, key, resolved)) {
-      degradeToInvalidate(batch, event, key, version, SyncSkipReason.VALUE_DECLINED_BY_LOADER);
-      return;
+      return degradeOrYieldIfSuperseded(
+        batch,
+        event,
+        key,
+        version,
+        SyncSkipReason.VALUE_DECLINED_BY_LOADER,
+        coveredVersion,
+        slot
+      );
     }
 
     SyncSkipReason[] refuseReason = new SyncSkipReason[1];
@@ -351,18 +396,76 @@ public class DefaultSyncContext {
       SyncSkipReason reason = refuseReason[0] != null ? refuseReason[0] : SyncSkipReason.VERSION_STALE;
       if (reason == SyncSkipReason.TTL_NOT_PREWARMABLE) {
         // Resident expired mid-load; settle identically to cold-path degradation.
-        degradeToInvalidate(batch, event, key, version, reason);
-        return;
+        return degradeOrYieldIfSuperseded(batch, event, key, version, reason, coveredVersion, slot);
       }
-      fireOnSkipped(event, reason);
-      return;
+      return settleStaleValue(event, key, version, reason, coveredVersion, slot);
     }
     fireAfterValueApplied(event, applied.current());
+    return version;
+  }
+
+  /**
+   * Settles a value that lost a guard after its loader work. A version-stale value needs nothing
+   * further (the resident already outranks it, and every covered stamp is below it), while a
+   * tombstone refuses the value but not the removal the same batch carried: the covered INVALIDATE
+   * is hard-removed here, exactly as a standalone INVALIDATE would have been.
+   *
+   * @return the highest covered stamp this settle satisfied
+   */
+  private long settleStaleValue(
+    SyncEvent event,
+    String key,
+    long version,
+    SyncSkipReason reason,
+    long coveredVersion,
+    @Nullable RefreshSlot slot
+  ) {
+    if (reason != SyncSkipReason.INVALIDATION_TOMBSTONE) {
+      fireOnSkipped(event, reason);
+      return version;
+    }
+    if (slot != null && isSuperseded(slot, version)) {
+      // The replacement task owns the key's outcome; the covered removal travels with the slot.
+      fireOnSkipped(event, reason);
+      return 0L;
+    }
+    long covered = effectiveCovered(coveredVersion, slot);
+    rejectValue(event, key, reason, covered);
+    return covered;
+  }
+
+  /**
+   * Degrades a refused value to a versioned eviction unless a strictly newer task is parked in
+   * {@code slot}. Evicting on behalf of a superseded task would remove the live resident its
+   * replacement is about to renew, turning that replacement into a refused cold load.
+   *
+   * @return the stamp the eviction satisfied, or {@code 0} when the replacement inherits the duty
+   */
+  private long degradeOrYieldIfSuperseded(
+    Batch.Value batch,
+    SyncEvent event,
+    String key,
+    long version,
+    SyncSkipReason reason,
+    long coveredVersion,
+    @Nullable RefreshSlot slot
+  ) {
+    if (slot != null && isSuperseded(slot, version)) {
+      fireOnSkipped(event, SyncSkipReason.COVERED_BY_NEWER_EVENT);
+      return 0L;
+    }
+    long covered = effectiveCovered(coveredVersion, slot);
+    return degradeToInvalidate(batch, event, key, version, reason, covered == 0L);
   }
 
   /**
    * Schedules a peer REFRESH onto {@link #refreshExecutor} with per-key coalescing (one active
    * load plus one newest pending replacement). Lower or equal versions are skipped immediately.
+   *
+   * <p>A superseded task never evicts on the spot: its covered INVALIDATE is merged into the slot
+   * and honoured by whichever task settles last. Evicting when the task is replaced would remove a
+   * live resident before its replacement has loaded, turning a successful refresh into a refused
+   * cold load for a namespace that forbids one.
    *
    * @param task the refresh task to execute
    */
@@ -371,19 +474,26 @@ public class DefaultSyncContext {
     RefreshTask[] superseded = new RefreshTask[1];
     boolean[] shouldSubmit = { false };
     RefreshSlot slot = inFlightRefreshes.compute(task.key(), (key, existing) -> {
+      superseded[0] = null;
+      shouldSubmit[0] = false;
       if (existing == null) {
         shouldSubmit[0] = true;
-        return new RefreshSlot(task.version());
+        return new RefreshSlot(task.version(), task.coveredVersion());
       }
       if (task.version() <= existing.activeVersion) {
+        // Same or older version: its removal still has to land, so merge it into the slot.
         superseded[0] = task;
+        existing.activeCovered = Math.max(existing.activeCovered, task.coveredVersion());
       } else if (existing.next == null) {
         existing.next = task;
+        existing.nextCovered = task.coveredVersion();
       } else if (task.version() > existing.next.version()) {
         superseded[0] = existing.next;
+        existing.nextCovered = Math.max(existing.nextCovered, task.coveredVersion());
         existing.next = task;
       } else {
         superseded[0] = task;
+        existing.nextCovered = Math.max(existing.nextCovered, task.coveredVersion());
       }
       return existing;
     });
@@ -398,16 +508,18 @@ public class DefaultSyncContext {
     try {
       refreshExecutor.execute(() -> drainAsyncRefresh(task, slot));
     } catch (RejectedExecutionException e) {
-      RefreshTask pending = releaseSlotOnRejection(task.key(), slot);
-      degradeToInvalidate(task, SyncSkipReason.REFRESH_REJECTED);
-      if (pending != null) {
-        degradeToInvalidate(pending, SyncSkipReason.REFRESH_REJECTED);
+      ReleasedSlot released = releaseSlotOnRejection(task.key(), slot);
+      boolean allowSoft = released.coveredVersion() == 0L;
+      degradeToInvalidate(task, SyncSkipReason.REFRESH_REJECTED, allowSoft);
+      if (released.pending() != null) {
+        degradeToInvalidate(released.pending(), SyncSkipReason.REFRESH_REJECTED, allowSoft);
       }
     } catch (RuntimeException | Error failure) {
-      RefreshTask pending = releaseSlotOnRejection(task.key(), slot);
-      degradeToInvalidate(task, SyncSkipReason.REFRESH_FAILED);
-      if (pending != null) {
-        degradeToInvalidate(pending, SyncSkipReason.REFRESH_FAILED);
+      ReleasedSlot released = releaseSlotOnRejection(task.key(), slot);
+      boolean allowSoft = released.coveredVersion() == 0L;
+      degradeToInvalidate(task, SyncSkipReason.REFRESH_FAILED, allowSoft);
+      if (released.pending() != null) {
+        degradeToInvalidate(released.pending(), SyncSkipReason.REFRESH_FAILED, allowSoft);
       }
       throw failure;
     }
@@ -415,37 +527,58 @@ public class DefaultSyncContext {
 
   /**
    * Drains the active refresh task and, in the same executor turn, the newest replacement queued
-   * behind it. Failures are degraded individually so one bad load cannot strand later tasks. The
-   * finally block covers abnormal exit (an {@link Error} outside the per-task catch) by releasing the
-   * slot and degrading the task that was still running; the slot is released here rather than in the
-   * caller because only this loop knows whether a replacement became active.
+   * behind it. Each settle reports the highest covered stamp it satisfied; whatever remains is
+   * handed to the replacement, and applied in place when the slot closes with no replacement left,
+   * so a removal covered by a task that lost its value is never lost. Failures are degraded
+   * individually so one bad load cannot strand later tasks. The finally block covers abnormal exit
+   * (an {@link Error} outside the per-task catch) by releasing the slot and degrading the task that
+   * was still running; the slot is released here rather than in the caller because only this loop
+   * knows whether a replacement became active.
    */
   private void drainAsyncRefresh(RefreshTask first, RefreshSlot slot) {
     RefreshTask current = first;
+    long activeCovered = first.coveredVersion();
     boolean completedNormally = false;
     try {
       while (current != null) {
         RefreshTask task = current;
+        long satisfiedUpTo;
         try {
-          executeRefreshTask(task, slot);
+          satisfiedUpTo = executeRefreshTask(task, slot, activeCovered);
         } catch (RuntimeException e) {
-          log.warn("Async refresh failed: key={}", task.key(), e);
-          degradeToInvalidate(task, SyncSkipReason.REFRESH_FAILED);
+          if (isSuperseded(slot, task.version())) {
+            onRefreshSuperseded(task);
+            satisfiedUpTo = 0L;
+          } else {
+            log.warn("Async refresh failed: key={}", task.key(), e);
+            satisfiedUpTo = degradeToInvalidate(
+              task,
+              SyncSkipReason.REFRESH_FAILED,
+              effectiveCovered(activeCovered, slot) == 0L
+            );
+          }
         }
         // The task above is settled either way: clearing the cursor before the poll keeps the
         // finally block from degrading it a second time if the poll itself throws.
         current = null;
-        current = pollNextRefresh(first.key(), slot);
+        NextRefresh next = pollNextRefresh(first.key(), slot, satisfiedUpTo);
+        current = next.task();
+        activeCovered = next.activeCovered();
+        if (current == null && activeCovered > 0L) {
+          // No task is left to carry the removal the slot still owed; land it now.
+          applyCoveredInvalidateFallback(first.key(), activeCovered);
+        }
       }
       completedNormally = true;
     } finally {
       if (!completedNormally) {
-        RefreshTask pending = releaseSlotOnRejection(first.key(), slot);
+        ReleasedSlot released = releaseSlotOnRejection(first.key(), slot);
+        boolean allowSoft = activeCovered == 0L && released.coveredVersion() == 0L;
         if (current != null) {
-          degradeToInvalidate(current, SyncSkipReason.REFRESH_FAILED);
+          degradeToInvalidate(current, SyncSkipReason.REFRESH_FAILED, allowSoft);
         }
-        if (pending != null) {
-          degradeToInvalidate(pending, SyncSkipReason.REFRESH_FAILED);
+        if (released.pending() != null) {
+          degradeToInvalidate(released.pending(), SyncSkipReason.REFRESH_FAILED, allowSoft);
         }
       }
     }
@@ -456,59 +589,59 @@ public class DefaultSyncContext {
    * before and after the blocking loader call: the task may have been parked behind a newer one, or a
    * peer write may have landed while the source was being read. The cold-load policy is re-checked as
    * well, since an entry that was live at enqueue time can expire before the task runs.
+   *
+   * @return the highest covered stamp this settle satisfied; {@code 0} when a replacement is parked
+   *         and inherits the obligation
    */
-  private void executeRefreshTask(RefreshTask task, RefreshSlot slot) {
+  private long executeRefreshTask(RefreshTask task, RefreshSlot slot, long activeCovered) {
     if (isSuperseded(slot, task.version())) {
       onRefreshSuperseded(task);
-      return;
+      return 0L;
     }
 
     EntryView preLoad = view(task.key());
     SyncSkipReason stale = staleReason(task.key(), preLoad, task.version(), true);
     if (stale != null) {
-      fireOnSkipped(task.event(), stale);
-      return;
+      return settleStaleValue(task.event(), task.key(), task.version(), stale, activeCovered, slot);
     }
 
-    boolean hasResident = EntryView.isLive(preLoad);
-    if (!hasResident) {
+    long covered = Math.max(activeCovered, slot.activeCovered);
+    if (!EntryView.isLive(preLoad)) {
       // The entry may have expired or been evicted while this task waited in the refresh queue, so
       // the cold-load policy is re-checked here instead of only at apply time.
       SyncSkipReason refusal = coldRefusal(task.resolvedPolicy(), task.key(), false);
       if (refusal != null) {
-        degradeToInvalidate(task, refusal);
-        return;
+        return degradeToInvalidate(task, refusal, covered == 0L);
       }
     }
 
     Object loaded;
     try {
-      loaded = hasResident ? task.loader().reload(task.key()) : task.loader().load(task.key());
+      // A refresh always runs outside the caller's stack, resident or not, so it uses the
+      // background entry point and never the foreground-only load.
+      loaded = task.loader().reload(task.key());
     } catch (RuntimeException e) {
       // A task superseded while its load was in flight is reported as covered, not as a failure:
       // the newer task owns the key's outcome.
       if (isSuperseded(slot, task.version())) {
         onRefreshSuperseded(task);
-        return;
+        return 0L;
       }
       log.warn("refresh: load failed for key={}", task.key(), e);
-      degradeToInvalidate(task, SyncSkipReason.REFRESH_FAILED);
-      return;
+      return degradeToInvalidate(task, SyncSkipReason.REFRESH_FAILED, covered == 0L);
     }
 
     if (isSuperseded(slot, task.version())) {
       onRefreshSuperseded(task);
-      return;
+      return 0L;
     }
     if (loaded == null) {
-      degradeToInvalidate(task, SyncSkipReason.VALUE_NOT_FOUND);
-      return;
+      return degradeToInvalidate(task, SyncSkipReason.VALUE_NOT_FOUND, covered == 0L);
     }
     if (!admitsValue(task.loader(), task.key(), loaded)) {
-      degradeToInvalidate(task, SyncSkipReason.VALUE_DECLINED_BY_LOADER);
-      return;
+      return degradeToInvalidate(task, SyncSkipReason.VALUE_DECLINED_BY_LOADER, covered == 0L);
     }
-    finishValue(
+    return finishValue(
       task.batch(),
       task.event(),
       task.key(),
@@ -518,14 +651,15 @@ public class DefaultSyncContext {
       task.resolvedPolicy(),
       task.loader(),
       task.policy(),
-      task.coveredVersion()
+      covered,
+      slot
     );
   }
 
   /**
-   * Writes a peer value into L1 under tombstone and refresh version guards, preserving resident
-   * TTLs or using a prewarmable namespace contract for absent entries, then drops dedup and
-   * best-effort re-arms {@link #warmScheduler}.
+   * Writes a peer value into L1 under the tombstone guard and an idempotent equal-version guard,
+   * preserving resident TTLs or using a prewarmable namespace contract for absent entries, then
+   * drops dedup and best-effort re-arms {@link #warmScheduler}.
    *
    * @param key            the affected physical key
    * @param version        the effective data version stamp
@@ -548,7 +682,9 @@ public class DefaultSyncContext {
         return existing;
       }
       CacheEntry resident = liveResident(existing);
-      if (resident != null && VersionGuard.shouldSkipForRefresh(resident, version)) {
+      // A value event is idempotent at an equal stamp: the resident already carries that version,
+      // so a redelivered PUT/REFRESH must not re-fetch the source or restart the entry's TTLs.
+      if (resident != null && VersionGuard.shouldSkipForSync(resident, version)) {
         refuseReason[0] = SyncSkipReason.VERSION_STALE;
         return existing;
       }
@@ -592,34 +728,62 @@ public class DefaultSyncContext {
     return applied;
   }
 
+  /** {@code evict} outcome: the resident outranked the stamp; nothing was removed. */
+  private static final int EVICT_STALE = 0;
+
+  /** {@code evict} outcome: the stamp was already covered and no resident was live. */
+  private static final int EVICT_STALE_TOMBSTONE = 1;
+
+  /** {@code evict} outcome: the soft window was closed and the entry still serves as stale. */
+  private static final int EVICT_SOFT_EXPIRED = 2;
+
+  /** {@code evict} outcome: the entry was hard-removed, or was already absent. */
+  private static final int EVICT_HARD = 3;
+
   /**
    * Performs version-guarded local eviction inside the key's map bin: records the invalidation
    * tombstone, drops SingleFlight dedup, and either closes the soft window (when
    * {@code softExpireHot} applies to a live hot resident with soft TTL) or removes the entry and
    * cancels its warm task.
    *
+   * <p>A stamp an earlier removal already covered cannot condemn anything: with no live resident
+   * there is nothing to remove, and invalidating the key's flight unconditionally would kill a load
+   * that started <em>after</em> that removal. Such a late message (a reordered peer INVALIDATE, or a
+   * delayed degradation) settles as {@link #EVICT_STALE_TOMBSTONE} without touching the flight.
+   * A live resident is exempt from that short-circuit: a resident that is merely soft-expired still
+   * has to be hard-removed when the same stamp arrives again.
+   *
    * @param key           the affected physical key
    * @param version       the invalidation version stamp
    * @param softExpireHot {@code true} to soft-expire eligible hot entries instead of deleting them
-   * @return {@code true} if the tombstone and eviction applied; {@code false} if a newer resident
-   *         outranked {@code version}
+   * @return one of {@link #EVICT_STALE}, {@link #EVICT_STALE_TOMBSTONE}, {@link #EVICT_SOFT_EXPIRED}
+   *         or {@link #EVICT_HARD}
    */
   @SuppressWarnings("all")
-  private boolean evict(String key, long version, boolean softExpireHot) {
-    boolean[] stale = { false };
+  private int evict(String key, long version, boolean softExpireHot) {
+    int[] outcome = { EVICT_HARD };
     boolean[] removed = { false };
     cache
       .asMap()
       .compute(key, (k, existing) -> {
+        outcome[0] = EVICT_HARD;
+        removed[0] = false;
         CacheEntry resident = liveResident(existing);
         if (resident != null && VersionGuard.shouldSkipForRefresh(resident, version)) {
-          stale[0] = true;
+          outcome[0] = EVICT_STALE;
           return existing;
         }
-
-        entryLifecycle.recordInvalidation(key, version);
-        if (singleFlight != null) {
-          singleFlight.invalidate(key);
+        boolean alreadyCovered = entryLifecycle.staleAgainstInvalidation(key, version);
+        if (resident == null && alreadyCovered) {
+          outcome[0] = EVICT_STALE_TOMBSTONE;
+          removed[0] = existing != null;
+          return null;
+        }
+        if (!alreadyCovered) {
+          entryLifecycle.recordInvalidation(key, version);
+          if (singleFlight != null) {
+            singleFlight.invalidate(key);
+          }
         }
         if (existing == null) {
           // Entry is already absent, but a scheduled warm task may still be armed.
@@ -629,11 +793,12 @@ public class DefaultSyncContext {
         if (
           resident != null && softExpireHot && existing.getSoftTtlMs() > 0L && heatView != null && heatView.isHot(key)
         ) {
+          outcome[0] = EVICT_SOFT_EXPIRED;
           if (ttlPolicy.isSoftExpired(existing)) {
             return existing;
           }
           // Set soft deadline 1ms in the past so reads in the same millisecond trigger soft refresh.
-          return entryLifecycle.editEntry(existing).softExpiryAt(TimeSource.currentTimeMillis() - 1L).build();
+          return entryLifecycle.editEntry(existing).softExpiryAt(TimeSource.monotonicMillis() - 1L).build();
         }
         removed[0] = true;
         return null;
@@ -641,7 +806,7 @@ public class DefaultSyncContext {
     if (removed[0] && warmScheduler != null) {
       warmScheduler.cancel(key);
     }
-    return !stale[0];
+    return outcome[0];
   }
 
   /**
@@ -688,15 +853,29 @@ public class DefaultSyncContext {
     fireHooks("afterClear", "clear", hook -> hook.afterClear(clearEvents(accepted, marks), removed));
   }
 
+  /** Per-key sweep result: the resident outranked the clear and was left in place. */
+  private static final int SWEEP_KEPT = 0;
+
+  /** Per-key sweep result: an already-expired resident was removed but no servable value was lost. */
+  private static final int SWEEP_EXPIRED = 1;
+
+  /** Per-key sweep result: a live resident was removed by this clear. */
+  private static final int SWEEP_LIVE = 2;
+
   /**
    * Sweeps L1 entries targeted by {@code fullStamp} or {@code prefixStamps}, removing residents
    * at or below the applicable stamp and cancelling their warm tasks.
+   *
+   * <p>One {@code outcome} holder is reused across the walk and reset before every mutation, so a
+   * contended bin that re-runs the mapping function against a different image cannot carry the
+   * previous key's result into this key's count.
    *
    * @return number of live entries removed by this sweep
    */
   @SuppressWarnings("all")
   private int sweep(long fullStamp, Map<String, Long> prefixStamps) {
     int removed = 0;
+    int[] outcome = new int[1];
     for (Map.Entry<String, CacheEntry> entry : cache.asMap().entrySet()) {
       String key = entry.getKey();
       long stamp = stampFor(key, fullStamp, prefixStamps);
@@ -709,27 +888,27 @@ public class DefaultSyncContext {
       if (resident != null && VersionGuard.shouldSkipForRefresh(resident, stamp)) {
         continue;
       }
+      outcome[0] = SWEEP_KEPT;
       // Pre-clear flights were already invalidated above; watermarks block stale fills.
-      boolean[] liveRemoved = { false };
-      Applied removal = EntryMutations.apply(cache, key, existing -> {
-        // Reset on every attempt: a contended bin can re-run this function against a different image.
-        liveRemoved[0] = false;
-        if (
-          existing == null || (liveResident(existing) != null && VersionGuard.shouldSkipForRefresh(existing, stamp))
-        ) {
-          return existing;
-        }
+      cache
+        .asMap()
+        .computeIfPresent(key, (k, existing) -> {
+          // Reset on every attempt: a contended bin can re-run this function against a different image.
+          outcome[0] = SWEEP_KEPT;
+          boolean live = liveResident(existing) != null;
+          if (live && VersionGuard.shouldSkipForRefresh(existing, stamp)) {
+            return existing;
+          }
+          // An entry past its hard deadline is already unservable: it still has to be removed (and
+          // its warm task cancelled), but it was not an entry this clear took away.
+          outcome[0] = live ? SWEEP_LIVE : SWEEP_EXPIRED;
+          return null;
+        });
 
-        // An entry past its hard deadline is already unservable: it still has to be removed (and its
-        // warm task cancelled), but it was not an entry this clear took away.
-        liveRemoved[0] = liveResident(existing) != null;
-        return null;
-      });
-
-      if (liveRemoved[0]) {
+      if (outcome[0] == SWEEP_LIVE) {
         removed++;
       }
-      if (removal.changed() && warmScheduler != null) {
+      if (outcome[0] != SWEEP_KEPT && warmScheduler != null) {
         warmScheduler.cancel(key);
       }
     }
@@ -774,26 +953,26 @@ public class DefaultSyncContext {
   }
 
   /**
-   * Checks version and optional tombstone guards before policy invocation or write-back. A live
-   * resident with a strictly newer data version makes the event stale; a tombstone check is
-   * requested only for value paths, where a prior invalidation or clear at an equal or newer stamp
-   * must suppress a late peer value. Returning a reason here avoids running a loader for an event
-   * that cannot win.
+   * Checks the version guard and, on the paths that need it, the invalidation watermarks before
+   * policy invocation or write-back. A live resident carrying the event's own stamp or a higher one
+   * settles the event: a value event is idempotent at an equal stamp, while an INVALIDATE or a clear
+   * sweep must still win at that stamp, so only a strictly newer resident outranks them. The
+   * tombstone is consulted for value events always, and for removals only when no live resident
+   * exists — a live (possibly soft-expired) resident is condemned by {@code evict} itself, whereas a
+   * tombstone would otherwise settle the event without touching it. Returning a reason here avoids
+   * running a loader for an event that cannot win.
    *
-   * @param checkTombstone whether to consult the invalidation/prefix-clear watermarks
+   * @param isValue whether the event writes a value ({@code PUT}/{@code REFRESH}) rather than
+   *                removing one
    * @return the skip reason, or {@code null} when the event may proceed
    */
   @SuppressWarnings("all")
-  private @Nullable SyncSkipReason staleReason(
-    String key,
-    @Nullable EntryView current,
-    long version,
-    boolean checkTombstone
-  ) {
-    if (EntryView.isLive(current) && current.dataVersion() > version) {
+  private @Nullable SyncSkipReason staleReason(String key, @Nullable EntryView current, long version, boolean isValue) {
+    boolean live = EntryView.isLive(current);
+    if (live && (isValue ? current.dataVersion() >= version : current.dataVersion() > version)) {
       return SyncSkipReason.VERSION_STALE;
     }
-    if (checkTombstone && entryLifecycle.staleAgainstInvalidation(key, version)) {
+    if ((isValue || !live) && entryLifecycle.staleAgainstInvalidation(key, version)) {
       return SyncSkipReason.INVALIDATION_TOMBSTONE;
     }
     return null;
@@ -817,19 +996,47 @@ public class DefaultSyncContext {
    * of degraded. Soft expiry is preserved when the batch allows it.
    *
    * @param reason the original refusal, reported through {@code afterValueDegraded}
+   * @return the stamp the eviction satisfied: the event version after a hard removal, otherwise
+   *         {@code 0}
    */
-  private void degradeToInvalidate(
+  private long degradeToInvalidate(
     Batch.Value batch,
     SyncEvent event,
     String key,
     long version,
     SyncSkipReason reason
   ) {
-    if (!evict(key, version, batch.allowSoftExpire())) {
+    return degradeToInvalidate(batch, event, key, version, reason, true);
+  }
+
+  /**
+   * Degrades a value event to a versioned eviction, choosing between a hard removal and a
+   * soft-expire close.
+   *
+   * @param allowSoftExpire whether the settle may leave a hot entry soft-expired instead of removing
+   *                        it; forced to {@code false} when the batch carried an INVALIDATE
+   * @return the stamp the eviction satisfied: the event version after a hard removal, otherwise
+   *         {@code 0}
+   */
+  private long degradeToInvalidate(
+    Batch.Value batch,
+    SyncEvent event,
+    String key,
+    long version,
+    SyncSkipReason reason,
+    boolean allowSoftExpire
+  ) {
+    int outcome = evict(key, version, allowSoftExpire && batch.allowSoftExpire());
+    if (outcome == EVICT_STALE) {
       fireOnSkipped(event, SyncSkipReason.VERSION_STALE);
-      return;
+      return version;
+    }
+    if (outcome == EVICT_STALE_TOMBSTONE) {
+      fireOnSkipped(event, SyncSkipReason.INVALIDATION_TOMBSTONE);
+      return version;
     }
     fireAfterValueDegraded(event, reason);
+    return outcome == EVICT_HARD ? version : 0L;
   }
 
   /**
@@ -838,8 +1045,8 @@ public class DefaultSyncContext {
    * settle, and evicting at the task's version still removes the resident the refresh was meant to
    * renew instead of dropping the event silently.
    */
-  private void degradeToInvalidate(RefreshTask task, SyncSkipReason reason) {
-    degradeToInvalidate(task.batch(), task.event(), task.key(), task.version(), reason);
+  private long degradeToInvalidate(RefreshTask task, SyncSkipReason reason, boolean allowSoftExpire) {
+    return degradeToInvalidate(task.batch(), task.event(), task.key(), task.version(), reason, allowSoftExpire);
   }
 
   /**
@@ -1065,54 +1272,78 @@ public class DefaultSyncContext {
   }
 
   /**
-   * Settles a REFRESH that lost to a newer task. Its covered INVALIDATE still applies, so removal
-   * intent carried in the batch is not lost with the superseded value; the skip is reported as
-   * {@code COVERED_BY_NEWER_EVENT} rather than as a failure.
+   * Highest covered stamp a settle has to honour: the task's own batch coverage merged with
+   * everything {@link #scheduleAsyncRefresh} folded into the slot while the task ran. The slot's
+   * read is lock-free; a merge that lands after this snapshot is still picked up by the drain loop
+   * through {@code remaining}.
+   */
+  private static long effectiveCovered(long coveredVersion, @Nullable RefreshSlot slot) {
+    return slot == null ? coveredVersion : Math.max(coveredVersion, slot.activeCovered);
+  }
+
+  /**
+   * Settles a REFRESH that lost to a newer task. The covered removal is not applied here: it is
+   * merged into the slot and honoured by whichever task settles last, so a replacement that writes
+   * a newer value is not preceded by an eviction of the resident it was about to renew. The skip is
+   * reported as {@code COVERED_BY_NEWER_EVENT} rather than as a failure.
    */
   private void onRefreshSuperseded(RefreshTask task) {
-    applyCoveredInvalidateFallback(task.key(), task.coveredVersion());
     fireOnSkipped(task.event(), SyncSkipReason.COVERED_BY_NEWER_EVENT);
   }
 
   /**
-   * Promotes the queued replacement to active under the map's compute, returning it for the drain
-   * loop to execute. The identity check ({@code existing != slot}) is essential: a rejected slot may
-   * already have been removed and replaced, and mutating the newer slot would strand its task.
+   * Promotes the queued replacement to active under the map's compute, returning it together with
+   * the covered stamp it inherits: whatever the settled task did not satisfy. An unsatisfied stamp
+   * is never dropped with the slot — with a replacement parked it is folded into the task it hands
+   * over, and without one it is returned to the caller, which applies it before the slot disappears.
+   * The {@code existing != slot} identity check keeps a replaced slot's task from being mutated.
+   *
+   * @param satisfiedUpTo the highest covered stamp the settled task satisfied
    */
   @SuppressWarnings("all")
-  private @Nullable RefreshTask pollNextRefresh(String key, RefreshSlot slot) {
-    RefreshTask[] next = new RefreshTask[1];
+  private NextRefresh pollNextRefresh(String key, RefreshSlot slot, long satisfiedUpTo) {
+    NextRefresh[] result = { new NextRefresh(null, 0L) };
     inFlightRefreshes.computeIfPresent(key, (k, existing) -> {
       if (existing != slot) {
+        result[0] = new NextRefresh(null, 0L);
         return existing;
       }
-      if (existing.next != null) {
-        next[0] = existing.next;
-        existing.activeVersion = existing.next.version();
-        existing.next = null;
-        return existing;
+      long remaining = existing.activeCovered > satisfiedUpTo ? existing.activeCovered : 0L;
+      if (existing.next == null) {
+        result[0] = new NextRefresh(null, remaining);
+        return null;
       }
-      return null;
+      RefreshTask next = existing.next;
+      long nextActiveCovered = Math.max(existing.nextCovered, remaining);
+      existing.activeVersion = next.version();
+      existing.activeCovered = nextActiveCovered;
+      existing.next = null;
+      existing.nextCovered = 0L;
+      result[0] = new NextRefresh(next, nextActiveCovered);
+      return existing;
     });
-    return next[0];
+    return result[0];
   }
 
   /**
-   * Removes a rejected or failed slot and hands back its parked replacement so the caller can degrade
-   * both tasks. The identity check prevents removing a slot that a newer submission has already
+   * Removes a rejected or failed slot and hands back its parked replacement plus the highest covered
+   * stamp the slot still owed, so the caller can degrade both tasks at a version that also honours
+   * the removal. The identity check prevents removing a slot that a newer submission has already
    * installed under the same key.
    */
-  private @Nullable RefreshTask releaseSlotOnRejection(String key, RefreshSlot slot) {
-    RefreshTask[] pending = new RefreshTask[1];
+  private ReleasedSlot releaseSlotOnRejection(String key, RefreshSlot slot) {
+    ReleasedSlot[] result = { new ReleasedSlot(null, 0L) };
     inFlightRefreshes.computeIfPresent(key, (k, existing) -> {
       if (existing != slot) {
+        result[0] = new ReleasedSlot(null, 0L);
         return existing;
       }
-      pending[0] = existing.next;
+      result[0] = new ReleasedSlot(existing.next, Math.max(existing.activeCovered, existing.nextCovered));
       existing.next = null;
+      existing.nextCovered = 0L;
       return null;
     });
-    return pending[0];
+    return result[0];
   }
 
   /**
@@ -1141,7 +1372,7 @@ public class DefaultSyncContext {
     if (hooks.isEmpty() || entry == null) {
       return;
     }
-    EntryView view = EntryView.of(entry, ttlPolicy, TimeSource.currentTimeMillis());
+    EntryView view = EntryView.of(entry, ttlPolicy, TimeSource.monotonicMillis());
     fireHooks("afterValueApplied", eventKey(event), hook -> hook.afterValueApplied(event, view));
   }
 
@@ -1219,20 +1450,39 @@ public class DefaultSyncContext {
     }
   }
 
-  /** Per-key coalescing slot holding the active refresh version and at most one newest replacement. */
+  /**
+   * Per-key coalescing slot: the executing task's version and outstanding covered stamp, plus at
+   * most one newest replacement.
+   *
+   * <p>Every field is written under the {@code inFlightRefreshes} per-key bin lock (inside the
+   * {@code compute} of {@link #scheduleAsyncRefresh}, {@link #pollNextRefresh} and
+   * {@link #releaseSlotOnRejection}). {@link #activeCovered} is additionally {@code volatile}
+   * because a settling task reads it without the lock. {@link #nextCovered} stays plain: it is
+   * only ever read under that lock.
+   */
   private static final class RefreshSlot {
 
     volatile long activeVersion;
+    volatile long activeCovered;
     volatile @Nullable RefreshTask next;
+    long nextCovered;
 
     /**
-     * Creates a slot for a task about to run. The active version is seeded before submission so a
-     * concurrent higher-version task is parked as a replacement rather than starting a second load.
+     * Creates a slot for a task about to run. The active version and its covered stamp are seeded
+     * before submission so a concurrent newer task is parked as a replacement rather than starting
+     * a second load.
      */
-    private RefreshSlot(long activeVersion) {
+    private RefreshSlot(long activeVersion, long activeCovered) {
       this.activeVersion = activeVersion;
+      this.activeCovered = activeCovered;
     }
   }
+
+  /** The promoted replacement and the covered stamp it inherits. */
+  private record NextRefresh(@Nullable RefreshTask task, long activeCovered) {}
+
+  /** A released slot's parked replacement and the highest covered stamp the slot still owed. */
+  private record ReleasedSlot(@Nullable RefreshTask pending, long coveredVersion) {}
 
   /** Immutable table-wide and prefix-scoped clear watermarks resolved for one clear batch. */
   private record ClearMarks(long fullStamp, Map<String, Long> prefixStamps) {}

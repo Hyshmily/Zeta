@@ -22,9 +22,6 @@ import org.jspecify.annotations.Nullable;
  *
  * <p>Every downstream decision reads a predicate instead of re-comparing the header string:
  * <ul>
- *   <li>{@link #ignoresSelf()} — the fanout copy of this instance's own broadcast carries no
- *       information (the sender already applied it); only the single-key and batched INVALIDATE
- *       operations are re-applied.</li>
  *   <li>{@link #isClear()} — an O(n) table/namespace sweep, the control-plane family that shares
  *       one dispatcher channel and bypasses the global payload budget.</li>
  *   <li>{@link #isControl()} — an O(1) removal or clear that must survive a value-payload storm;
@@ -45,11 +42,6 @@ public enum SyncType {
   INVALIDATE_ALL,
   INVALIDATE_PREFIX,
   INVALIDATE_BATCH;
-
-  /** Whether the fanout copy of this instance's own broadcast is discarded unread. */
-  public boolean ignoresSelf() {
-    return this == REFRESH || this == PUT || isClear();
-  }
 
   /** Whether applying the operation sweeps the cache table or a key namespace. */
   public boolean isClear() {

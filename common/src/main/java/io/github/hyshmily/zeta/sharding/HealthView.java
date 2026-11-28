@@ -55,6 +55,21 @@ public interface HealthView {
   /** Get the IDs of Workers currently considered alive. */
   Set<String> getAliveWorkerIds();
 
+  /**
+   * Whether the alive set is exactly {@code expected} — the comparison-only form of
+   * {@code getAliveWorkerIds().equals(expected)}, for callers that reconcile against a set they
+   * already hold and would otherwise allocate a fresh set per probe.
+   *
+   * <p>Implementations with direct access to their records answer without materialising
+   * anything; the result must equal {@code getAliveWorkerIds().equals(expected)}.
+   *
+   * @param expected the Worker-ID set to compare the alive set against; never {@code null}
+   * @return {@code true} if the alive set equals {@code expected}
+   */
+  default boolean matchesAliveWorkers(Set<String> expected) {
+    return getAliveWorkerIds().equals(expected);
+  }
+
   /** Get the IDs of all known Workers. */
   Set<String> getAllWorkerIds();
 

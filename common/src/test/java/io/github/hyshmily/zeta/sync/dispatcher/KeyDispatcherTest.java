@@ -364,6 +364,50 @@ class KeyDispatcherTest {
   }
 
   /**
+   * A first cycle that has already started must be reported as accepted even when close() lands
+   * while the creator is still inside the executor submission. The batch owns its messages: the
+   * caller that reads {@code false} applies an inline removal at the same version, which erases the
+   * value the batch just wrote and leaves a tombstone that refuses the redelivery.
+   */
+  @Test
+  void close_racingAStartedFirstCycle_shouldReportAccepted() throws Exception {
+    CountDownLatch batchEntered = new CountDownLatch(1);
+    CountDownLatch releaseBatch = new CountDownLatch(1);
+    StartedFirstCycleExecutor started = new StartedFirstCycleExecutor(batchEntered);
+    KeyDispatcher<Runnable> d = new KeyDispatcher<>(
+      started,
+      "close-race-started",
+      batch -> {
+        batchEntered.countDown();
+        awaitUninterruptibly(releaseBatch);
+      },
+      KeyDispatcher.DEFAULT_MAX_QUEUE_PER_KEY,
+      KeyDispatcher.DEFAULT_MAX_TASKS_PER_CYCLE,
+      KeyDispatcher.DEFAULT_MAX_GLOBAL_PENDING_UNITS,
+      0
+    );
+    started.observeCloseVia(d);
+    Thread closer = new Thread(() -> {
+      awaitUninterruptibly(batchEntered);
+      d.close();
+    }, "close-race");
+    ExecutorService callers = Executors.newSingleThreadExecutor();
+    try {
+      closer.start();
+      Future<Boolean> accepted = callers.submit(() -> d.submit("key", () -> {}, 1, false));
+
+      assertThat(accepted.get(5, TimeUnit.SECONDS)).as("a started batch is never reported refused").isTrue();
+      assertThat(batchEntered.await(5, TimeUnit.SECONDS)).isTrue();
+    } finally {
+      releaseBatch.countDown();
+      closer.join(5_000L);
+      callers.shutdownNow();
+      d.close();
+      started.shutdownNow();
+    }
+  }
+
+  /**
    * Verifies that after a single task completes and the queue is empty, the key is removed from the internal map.
    */
   @Test
@@ -1176,11 +1220,79 @@ class KeyDispatcherTest {
   }
 
   /**
+   * Awaits {@code latch} without letting an interrupt end the wait, restoring the flag afterwards
+   * so a pooled thread's interrupt state is never silently swallowed.
+   */
+  private static void awaitUninterruptibly(CountDownLatch latch) {
+    boolean interrupted = false;
+    try {
+      for (;;) {
+        try {
+          latch.await();
+          return;
+        } catch (InterruptedException e) {
+          interrupted = true;
+        }
+      }
+    } finally {
+      if (interrupted) {
+        Thread.currentThread().interrupt();
+      }
+    }
+  }
+
+  /**
+   * Runs the submitted cycle on the pool and holds the submitting thread inside
+   * {@link #execute(Runnable)} until that cycle has entered the consumer and {@code close()} has
+   * taken effect, so a test can land the close exactly inside the creator's admission window.
+   */
+  private static class StartedFirstCycleExecutor extends ScheduledThreadPoolExecutor {
+
+    private final CountDownLatch batchEntered;
+
+    private volatile KeyDispatcher<?> owner;
+
+    StartedFirstCycleExecutor(CountDownLatch batchEntered) {
+      super(2);
+      this.batchEntered = batchEntered;
+    }
+
+    /** Lets {@link #execute} observe the dispatcher it is blocking, to wait for its close. */
+    void observeCloseVia(KeyDispatcher<?> owner) {
+      this.owner = owner;
+    }
+
+    @Override
+    @SuppressWarnings("java:S2142")
+    public void execute(Runnable command) {
+      super.execute(command);
+      awaitUninterruptibly(batchEntered);
+      awaitClosed(owner);
+    }
+  }
+
+  /** Spins until {@code dispatcher.close()} has set the closed flag. */
+  private static void awaitClosed(KeyDispatcher<?> dispatcher) {
+    try {
+      Field closed = KeyDispatcher.class.getDeclaredField("closed");
+      closed.setAccessible(true);
+      long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+      while (!closed.getBoolean(dispatcher)) {
+        if (System.nanoTime() > deadline) {
+          throw new AssertionError("dispatcher did not close within the test budget");
+        }
+        Thread.onSpinWait();
+      }
+    } catch (ReflectiveOperationException e) {
+      throw new IllegalStateException("cannot read KeyDispatcher.closed", e);
+    }
+  }
+
+  /**
    * A scheduler that parks its first {@link #execute(Runnable)} until the test releases it,
    * then rejects that call; later submissions run normally. Reproduces a submit racing the
    * creator's executor admission.
-   */
-  private static class BlockingFirstRejectingExecutor extends ScheduledThreadPoolExecutor {
+   */  private static class BlockingFirstRejectingExecutor extends ScheduledThreadPoolExecutor {
 
     private final CountDownLatch firstEntered = new CountDownLatch(1);
     private final CountDownLatch releaseFirst = new CountDownLatch(1);
