@@ -102,7 +102,9 @@ class WarmRegistryTest {
   void omittedFormatInheritsTheAnnotation() throws Exception {
     NamespacePolicyRegistry policies = policies();
     NamespaceKeys keys = new NamespaceKeys(KeyFormat.TYPED);
-    keys.register("users", KeyFormat.Option.PLAIN, sampleMethod());
+    NamespaceKeys.Staging staging = keys.staging();
+    staging.stage("users", KeyFormat.Option.PLAIN, sampleMethod(), true);
+    staging.commit();
     WarmRegistry registry = DefaultWarmRegistry.create(keys, policies);
 
     registry

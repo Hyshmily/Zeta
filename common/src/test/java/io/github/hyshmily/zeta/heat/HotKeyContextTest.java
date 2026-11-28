@@ -159,7 +159,7 @@ class HotKeyContextTest {
         .value("v")
         .version(2L)
         .ttl(60_000L, 0L)
-        .hardExpiryAt(TimeSource.currentTimeMillis() - 1_000L)
+        .hardExpiryAt(TimeSource.monotonicMillis() - 1_000L)
         .build()
     );
 

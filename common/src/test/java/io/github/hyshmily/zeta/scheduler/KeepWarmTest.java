@@ -282,6 +282,30 @@ class KeepWarmTest {
     assertThat(refresher.renewals).isEqualTo(1);
   }
 
+  /**
+   * A read tide samples one instant for the whole batch. A task replaced while that walk is still
+   * in flight already holds a newer read, and the batch's older sample must not push the evidence
+   * back before the new cycle started — the next fire would then discard a key just served.
+   */
+  @Test
+  void anOlderTideSample_shouldNotOverwriteANewerRead() {
+    grantClusterLease();
+    cache.put(KEY, entry);
+    long tideSample = TimeSource.monotonicMillis() - 1_000L;
+    keepWarm.scheduleIfEligible(KEY, entry, WarmSignal.HEAT);
+
+    // A write re-arms the cycle and a real read lands on it while the tide is still walking.
+    CacheEntry version2 = EntryDraft.blank(new TtlPolicy(props)).value("v2").version(2L).ttl(60_000L, 30_000L).build();
+    cache.put(KEY, version2);
+    keepWarm.scheduleIfEligible(KEY, version2, WarmSignal.WRITE);
+    keepWarm.scheduleIfEligible(KEY, version2, WarmSignal.READ);
+
+    keepWarm.onReads(Set.of(KEY), tideSample);
+    scheduled.get().run();
+
+    assertThat(refresher.renewals).isEqualTo(1);
+  }
+
   @Test
   void onReads_shouldRearmATaskBoundToAnOlderVersion() {
     grantClusterLease();

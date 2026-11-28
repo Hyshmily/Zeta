@@ -214,4 +214,35 @@ class NamespacePolicyRegistryTest {
     registry.registerAnnotatedNamespace("later\u0000", 1_000L, 0L, false, null, null);
     assertThat(registry.resolve("later\u0000k").ttl().hardTtlMs()).isNotEqualTo(1_000L);
   }
+
+  /**
+   * A programmatic declaration after the freeze cannot reach the published snapshot, so accepting
+   * it would drop the declaration while its builder reports success and leaves the warm registry's
+   * pending set. It fails instead — only an annotation, whose declaring bean may legitimately be
+   * created after the freeze, is tolerated.
+   */
+  @Test
+  void registerProgrammaticNamespace_afterFreeze_shouldFailInsteadOfDropping() {
+    NamespacePolicyRegistry registry = new NamespacePolicyRegistry(properties(), null);
+    registry.validateAndFreeze();
+
+    assertThatThrownBy(() ->
+      registry.registerProgrammaticNamespace("late\u0000", HeatTrigger.LOCAL, null, key -> "v")
+    )
+      .isInstanceOf(IllegalStateException.class)
+      .hasMessageContaining("already frozen")
+      .hasMessageContaining("late");
+    assertThat(registry.resolve("late\u0000k").loader()).isNull();
+  }
+
+  @Test
+  void setFallbackLoader_afterFreeze_shouldFailInsteadOfDropping() {
+    NamespacePolicyRegistry registry = new NamespacePolicyRegistry(properties(), null);
+    registry.validateAndFreeze();
+
+    assertThatThrownBy(() -> registry.setFallbackLoader(key -> "v"))
+      .isInstanceOf(IllegalStateException.class)
+      .hasMessageContaining("already frozen");
+    assertThat(registry.resolve("plain-key").loader()).isNull();
+  }
 }

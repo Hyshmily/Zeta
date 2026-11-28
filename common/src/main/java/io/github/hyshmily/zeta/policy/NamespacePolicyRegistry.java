@@ -165,6 +165,8 @@ public final class NamespacePolicyRegistry {
    * @param prewarm   the trigger for loading a missing entry, or {@code null} to inherit
    * @param keepWarm  the trigger for renewing a resident entry, or {@code null} to inherit
    * @param loader    the namespace-scoped loader, or {@code null}
+   * @throws IllegalStateException when the registry is already frozen, or the namespace already
+   *                               declares a background loader
    */
   public void registerProgrammaticNamespace(
     String namespace,
@@ -173,10 +175,8 @@ public final class NamespacePolicyRegistry {
     @Nullable CacheLoader<String, ?> loader
   ) {
     Assert.hasText(namespace, "namespace must not be blank");
-    if (frozen != null) {
-      return;
-    }
     Assert.isTrue(CacheKeysPolicy.hasTrailingDelimiter(namespace), "namespace must end with a key delimiter");
+    assertNotFrozen("register namespace '" + displayNamespace(namespace) + "'");
     programmaticWarms.compute(namespace, (key, existing) -> {
       if (existing == null) {
         return new ProgrammaticWarm(prewarm, keepWarm, loader);
@@ -208,15 +208,15 @@ public final class NamespacePolicyRegistry {
    * Registers the deployment-wide fallback used when a key carries no namespace loader.
    *
    * @param loader the fallback loader, or {@code null} to clear it
+   * @throws IllegalStateException when the registry is already frozen, or a fallback loader is
+   *                               already registered
    */
   public void setFallbackLoader(@Nullable CacheLoader<String, Object> loader) {
+    assertNotFrozen("set the fallback loader");
     Assert.isTrue(
       fallbackLoader == null || loader == null,
       "a fallback loader is already registered; keep one registration"
     );
-    if (frozen != null) {
-      return;
-    }
     this.fallbackLoader = loader;
   }
 
@@ -442,6 +442,21 @@ public final class NamespacePolicyRegistry {
    */
   private static String displayNamespace(String namespace) {
     return namespace.replace("\u0000", "\\u0000");
+  }
+
+  /**
+   * Rejects a registration that would land after {@link #validateAndFreeze()}: the published
+   * snapshot would not contain it, so the declaration would be dropped silently while its owner
+   * believes it took effect. An annotation keeps its own tolerate-and-ignore path for a bean
+   * proxied after the freeze.
+   *
+   * @param action the operation being refused, for the exception message
+   * @throws IllegalStateException when the registry is already frozen
+   */
+  private void assertNotFrozen(String action) {
+    if (frozen != null) {
+      throw new IllegalStateException("NamespacePolicyRegistry is already frozen; cannot " + action);
+    }
   }
 
   /** The same logical namespace under the other physical delimiter, or {@code null}. */

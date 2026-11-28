@@ -30,6 +30,8 @@ import io.github.hyshmily.zeta.policy.ResolvedNamespacePolicy;
 import io.github.hyshmily.zeta.util.Internal;
 import io.github.hyshmily.zeta.util.TimeSource;
 import io.github.hyshmily.zeta.util.clock.StampClock;
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.VarHandle;
 import java.util.Set;
 import java.util.concurrent.*;
 import org.jspecify.annotations.Nullable;
@@ -147,14 +149,14 @@ public final class KeepWarm implements WarmScheduler, ReadObserver, DisposableBe
     WarmTask current = tasks.get(key);
     if (current != null && current.dataVersion >= version) {
       if (current.dataVersion == version && signal.isReadEvidence()) {
-        current.lastReadMonoMs = nowMono;
+        current.recordRead(nowMono);
       }
       return true;
     }
     if (current == null && tasks.size() >= config.getKeepWarm().getMaxTasks()) {
       return false;
     }
-    long delayMs = computeDelayMs(entry);
+    long delayMs = computeDelayMs(entry, nowMono);
     if (delayMs < 0L) {
       // The new version declares a lifetime that must not be renewed (permanent, or a window
       // below the floor). Keeping the older task would renew a regime that no longer exists.
@@ -184,7 +186,7 @@ public final class KeepWarm implements WarmScheduler, ReadObserver, DisposableBe
         return existing;
       } else if (existing.dataVersion == version) {
         if (signal.isReadEvidence()) {
-          existing.lastReadMonoMs = nowMono;
+          existing.recordRead(nowMono);
         }
         return existing;
       }
@@ -214,8 +216,10 @@ public final class KeepWarm implements WarmScheduler, ReadObserver, DisposableBe
       }
     });
     // destroy() may have cleared the map while this compute was running; a task armed after that
-    // clear would otherwise sit in the delay queue and in tasks until it expires.
-    if (closed && armed != null && tasks.remove(key, armed)) {
+    // clear would otherwise sit in the delay queue until it expires. The cancel is unconditional:
+    // a failed remove means destroy() already cleared the entry, not that the future is gone.
+    if (closed && armed != null) {
+      tasks.remove(key, armed);
       armed.cancel();
       return false;
     }
@@ -278,7 +282,9 @@ public final class KeepWarm implements WarmScheduler, ReadObserver, DisposableBe
     for (String key : keys) {
       WarmTask task = tasks.get(key);
       if (task != null) {
-        task.lastReadMonoMs = nowMonoMs;
+        // One sample serves the whole tide, so a task re-armed mid-walk can already hold a newer
+        // read; the evidence only ever moves forward.
+        task.recordRead(nowMonoMs);
         CacheEntry raw = QuietCache.getIfPresent(cache, key);
         if (raw == null) {
           // The resident is gone; a task bound to it has nothing left to renew.
@@ -336,11 +342,14 @@ public final class KeepWarm implements WarmScheduler, ReadObserver, DisposableBe
    * signal. The trigger is re-judged here so a caller never has to know which sources the
    * namespace opted into.
    *
+   * <p>A key with no armed task is the common case during a COOL sweep, so it costs one map
+   * lookup and no policy resolution or heat probe.
+   *
    * @param key the physical key
    */
   @Override
   public void cancelIfCold(String key) {
-    if (!matchesKeepWarm(policies.resolve(key), key)) {
+    if (tasks.containsKey(key) && !matchesKeepWarm(policies.resolve(key), key)) {
       cancel(key);
     }
   }
@@ -435,26 +444,34 @@ public final class KeepWarm implements WarmScheduler, ReadObserver, DisposableBe
   /**
    * The delay before this entry's renewal, or {@code -1} when it must not be scheduled.
    *
+   * <p>The window is measured against a deadline {@code TtlPolicy} minted from the monotonic clock,
+   * so the caller's monotonic sample is the same axis — one clock read serves both the window and
+   * the read evidence.
+   *
    * <p>The lead is capped at a quarter of the window and never below 1 s unless the window itself
    * is smaller, so the lead plus its jitter always consumes less than 3/8 of the window.
+   *
+   * @param entry   the resident entry whose deadlines bound the renewal
+   * @param nowMono one monotonic sample for this event
    */
-  private long computeDelayMs(CacheEntry entry) {
+  private long computeDelayMs(CacheEntry entry, long nowMono) {
     long hardDeadline = entry.getHardExpireAtMs();
     long softDeadline = entry.getSoftExpireAtMs();
     if (hardDeadline == Long.MAX_VALUE && softDeadline <= 0L) {
       return -1L;
     }
-    long now = TimeSource.currentTimeMillis();
     long minWindow = config.getKeepWarm().getMinWindowMs();
     // The soft deadline is the earlier renewal point only while it can still hold the minimum
     // window. A short soft TTL (2 s against a 5 s floor) must not make a long hard TTL
     // unrenewable: fall back to the hard deadline, which is the expiry that would actually miss.
     long deadline =
-      softDeadline > 0L && softDeadline < hardDeadline && softDeadline - now >= minWindow ? softDeadline : hardDeadline;
+      softDeadline > 0L && softDeadline < hardDeadline && softDeadline - nowMono >= minWindow
+        ? softDeadline
+        : hardDeadline;
     if (deadline == Long.MAX_VALUE) {
       return -1L;
     }
-    long window = deadline - now;
+    long window = deadline - nowMono;
     if (window < minWindow) {
       return -1L;
     }
@@ -476,10 +493,21 @@ public final class KeepWarm implements WarmScheduler, ReadObserver, DisposableBe
   /** One per-key warm cycle, bound to one data version. */
   private static final class WarmTask {
 
+    /** Atomic max-merge handle over {@link #lastReadMonoMs}. */
+    private static final VarHandle LAST_READ;
+
+    static {
+      try {
+        LAST_READ = MethodHandles.lookup().findVarHandle(WarmTask.class, "lastReadMonoMs", long.class);
+      } catch (ReflectiveOperationException e) {
+        throw new ExceptionInInitializerError(e);
+      }
+    }
+
     private final String key;
     private final long dataVersion;
     private final long armedAtMonoMs;
-    private volatile long lastReadMonoMs;
+    private final long lastReadMonoMs;
     private volatile boolean cancelled;
     private volatile @Nullable ScheduledFuture<?> future;
 
@@ -495,6 +523,24 @@ public final class KeepWarm implements WarmScheduler, ReadObserver, DisposableBe
       this.dataVersion = dataVersion;
       this.armedAtMonoMs = armedAtMonoMs;
       this.lastReadMonoMs = initialReadMonoMs;
+    }
+
+    /**
+     * Raises the read evidence to {@code nowMono}. Never lowers it: a read tide carries one sample
+     * for the whole batch, while a task replaced during that walk is armed by a newer cycle — an
+     * unconditional write of the older sample would push the evidence back before
+     * {@link #armedAtMonoMs} and make the next fire read "no local read" for a key that was just
+     * served.
+     */
+    private void recordRead(long nowMono) {
+      long cur = lastReadMonoMs;
+      while (nowMono > cur) {
+        long witness = (long) LAST_READ.compareAndExchange(this, cur, nowMono);
+        if (witness == cur) {
+          return;
+        }
+        cur = witness;
+      }
     }
 
     /**

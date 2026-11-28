@@ -112,7 +112,7 @@ class DefaultBackgroundRefresherTest {
 
   @Test
   void renewHard_shouldApplyWhenTheResidentExpiresDuringTheLoad() throws Exception {
-    long deadline = TimeSource.currentTimeMillis() + 20L;
+    long deadline = TimeSource.monotonicMillis() + 20L;
     cache.put(
       KEY,
       EntryDraft.blank(ttlPolicy).value("old").version(1L).ttl(60_000L, 30_000L).hardExpiryAt(deadline).build()
@@ -133,7 +133,7 @@ class DefaultBackgroundRefresherTest {
 
   @Test
   void softRefresh_shouldNotWritePastTheHardDeadline() throws Exception {
-    long deadline = TimeSource.currentTimeMillis() + 20L;
+    long deadline = TimeSource.monotonicMillis() + 20L;
     cache.put(
       KEY,
       EntryDraft.blank(ttlPolicy).value("old").version(1L).ttl(60_000L, 30_000L).hardExpiryAt(deadline).build()
@@ -190,8 +190,9 @@ class DefaultBackgroundRefresherTest {
     assertThat(refresher.getRefreshLimiter().availablePermits()).isEqualTo(1);
   }
 
-  private static void sleepPast(long epochMs) throws InterruptedException {
-    long waitMs = epochMs - TimeSource.currentTimeMillis() + 5L;
+  /** Sleeps until the monotonic deadline has passed, plus a small scheduling margin. */
+  private static void sleepPast(long deadlineMonoMs) throws InterruptedException {
+    long waitMs = deadlineMonoMs - TimeSource.monotonicMillis() + 5L;
     if (waitMs > 0L) {
       Thread.sleep(waitMs);
     }
