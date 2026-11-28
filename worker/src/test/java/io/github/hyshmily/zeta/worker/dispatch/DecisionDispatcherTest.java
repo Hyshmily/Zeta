@@ -207,16 +207,17 @@ class DecisionDispatcherTest {
     Class<?> pendingType = Class.forName("io.github.hyshmily.zeta.worker.dispatch.DecisionDispatcher$Pending");
     Constructor<?> pendingConstructor = pendingType.getDeclaredConstructor(ZetaDecision.class, long.class);
     pendingConstructor.setAccessible(true);
+    Object pending = pendingConstructor.newInstance(ZetaDecision.hot("k", 1L), Long.MAX_VALUE);
     Field queueField = laneType.getDeclaredField("queue");
     queueField.setAccessible(true);
     @SuppressWarnings("unchecked")
     ArrayBlockingQueue<Object> queue = (ArrayBlockingQueue<Object>) queueField.get(lane);
-    queue.add(pendingConstructor.newInstance(ZetaDecision.hot("k", 1L), Long.MAX_VALUE));
+    queue.add(pending);
 
-    Method nanosToNextEvent = laneType.getDeclaredMethod("nanosToNextEvent", long.class);
+    Method nanosToNextEvent = laneType.getDeclaredMethod("nanosToNextEvent", pendingType, long.class);
     nanosToNextEvent.setAccessible(true);
 
-    assertThat((long) nanosToNextEvent.invoke(lane, Long.MIN_VALUE)).isPositive();
+    assertThat((long) nanosToNextEvent.invoke(lane, pending, Long.MIN_VALUE)).isPositive();
   }
 
   @Test
@@ -1341,6 +1342,104 @@ class DecisionDispatcherTest {
     assertThat(dispatcher.submit(ZetaDecision.cool("k", 2L)))
       .as("a submission after the drain died is refused, not queued")
       .isFalse();
+  }
+
+  /**
+   * Only a submission that satisfies a wait condition wakes the parked drain. A HOT queued behind a
+   * token-starved head changes nothing the next round would find — the head is already there and
+   * still unsendable — so it costs neither a signal nor another head probe, while a COOL for a lane
+   * the drain saw as empty does satisfy one and is delivered immediately.
+   */
+  @Test
+  void onlyTheFactsTheParkedDrainWaitsForWakeIt() throws InterruptedException {
+    WorkerBroadcaster funnel = mock(WorkerBroadcaster.class);
+    AtomicInteger probes = new AtomicInteger();
+    List<String> sent = new CopyOnWriteArrayList<>();
+    when(funnel.classify(any(), anyLong())).thenAnswer(invocation -> {
+      probes.incrementAndGet();
+      return null;
+    });
+    when(funnel.send(any(), anyLong())).thenAnswer(invocation -> {
+      ZetaDecision decision = invocation.getArgument(0);
+      sent.add(decision.cacheKey());
+      return WorkerBroadcaster.Delivery.SENT;
+    });
+    // One HOT per second: after the first round the hot lane is starved for a whole second, so the
+    // drain parks on the refill and a wake it should not have received shows up as a head probe.
+    dispatcher = new DecisionDispatcher(
+      1_000,
+      1_000,
+      1,
+      1_000_000,
+      1,
+      32,
+      30_000,
+      funnel,
+      metrics,
+      DecisionDispatcher.Rollback.NOOP,
+      DecisionDispatcher.Probe.ALWAYS
+    );
+
+    assertThat(dispatcher.submit(ZetaDecision.hot("blocker", 1L))).isTrue();
+    Thread.sleep(100L);
+    int parked = probes.get();
+
+    assertThat(dispatcher.submit(ZetaDecision.hot("a", 2L))).isTrue();
+    assertThat(dispatcher.submit(ZetaDecision.hot("b", 3L))).isTrue();
+    Thread.sleep(150L);
+
+    assertThat(probes).as("a HOT behind a starved head wakes nobody").hasValue(parked);
+    assertThat(sent).as("no HOT had a send budget").isEmpty();
+
+    assertThat(dispatcher.submit(ZetaDecision.cool("cool", 9L))).isTrue();
+    await(() -> sent.contains("cool"), 2_000);
+    assertThat(sent).as("the COOL satisfied the cool lane's wait condition").contains("cool");
+  }
+
+  /**
+   * A hot head whose promotion is released after the readiness test but before the mask publication
+   * must leave without waiting for a token. The probe blocks that readiness call, then reports the
+   * promotion gone; only the post-mask check can observe it.
+   */
+  @Test
+  void aHotReleasedDuringTheParkRecheckLeavesWithoutWaitingForAToken() throws InterruptedException {
+    List<String> aborted = new CopyOnWriteArrayList<>();
+    CountDownLatch readiness = new CountDownLatch(1);
+    CountDownLatch release = new CountDownLatch(1);
+    AtomicBoolean stale = new AtomicBoolean();
+    AtomicInteger probes = new AtomicInteger();
+    dispatcher = new DecisionDispatcher(
+      1_000,
+      1_000,
+      1,
+      1_000_000,
+      1,
+      32,
+      30_000,
+      broadcaster,
+      metrics,
+      (key, version) -> aborted.add(key + "@" + version),
+      (key, version) -> {
+        if (probes.incrementAndGet() == 2) {
+          readiness.countDown();
+          try {
+            release.await();
+          } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+          }
+          return true;
+        }
+        return !stale.get();
+      }
+    );
+
+    assertThat(dispatcher.submit(ZetaDecision.hot("stale", 1L))).isTrue();
+    assertThat(readiness.await(2, TimeUnit.SECONDS)).isTrue();
+    stale.set(true);
+    release.countDown();
+
+    await(() -> aborted.contains("stale@1"), 750L);
+    assertThat(aborted).containsExactly("stale@1");
   }
 
   private double counter(String name, String type) {

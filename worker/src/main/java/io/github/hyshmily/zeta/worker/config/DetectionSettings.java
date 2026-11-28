@@ -115,7 +115,15 @@ public record DetectionSettings(
     }
 
     private DetectionSettings validate() {
-      window = resolveGeometry(detection.getWindow());
+      if (detection == null) {
+        throw new IllegalStateException("Invalid zeta.worker.detection configuration:\n  - detection must not be null");
+      }
+      WorkerProperties.Window windowConfig = detection.getWindow();
+      if (windowConfig == null) {
+        errors.add("detection.window must not be null");
+      } else {
+        window = resolveGeometry(windowConfig);
+      }
       WorkerProperties.Cooling cooling = detection.getCooling();
       if (cooling == null) {
         errors.add("detection.cooling must not be null");
@@ -154,7 +162,7 @@ public record DetectionSettings(
         errors.add("detection.cooling.sweep-interval (" + sweepIntervalMs + "ms) must be >= 1000ms");
       }
 
-      long retentionMs = millis(detection.getWindow().getRetention(), "detection.window.retention");
+      long retentionMs = windowConfig == null ? 0L : millis(windowConfig.getRetention(), "detection.window.retention");
       RuleSet ruleSet = null;
       if (window != null) {
         validateWindowBounds(retentionMs, lowQps);

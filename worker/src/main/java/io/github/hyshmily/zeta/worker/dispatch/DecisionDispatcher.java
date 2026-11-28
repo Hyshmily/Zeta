@@ -107,6 +107,28 @@ public class DecisionDispatcher implements SmartLifecycle {
    */
   private static final int YIELDED_ONCE = 1 << 3;
 
+  /** A HOT was offered to the hot lane, which the parked drain saw as empty. */
+  private static final int WAKE_HOT = 1;
+
+  /** A COOL was offered to the cool lane, which the parked drain saw as empty. */
+  private static final int WAKE_COOL = 1 << 1;
+
+  /**
+   * A submission displaced an already queued HOT decision for its key, so the hot lane's head may
+   * have become terminal in place without either lane becoming non-empty.
+   */
+  private static final int WAKE_SUPERSEDE = 1 << 2;
+
+  private static final VarHandle WAKE_MASK;
+
+  static {
+    try {
+      WAKE_MASK = MethodHandles.lookup().findVarHandle(DecisionDispatcher.class, "wakeMask", int.class);
+    } catch (ReflectiveOperationException e) {
+      throw new ExceptionInInitializerError(e);
+    }
+  }
+
   /** Hands an undelivered HOT promotion back to the registry. */
   @FunctionalInterface
   public interface Rollback {
@@ -169,6 +191,12 @@ public class DecisionDispatcher implements SmartLifecycle {
     final long expiresAtMs;
 
     final ZetaDecision decision;
+
+    /**
+     * Whether offering this item displaced a queued decision for the same key. Written and read by
+     * the submitting thread only, so it needs no atomic: it decides the wake bits below.
+     */
+    boolean supersededPrevious;
 
     Pending(ZetaDecision decision, long expiresAtMs) {
       this.decision = decision;
@@ -310,10 +338,15 @@ public class DecisionDispatcher implements SmartLifecycle {
 
     /**
      * Nanoseconds until this lane can make progress without a new submission: the first token, or the
-     * queued head reaching its age bound.
+     * queued head reaching its age bound. The caller passes the head it already peeked, so a wait
+     * bound costs no second queue visit.
+     *
+     * @param head  the lane's head, or {@code null} when the lane is empty
+     * @param nowMs the monotonic sample of this wait
+     * @return nanoseconds to the earlier of the two events, or {@link Long#MAX_VALUE} when the lane
+     *         cannot act on its own
      */
-    private long nanosToNextEvent(long nowMs) {
-      Pending head = queue.peek();
+    private long nanosToNextEvent(@Nullable Pending head, long nowMs) {
       if (head == null) {
         return Long.MAX_VALUE;
       }
@@ -367,9 +400,18 @@ public class DecisionDispatcher implements SmartLifecycle {
   private final ConcurrentHashMap<String, Pending> queued = new ConcurrentHashMap<>();
 
   /**
-   * Released on every successful submission and on shutdown, so an idle drain blocks instead of polling.
+   * Parks the drain while it has nothing it can do, and is released only by a submission whose fact
+   * the parked drain is waiting for (see {@link #wakeMask}) or by {@link #shutdown()}.
    */
   private final Semaphore pendingSignal = new Semaphore(0);
+
+  /**
+   * The conditions only a new submission can satisfy while the drain is parked: {@link #WAKE_HOT},
+   * {@link #WAKE_COOL} and {@link #WAKE_SUPERSEDE}. Written immediately before the drain sleeps and
+   * cleared on wake, so it is {@code 0} for the whole of an active drain and failure backoff and a
+   * submission costs one volatile read instead of a semaphore operation.
+   */
+  private volatile int wakeMask;
 
   private final Thread drainThread;
   private final long maxAgeMs;
@@ -515,8 +557,34 @@ public class DecisionDispatcher implements SmartLifecycle {
       return false;
     }
 
-    pendingSignal.release();
+    int need = type == ZetaDecision.DecisionType.COOL ? WAKE_COOL : WAKE_HOT;
+    if (current.supersededPrevious) {
+      need |= WAKE_SUPERSEDE;
+    }
+    signalIfNeeded(need);
     return true;
+  }
+
+  /**
+   * Wakes the parked drain when this submission satisfies one of the conditions it is waiting on.
+   *
+   * <p>{@link #wakeMask} names those conditions, so a submission that cannot change what the parked
+   * drain would find — the common case of another HOT queued behind a token-starved head — signals
+   * nothing, and a submission during an active round touches no semaphore at all. The successful
+   * claim clears the mask before releasing, so a burst of submissions produces at most one release
+   * and the drain re-reads both lanes on the single wakeup it gets.
+   *
+   * @param need the wake bits this submission satisfies
+   */
+  private void signalIfNeeded(int need) {
+    int mask = wakeMask;
+    while ((mask & need) != 0) {
+      if (WAKE_MASK.compareAndSet(this, mask, 0)) {
+        pendingSignal.release();
+        return;
+      }
+      mask = wakeMask;
+    }
   }
 
   /**
@@ -569,6 +637,11 @@ public class DecisionDispatcher implements SmartLifecycle {
     // polls the finished word or does not see the item at all.
     if (previous != null && previous.version() < current.version()) {
       previous.supersede();
+      // Only a displaced HOT can become terminal in place; a COOL never coalesces on a pending
+      // supersede, so waking the drain for one only burns an empty round.
+      if (previous.hot()) {
+        current.supersededPrevious = true;
+      }
     }
 
     // An equal version is a duplicate offered while the first copy is still queued: both may be
@@ -595,19 +668,13 @@ public class DecisionDispatcher implements SmartLifecycle {
             if (!running) {
               break;
             }
-            // Keep the broker-failure retry pace; a failed decision never consumes a token. Drop
-            // the permits accumulated while the broker was failing so a sustained outage cannot
-            // grow an unbounded semaphore count that the next empty round has to drain.
-            pendingSignal.drainPermits();
+            // Keep the broker-failure retry pace; a failed decision never consumes a token.
             Thread.sleep(FAILURE_BACKOFF_MS);
             continue;
           }
           if (round.sent() > 0 || round.processed() > 0) {
-            // Permits released while this round was busy describe decisions already handled; drop them so
-            // the next empty round blocks instead of spinning through stale signals. A round that only
-            // settled terminal decisions is also progress: the next round continues the backlog without
-            // waiting for a token those decisions do not need.
-            pendingSignal.drainPermits();
+            // A round that only settled terminal decisions is also progress: the next round continues
+            // the backlog without waiting for a token those decisions do not need.
             continue;
           }
           if (!awaitWork()) {
@@ -618,7 +685,6 @@ public class DecisionDispatcher implements SmartLifecycle {
           if (!running) {
             break;
           }
-          pendingSignal.drainPermits();
           Thread.sleep(FAILURE_BACKOFF_MS);
         } catch (Error e) {
           log.error("Decision drain thread terminated by Error; stopping dispatcher", e);
@@ -655,9 +721,14 @@ public class DecisionDispatcher implements SmartLifecycle {
   /**
    * Waits until this round has work it can do without a new submission.
    *
-   * <p>An empty queue waits on the submission semaphore; a non-empty but token-starved queue waits
-   * for the next refill or the head's age bound. The permits are drained before waiting so a stale
-   * wakeup cannot spin the loop through work this round cannot perform.
+   * <p>The heads are peeked once and reused for the readiness test and for the wait bound. When there
+   * is nothing to do the method publishes {@link #wakeMask} — the facts only a new submission can
+   * supply — and then re-checks the lanes and the sampled hot head, so a submission that ran before
+   * the mask was visible is picked up here instead of being lost. The head check closes the window in
+   * which a hot head becomes terminal in place without any lane changing: a newer submission marks
+   * it, or the registry releases its promotion. The wait is bounded by the next token refill or the
+   * head's age bound, and unbounded only while both lanes are empty, where a release is the only
+   * wakeup.
    *
    * @return {@code false} when shutdown was observed and the loop must stop
    * @throws InterruptedException when the drain thread is interrupted
@@ -665,40 +736,37 @@ public class DecisionDispatcher implements SmartLifecycle {
   // tryAcquire's result is intentionally ignored: waking and timing out both continue the round.
   @SuppressWarnings("all")
   private boolean awaitWork() throws InterruptedException {
-    if (!queuesEmpty()) {
-      if (hasReadyWork()) {
-        return true;
-      }
-      // Shutdown: the tokens available now were already spent by the two drains above. Waiting for a
-      // refill only burns the join timeout; drainRemaining() counts the remainder as dropped and
-      // returns the HOT seats. Drop the accumulated permits before checking, so the shutdown release
-      // below is observed by the same check.
-      pendingSignal.drainPermits();
-      if (!running) {
-        return false;
-      }
-      // A submission between the first check and the permit drain can make a head terminal; its
-      // release was just discarded, so re-check before sleeping.
-      if (hasReadyWork()) {
-        return true;
-      }
-      // No usable token: wait for the next refill or the head's age bound on the semaphore, so a
-      // COOL arriving behind a HOT-starved round wakes the drain immediately instead of waiting out a
-      // pause nothing can signal. An expired decision still returns its HOT seat on time.
-      pendingSignal.tryAcquire(nanosToNextEvent(), TimeUnit.NANOSECONDS);
+    Pending hotHead = hotLane.queue.peek();
+    Pending coolHead = coolLane.queue.peek();
+    if (readyToWork(hotHead, coolHead)) {
       return true;
     }
-
-    // Clear permits left by a suppressed round, then re-check: a submission between the emptiness
-    // check and here is visible in the queue, so draining its permit cannot lose the wakeup.
+    // Clear a permit released by a wake this round already consumed as work; the mask is not yet
+    // published, so no submission can add one behind this drain. Re-check shutdown after the drain:
+    // shutdown clears the flag before it releases, so a discarded release always leaves a visible stop.
     pendingSignal.drainPermits();
     if (!running) {
       return false;
     }
-    if (queuesEmpty()) {
-      pendingSignal.acquire();
+    // Only a non-null hot head can become terminal in place: a newer submission marks it, or the
+    // registry releases it. Pair publishing this mask with the post-publish supersededHot check so
+    // either change racing the publication is caught instead of lost.
+    wakeMask = (hotHead == null ? WAKE_HOT : WAKE_SUPERSEDE) | (coolHead == null ? WAKE_COOL : 0);
+    Pending hotAfter = hotHead != null ? hotHead : hotLane.queue.peek();
+    Pending coolAfter = coolHead != null ? coolHead : coolLane.queue.peek();
+    try {
+      if (hotAfter != hotHead || coolAfter != coolHead || (hotHead != null && supersededHot(hotHead))) {
+        return true;
+      }
+      if (hotAfter == null && coolAfter == null) {
+        pendingSignal.acquire();
+      } else {
+        pendingSignal.tryAcquire(nanosToNextEvent(hotAfter, coolAfter), TimeUnit.NANOSECONDS);
+      }
+      return true;
+    } finally {
+      wakeMask = 0;
     }
-    return true;
   }
 
   /** @return whether both lanes have no queued decision */
@@ -707,19 +775,19 @@ public class DecisionDispatcher implements SmartLifecycle {
   }
 
   /**
-   * Whether any non-empty lane can act now. A lane with a token can send; without one, a head the
-   * funnel would settle in memory (superseded, expired or elided) leaves without a send budget. A
-   * cool head with a token always counts: the next round either sends it or yields once to a newer
-   * HOT that the hot lane can send in the same round.
+   * Whether either lane can act now. A lane with a token can send; without one, a head the funnel
+   * would settle in memory (superseded, expired or elided) leaves without a send budget. A cool head
+   * with a token always counts: the next round either sends it or yields once to a newer HOT that the
+   * hot lane can send in the same round.
    *
+   * @param hotHead  the hot lane's head, or {@code null} when that lane is empty
+   * @param coolHead the cool lane's head, or {@code null} when that lane is empty
    * @return {@code true} when the next round can make progress without a new submission
    */
-  private boolean hasReadyWork() {
-    Pending hotHead = hotLane.queue.peek();
+  private boolean readyToWork(@Nullable Pending hotHead, @Nullable Pending coolHead) {
     if (hotHead != null && (hotLane.tokens >= 1.0d || isTerminalHead(hotHead))) {
       return true;
     }
-    Pending coolHead = coolLane.queue.peek();
     return coolHead != null && (coolLane.tokens >= 1.0d || isTerminalHead(coolHead));
   }
 
@@ -740,11 +808,13 @@ public class DecisionDispatcher implements SmartLifecycle {
    * receives a token, or a queued head reaches {@code maxAgeMs} and becomes droppable. Both buckets
    * refill from the same elapsed time, so the earlier refill unblocks the round.
    *
+   * @param hotHead  the hot lane's head, or {@code null} when that lane is empty
+   * @param coolHead the cool lane's head, or {@code null} when that lane is empty
    * @return the wait bound for the drain's semaphore
    */
-  private long nanosToNextEvent() {
+  private long nanosToNextEvent(@Nullable Pending hotHead, @Nullable Pending coolHead) {
     long now = TimeSource.monotonicMillis();
-    long nanos = Math.min(coolLane.nanosToNextEvent(now), hotLane.nanosToNextEvent(now));
+    long nanos = Math.min(coolLane.nanosToNextEvent(coolHead, now), hotLane.nanosToNextEvent(hotHead, now));
     return nanos == Long.MAX_VALUE ? TimeUnit.MILLISECONDS.toNanos(FAILURE_BACKOFF_MS) : nanos;
   }
 
@@ -1117,8 +1187,8 @@ public class DecisionDispatcher implements SmartLifecycle {
   }
 
   /**
-   * Stops after the cooling scheduler ({@code MAX_VALUE - 10}) and after the listeners (which use
-   * the default phase), so no COOL is submitted once the final drain has begun.
+   * Stops after the cooling scheduler ({@code MAX_VALUE - 10}) and after the report listener
+   * ({@code MAX_VALUE - 5}), so no HOT or COOL is submitted once the final drain has begun.
    */
   @Override
   public int getPhase() {

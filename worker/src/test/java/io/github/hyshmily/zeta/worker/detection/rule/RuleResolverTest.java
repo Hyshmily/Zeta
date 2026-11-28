@@ -312,6 +312,26 @@ class RuleResolverTest {
     assertThat(gate.binding("k").matches()).isEqualTo(1);
   }
 
+  /**
+   * The global floor can never gate an effective exact rule: an exact rule below
+   * {@code minHotCount} still promotes its own key at its own threshold, while every other key keeps
+   * the floor.
+   */
+  @Test
+  void anExactRuleBelowTheGlobalFloorStillPromotesAtItsOwnThreshold() {
+    HotKeyRule exact = new HotKeyRule("vip", MatchType.EXACT, "vip:1", 0, 0, 3, 0L, 0L, 60_000L, null);
+    defaults = new HotKeyRule("defaults", MatchType.REGEX, ".*", Integer.MIN_VALUE, -1, 100, 0L, 0L, 60_000L, null);
+    RuleResolver exactAware = new RuleResolver(RuleSet.of(List.of(exact), defaults), 4, metrics);
+
+    assertThat(exactAware.snapshot().minHotCount())
+      .as("the floor only covers the rules the scan resolves")
+      .isEqualTo(100L);
+
+    assertThat(exactAware.resolveIfEligible("vip:1", 2)).as("below even the exact threshold").isNull();
+    assertThat(exactAware.resolveIfEligible("vip:1", 3).rule()).isSameAs(exact);
+    assertThat(exactAware.resolveIfEligible("other", 99)).as("the floor still gates every other key").isNull();
+  }
+
   @Test
   void namespaceMatchesTheAnnotationNamespaceAndItsColonForm() {
     HotKeyRule namespace = new HotKeyRule("ns", MatchType.NAMESPACE, "users", 0, 0, 5, 0L, 0L, 60_000L, null);

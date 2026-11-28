@@ -20,10 +20,17 @@ import static org.assertj.core.api.Assertions.*;
 import io.github.hyshmily.zeta.util.TimeSource;
 import java.lang.reflect.Field;
 import java.util.AbstractSet;
+import java.util.ArrayList;
 import java.util.Iterator;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
 
@@ -826,5 +833,45 @@ class SlidingWindowDetectorTest {
     } finally {
       TimeSource.setTimeOffsetForTest(0, 0);
     }
+  }
+
+  /**
+   * A first touch raced by many report threads installs exactly one window and refunds every surplus
+   * seat reservation: a thread that finds the mapping already published returns its seat and adds to
+   * the live window instead of replacing it, so a burst on a cold key neither loses counts nor
+   * drains the ledger.
+   */
+  @Test
+  void aRacedFirstTouchInstallsOneWindowAndRefundsTheLosingSeats() throws Exception {
+    WindowGeometry geometry = WindowGeometry.of(60_000, 64);
+    SlidingWindowDetector detector = new SlidingWindowDetector(geometry, 1_000);
+    int threads = 8;
+    int adds = 200;
+    ExecutorService pool = Executors.newFixedThreadPool(threads);
+    CountDownLatch start = new CountDownLatch(1);
+    try {
+      List<Future<?>> tasks = new ArrayList<>();
+      for (int i = 0; i < threads; i++) {
+        tasks.add(
+          pool.submit(() -> {
+            start.await();
+            for (int round = 0; round < adds; round++) {
+              detector.addCountAtSlice("cold", 1, detector.sliceIndex(TimeSource.monotonicMillis()));
+            }
+            return null;
+          })
+        );
+      }
+      start.countDown();
+      for (Future<?> task : tasks) {
+        task.get(30, TimeUnit.SECONDS);
+      }
+    } finally {
+      pool.shutdownNow();
+    }
+
+    assertThat(detector.activeWindows()).isEqualTo(1);
+    assertThat(detector.windowSum("cold")).isEqualTo((long) threads * adds);
+    assertThat(detector.rejectedNewKeys()).as("the race never exceeded the admission cap").isZero();
   }
 }

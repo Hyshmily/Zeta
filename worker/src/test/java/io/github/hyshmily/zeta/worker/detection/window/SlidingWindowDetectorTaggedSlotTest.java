@@ -65,20 +65,38 @@ class SlidingWindowDetectorTaggedSlotTest {
   }
 
   /**
+   * The signed tag difference cannot tell a newer rotation from a tag written between {@code 2^31}
+   * and {@code 2^32} slices ago. The window's 64-bit last write disambiguates: a real rotation is at
+   * least {@code 2 * windowSize} ahead, so a last write still inside the summation range proves the
+   * tag is stale and the slot must be replaced from zero instead of dropping the add.
+   */
+  @Test
+  void aTagPastHalfTheTagCycleDoesNotDropTheWrite() {
+    SlidingWindowDetector detector = new SlidingWindowDetector(WindowGeometry.of(4, 4), 0);
+    long written = 1L;
+    long later = written + (1L << 31) + 2L * WINDOW;
+
+    assertThat(detector.addCountAtSlice("k", 100, written)).isEqualTo(100L);
+    assertThat(detector.addCountAtSlice("k", 1, later))
+      .as("the half-cycle-old tag is stale, not a newer rotation")
+      .isEqualTo(1L);
+  }
+
+  /**
    * A writer that stalled across a full rotation must not replace the newer rotation's word. Its own
    * slice is already outside every reader's range, so dropping the add loses no visible traffic;
    * overwriting would erase the count the current window still sums.
    */
   @Test
   void aStaleAddDoesNotReplaceANewerRotation() {
-    long[] slots = new long[2 * WINDOW];
+    SlidingWindowDetector detector = new SlidingWindowDetector(WindowGeometry.of(4, 4), 0);
     long stale = 1L;
     long newer = stale + 2L * WINDOW;
     int index = (int) (stale & MASK);
-    slots[index] = SlidingWindowDetector.pack(newer, 7);
+    SlidingWindowDetector.KeyWindow window = new SlidingWindowDetector.KeyWindow(2 * WINDOW, newer, index, 7);
 
-    SlidingWindowDetector.addToSlot(index, 100, slots, stale);
+    detector.addToSlot(window, index, 100, stale);
 
-    assertThat(slots[index]).isEqualTo(SlidingWindowDetector.pack(newer, 7));
+    assertThat(window.slices[index]).isEqualTo(SlidingWindowDetector.pack(newer, 7));
   }
 }

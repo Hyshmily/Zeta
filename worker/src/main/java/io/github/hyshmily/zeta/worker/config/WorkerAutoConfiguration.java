@@ -647,6 +647,15 @@ public class WorkerAutoConfiguration {
     public boolean isRunning() {
       return running;
     }
+
+    /**
+     * Starts last, after report consumers at {@code MAX_VALUE - 5}, and stops first, so heartbeats
+     * cease before the consumers drain in-flight reports.
+     */
+    @Override
+    public int getPhase() {
+      return DEFAULT_PHASE;
+    }
   }
 
   /**
@@ -772,6 +781,9 @@ public class WorkerAutoConfiguration {
     factory.setDefaultRequeueRejected(false);
     // A broker restart or a temporarily missing queue must not stop the report consumer forever.
     factory.setMissingQueuesFatal(false);
+    // Start after the dispatcher (MAX_VALUE - 20) and the cooling scheduler (MAX_VALUE - 10), and
+    // stop before them while still stopping before WorkerScheduling's heartbeat (MAX_VALUE).
+    factory.setPhase(Integer.MAX_VALUE - 5);
     return factory;
   }
 

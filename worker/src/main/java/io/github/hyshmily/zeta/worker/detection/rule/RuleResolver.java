@@ -229,11 +229,13 @@ public class RuleResolver {
 
     private final Map<String, RuleBinding> bindingsById;
     private final @Nullable Cache<String, RuleBinding> matchCache;
-    private final Map<String, RuleBinding> exactRules;
+    private final @Nullable Map<String, RuleBinding> exactRules;
     private final List<RuleBinding> bindings;
     private final RuleBinding[] scanBindings;
     private final RuleBinding defaultBinding;
     private final RuleSet ruleSet;
+    private final long minHotCount;
+    private final long globalFloor;
 
     private Snapshot(
       RuleSet ruleSet,
@@ -246,8 +248,31 @@ public class RuleResolver {
       this.bindingsById = Map.copyOf(bindingsById);
       this.defaultBinding = this.bindings.get(0);
       this.scanBindings = buildScanBindings(this.bindings);
-      this.exactRules = buildExactRules(ruleSet, this.bindingsById);
+      Map<String, RuleBinding> exact = buildExactRules(ruleSet, this.bindingsById);
+      this.exactRules = exact.isEmpty() ? null : exact;
+      this.minHotCount = ruleSet.minHotCount();
+      this.globalFloor = computeGlobalFloor(this.minHotCount, this.exactRules);
       this.matchCache = this.scanBindings.length == 0 ? null : Caffeine.newBuilder().maximumSize(cacheSize).build();
+    }
+
+    /**
+     * The lowest {@code hotCount} any rule can promote at. {@link RuleSet#minHotCount()} covers the
+     * rules the floor gates, so the only rule that can undercut it is an effective {@code EXACT} one,
+     * which is indexed and checked before the floor. A report below this value cannot be eligible for
+     * any rule, which makes the whole resolution a single comparison.
+     *
+     * @param minHotCount the rule set's promotion floor
+     * @param exactRules  the effective exact index, or {@code null} when there is none
+     * @return the lowest promotable window sum
+     */
+    private static long computeGlobalFloor(long minHotCount, @Nullable Map<String, RuleBinding> exactRules) {
+      long floor = minHotCount;
+      if (exactRules != null) {
+        for (RuleBinding binding : exactRules.values()) {
+          floor = Math.min(floor, binding.rule().hotCount());
+        }
+      }
+      return floor;
     }
 
     /**
@@ -294,18 +319,26 @@ public class RuleResolver {
      * {@link RuleResolver#resolveIfEligible(String, long)} documents the floor, the exact index and
      * the match counter.
      *
+     * <p>The {@code globalFloor} test runs first: a report below the lowest threshold any rule can
+     * promote at cannot be eligible, so a cold key — the bulk of a long-tail distribution — costs one
+     * comparison instead of an index lookup, a match-cache lookup and its own threshold test.
+     *
      * @param key       the cache key
      * @param windowSum the reported window sum
      * @return the governing binding, or {@code null} when the report is below its threshold
      */
     @Nullable
     private RuleBinding resolveIfEligible(String key, long windowSum) {
-      RuleBinding exact = exactRules.get(key);
-      if (exact != null) {
-        return eligible(exact, windowSum);
+      if (windowSum < globalFloor) {
+        return null;
       }
-
-      if (windowSum < ruleSet.minHotCount()) {
+      if (exactRules != null) {
+        RuleBinding exact = exactRules.get(key);
+        if (exact != null) {
+          return eligible(exact, windowSum);
+        }
+      }
+      if (windowSum < minHotCount) {
         return null;
       }
       RuleBinding binding = matchCache == null ? defaultBinding : matchCache.get(key, this);
@@ -324,7 +357,7 @@ public class RuleResolver {
 
     /** @return the promotion floor */
     public long minHotCount() {
-      return ruleSet.minHotCount();
+      return minHotCount;
     }
 
     /**
@@ -365,7 +398,7 @@ public class RuleResolver {
      * @return the governing rule; never {@code null}
      */
     public HotKeyRule resolveRule(String key) {
-      RuleBinding exact = exactRules.get(key);
+      RuleBinding exact = exactRules == null ? null : exactRules.get(key);
       return (exact != null ? exact : apply(key)).rule();
     }
 

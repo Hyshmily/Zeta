@@ -36,10 +36,11 @@ import org.jspecify.annotations.Nullable;
  * <p>
  * The slice number is written under the {@link KeyWindow} monitor. Eviction writes the tombstone
  * under that monitor and removes the mapping only after releasing it, with an identity-matched
- * {@code windows.remove}. Creation runs under the map's bin lock and may take the entry monitor, so
- * the lock order is bin lock → entry monitor; eviction never takes the bin lock while holding the
- * monitor. The cap-relief path takes the reclaimer lock outside every map lock. The slot add and
- * the window-sum read stay lock-free.
+ * {@code windows.remove}. Creation installs a fresh window with an atomic {@code putIfAbsent} and
+ * advances an existing one outside the bin lock, so no path takes the bin lock while holding a
+ * monitor; the only nesting is entry monitor → bin lock, and creation holds no monitor at all. The
+ * cap-relief path takes the reclaimer lock outside every map lock. The slot add and the window-sum
+ * read stay lock-free.
  *
  * <p>
  * A write sums the {@code windowSize} slices ending at the slice it wrote plus one guard slice, so
@@ -93,7 +94,7 @@ public class SlidingWindowDetector {
   private final int lengthMask;
 
   /** One key's window state: the doubled ring and the absolute slice of its last write. */
-  private static final class KeyWindow {
+  static final class KeyWindow {
 
     /**
      * Tombstone: the entry has been removed from the map and may only be replaced. No timestamp
@@ -120,8 +121,20 @@ public class SlidingWindowDetector {
      */
     volatile long lastSlice;
 
-    KeyWindow(int capacity, long nowSlice) {
+    /**
+     * Creates a window whose first slot already holds {@code initialCount} at {@code nowSlice}.
+     *
+     * <p>The slot is written before the window is published, so every thread that observes the
+     * window observes its first count and the install needs no post-publication CAS.
+     *
+     * @param capacity     the doubled ring length, {@code 2 * windowSize}
+     * @param nowSlice     the absolute slice of the initial count
+     * @param slotIndex    the ring slot for {@code nowSlice}, {@code nowSlice & lengthMask}
+     * @param initialCount the positive count already recorded at {@code nowSlice}
+     */
+    KeyWindow(int capacity, long nowSlice, int slotIndex, int initialCount) {
       this.slices = new long[capacity];
+      this.slices[slotIndex] = pack(nowSlice, initialCount);
       this.lastSlice = nowSlice;
     }
   }
@@ -165,8 +178,9 @@ public class SlidingWindowDetector {
    * A first access creates the window through the admission gate. The slice-gated fast path skips
    * the entry monitor when the key's slice is not behind the caller's sample; eviction thresholds
    * are minutes against a slice of tens of milliseconds, so a window old enough for the evictor
-   * always takes the slice-refreshing slow path. The returned sum walks the ring because concurrent
-   * adders share the window, so a cached sum would go stale.
+   * always takes the slice-refreshing slow path. A first access returns the count that created the
+   * window; an existing window walks the ring because concurrent adders share it, so a cached sum
+   * would go stale.
    *
    * <p>
    * A brand-new key at the cap asks the reclaimer for one bounded reclaim pass; the add is dropped
@@ -185,14 +199,7 @@ public class SlidingWindowDetector {
     if (count <= 0) {
       return windowSumAtSlice(key, nowSlice);
     }
-    KeyWindow window = recordCount(key, count, nowSlice, false);
-    if (window == null) {
-      return 0L;
-    }
-    // A concurrent writer may have advanced the window while this add was in flight. Summing to the
-    // later slice keeps the returned sum current; an add that lost its slot to a newer rotation is
-    // simply not part of it.
-    return sumRange(window.slices, Math.max(nowSlice, window.lastSlice), windowSize + 1, lengthMask);
+    return recordCount(key, (int) Math.min(count, Integer.MAX_VALUE), nowSlice, false, true);
   }
 
   /**
@@ -211,71 +218,128 @@ public class SlidingWindowDetector {
    */
   public void recordCountAtSlice(String key, long count, long nowSlice) {
     if (count > 0) {
-      recordCount(key, count, nowSlice, true);
+      recordCount(key, (int) Math.min(count, Integer.MAX_VALUE), nowSlice, true, false);
     }
   }
 
   /**
-   * Admits or advances the key's window and writes {@code count} into its slot — the shared body of
-   * both report paths.
+   * Writes {@code delta} into the key's window and returns the sliding-window sum when requested.
    *
    * <p>A null mapping and a tombstone both need a window. The tombstone is already dead (its seat
    * was returned when it was set), so it never takes its own monitor; both cases enter the
-   * admission path, which reserves a seat before the bin lock and releases it when a concurrent
-   * admission published a live window first.
+   * admission path, which reserves a seat before the map operation and releases it when a
+   * concurrent admission published a live window first.
+   *
+   * <p>A resident window costs one slice read: a window at or ahead of the caller's sample takes the
+   * fast path, and a window behind it advances under its own monitor. The comparison is on SLICE
+   * NUMBER, not raw elapsed time: {@code now - lastWrite >= sliceMs} disagrees with the bucket
+   * arithmetic around boundaries (lastWrite=90 and now=180 with a 100ms slice are one bucket apart,
+   * yet only 90ms elapsed). The add keeps the caller's slice; re-attributing it to a newer slice
+   * would inject traffic older than the window into the current one. A batch that fell behind the
+   * whole window is dropped by the span test, while one still inside the span keeps its honest slice
+   * tag.
    *
    * @param key        the cache key
-   * @param count      the positive count to add
+   * @param delta      the positive count to add
    * @param nowSlice   the caller's absolute slice number
    * @param alreadyHot whether this report belongs to a key that already holds a HOT seat
-   * @return the live window, or {@code null} when the cap refused the admission
+   * @param needSum    whether the caller needs the sliding-window sum
+   * @return the sum over the last {@code windowSize} slices, or {@code 0} when the admission was
+   *         refused or {@code needSum} is {@code false}
    */
-  @Nullable
-  private KeyWindow recordCount(String key, long count, long nowSlice, boolean alreadyHot) {
-    // Fast path: the window's slice is not behind this thread's sample. An older sample (a
-    // concurrent adder crossed the boundary first) must not take the entry monitor only to discover
-    // it has nothing to refresh — the add keeps its own slice below. The comparison is on
-    // SLICE NUMBER, not raw elapsed time: `now - lastWrite >= sliceMs` disagrees with the bucket
-    // arithmetic around boundaries (lastWrite=90 and now=180 with a 100ms slice are one bucket
-    // apart, yet only 90ms elapsed).
+  private long recordCount(String key, int delta, long nowSlice, boolean alreadyHot, boolean needSum) {
     KeyWindow window = windows.get(key);
     long lastSlice = window == null ? KeyWindow.EVICTED : window.lastSlice;
 
     if (lastSlice == KeyWindow.EVICTED) {
-      window = admitAndCreate(key, nowSlice, alreadyHot);
-    } else if (lastSlice < nowSlice) {
-      window = advance(window, nowSlice);
-      if (window == null) {
-        window = admitAndCreate(key, nowSlice, alreadyHot);
+      return admitAndRecord(key, delta, nowSlice, alreadyHot, needSum);
+    }
+    if (lastSlice < nowSlice) {
+      lastSlice = advance(window, nowSlice);
+      if (lastSlice == KeyWindow.EVICTED) {
+        return admitAndRecord(key, delta, nowSlice, alreadyHot, needSum);
       }
     }
-    if (window == null) {
-      return null;
-    }
+    return addToExisting(window, lastSlice, delta, nowSlice, needSum);
+  }
 
-    // Keep the add at its own slice. `nowSlice` was sampled before the monitor and a concurrent
-    // adder may have moved the window ahead, but re-attributing this count to the newer slice
-    // would inject traffic older than the window into the current one. A batch that fell behind
-    // the whole window is dropped; one still inside the span keeps its honest slice tag.
-    long latestSlice = window.lastSlice;
-    if (latestSlice == KeyWindow.EVICTED) {
-      // The fast path read the entry just before a concurrent eviction tombstoned and removed it.
-      // Rebuild through the admission gate instead of dropping the add: for an already-hot key the
-      // count feeds COOL_FOR_LOW_QPS, and losing it would understate live traffic and cool the key
-      // early. A non-hot key pays the same gate it would have paid as a first touch.
-      window = admitAndCreate(key, nowSlice, alreadyHot);
-      if (window == null) {
-        return null;
-      }
-      latestSlice = window.lastSlice;
-      if (latestSlice == KeyWindow.EVICTED) {
-        return null;
-      }
+  /**
+   * Adds {@code delta} at the caller's slice when it is still inside the window, then sums the range
+   * when requested. The span test uses the slice the caller observed; a slot a newer rotation reused
+   * is still rejected by its tag inside {@link #addToSlot}.
+   *
+   * @param window    the key's live window
+   * @param lastSlice the window's last-write slice observed by the caller
+   * @param delta     the positive count to add
+   * @param nowSlice  the caller's absolute slice number
+   * @param needSum   whether to return the sliding-window sum
+   * @return the sum over the last {@code windowSize} slices, or {@code 0} when {@code needSum} is
+   *         {@code false}
+   */
+  private long addToExisting(KeyWindow window, long lastSlice, int delta, long nowSlice, boolean needSum) {
+    if (lastSlice - nowSlice <= windowSize) {
+      addToSlot(window, (int) (nowSlice & lengthMask), delta, nowSlice);
     }
-    if (latestSlice - nowSlice <= windowSize) {
-      addToSlot((int) (nowSlice & lengthMask), (int) Math.min(count, Integer.MAX_VALUE), window.slices, nowSlice);
+    if (!needSum) {
+      return 0L;
     }
-    return window;
+    // A concurrent writer may have advanced the window while this add was in flight. Summing to the
+    // later slice keeps the returned sum current; an add that lost its slot to a newer rotation is
+    // simply not part of it. An eviction that won the race leaves no window this sum may claim.
+    long latest = window.lastSlice;
+    if (latest == KeyWindow.EVICTED) {
+      return 0L;
+    }
+    return sumRange(window.slices, Math.max(nowSlice, latest), windowSize + 1, lengthMask);
+  }
+
+  /**
+   * Reserves one admission seat and installs a window whose first slot already holds {@code delta},
+   * or advances the window a concurrent admission published first.
+   *
+   * <p>The admission gate runs before the mapping is touched, because the sampling pass a refused
+   * seat triggers removes a different key and must not run inside a mapping replacement. The lock
+   * order stays reclaimer → entry monitor → bin lock. A fresh window is installed already carrying
+   * {@code delta}, so the call returns it directly; a live window found by a lost race receives the
+   * add once the surplus seat is returned.
+   *
+   * @param key        the key being admitted
+   * @param delta      the positive count to record
+   * @param nowSlice   the caller's absolute slice number
+   * @param alreadyHot whether this report belongs to a key that already holds a HOT seat and is
+   *                   admitted regardless of the tracked-key bound
+   * @param needSum    whether to return the sliding-window sum
+   * @return the sliding-window sum, or {@code 0} when the cap refused the admission or
+   *         {@code needSum} is {@code false}
+   */
+  private long admitAndRecord(String key, int delta, long nowSlice, boolean alreadyHot, boolean needSum) {
+    if (alreadyHot) {
+      // The key already holds a registry seat, so it is not new tracked traffic and the admission
+      // bound does not apply. A tombstone left by a concurrent eviction is replaced under the same
+      // exemption: the key's count still feeds its cool-down.
+      reclaimer.reserveHotSeat();
+    } else if (!reclaimer.tryAdmit(key, nowSlice, sampledEvictor)) {
+      // A sampled tombstone already returned its seat when it was set, so the replacement is a new
+      // admission: it must pass the same soft-cap sample and saturation gate as a first touch.
+      return 0L;
+    }
+    KeyWindow existing;
+    try {
+      existing = publishOrGetExisting(key, delta, nowSlice);
+    } catch (RuntimeException | Error e) {
+      // The reservation is this call's alone until the publication consumes it. A failed
+      // allocation must return it; otherwise every failed admission permanently shrinks the ledger.
+      reclaimer.releaseSeat();
+      throw e;
+    }
+    if (existing == null) {
+      // The fresh window was installed with `delta` in its initial slot; linearizable at publication.
+      return needSum ? delta : 0L;
+    }
+    long latest = existing.lastSlice;
+    // A concurrent eviction between the lost race and this read returned the window's seat and
+    // removed the mapping; there is no live window left to count against.
+    return latest == KeyWindow.EVICTED ? 0L : addToExisting(existing, latest, delta, nowSlice, needSum);
   }
 
   /**
@@ -286,12 +350,20 @@ public class SlidingWindowDetector {
    * untouched: the add is outside every readable range, while replacing the newer word would erase
    * a write the current window still sums.
    *
+   * <p>A positive signed tag difference also matches a tag written between {@code 2^31} and
+   * {@code 2^32} slices ago, so the cold path confirms it against the window's 64-bit last write: a
+   * newer rotation is at least {@code 2 * windowSize} slices ahead and its writer advanced
+   * {@code lastSlice} before the slot CAS, while a last write still within {@code windowSize} of
+   * the add proves no newer rotation can have reused the slot. The acquire fence makes the newer
+   * writer's {@code lastSlice} advance visible to the slot read that observed the new tag.
+   *
+   * @param window   the key's window, the source of the 64-bit last write
    * @param index    the slot index, {@code addSlice & lengthMask}
    * @param delta    the positive count to add
-   * @param slots    the doubled ring
    * @param addSlice the absolute slice of this add
    */
-  static void addToSlot(int index, int delta, long[] slots, long addSlice) {
+  void addToSlot(KeyWindow window, int index, int delta, long addSlice) {
+    long[] slots = window.slices;
     long current = (long) SLICES.getOpaque(slots, index);
     for (;;) {
       int base = 0;
@@ -300,9 +372,12 @@ public class SlidingWindowDetector {
         // negative add slice would make the empty tag look like a newer rotation.
         int ahead = tag(current) - (int) addSlice;
         if (ahead > 0) {
-          return;
-        }
-        if (ahead == 0) {
+          VarHandle.acquireFence();
+          long latest = window.lastSlice;
+          if (latest == KeyWindow.EVICTED || latest - addSlice > windowSize) {
+            return;
+          }
+        } else if (ahead == 0) {
           base = count(current);
           if (base == Integer.MAX_VALUE) {
             // The slice is already saturated: the packed word would be identical, and the CAS would
@@ -340,42 +415,6 @@ public class SlidingWindowDetector {
   }
 
   /**
-   * Reserves one admission seat and publishes the key's window, or advances the window a concurrent
-   * admission published first.
-   *
-   * <p>The admission gate runs before {@code windows.compute} because a sampling pass removes a
-   * different key and a remapping function must not modify the map it is remapping. The lock order
-   * stays reclaimer → CHM bin → entry monitor.
-   *
-   * @param key        the key being admitted
-   * @param nowSlice   the caller's absolute slice number
-   * @param alreadyHot whether this report belongs to a key that already holds a HOT seat and is
-   *                   admitted regardless of the tracked-key bound
-   * @return the live window, or {@code null} when the cap refused the seat
-   */
-  @Nullable
-  private KeyWindow admitAndCreate(String key, long nowSlice, boolean alreadyHot) {
-    if (alreadyHot) {
-      // The key already holds a registry seat, so it is not new tracked traffic and the admission
-      // bound does not apply. A tombstone left by a concurrent eviction is replaced under the same
-      // exemption: the key's count still feeds its cool-down.
-      reclaimer.reserveHotSeat();
-    } else if (!reclaimer.tryAdmit(key, nowSlice, sampledEvictor)) {
-      // A sampled tombstone already returned its seat when it was set, so the replacement is a new
-      // admission: it must pass the same soft-cap sample and saturation gate as a first touch.
-      return null;
-    }
-    try {
-      return computeWindow(key, nowSlice);
-    } catch (RuntimeException | Error e) {
-      // The reservation is this call's alone until computeWindow consumes it. A failed allocation
-      // must return it; otherwise every failed admission permanently shrinks the ledger.
-      reclaimer.releaseSeat();
-      throw e;
-    }
-  }
-
-  /**
    * The reclaimer's per-candidate test: reclaim the sampled window when this pass is the one that
    * tombstoned it. The re-check under the monitor is authoritative, so a concurrent periodic sweep
    * makes this call return {@code false}; the reclaimer accounts for the reclaimed seat from that
@@ -391,55 +430,64 @@ public class SlidingWindowDetector {
 
   /**
    * Advances a live resident window across a slice boundary under its own monitor. No map mutation
-   * happens, so re-entering the CHM compute would only rehash the key and take the bin lock once per
-   * slice.
+   * happens, so a slice roll-over costs one monitor entry and no map operation.
    *
    * @param window   the sampled live window
    * @param nowSlice the caller's absolute slice number
-   * @return the live window, or {@code null} when the evictor tombstoned the sampled entry first
+   * @return the window's last-write slice after the call, or {@link KeyWindow#EVICTED} when the
+   *         evictor tombstoned the sampled entry first
    */
-  @Nullable
   @SuppressWarnings("SynchronizationOnLocalVariableOrMethodParameter")
-  private static KeyWindow advance(KeyWindow window, long nowSlice) {
+  private static long advance(KeyWindow window, long nowSlice) {
     synchronized (window) {
       long lastSlice = window.lastSlice;
       if (lastSlice == KeyWindow.EVICTED) {
-        return null;
+        return KeyWindow.EVICTED;
       }
       if (lastSlice < nowSlice) {
         window.lastSlice = nowSlice;
+        return nowSlice;
       }
-      return window;
+      return lastSlice;
     }
   }
 
   /**
-   * Creates the mapping or advances the window already published by a concurrent admission. The
-   * caller holds a reserved seat: the mapping consumes it when it creates a window and returns it
-   * with {@code releaseSeat()} when it finds a live one.
+   * Publishes a fresh pre-filled window, or advances the one a concurrent admission published first.
+   * The caller holds a reserved seat: the mapping consumes it when this call installs a window and
+   * returns it with {@code releaseSeat()} when it finds a live one.
+   *
+   * <p>An empty bin takes {@link ConcurrentHashMap#putIfAbsent}'s lock-free CAS path, so the common
+   * first-touch allocates neither the map's reservation node nor a capturing lambda. The ring
+   * allocation and the slice advance then happen outside the bin lock, which leaves the create path
+   * with no nested monitor at all. A tombstoned mapping is swapped atomically by
+   * {@link ConcurrentHashMap#replace}; when it is gone already, the next {@code putIfAbsent} retries
+   * as a plain creation.
    *
    * @param key      the key being admitted
+   * @param delta    the positive count to place in a fresh window's first slot
    * @param nowSlice the caller's absolute slice number
-   * @return the live window
+   * @return {@code null} when the fresh window was installed, or the live window that won the race
    */
-  private KeyWindow computeWindow(String key, long nowSlice) {
-    return windows.compute(key, (k, existing) -> {
+  @Nullable
+  private KeyWindow publishOrGetExisting(String key, int delta, long nowSlice) {
+    KeyWindow fresh = new KeyWindow(windowSize * 2, nowSlice, (int) (nowSlice & lengthMask), delta);
+    for (;;) {
+      KeyWindow existing = windows.putIfAbsent(key, fresh);
       if (existing == null) {
-        return new KeyWindow(windowSize * 2, nowSlice);
+        return null;
       }
-
-      KeyWindow advanced = advance(existing, nowSlice);
-      if (advanced == null) {
-        // The evictor tombstoned the mapping and is about to remove it; replacing it here keeps
-        // the key live and consumes the caller's reserved seat. The tombstone's seat was already
-        // returned (periodic sweep) or kept for the sampling admission that set it.
-        return new KeyWindow(windowSize * 2, nowSlice);
+      if (advance(existing, nowSlice) != KeyWindow.EVICTED) {
+        // A concurrent admission published the mapping: this thread's seat is surplus.
+        reclaimer.releaseSeat();
+        return existing;
       }
-
-      // A concurrent admission published the mapping: this thread's seat is surplus.
-      reclaimer.releaseSeat();
-      return advanced;
-    });
+      if (windows.replace(key, existing, fresh)) {
+        // The evictor tombstoned this mapping and is about to remove it; installing the fresh window
+        // keeps the key live and consumes the caller's reserved seat.
+        return null;
+      }
+    }
   }
 
   /**

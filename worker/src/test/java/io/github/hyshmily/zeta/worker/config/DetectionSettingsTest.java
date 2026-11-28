@@ -226,6 +226,29 @@ class DetectionSettingsTest {
       .hasMessageContaining("detection.rules must not be null");
   }
 
+  @Test
+  void rejectsANullDetectionBlock() {
+    WorkerProperties properties = new WorkerProperties();
+    properties.setDetection(null);
+
+    assertThatThrownBy(() -> DetectionSettings.of(properties))
+      .isInstanceOf(IllegalStateException.class)
+      .hasMessageContaining("detection must not be null");
+  }
+
+  /** A YAML empty block binds the group to null; it must join the startup error list, not escape as an NPE. */
+  @Test
+  void aNullWindowBlockIsReportedWithTheOtherConfigurationErrors() {
+    WorkerProperties properties = base(100, 50);
+    properties.getDetection().setWindow(null);
+    properties.getDetection().setCooling(null);
+
+    assertThatThrownBy(() -> DetectionSettings.of(properties))
+      .isInstanceOf(IllegalStateException.class)
+      .hasMessageContaining("detection.window must not be null")
+      .hasMessageContaining("detection.cooling must not be null");
+  }
+
   /** Padding must not smuggle a configured rule past the reserved-id check. */
   @Test
   void trimsRuleIdsBeforeTheReservedIdCheck() {

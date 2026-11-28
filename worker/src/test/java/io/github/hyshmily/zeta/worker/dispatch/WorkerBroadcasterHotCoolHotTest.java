@@ -21,8 +21,8 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 
-import com.github.benmanes.caffeine.cache.Cache;
 import io.github.hyshmily.zeta.model.ZetaDecision;
+import io.github.hyshmily.zeta.util.TimeSource;
 import io.github.hyshmily.zeta.worker.dispatch.connection.WorkerIdentity;
 import io.github.hyshmily.zeta.worker.metrics.WorkerDetectionMetrics;
 import java.lang.reflect.Field;
@@ -87,7 +87,7 @@ class WorkerBroadcasterHotCoolHotTest {
     Object cleared = wireRecord(broadcaster, "k");
     assertThat(hotRetained(cleared)).as("an expired COOL gives up the long retention").isFalse();
 
-    settle(broadcaster, "ELIDED", cleared, ZetaDecision.hot("k", 3L));
+    settle(broadcaster, "ELIDED", cleared, ZetaDecision.hot("k", 3L), TimeSource.monotonicMillis());
 
     assertThat(broadcaster.acceptedVersion("k")).isEqualTo(3L);
     assertThat(hotRetained(wireRecord(broadcaster, "k"))).as("an elided HOT still holds the seat").isTrue();
@@ -95,21 +95,34 @@ class WorkerBroadcasterHotCoolHotTest {
   }
 
   /** Applies one terminal outcome through the private funnel, as {@code send} would. */
-  private static void settle(WorkerBroadcaster broadcaster, String outcome, Object prev, ZetaDecision decision)
-    throws Exception {
+  private static void settle(
+    WorkerBroadcaster broadcaster,
+    String outcome,
+    Object prev,
+    ZetaDecision decision,
+    long nowMs
+  ) throws Exception {
     Class<?> delivery = Class.forName(WorkerBroadcaster.class.getName() + "$Delivery");
     Class<?> accepted = Class.forName(WorkerBroadcaster.class.getName() + "$AcceptedDecision");
-    Method settle = WorkerBroadcaster.class.getDeclaredMethod("settle", delivery, accepted, ZetaDecision.class);
+    Method settle = WorkerBroadcaster.class.getDeclaredMethod(
+      "settle",
+      delivery,
+      accepted,
+      ZetaDecision.class,
+      long.class
+    );
     settle.setAccessible(true);
-    settle.invoke(broadcaster, Enum.valueOf((Class<Enum>) delivery, outcome), prev, decision);
+    settle.invoke(broadcaster, Enum.valueOf((Class<Enum>) delivery, outcome), prev, decision, nowMs);
   }
 
   /** Reads the private wire record that the funnel keeps per key. */
   private static Object wireRecord(WorkerBroadcaster broadcaster, String key) throws Exception {
     Field acceptedField = WorkerBroadcaster.class.getDeclaredField("accepted");
     acceptedField.setAccessible(true);
-    Cache<String, ?> accepted = (Cache<String, ?>) acceptedField.get(broadcaster);
-    return accepted.getIfPresent(key);
+    Object store = acceptedField.get(broadcaster);
+    Method get = store.getClass().getDeclaredMethod("get", String.class, long.class);
+    get.setAccessible(true);
+    return get.invoke(store, key, TimeSource.monotonicMillis());
   }
 
   /** Reads the private wire record's retention bit. */

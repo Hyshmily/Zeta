@@ -23,15 +23,13 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.*;
 
-import com.github.benmanes.caffeine.cache.Cache;
 import io.github.hyshmily.zeta.constants.ZetaConstants;
 import io.github.hyshmily.zeta.model.DecisionKind;
 import io.github.hyshmily.zeta.model.ZetaDecision;
+import io.github.hyshmily.zeta.util.TimeSource;
 import io.github.hyshmily.zeta.worker.dispatch.connection.WorkerIdentity;
 import io.github.hyshmily.zeta.worker.metrics.WorkerDetectionMetrics;
 import java.util.List;
-import java.util.OptionalLong;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -385,49 +383,165 @@ class WorkerBroadcasterTest {
   }
 
   /**
-   * A COOL that expires before it can be sent must not leave its key's HOT record with the
-   * century retention: the Worker no longer holds the key hot, so the record only needs the
-   * queue-residency bound.
+   * The cool tier's cached lower bound must survive the removal of the old head: the entry that
+   * becomes the head still expires on its own write instant, not the instant the bound remembered.
    */
   @Test
-  void anExpiredCoolGivesUpTheHotRecordsLongRetention() throws Exception {
+  void aCoolEntryBehindARemovedHeadStillExpiresOnTime() {
     broadcaster = new WorkerBroadcaster(
       rabbitTemplate,
       BROADCAST,
       "testApp",
       new WorkerIdentity("test-node", EPOCH),
       new WorkerDetectionMetrics(null),
-      1_000L,
+      500L,
+      65_536L
+    );
+    long base = TimeSource.monotonicMillis();
+    TimeSource.setTimeOffsetForTest(0L, -base);
+    try {
+      assertThat(broadcaster.send(ZetaDecision.cool("oldest", 1L), Long.MAX_VALUE)).isEqualTo(
+        WorkerBroadcaster.Delivery.SENT
+      );
+      assertThat(broadcaster.send(ZetaDecision.cool("second", 2L), Long.MAX_VALUE)).isEqualTo(
+        WorkerBroadcaster.Delivery.SENT
+      );
+
+      TimeSource.setTimeOffsetForTest(0L, -base + 250L);
+      assertThat(broadcaster.send(ZetaDecision.cool("oldest", 3L), Long.MAX_VALUE)).isEqualTo(
+        WorkerBroadcaster.Delivery.SENT
+      );
+
+      TimeSource.setTimeOffsetForTest(0L, -base + 1_100L);
+      assertThat(broadcaster.acceptedVersion("second"))
+        .as("the new head expired on its own instant, not the removed head's bound")
+        .isZero();
+      assertThat(broadcaster.acceptedVersion("oldest")).isEqualTo(3L);
+    } finally {
+      TimeSource.setTimeOffsetForTest(0L, 0L);
+    }
+  }
+
+  /**
+   * A COOL that expires before it can be sent must not leave its key's HOT record with the long
+   * retention: the Worker no longer holds the key hot, so the record keeps only the queue-residency
+   * bound and expires with it.
+   */
+  @Test
+  void anExpiredCoolGivesUpTheHotRecordsLongRetention() throws InterruptedException {
+    broadcaster = new WorkerBroadcaster(
+      rabbitTemplate,
+      BROADCAST,
+      "testApp",
+      new WorkerIdentity("test-node", EPOCH),
+      new WorkerDetectionMetrics(null),
+      20L,
       65_536L
     );
     assertThat(broadcaster.send(ZetaDecision.hot("k", 1L), Long.MAX_VALUE)).isEqualTo(WorkerBroadcaster.Delivery.SENT);
     assertThat(broadcaster.send(ZetaDecision.cool("k", 2L), 0L)).isEqualTo(WorkerBroadcaster.Delivery.EXPIRED);
 
-    var field = WorkerBroadcaster.class.getDeclaredField("accepted");
-    field.setAccessible(true);
-    @SuppressWarnings("unchecked")
-    Cache<String, ?> cache = (Cache<String, ?>) field.get(broadcaster);
-    OptionalLong retention = cache.policy().expireVariably().orElseThrow().getExpiresAfter("k", TimeUnit.NANOSECONDS);
-    assertThat(retention).as("the record still exists").isPresent();
-    assertThat(retention.getAsLong())
-      .as("the failed COOL dropped the century retention")
-      .isLessThan(TimeUnit.DAYS.toNanos(1L));
+    Thread.sleep(120L);
+
+    assertThat(broadcaster.acceptedVersion("k"))
+      .as("the record expired on the twice-the-queue-age bound, not the long HOT one")
+      .isZero();
   }
 
   /**
-   * The accepted-record cache is size-bounded: a COOL dropped before the funnel (queue saturation)
-   * never updates its HOT record, so without the cap one-off keys would pin their records forever.
-   * Evicting a live predecessor only costs a redundant send; the App's version guard absorbs it.
+   * A HOT record keeps its version watermark for the whole hot episode, however long the COOL bound
+   * is: a COOL arriving after it must still be ordered against it.
    */
   @Test
-  void acceptedRecordsAreBounded() throws Exception {
-    var field = WorkerBroadcaster.class.getDeclaredField("accepted");
-    field.setAccessible(true);
-    @SuppressWarnings("unchecked")
-    Cache<String, ?> cache = (Cache<String, ?>) field.get(broadcaster);
+  void aHotRecordOutlivesTheCoolRetention() throws InterruptedException {
+    broadcaster = new WorkerBroadcaster(
+      rabbitTemplate,
+      BROADCAST,
+      "testApp",
+      new WorkerIdentity("test-node", EPOCH),
+      new WorkerDetectionMetrics(null),
+      20L,
+      65_536L
+    );
+    assertThat(broadcaster.send(ZetaDecision.hot("k", 1L), Long.MAX_VALUE)).isEqualTo(WorkerBroadcaster.Delivery.SENT);
 
-    assertThat(cache.policy().eviction()).as("maximumSize").isPresent();
-    assertThat(cache.policy().eviction().orElseThrow().getMaximum()).isEqualTo(65_536L);
+    Thread.sleep(120L);
+
+    assertThat(broadcaster.acceptedVersion("k")).as("the long HOT retention has no time bound").isEqualTo(1L);
+  }
+
+  /**
+   * The record ledger is size-bounded: a COOL dropped before the funnel (queue saturation) never
+   * updates its HOT record, so without the cap one-off keys would pin their records forever. The cap
+   * evicts the oldest COOL record first, so the evidence that a long-lived key was told to the
+   * cluster survives a flood of short-lived ones; evicting a live COOL record only costs a redundant
+   * send, which the App's version guard absorbs.
+   */
+  @Test
+  void theCapEvictsTheOldestCoolRecordBeforeAnyHotRecord() {
+    broadcaster = new WorkerBroadcaster(
+      rabbitTemplate,
+      BROADCAST,
+      "testApp",
+      new WorkerIdentity("test-node", EPOCH),
+      new WorkerDetectionMetrics(null),
+      30_000L,
+      2L
+    );
+
+    assertThat(broadcaster.send(ZetaDecision.hot("keep", 1L), Long.MAX_VALUE)).isEqualTo(
+      WorkerBroadcaster.Delivery.SENT
+    );
+    assertThat(broadcaster.send(ZetaDecision.cool("a", 1L), Long.MAX_VALUE)).isEqualTo(WorkerBroadcaster.Delivery.SENT);
+    assertThat(broadcaster.send(ZetaDecision.cool("b", 1L), Long.MAX_VALUE)).isEqualTo(WorkerBroadcaster.Delivery.SENT);
+
+    assertThat(broadcaster.acceptedVersion("keep")).as("the HOT record is not the cap's victim").isEqualTo(1L);
+    assertThat(broadcaster.send(ZetaDecision.cool("a", 1L), Long.MAX_VALUE))
+      .as("the oldest COOL record was evicted, so its replay is a new send")
+      .isEqualTo(WorkerBroadcaster.Delivery.SENT);
+    assertThat(broadcaster.send(ZetaDecision.hot("keep", 1L), Long.MAX_VALUE))
+      .as("the surviving HOT record still suppresses its own replay")
+      .isEqualTo(WorkerBroadcaster.Delivery.ELIDED);
+  }
+
+  /**
+   * A COOL flood cannot displace the HOT evidence: at the cap the ledger takes the oldest COOL record
+   * first, so every silent long-lived HOT key keeps its watermark however many short-lived keys
+   * follow it. Losing one would answer {@code acceptedVersion == 0} and let the next pre-funnel
+   * rollback abort a live HOT seat on every App.
+   */
+  @Test
+  void aCoolFloodCannotEvictASilentHotRecord() {
+    int hotKeys = 100;
+    int coolKeys = 50_000;
+    broadcaster = new WorkerBroadcaster(
+      new RabbitTemplate() {
+        @Override
+        public void send(String exchange, String routingKey, Message message) {
+          // The ledger is what this test measures; the broker is not under test.
+        }
+      },
+      BROADCAST,
+      "testApp",
+      new WorkerIdentity("test-node", EPOCH),
+      new WorkerDetectionMetrics(null),
+      30_000L,
+      1_000L
+    );
+
+    for (int i = 0; i < hotKeys; i++) {
+      assertThat(broadcaster.send(ZetaDecision.hot("hot-" + i, 1L), Long.MAX_VALUE)).isEqualTo(
+        WorkerBroadcaster.Delivery.SENT
+      );
+    }
+    for (int i = 0; i < coolKeys; i++) {
+      broadcaster.send(ZetaDecision.cool("cool-" + i, 1L), Long.MAX_VALUE);
+    }
+
+    for (int i = 0; i < hotKeys; i++) {
+      assertThat(broadcaster.acceptedVersion("hot-" + i)).as("hot-%d survived the flood", i).isEqualTo(1L);
+    }
+    assertThat(broadcaster.acceptedVersion("cool-0")).as("the oldest COOL records left instead").isZero();
   }
 
   /** The accepted-version probe answers the same question the funnel's supersede check does. */

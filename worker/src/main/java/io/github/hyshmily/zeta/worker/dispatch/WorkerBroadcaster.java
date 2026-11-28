@@ -18,21 +18,18 @@ package io.github.hyshmily.zeta.worker.dispatch;
 import static io.github.hyshmily.zeta.constants.ZetaConstants.Amqp.*;
 import static io.github.hyshmily.zeta.constants.ZetaConstants.Routing.PREFIX_DECISION;
 
-import com.github.benmanes.caffeine.cache.Cache;
-import com.github.benmanes.caffeine.cache.Caffeine;
-import com.github.benmanes.caffeine.cache.Expiry;
 import io.github.hyshmily.zeta.model.DecisionKind;
 import io.github.hyshmily.zeta.model.ZetaDecision;
 import io.github.hyshmily.zeta.util.TimeSource;
 import io.github.hyshmily.zeta.worker.dispatch.connection.WorkerIdentity;
 import io.github.hyshmily.zeta.worker.metrics.WorkerDetectionMetrics;
 import java.nio.charset.StandardCharsets;
+import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Objects;
-import java.util.concurrent.TimeUnit;
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
-import org.jspecify.annotations.NonNull;
 import org.jspecify.annotations.Nullable;
 import org.springframework.amqp.core.Message;
 import org.springframework.amqp.core.MessageProperties;
@@ -61,8 +58,9 @@ import org.springframework.amqp.rabbit.core.RabbitTemplate;
  *
  * <p>Only the dispatcher's drain thread calls the package-private classification and send methods,
  * so every accepted-record mutation is single-threaded; {@link AcceptedDecision} values are
- * immutable. Delivery is fire-and-forget: a lost decision converges through the App's hard TTL and
- * the local TopK's TTL authority, not through a retry here.
+ * immutable and the ledger is two insertion-ordered tiers, not a concurrent cache. Delivery is
+ * fire-and-forget: a lost decision converges through the App's hard TTL and the local TopK's TTL
+ * authority, not through a retry here.
  *
  * <p>design decisions: decision delivery
  */
@@ -105,23 +103,16 @@ public class WorkerBroadcaster {
   private static final long DEDUP_WINDOW_MS = 100L;
 
   /**
-   * Retention of a record that still carries the long HOT retention. Such a record is the only
-   * evidence the cluster was told the key is hot, and a hot key can keep its seat indefinitely, so
-   * it must outlive every state the cluster can still hold; one hundred years is a bound no process
-   * reaches while staying clear of duration arithmetic. A failed or expired COOL clears the
-   * retention bit, so the bound applies only while the Worker still holds the key hot.
+   * Per-key wire state and ordering watermark. Every field is immutable so a record read from the
+   * ledger is a stable fact. {@code flags} packs the last <em>confirmed</em> wire type, whether a
+   * send completed, and whether the record still needs the long HOT retention; {@code sentAtMs} is
+   * the monotonic instant of that send, used only for the 100 ms debounce, and {@code updatedAtMs}
+   * is the monotonic instant of this record's last write, which anchors the COOL retention on the
+   * same clock as the debounce, the queue age bound and every other deadline in the Worker. Both
+   * instants are full {@code long}s; a narrowed field aliases intervals across its wrap, and a HOT
+   * record can outlive any such wrap by years.
    */
-  private static final long HOT_RECORD_RETENTION_NANOS = TimeUnit.DAYS.toNanos(36_500L);
-
-  /**
-   * Per-key wire state and ordering watermark. Every field is immutable so a record read through the
-   * cache is a stable fact. {@code flags} packs the last <em>confirmed</em> wire type, whether a send
-   * completed, and whether the record still needs the long HOT retention; {@code sentAtMs} is the
-   * monotonic instant of that send, used only for the 100 ms debounce. The instant is a full
-   * {@code long}; a narrowed field aliases intervals across its wrap, and a HOT record can outlive
-   * any such wrap by years.
-   */
-  private record AcceptedDecision(long sentAtMs, long version, int flags) {
+  private record AcceptedDecision(long sentAtMs, long updatedAtMs, long version, int flags) {
     private static final int HOT_BIT = 1;
     private static final int CONFIRMED_BIT = 1 << 1;
     private static final int HOT_RETENTION_BIT = 1 << 2;
@@ -136,7 +127,7 @@ public class WorkerBroadcaster {
      */
     static AcceptedDecision confirmed(long version, boolean hot, long sentAtMs) {
       int flags = CONFIRMED_BIT | (hot ? HOT_BIT | HOT_RETENTION_BIT : 0);
-      return new AcceptedDecision(sentAtMs, version, flags);
+      return new AcceptedDecision(sentAtMs, sentAtMs, version, flags);
     }
 
     /**
@@ -150,10 +141,11 @@ public class WorkerBroadcaster {
      *
      * @param version   the new watermark
      * @param retainHot whether this elision re-establishes the long HOT retention
+     * @param nowMs     the monotonic instant of this write
      * @return a copy with the wire state and debounce anchor unchanged
      */
-    AcceptedDecision advance(long version, boolean retainHot) {
-      return new AcceptedDecision(sentAtMs, version, retainHot ? flags | HOT_RETENTION_BIT : flags);
+    AcceptedDecision advance(long version, boolean retainHot, long nowMs) {
+      return new AcceptedDecision(sentAtMs, nowMs, version, retainHot ? flags | HOT_RETENTION_BIT : flags);
     }
 
     /**
@@ -164,10 +156,11 @@ public class WorkerBroadcaster {
      * seat the dispatcher returns, so the record only needs the queue-residency bound to keep its
      * version watermark.
      *
+     * @param nowMs the monotonic instant of this write
      * @return a copy that only carries the last confirmed watermark and wire type
      */
-    AcceptedDecision unconfirmed() {
-      return new AcceptedDecision(0L, version, flags & HOT_BIT);
+    AcceptedDecision unconfirmed(long nowMs) {
+      return new AcceptedDecision(0L, nowMs, version, flags & HOT_BIT);
     }
 
     /**
@@ -175,10 +168,11 @@ public class WorkerBroadcaster {
      * a COOL expired before it could be sent: the cluster may still be hot, but this Worker is not,
      * so the record only needs the queue-residency bound.
      *
+     * @param nowMs the monotonic instant of this write
      * @return a copy whose retention is the COOL bound
      */
-    AcceptedDecision retentionLimited() {
-      return new AcceptedDecision(sentAtMs, version, flags & ~HOT_RETENTION_BIT);
+    AcceptedDecision retentionLimited(long nowMs) {
+      return new AcceptedDecision(sentAtMs, nowMs, version, flags & ~HOT_RETENTION_BIT);
     }
 
     /**
@@ -212,59 +206,147 @@ public class WorkerBroadcaster {
   }
 
   /**
-   * Caffeine variable expiry: a record that still carries the long HOT retention is kept for the
-   * lifetime of the Worker's hot state, while a record whose COOL was accepted, whose publish
-   * failed or whose COOL expired keeps the queue-residency bound. Expiring a long-retained record
-   * would let a stale HOT or an old COOL be re-sent after the key's queue decisions settled; the
-   * App's version guard makes the replay harmless, but the send is wasted.
+   * The accepted ledger: two insertion-ordered tiers, the COOL expiry and the capacity cap applied
+   * from the head.
+   *
+   * <p>Every access comes from the dispatcher's drain thread, so the ledger needs no lock, cursor or
+   * expiry wheel of its own. The {@code cool} tier holds records whose retention is the queue bound
+   * — a COOL wire state, an unconfirmed record, or one that gave the long retention up — ordered by
+   * {@code updatedAtMs} ascending: the drain thread's clock samples are non-decreasing and every
+   * write re-inserts at the tail, so expiry is a head walk that stops at the first live record. A
+   * cached lower bound on the head's write instant skips that walk until expiry is possible. The
+   * {@code hot} tier holds the records that still need the long retention and has no time bound; only
+   * the cap consumes it, and only once the {@code cool} tier is empty, so a burst of short-lived keys
+   * can never displace the evidence that the cluster was told a long-lived key is hot.
    */
-  private record AcceptedDecisionExpiry(long coolRetentionNanos) implements Expiry<String, AcceptedDecision> {
-    @Override
-    public long expireAfterCreate(@NonNull String key, @NonNull AcceptedDecision value, long currentTime) {
-      return retentionNanos(value);
+  private static final class AcceptedStore {
+
+    private final LinkedHashMap<String, AcceptedDecision> hot = new LinkedHashMap<>();
+    private final LinkedHashMap<String, AcceptedDecision> cool = new LinkedHashMap<>();
+    private final long maxEntries;
+    private final long retentionMs;
+
+    /**
+     * Lower bound on the oldest entry's {@code updatedAtMs} in {@link #cool}, meaningful only while
+     * the tier is non-empty. Removing or moving the head can leave it older than the new head, which
+     * costs one extra head walk and never hides an expired record.
+     */
+    private long oldestCoolAtMs;
+
+    private AcceptedStore(long maxEntries, long retentionMs) {
+      this.maxEntries = maxEntries;
+      this.retentionMs = retentionMs;
     }
 
-    @Override
-    public long expireAfterUpdate(
-      @NonNull String key,
-      @NonNull AcceptedDecision value,
-      long currentTime,
-      long currentDuration
-    ) {
-      return retentionNanos(value);
+    /**
+     * Reads one key's record, expiring the {@code cool} tier first so a record past its retention is
+     * never returned.
+     *
+     * @param key   the decision's cache key
+     * @param nowMs the monotonic sample of this read
+     * @return the record, or {@code null} when the key has no live record
+     */
+    @Nullable
+    private AcceptedDecision get(String key, long nowMs) {
+      expireCool(nowMs);
+      AcceptedDecision record = hot.get(key);
+      return record != null ? record : cool.get(key);
     }
 
-    @Override
-    public long expireAfterRead(
-      @NonNull String key,
-      @NonNull AcceptedDecision value,
-      long currentTime,
-      long currentDuration
-    ) {
-      return currentDuration;
+    /**
+     * Replaces the key's record, moving it to the tier its retention requires.
+     *
+     * <p>The previous record is removed before the cap is applied, so an in-place update never costs
+     * another key its record; the cap is applied before the insert, so the record being written can
+     * never be the one it evicts.
+     *
+     * @param key    the decision's cache key
+     * @param record the new record
+     * @param nowMs  the monotonic sample of this write
+     */
+    private void put(String key, AcceptedDecision record, long nowMs) {
+      // A key lives in exactly one tier, so the cool probe runs only when the hot tier missed.
+      if (hot.remove(key) == null) {
+        cool.remove(key);
+      }
+      expireCool(nowMs);
+      while (size() >= maxEntries) {
+        if (!dropOldest(cool) && !dropOldest(hot)) {
+          break;
+        }
+      }
+      if (record.hotRetained()) {
+        hot.put(key, record);
+      } else {
+        if (cool.isEmpty()) {
+          oldestCoolAtMs = record.updatedAtMs();
+        }
+        cool.put(key, record);
+      }
     }
 
-    private long retentionNanos(AcceptedDecision value) {
-      return value.hotRetained() ? Math.max(HOT_RECORD_RETENTION_NANOS, coolRetentionNanos) : coolRetentionNanos;
+    private int size() {
+      return hot.size() + cool.size();
+    }
+
+    /**
+     * Drops every {@code cool} record whose retention ran out, in insertion order.
+     *
+     * <p>The cached lower bound lets a fresh head skip the iterator allocation entirely; a walk that
+     * stops at a live record refreshes the bound to that record's exact write instant.
+     *
+     * @param nowMs the monotonic sample of this access
+     */
+    private void expireCool(long nowMs) {
+      if (cool.isEmpty() || nowMs - oldestCoolAtMs < retentionMs) {
+        return;
+      }
+      Iterator<Map.Entry<String, AcceptedDecision>> head = cool.entrySet().iterator();
+      while (head.hasNext()) {
+        Map.Entry<String, AcceptedDecision> oldest = head.next();
+        long updatedAtMs = oldest.getValue().updatedAtMs();
+        if (nowMs - updatedAtMs < retentionMs) {
+          oldestCoolAtMs = updatedAtMs;
+          return;
+        }
+        head.remove();
+      }
+    }
+
+    /**
+     * Removes the tier's oldest entry.
+     *
+     * @param tier the tier to drop from
+     * @return {@code false} when the tier is empty
+     */
+    private static boolean dropOldest(LinkedHashMap<String, AcceptedDecision> tier) {
+      Iterator<Map.Entry<String, AcceptedDecision>> oldest = tier.entrySet().iterator();
+      if (!oldest.hasNext()) {
+        return false;
+      }
+      oldest.next();
+      oldest.remove();
+      return true;
     }
   }
 
   /**
-   * A terminal in-memory classification together with the accepted record it was decided against.
-   * Carrying the record from {@link #classify} to {@link #commit} keeps one cache
-   * read for the whole head-drain step: a second read could observe an expiry the first did not and
-   * regress the accepted version to an older decision.
+   * A terminal in-memory classification together with the accepted record it was decided against and
+   * the instant it was classified. Carrying both from {@link #classify} to {@link #commit} keeps one
+   * ledger read and one clock sample for the whole head-drain step: a second read could observe an
+   * expiry the first did not and regress the accepted version to an older decision.
    */
-  record Verdict(Delivery outcome, @Nullable AcceptedDecision prev) {}
+  record Verdict(Delivery outcome, @Nullable AcceptedDecision prev, long nowMs) {}
 
   /**
-   * Per-key wire state with a state-dependent retention and a size cap. A COOL-state record is
-   * retained for twice the maximum queue residency, so it expires only after every decision that
-   * could still be compared against it has already been dropped as expired; a hot record keeps the
-   * long retention until a COOL is accepted, a COOL publish fails or a COOL expires. The cap is the
+   * Per-key wire state in two insertion-ordered tiers. A record whose last wire state is HOT lives in
+   * the {@code hot} tier and never expires on time — the Worker can hold that seat indefinitely under
+   * {@code COOL_FOR_LOW_QPS} — while a COOL-state, unconfirmed or retention-limited record lives in
+   * the {@code cool} tier and expires after twice the maximum queue residency, once every decision
+   * that could still be compared against it has already been dropped as expired. The cap is the
    * backstop for a COOL dropped before the funnel (queue saturation), which no record update sees.
    */
-  private final Cache<String, AcceptedDecision> accepted;
+  private final AcceptedStore accepted;
 
   /**
    * Detection-plane meters (documented in docs/MONITOR.md). A meter-less instance is a no-op, so
@@ -335,18 +417,7 @@ public class WorkerBroadcaster {
       appName
     );
     long retentionMs = maxDecisionAgeMs > Long.MAX_VALUE / 2L ? Long.MAX_VALUE : 2L * maxDecisionAgeMs;
-    this.accepted = Caffeine.newBuilder()
-      .maximumSize(maxAcceptedEntries)
-      .expireAfter(new AcceptedDecisionExpiry(toNanos(retentionMs)))
-      .build();
-  }
-
-  /** Converts a millisecond retention to nanoseconds, saturating instead of wrapping. */
-  private static long toNanos(long retentionMs) {
-    if (retentionMs <= 0L) {
-      return 0L;
-    }
-    return retentionMs > Long.MAX_VALUE / 1_000_000L ? Long.MAX_VALUE : retentionMs * 1_000_000L;
+    this.accepted = new AcceptedStore(maxAcceptedEntries, retentionMs);
   }
 
   /**
@@ -360,7 +431,7 @@ public class WorkerBroadcaster {
    * @return the accepted version, or {@code 0} when the key has no live record
    */
   long acceptedVersion(String cacheKey) {
-    AcceptedDecision prev = accepted.getIfPresent(cacheKey);
+    AcceptedDecision prev = accepted.get(cacheKey, TimeSource.monotonicMillis());
     return prev == null ? 0L : prev.version();
   }
 
@@ -384,9 +455,9 @@ public class WorkerBroadcaster {
   Delivery send(ZetaDecision decision, long expiresAtMs) {
     String key = decision.cacheKey();
     long sentAtMs = TimeSource.monotonicMillis();
-    AcceptedDecision prev = accepted.getIfPresent(key);
+    AcceptedDecision prev = accepted.get(key, sentAtMs);
     Delivery terminal = decide(sentAtMs, decision, expiresAtMs, prev);
-    return terminal != null ? settle(terminal, prev, decision) : emit(decision, key, sentAtMs, prev);
+    return terminal != null ? settle(terminal, prev, decision, sentAtMs) : emit(decision, key, sentAtMs, prev);
   }
 
   /**
@@ -411,7 +482,7 @@ public class WorkerBroadcaster {
       publish(key, typeCode, version);
     } catch (RuntimeException e) {
       if (prev != null) {
-        accepted.put(key, prev.unconfirmed());
+        accepted.put(key, prev.unconfirmed(sentAtMs), sentAtMs);
       }
       metrics.countDroppedDecision(type);
       if (log.isDebugEnabled()) {
@@ -420,7 +491,7 @@ public class WorkerBroadcaster {
       return Delivery.FAILED;
     }
 
-    accepted.put(key, AcceptedDecision.confirmed(version, type == ZetaDecision.DecisionType.HOT, sentAtMs));
+    accepted.put(key, AcceptedDecision.confirmed(version, type == ZetaDecision.DecisionType.HOT, sentAtMs), sentAtMs);
     metrics.countSentDecision(type);
     return Delivery.SENT;
   }
@@ -439,9 +510,9 @@ public class WorkerBroadcaster {
   @Nullable
   Verdict classify(ZetaDecision decision, long expiresAtMs) {
     long nowMs = TimeSource.monotonicMillis();
-    AcceptedDecision prev = accepted.getIfPresent(decision.cacheKey());
+    AcceptedDecision prev = accepted.get(decision.cacheKey(), nowMs);
     Delivery outcome = decide(nowMs, decision, expiresAtMs, prev);
-    return outcome != null ? new Verdict(outcome, prev) : null;
+    return outcome != null ? new Verdict(outcome, prev, nowMs) : null;
   }
 
   /**
@@ -454,7 +525,7 @@ public class WorkerBroadcaster {
    * @return the classification's outcome
    */
   Delivery commit(Verdict verdict, ZetaDecision decision) {
-    return settle(verdict.outcome(), verdict.prev(), decision);
+    return settle(verdict.outcome(), verdict.prev(), decision, verdict.nowMs());
   }
 
   /**
@@ -465,23 +536,24 @@ public class WorkerBroadcaster {
    * @param outcome  the terminal outcome
    * @param prev     the accepted record it was decided against, or {@code null}
    * @param decision the classified decision
+   * @param nowMs    the monotonic sample the outcome was classified at
    * @return the outcome, for the caller to return
    */
-  private Delivery settle(Delivery outcome, @Nullable AcceptedDecision prev, ZetaDecision decision) {
+  private Delivery settle(Delivery outcome, @Nullable AcceptedDecision prev, ZetaDecision decision, long nowMs) {
     switch (outcome) {
       case EXPIRED -> {
         // A COOL that expired before it could be sent is the last evidence the Worker held the
-        // key hot. Drop the century retention so a one-off key cannot pin its record forever;
+        // key hot. Drop the long retention so a one-off key cannot pin its record forever;
         // the wire state and watermark stay untouched because the cluster may still be hot.
         if (prev != null && prev.hotRetained() && decision.type() == ZetaDecision.DecisionType.COOL) {
-          accepted.put(decision.cacheKey(), prev.retentionLimited());
+          accepted.put(decision.cacheKey(), prev.retentionLimited(nowMs), nowMs);
         }
       }
       case ELIDED -> {
         AcceptedDecision record = Objects.requireNonNull(prev, "elision requires a predecessor");
         boolean retainHot =
           decision.type() == ZetaDecision.DecisionType.HOT && decision.decisionVersion() > record.version();
-        accepted.put(decision.cacheKey(), record.advance(decision.decisionVersion(), retainHot));
+        accepted.put(decision.cacheKey(), record.advance(decision.decisionVersion(), retainHot, nowMs), nowMs);
         metrics.countElidedDecision(decision.type());
       }
       case SUPERSEDED -> metrics.countSupersededDecision(decision.type());

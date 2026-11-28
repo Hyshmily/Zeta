@@ -88,11 +88,15 @@ public class HotKeyEndpoint {
   /**
    * Detection summary, or one key's state when {@code key} is supplied.
    *
+   * <p>The parameter is annotated with the framework's {@link Nullable} rather than JSpecify's:
+   * Actuator reads this annotation to decide that the parameter is optional (design decisions: the
+   * detection endpoint's optional parameter).
+   *
    * @param key an optional cache key
    * @return the diagnostic document
    */
   @ReadOperation
-  public Map<String, Object> info(@org.springframework.lang.Nullable String key) {
+  public Map<String, Object> info(@Nullable String key) {
     return key == null ? summary() : keyState(key);
   }
 
