@@ -670,6 +670,8 @@ public class ProductWarmReadService {
 
   // selfWarmLoader = true：启动期把本方法绑定为 "products" 的后台 loader
   // 约束：key 必须可逆（无参常量 / 单标量参数 / 默认标量参数）、禁止 condition、unless 只能读 #result、预热需静态 TTL
+  // 后台调用不经过调用方的切面链：方法上的事务/方法安全切面会在启动期以 WARN 点名，
+  // 依赖它们的 body 应改用 ZetaWarmConfigurer 注册 loader
   @ZetaCached(
     key = "#id",
     prewarm = HeatTrigger.Option.CLUSTER,

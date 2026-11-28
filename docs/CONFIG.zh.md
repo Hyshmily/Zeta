@@ -292,7 +292,6 @@ zeta:
   sync:
     enabled: true
     flush-delay-ms: 50
-    max-defer-ms: 500
     put-max-bytes: 32768
     put-allowed-packages:
       - com.example.order.dto
@@ -311,8 +310,7 @@ zeta:
 | 属性                             | 默认值               | 说明                                                                                                                                                                                                                                                                                                                                                        |
 | -------------------------------- | -------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `zeta.sync.enabled`              | `false`              | 启用跨实例缓存同步（需要 RabbitMQ）。                                                                                                                                                                                                                                                                                                                       |
-| `zeta.sync.flush-delay-ms`       | `50`                 | 待发送同步记录的合并窗口；窗口内同 key 写入合并为一批。                                                                                                                                                                                                                                                                                                     |
-| `zeta.sync.max-defer-ms`         | `500`                | 最大延迟上限；持续写入时也强制刷出，避免 debounce 饥饿。                                                                                                                                                                                                                                                                                                    |
+| `zeta.sync.flush-delay-ms`       | `50`                 | 待发送同步记录的合并窗口；窗口内同 key 写入合并为一批。窗口从首条记录起算且不滑动，因此单条记录最多等待此时长。                                                                                                                                                                                                                                               |
 | `zeta.sync.put-max-bytes`        | `32768`              | 单条带值 PUT 的载荷上限。超限或无法 Jackson 往返序列化时降级为无值 REFRESH；`0` 表示所有同步写都走 REFRESH。                                                                                                                                                                                                                                                |
 | `zeta.sync.put-allowed-packages` | `[]`                 | 带值 PUT 反序列化白名单额外放行的包前缀；末尾缺少 `.` 时会自动补齐，因此 `com.example.dto` 不会放行同级的 `com.example.dtoOther`。内置白名单只有 JDK 值类型（Collection/Map 仅限 `java.util`）与 `io.github.hyshmily.zeta.model.*`；业务 DTO 不加入会 fail-closed 降级为带版本 INVALIDATE。**列出的前缀可被任何能写 broker 的发送方实例化，请保持最小化。** |
 | `zeta.sync.exchange-name`        | `zeta.sync.exchange` | 同步消息的 FanoutExchange。                                                                                                                                                                                                                                                                                                                                 |
@@ -359,7 +357,7 @@ zeta:
 | `zeta.local.circuit-breaker.consecutive-success-threshold` | `3`     | 半开状态连续成功多少次才关闭，防止单次成功导致抖动。                                                                                                                              |
 | `zeta.local.circuit-breaker.log-enabled`                   | `true`  | 是否记录 OPEN/CLOSE/HALF-OPEN 状态切换。                                                                                                                                          |
 | `zeta.local.circuit-breaker.exclude-exceptions`            | `[]`    | 不触发熔断的异常全类名；匹配异常或其 `cause` 时按成功计。                                                                                                                         |
-| `zeta.local.circuit-breaker.include-exceptions`            | `[]`    | 只有列出的异常才触发熔断；为空表示全部触发。exclude 先于 include 检查。                                                                                                           |
+| `zeta.local.circuit-breaker.include-exceptions`            | `[]`    | 只有列出的异常才触发熔断；为空表示全部触发。已配置但类名无法加载的条目匹配不到任何异常（名字全部无法加载时不会触发熔断）。exclude 先于 include 检查。                          |
 | `zeta.local.circuit-breaker.max-prefixes`                  | `64`    | 最大存活熔断器分片数。注解 key 按 U+0000 命名空间分隔符前的 cache 命名空间分片；编程式 key 按第一个 `:` 前的段分片；两者都没有的 key 共用一个桶。单个坏数据源只影响自己的 shard。 |
 
 ## 10. Worker 基础与消息入口

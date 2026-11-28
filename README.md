@@ -694,7 +694,9 @@ public class ProductWarmReadService {
 
   // selfWarmLoader = true binds this method as the "products" background loader at startup.
   // Constraints: a reversible key (no-arg constant, one scalar, default scalars), no condition,
-  // unless may read only #result, and prewarm requires a static TTL.
+  // unless may read only #result, and prewarm requires a static TTL. The load runs outside the
+  // caller's advice chain: a transaction or method-security advisor on the method is named in a
+  // startup WARN, and a body that depends on one belongs in a ZetaWarmConfigurer loader.
   @ZetaCached(
     key = "#id",
     prewarm = HeatTrigger.Option.CLUSTER,
