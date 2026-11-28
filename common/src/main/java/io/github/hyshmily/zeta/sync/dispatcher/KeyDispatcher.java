@@ -17,13 +17,12 @@ package io.github.hyshmily.zeta.sync.dispatcher;
 
 import io.github.hyshmily.zeta.exception.ZetaExceptionHandler;
 import io.github.hyshmily.zeta.util.Internal;
-import java.lang.invoke.MethodHandles;
-import java.lang.invoke.VarHandle;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.function.Consumer;
 import lombok.extern.slf4j.Slf4j;
@@ -500,16 +499,6 @@ public class KeyDispatcher<T> implements AutoCloseable {
     /** {@link #close()} refused the first cycle before a worker thread could claim it. */
     private static final int FIRST_ABORTED = 2;
 
-    private static final VarHandle FIRST_STATE;
-
-    static {
-      try {
-        FIRST_STATE = MethodHandles.lookup().findVarHandle(KeyWorker.class, "firstState", int.class);
-      } catch (ReflectiveOperationException e) {
-        throw new ExceptionInInitializerError(e);
-      }
-    }
-
     final Object key;
 
     @Nullable
@@ -525,7 +514,7 @@ public class KeyDispatcher<T> implements AutoCloseable {
      * Ownership of the pre-granted first cycle, so {@link #close()} either prevents the batch from
      * running or reports it as accepted — never both.
      */
-    private volatile int firstState = FIRST_PENDING;
+    private final AtomicInteger firstState = new AtomicInteger(FIRST_PENDING);
 
     /** Creates a worker with its initial single-task batch pre-granted. */
     private KeyWorker(Object key, T firstTask, int firstWeight) {
@@ -546,7 +535,7 @@ public class KeyDispatcher<T> implements AutoCloseable {
      * @return {@code false} when {@link #close()} already refused this cycle
      */
     private boolean claimFirst() {
-      return FIRST_STATE.compareAndSet(this, FIRST_PENDING, FIRST_CLAIMED);
+      return firstState.compareAndSet(FIRST_PENDING, FIRST_CLAIMED);
     }
 
     /**
@@ -555,7 +544,7 @@ public class KeyDispatcher<T> implements AutoCloseable {
      * @return {@code true} when this call owns the refusal and the batch will not run
      */
     private boolean abortFirst() {
-      return FIRST_STATE.compareAndSet(this, FIRST_PENDING, FIRST_ABORTED);
+      return firstState.compareAndSet(FIRST_PENDING, FIRST_ABORTED);
     }
 
     /** Cancels a parked first-cycle jitter future if still present. */
