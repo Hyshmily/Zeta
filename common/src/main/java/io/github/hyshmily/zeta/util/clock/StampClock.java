@@ -24,9 +24,11 @@ import io.github.hyshmily.zeta.util.NodeIdentity;
  *
  * <p>A stamp is a positive, time-sortable {@code long} that orders data mutations across
  * instances. It answers one question only: <em>which of two values was written later?</em>
- * It is deliberately <b>not</b> a duration clock — TTLs, soft expiry and value-birth
- * stamps keep using the per-JVM monotonic clock ({@code TimeSource.monotonic*}).
- * Mixing the two lets an NTP step rewrite entry lifetimes.
+ * It is deliberately <b>not</b> a duration clock: absolute TTL deadlines are minted and compared on
+ * the per-JVM monotonic clock ({@code TimeSource.monotonicMillis()}), while this clock's wall-clock
+ * reading backs the stamp's timestamp field and the message trace IDs. A stamp must never be used
+ * as a deadline and a deadline must never be used as a stamp; the two axes stay separate so a
+ * stamp-space rollback cannot rewrite entry lifetimes and a clock step cannot reorder versions.
  *
  * <h2>Contract</h2>
  * <ul>

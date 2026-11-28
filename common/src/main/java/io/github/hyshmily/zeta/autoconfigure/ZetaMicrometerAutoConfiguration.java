@@ -192,7 +192,9 @@ public class ZetaMicrometerAutoConfiguration {
   ) {
     return registry -> {
       TopK detector = hotKeyDetectorProvider.getIfUnique(defaultTopKProvider::getIfAvailable);
-      registerLocalTopKMeters(detector, registry);
+      if (detector != null) {
+        registerLocalTopKMeters(detector, registry);
+      }
       singleFlightProvider.ifAvailable(sf ->
         gauge(registry, "zeta.singleflight.inflight", sf, SingleFlight::estimatedInFlightSize)
       );
@@ -321,7 +323,8 @@ public class ZetaMicrometerAutoConfiguration {
    * Register Micrometer meters for the local app-side TopK detector.
    * Exposes top-K size, total requests and expelled queue size.
    *
-   * @param detector the local TopK detector
+   * @param detector the local TopK detector; never {@code null}, because the binder registers these
+   *                 meters only when a detector bean exists
    * @param registry the Micrometer meter registry
    */
   private static void registerLocalTopKMeters(TopK detector, MeterRegistry registry) {

@@ -32,8 +32,9 @@ import org.jspecify.annotations.Nullable;
  * for 1 second before resuming or restarting; reads seamlessly fall back to
  * {@link System#currentTimeMillis()} clamped to the monotonic floor so time never steps backwards.
  *
- * <p><b>Clock axes.</b> Use {@link #currentTimeMillis()} for absolute wall-clock deadlines and
- * stamps, and {@link #monotonicMillis()} for all elapsed-time and delta computations.
+ * <p><b>Clock axes.</b> Use {@link #monotonicMillis()} for every duration-based decision — elapsed
+ * time, timeouts, TTL deadlines — and {@link #currentTimeMillis()} only where the value must be
+ * comparable outside this JVM: time-sortable version stamps and message trace IDs.
  */
 @Internal
 @Slf4j
@@ -117,7 +118,8 @@ public final class TimeSource {
 
   /**
    * Returns a monotonic millisecond timestamp immune to wall-clock/NTP jumps, anchored near the
-   * wall clock at JVM startup. Use for all elapsed-time and interval calculations.
+   * wall clock at JVM startup. Use for every elapsed-time, interval and absolute-deadline
+   * calculation.
    *
    * @return monotonic timestamp in milliseconds
    */

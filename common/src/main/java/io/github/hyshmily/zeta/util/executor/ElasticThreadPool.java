@@ -50,8 +50,9 @@ import org.jspecify.annotations.NonNull;
  * resolution: when the pool is still running the task is forced into the queue and the add is
  * kept (the later {@code afterExecute} balances it); once the force fails (shutdown) the user's
  * handler runs and the internal handler rolls the increment back — a returning handler
- * ({@link ThreadPoolExecutor.CallerRunsPolicy}, discard-style) decrements on return, a throwing
- * one (Abort) decrements before propagating its own exception. The over-cap pre-check in
+ * ({@link ThreadPoolExecutor.CallerRunsPolicy}, discard-style) decrements on the following line,
+ * while a throwing one (Abort) skips that line and lets {@link #execute(Runnable)}'s finally
+ * roll the same submission back exactly once. The over-cap pre-check in
  * {@link #execute(Runnable)} (past {@code maxSubmittedTaskCount}) calls the user's handler
  * directly after rolling the increment back. A failure that never reaches {@code reject} —
  * a throwing {@link ThreadFactory} or {@code Thread.start} failing — is rolled back by
@@ -69,21 +70,10 @@ public class ElasticThreadPool extends ThreadPoolExecutor {
   private static final long SHUTDOWN_DRAIN_MILLIS = 3_000L;
 
   /**
-   * Per-submission bookkeeping visible only to the thread inside {@link #execute(Runnable)}.
-   * {@link ThreadPoolExecutor#execute(Runnable)} only ever calls {@code remove(command)} inside its
-   * shutdown recheck, immediately before rejecting on the same thread; recording that removal here
-   * lets the rejection skip the second decrement. The frame also records that the internal handler
-   * ran, so a rejection exception is not compensated twice. Keeping the frame scoped to
-   * {@code super.execute} means an external {@link #remove(Runnable)} never writes a
-   * {@link ThreadLocal} that could outlive the pool.
+   * Stack-walk handle used on the shutdown path only, to tell the JDK's internal
+   * {@code remove} apart from an external one.
    */
-  private static final class ExecFrame {
-
-    private Runnable shutdownRemoved;
-    private boolean rejectedByInternal;
-  }
-
-  private static final ThreadLocal<ExecFrame> EXEC_FRAME = new ThreadLocal<>();
+  private static final StackWalker STACK_WALKER = StackWalker.getInstance();
 
   private final AtomicInteger submittedTasksCount = new AtomicInteger(0);
 
@@ -147,25 +137,17 @@ public class ElasticThreadPool extends ThreadPoolExecutor {
       userHandler.rejectedExecution(command, this);
       return;
     }
-    // A rejection raised by super.execute is fully resolved by the internal force-first handler
-    // (force, user-handler delegation and compensation). Anything else — a ThreadFactory that
-    // throws, Thread.start failing with OOM — never reaches reject() or afterExecute, so the
-    // submission increment would leak. The frame distinguishes the two on the same thread and is
-    // restored for a nested execute from a CallerRunsPolicy task.
-    ExecFrame previous = EXEC_FRAME.get();
-    ExecFrame frame = new ExecFrame();
-    EXEC_FRAME.set(frame);
+    // A rejection the internal force-first handler resolved has already compensated or queued the
+    // task; what can still leak the increment is a failure that never reaches reject() or
+    // afterExecute — a throwing ThreadFactory, Thread.start failing, or a rejected task whose
+    // handler threw. The handler decrements only when it returns, so this rollback covers exactly
+    // the throwing case and never double-counts.
     boolean completed = false;
     try {
       super.execute(command);
       completed = true;
     } finally {
-      if (previous == null) {
-        EXEC_FRAME.remove();
-      } else {
-        EXEC_FRAME.set(previous);
-      }
-      if (!completed && !frame.rejectedByInternal) {
+      if (!completed) {
         submittedTasksCount.decrementAndGet();
       }
     }
@@ -187,22 +169,46 @@ public class ElasticThreadPool extends ThreadPoolExecutor {
     return (int) Math.min((long) queueCapacity + maxThreads, Integer.MAX_VALUE);
   }
 
+  /**
+   * Removes a queued task and compensates its submission increment, except when the removal comes
+   * from {@link ThreadPoolExecutor#execute}'s shutdown recheck: that call removes the task only to
+   * reject it on the same thread, and the internal rejection handler owns the single decrement.
+   * Every other caller — including an explicit {@code remove} while the pool is shutting down —
+   * balances the submission here, because a removed task never reaches {@code afterExecute}.
+   *
+   * @param task the task to remove
+   * @return whether the task was still queued and is now removed
+   */
   @Override
   public boolean remove(Runnable task) {
-    // A removed queued task never reaches afterExecute's decrement — balance the submission
-    // increment here, or each external removal permanently leaks one slot of the admission
-    // ceiling (maxSubmittedTaskCount). Only a removal inside execute's shutdown recheck may
-    // record a marker: writing one from an arbitrary long-lived thread would pin the task (and
-    // everything it closes over) in that thread's ThreadLocal forever.
-    if (super.remove(task)) {
-      submittedTasksCount.decrementAndGet();
-      ExecFrame frame = EXEC_FRAME.get();
-      if (frame != null && isShutdown()) {
-        frame.shutdownRemoved = task;
-      }
-      return true;
+    if (!super.remove(task)) {
+      return false;
     }
-    return false;
+    // Outside the recheck the task can never reach afterExecute, so the increment is balanced here
+    // on every path, including an explicit remove() while the pool is shutting down.
+    if (!isShutdown() || !isShutdownRecheckCaller()) {
+      submittedTasksCount.decrementAndGet();
+    }
+    return true;
+  }
+
+  /**
+   * Whether {@link #remove(Runnable)} was entered from {@link ThreadPoolExecutor#execute}'s
+   * shutdown recheck — the only {@code remove(command)} the JDK performs itself, and only after
+   * {@code isRunning} turned false, immediately before {@code reject(command)}.
+   */
+  private static boolean isShutdownRecheckCaller() {
+    return STACK_WALKER.walk(frames ->
+      frames
+        // 0: this method, 1: remove, 2: the frame that invoked remove
+        .skip(2)
+        .findFirst()
+        .map(
+          frame ->
+            ThreadPoolExecutor.class.getName().equals(frame.getClassName()) && "execute".equals(frame.getMethodName())
+        )
+        .orElse(false)
+    );
   }
 
   /**
@@ -210,15 +216,16 @@ public class ElasticThreadPool extends ThreadPoolExecutor {
    *
    * <p>The JDK's implementation removes through the queue iterator and never calls
    * {@link #remove(Runnable)}, so without this override every purged cancelled task leaves one
-   * admission slot held forever. The snapshot-then-{@code queue.remove} form counts only a removal
-   * this call actually won; a worker or a concurrent purge that won the race owns the matching
-   * compensation (the worker through {@code afterExecute}).
+   * admission slot held forever. The iteration is the queue's own weakly consistent iterator —
+   * no array snapshot — and {@code queue.remove} reports only a removal this call actually won; a
+   * worker or a concurrent purge that won the race owns the matching compensation (the worker
+   * through {@code afterExecute}).
    */
   @Override
   public void purge() {
     int removed = 0;
     BlockingQueue<Runnable> queue = getQueue();
-    for (Runnable task : queue.toArray(new Runnable[0])) {
+    for (Runnable task : queue) {
       if (task instanceof Future<?> future && future.isCancelled() && queue.remove(task)) {
         removed++;
       }
@@ -359,10 +366,11 @@ public class ElasticThreadPool extends ThreadPoolExecutor {
    * {@code afterExecute} balances the submit-time increment. The user's handler runs only
    * once the force has failed (shutdown raced in). The counter is compensated here for
    * every not-queued outcome: a returning handler (CallerRuns/discard — neither path
-   * reaches {@code afterExecute}) decrements on return, and a throwing one (Abort)
-   * decrements before its original exception propagates. This handler never sees the
-   * over-cap pre-check rejection in {@link #execute(Runnable)}, which calls the user
-   * handler directly after rolling the increment back.
+   * reaches {@code afterExecute}) decrements on the following line, and a throwing one
+   * (Abort, or an {@code Error} from an inline run) skips that line so
+   * {@link #execute(Runnable)}'s finally performs the single rollback. This handler never
+   * sees the over-cap pre-check rejection in {@link #execute(Runnable)}, which calls the
+   * user handler directly after rolling the increment back.
    */
   private final class InternalForceQueueHandler implements RejectedExecutionHandler {
 
@@ -373,30 +381,12 @@ public class ElasticThreadPool extends ThreadPoolExecutor {
         return;
       }
 
-      // The task was never queued and never executed, so afterExecute will never
-      // fire: compensate the increment on EVERY outcome. finally instead of a
-      // catch: a CallerRunsPolicy that runs the task inline can throw an Error
-      // (OOM, StackOverflow, AssertionError), which a catch(RuntimeException) misses
-      // and leaks a slot permanently.
-      //
-      // remove() already decremented the exact task the JDK is now rejecting, so
-      // consume that marker instead of decrementing twice. The frame is also marked
-      // as handled, or execute()'s finally would compensate the same submission.
-      ExecFrame frame = EXEC_FRAME.get();
-      boolean alreadyCompensated = frame != null && frame.shutdownRemoved == task;
-      if (alreadyCompensated) {
-        frame.shutdownRemoved = null;
-      }
-      if (frame != null) {
-        frame.rejectedByInternal = true;
-      }
-      try {
-        userHandler.rejectedExecution(task, pool);
-      } finally {
-        if (!alreadyCompensated) {
-          submittedTasksCount.decrementAndGet();
-        }
-      }
+      // The task was never queued and never executed, so afterExecute will never fire: compensate
+      // the increment on every outcome. A handler that throws — Abort, or an Error escaping
+      // CallerRuns — never reaches the decrement, and execute()'s finally rolls that submission
+      // back instead, so each submission is decremented exactly once.
+      userHandler.rejectedExecution(task, pool);
+      submittedTasksCount.decrementAndGet();
     }
   }
 }

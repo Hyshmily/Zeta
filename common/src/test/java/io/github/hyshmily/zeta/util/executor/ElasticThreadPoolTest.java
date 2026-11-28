@@ -382,6 +382,40 @@ class ElasticThreadPoolTest {
     }
   }
 
+  /**
+   * An explicit removal while the pool is shutting down still balances its own increment: only the
+   * JDK's internal recheck call is skipped, and that distinction is made from the caller frame.
+   */
+  @Test
+  void remove_duringShutdown_shouldStillBalanceSubmittedCount() throws Exception {
+    var executor = newExecutor(1, 1, 100);
+    var firstStarted = new CountDownLatch(1);
+    var release = new CountDownLatch(1);
+    Runnable blocking = () -> {
+      firstStarted.countDown();
+      try {
+        release.await();
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+      }
+    };
+    try {
+      executor.execute(blocking);
+      assertThat(firstStarted.await(5, TimeUnit.SECONDS)).isTrue();
+      Runnable queued = () -> {};
+      executor.execute(queued);
+      assertThat(executor.getSubmittedTasksCount()).isEqualTo(2);
+
+      executor.shutdown();
+      assertThat(executor.remove(queued)).isTrue();
+
+      assertThat(executor.getSubmittedTasksCount()).isEqualTo(1);
+    } finally {
+      release.countDown();
+      executor.shutdownNow();
+    }
+  }
+
   @Test
   void purge_shouldCompensateCancelledQueuedFutures() throws Exception {
     // The JDK's purge removes cancellation through the queue iterator, not through

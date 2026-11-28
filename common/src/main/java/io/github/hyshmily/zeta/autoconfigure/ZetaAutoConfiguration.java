@@ -15,7 +15,7 @@
  */
 package io.github.hyshmily.zeta.autoconfigure;
 
-import static io.github.hyshmily.zeta.util.TimeSource.currentTimeMillis;
+import static io.github.hyshmily.zeta.util.TimeSource.monotonicMillis;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
@@ -597,7 +597,6 @@ public class ZetaAutoConfiguration {
       hotKeyScheduler,
       syncPublisherProvider.getIfAvailable(),
       syncProperties.getFlushDelayMs(),
-      syncProperties.getMaxDeferMs(),
       sendExecutor,
       BroadcastBuffer.DEFAULT_MAX_PENDING_PAYLOAD_BYTES
     );
@@ -743,7 +742,9 @@ public class ZetaAutoConfiguration {
    *
    * <p>Time-based expiry operates at the <em>Caffeine</em> level via a custom
    * {@link Expiry} implementation, computing remaining nanoseconds from the
-   * entry's {@code hardExpireAtMs} wall-clock deadline. Entries with
+   * entry's {@code hardExpireAtMs} monotonic deadline — the same axis
+   * {@code TtlPolicy} stamps its deadlines on, and the same kind of clock
+   * Caffeine's own ticker counts with. Entries with
    * {@code hardExpireAtMs == Long.MAX_VALUE} are purely logical-expiry
    * — Caffeine never evicts them by time; they live until size eviction or
    * manual invalidation. Reads never extend the expiry duration (no read-based
@@ -784,7 +785,7 @@ public class ZetaAutoConfiguration {
          * Compute the time-to-live for a newly created cache entry.
          * Returns {@link Long#MAX_VALUE} for pure logical-expiry entries
          * (where {@code hardExpireAtMs == Long.MAX_VALUE}); otherwise
-         * computes the remaining wall-clock time.
+         * computes the remaining monotonic time.
          *
          * @param key              the cache key
          * @param value            the cache value (expected to be a {@link CacheEntry})
@@ -850,7 +851,7 @@ public class ZetaAutoConfiguration {
    * sits at {@code hardExpireAtMs}: {@link Long#MAX_VALUE} for pure
    * logical-expiry entries (Caffeine never time-evicts them — the Expiry
    * Javadoc defines {@code Long.MAX_VALUE} as "no expiration"); otherwise the
-   * remaining wall-clock time, floored at 1ms so a just-expired entry still
+   * remaining monotonic time, floored at 1ms so a just-expired entry still
    * gets one scheduling quantum instead of an immediate re-expiry storm.
    */
   private static long remainingHardTtlNanos(long hardExpireAtMs) {
@@ -858,7 +859,7 @@ public class ZetaAutoConfiguration {
       return Long.MAX_VALUE;
     }
 
-    long remainingMs = hardExpireAtMs - currentTimeMillis();
+    long remainingMs = hardExpireAtMs - monotonicMillis();
     return TimeUnit.MILLISECONDS.toNanos(Math.max(1, remainingMs));
   }
 }

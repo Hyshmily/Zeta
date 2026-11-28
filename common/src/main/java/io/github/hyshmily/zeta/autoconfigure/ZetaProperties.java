@@ -745,6 +745,8 @@ public class ZetaProperties {
      * Exception class names (fully qualified) that SHOULD trip the breaker.
      * When non-empty, ONLY these exceptions are counted as failures; all others
      * are treated as successes. When empty (default), all exceptions are counted.
+     * A name that cannot be loaded matches nothing, so a list whose every name
+     * fails counts no exception as a failure.
      * Mutually exclusive with {@code excludeExceptions} in intent, but both
      * can be set — exclude checks run first.
      */

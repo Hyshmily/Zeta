@@ -360,12 +360,6 @@
       "defaultValue": 50
     },
     {
-      "name": "zeta.sync.max-defer-ms",
-      "type": "java.lang.Long",
-      "description": "Maximum deferral in ms before a flush is forced, even under continuous writes.",
-      "defaultValue": 500
-    },
-    {
       "name": "zeta.sync.put-max-bytes",
       "type": "java.lang.Integer",
       "description": "Upper bound (bytes) for a single value-carrying PUT payload; a write over the bound (or not Jackson-round-trippable) degrades to a value-less REFRESH.",
@@ -452,7 +446,7 @@
     {
       "name": "zeta.local.circuit-breaker.include-exceptions",
       "type": "java.util.List",
-      "description": "Exception class names that SHOULD trip the breaker (empty = all).",
+      "description": "Exception class names that SHOULD trip the breaker (empty = all; a name that cannot be loaded matches nothing).",
       "defaultValue": []
     },
     {
