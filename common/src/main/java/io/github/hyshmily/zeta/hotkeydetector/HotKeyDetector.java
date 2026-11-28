@@ -47,8 +47,8 @@ import org.jspecify.annotations.Nullable;
  *
  * <p>The admission sink is forwarded from the sketch so the cache layer can
  * learn about newly admitted keys without depending on {@link HeavyKeeper}.
- * The sink runs on the admitting thread under the sketch's admission lock and
- * must not block.
+ * The sink runs on the admitting thread after the sketch's admission lock is
+ * released and must not block.
  *
  * <p>Thread-safe: every method delegates to the thread-safe sketch.
  */

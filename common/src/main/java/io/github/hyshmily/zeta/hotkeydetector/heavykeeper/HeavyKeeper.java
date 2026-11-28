@@ -43,10 +43,12 @@ import org.springframework.util.Assert;
  * {@link #fading()} call so estimates reflect the most recent
  * {@code windowCount * decayInterval}.
  *
- * <p><b>Thread safety.</b> Striped monitors guard individual sketch slot updates, member counts
- * use lock-free {@link VarHandle} max-raises, and {@link #admissionLock} serializes Top-K
- * admission, eviction, and membership decay. Sketch stripes and {@link #admissionLock} are never
- * held simultaneously, preventing lock-order inversion.
+ * <p><b>Thread safety.</b> Striped monitors guard compound sketch slot updates; each monitor owns
+ * one contiguous block of slots, so neighbouring slots never sit under two different locks on the
+ * same cache line. Member counts use lock-free {@link VarHandle} max-raises, and
+ * {@link #admissionLock} serializes Top-K admission, eviction, and membership decay. Sketch
+ * stripes and {@link #admissionLock} are never held simultaneously, preventing lock-order
+ * inversion.
  *
  * @see <a href="https://github.com/Hyshmily/Zeta/blob/master/docs/design-decisions.md">design decisions: sketch</a>
  */
@@ -85,9 +87,6 @@ public class HeavyKeeper implements TopK {
   /** Minimum deadband in {@link #raiseCount} to avoid locked CAS traffic on every hot hit. */
   private static final int RAISE_DEADBAND_FLOOR = 16;
 
-  /** Sentinel returned by {@link #expelIfBelowThreshold} when a member survives removal. */
-  private static final long KEPT = -1L;
-
   /** Tombstone written into {@link Node#count} when a member leaves {@link #members}. */
   private static final int DETACHED = -1;
 
@@ -100,7 +99,7 @@ public class HeavyKeeper implements TopK {
   /** Maximum supported per-slot window ring depth. */
   private static final int MAX_WINDOW_COUNT = 1 << 20;
 
-  /** Lower and upper bounds on striped sketch lock count (power of two). */
+  /** Lower and upper bounds on the number of striped sketch monitors. */
   private static final int MIN_LOCK_STRIPES = 64;
   private static final int MAX_LOCK_STRIPES = 2048;
 
@@ -136,9 +135,15 @@ public class HeavyKeeper implements TopK {
   /** Flattened per-slot state: {@code [fingerprint, slotSum, w0..w(windowCount-1)]}. */
   private final int[] table;
 
-  /** Power-of-two striped monitors serializing compound updates to individual sketch slots. */
+  /**
+   * Striped monitors serializing compound updates to sketch slots. A monitor owns the contiguous
+   * slot block {@code [stripe << stripeShift, (stripe + 1) << stripeShift)}, so a block's slots
+   * never share a cache line with another stripe's.
+   */
   private final Object[] lockStripes;
-  private final int lockMask;
+
+  /** Log2 of the number of consecutive slots one monitor owns; {@code 0} means one slot each. */
+  private final int stripeShift;
 
   /** Authoritative Top-K membership map (size bounded by {@link #k} under {@link #admissionLock}). */
   private final ConcurrentHashMap<String, Node> members;
@@ -241,8 +246,17 @@ public class HeavyKeeper implements TopK {
     this.decayBase = decay;
     this.decayPowers = buildDecayPowers(decay);
     this.table = new int[tableLength];
-    this.lockStripes = createLockStripes(computedSlots);
-    this.lockMask = lockStripes.length - 1;
+    // Contiguous slot blocks, one monitor each: a monitor's slots cover whole cache lines, so two
+    // threads writing neighbouring slots never ping-pong one line under two different locks, and a
+    // full sweep of the table walks it once in address order. One block per ~16 slots, clamped to
+    // the configured stripe bounds; shift 0 (one slot per monitor) only for the smallest sketches.
+    int targetStripes = Math.min(
+      computedSlots,
+      Math.min(MAX_LOCK_STRIPES, Math.max(MIN_LOCK_STRIPES, computedSlots >> 4))
+    );
+    int slotsPerStripe = (computedSlots - 1) / targetStripes;
+    this.stripeShift = Integer.SIZE - Integer.numberOfLeadingZeros(slotsPerStripe);
+    this.lockStripes = createLockStripes(((computedSlots - 1) >>> stripeShift) + 1);
     this.admissionLock = new ReentrantLock();
     this.members = new ConcurrentHashMap<>(k);
     this.expelledQueue = new ArrayBlockingQueue<>(expelledQueueCapacity);
@@ -397,6 +411,9 @@ public class HeavyKeeper implements TopK {
    * Captures a consistent snapshot of {@link #members}, sorts by count descending and key
    * ascending, and truncates to at most {@code limit} entries.
    *
+   * <p>A node observed with the {@link #DETACHED} tombstone has already left the Top-K and is
+   * skipped: exposing it would publish a zero-count key that no longer belongs to the ranking.
+   *
    * @param limit maximum number of entries to return
    * @return sorted, detached list of {@link Item} entries
    */
@@ -406,14 +423,19 @@ public class HeavyKeeper implements TopK {
     }
     List<Item> snapshot = new ArrayList<>(members.size());
     for (Node node : members.values()) {
-      // Clamp detached tombstones (-1) observed during weakly consistent iteration to 0.
-      snapshot.add(new Item(node.key, Math.max(0L, node.count)));
+      int count = node.count;
+      if (count >= 0) {
+        snapshot.add(new Item(node.key, count));
+      }
     }
     snapshot.sort((a, b) -> {
       int cmp = Long.compare(b.count(), a.count());
       return cmp != 0 ? cmp : a.key().compareTo(b.key());
     });
-    return snapshot.size() > limit ? new ArrayList<>(snapshot.subList(0, limit)) : snapshot;
+    if (snapshot.size() > limit) {
+      snapshot.subList(limit, snapshot.size()).clear();
+    }
+    return snapshot;
   }
 
   /**
@@ -444,7 +466,7 @@ public class HeavyKeeper implements TopK {
     for (int row = 0; row < depth; row++) {
       int index = row * width + bucketIndex(itemFingerprint, row);
       int base = index * slotStride;
-      synchronized (lockStripes[index & lockMask]) {
+      synchronized (lockStripes[index >>> stripeShift]) {
         int active = activeWindow;
         long cur = table[base + SLOT_SUM_OFFSET];
         if (cur == 0L) {
@@ -592,15 +614,20 @@ public class HeavyKeeper implements TopK {
   }
 
   /**
-   * Zeroes window {@code windowIndex} across every sketch slot under each owning stripe monitor
-   * and subtracts the expired contribution from each slot's running sum.
+   * Zeroes window {@code windowIndex} across every sketch slot, one owning stripe block at a time,
+   * and subtracts the expired contribution from each slot's running sum. The walk is a single
+   * ascending pass over {@link #table}: each stripe's slots are adjacent, so the whole sweep stays
+   * within a few active cache lines and streams forward in hardware-prefetch order.
    *
    * @param windowIndex the expiring window ring index to clear
    */
   private void rotateSketchWindows(int windowIndex) {
+    int blockSize = 1 << stripeShift;
     for (int stripe = 0; stripe < lockStripes.length; stripe++) {
+      int start = stripe << stripeShift;
+      int end = (int) Math.min((long) totalSlots, (long) start + blockSize);
       synchronized (lockStripes[stripe]) {
-        for (int slot = stripe; slot < totalSlots; slot += lockStripes.length) {
+        for (int slot = start; slot < end; slot++) {
           int base = slot * slotStride;
           int off = base + SLOT_WINDOWS_OFFSET + windowIndex;
           int oldWindow = table[off];
@@ -846,28 +873,27 @@ public class HeavyKeeper implements TopK {
 
   /**
    * Re-synchronizes every member's count against the sketch under {@link #admissionLock}, drops
-   * members below {@link #expelBelowCount}, and refreshes {@link #minMemberCount}.
+   * members below {@link #expelBelowCount} through the same tombstone protocol as eviction, and
+   * refreshes {@link #minMemberCount}.
    */
   private void decayMembership() {
     admissionLock.lock();
     try {
       // The sweep may drop members below k; the fast-reject floor is only meaningful on a full set.
       minMemberCount = 0L;
-      List<String> dropped = null;
       for (Node node : members.values()) {
-        int current = synchronizeMemberCount(node);
-        if (current < expelBelowCount && node.count < expelBelowCount) {
-          if (dropped == null) {
-            dropped = new ArrayList<>();
+        synchronizeMemberCount(node);
+        // Tombstone first, then unlink: a lock-free raise that lands in this window observes
+        // DETACHED and falls through to admission instead of being discarded with the removal.
+        for (;;) {
+          int count = node.count;
+          if (count >= expelBelowCount) {
+            break;
           }
-          dropped.add(node.key);
-        }
-      }
-      if (dropped != null) {
-        for (String key : dropped) {
-          long departedAt = expelIfBelowThreshold(key);
-          if (departedAt != KEPT) {
-            offerExpelled(key, departedAt, "decay-dropped key");
+          if ((int) MEMBER_COUNT.compareAndExchange(node, count, DETACHED) == count) {
+            members.remove(node.key, node);
+            offerExpelled(node.key, count, "decay-dropped key");
+            break;
           }
         }
       }
@@ -885,48 +911,16 @@ public class HeavyKeeper implements TopK {
    * estimate when present, or halves the count if all sketch rows were taken over.
    *
    * @param node the member node to synchronize
-   * @return the resulting count stored in {@code node}
    */
-  private int synchronizeMemberCount(Node node) {
+  private void synchronizeMemberCount(Node node) {
     for (;;) {
       int prev = node.count;
       long observed = probeSketch(node.fp);
       int next = observed >= 0L ? (int) Math.min(observed, Integer.MAX_VALUE) : prev >> 1;
-      if (next == prev) {
-        return prev;
-      }
-      int witness = (int) MEMBER_COUNT.compareAndExchange(node, prev, next);
-      if (witness == prev) {
-        return next;
+      if (next == prev || (int) MEMBER_COUNT.compareAndExchange(node, prev, next) == prev) {
+        return;
       }
     }
-  }
-
-  /**
-   * Atomically tombstones and removes {@code key} inside its map bin if its live count remains
-   * below {@link #expelBelowCount}, capturing the exact departure count.
-   *
-   * @param key the candidate member key
-   * @return the member's departure count, or {@link #KEPT} if revived concurrently
-   */
-  private long expelIfBelowThreshold(String key) {
-    long[] departedAt = { KEPT };
-    members.compute(key, (k, node) -> {
-      if (node == null) {
-        return null;
-      }
-      for (;;) {
-        int count = node.count;
-        if (count >= expelBelowCount) {
-          return node;
-        }
-        if ((int) MEMBER_COUNT.compareAndExchange(node, count, DETACHED) == count) {
-          departedAt[0] = count;
-          return null;
-        }
-      }
-    });
-    return departedAt[0];
   }
 
   /**
@@ -1065,17 +1059,12 @@ public class HeavyKeeper implements TopK {
   }
 
   /**
-   * Allocates a power-of-two array of striped monitor objects sized proportionally to
-   * {@code totalSlots} within {@code [MIN_LOCK_STRIPES, MAX_LOCK_STRIPES]}.
+   * Allocates the striped monitor array: one plain monitor per contiguous slot block.
    *
-   * @param totalSlots total number of sketch slots ({@code depth * width})
+   * @param stripes the number of blocks the sketch geometry resolves to
    * @return the lock-stripe array
    */
-  private static Object[] createLockStripes(int totalSlots) {
-    int stripes = Math.min(MAX_LOCK_STRIPES, Math.max(MIN_LOCK_STRIPES, totalSlots >> 4));
-    if (!isPowerOfTwo(stripes)) {
-      stripes = nextPowerOfTwo(stripes);
-    }
+  private static Object[] createLockStripes(int stripes) {
     Object[] lockArray = new Object[stripes];
     for (int i = 0; i < stripes; i++) {
       lockArray[i] = new Object();

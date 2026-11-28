@@ -66,6 +66,7 @@ class RemoteInvalidationTransactionTest {
   @DisplayName("a remote invalidation is not broadcast before the transaction commits")
   void remoteInvalidationWaitsForCommit() {
     TransactionSynchronizationManager.initSynchronization();
+    TransactionSynchronizationManager.setActualTransactionActive(true);
     try {
       cache.invalidate("k", new InvalidatePolicy(InvalidatePolicy.Scope.REMOTE, false));
       verifyNoInteractions(broadcastBuffer);
@@ -82,6 +83,7 @@ class RemoteInvalidationTransactionTest {
   @DisplayName("immediate remote invalidation broadcasts on the calling thread")
   void immediateRemoteInvalidationBroadcastsNow() {
     TransactionSynchronizationManager.initSynchronization();
+    TransactionSynchronizationManager.setActualTransactionActive(true);
     try {
       cache.invalidate("k", new InvalidatePolicy(InvalidatePolicy.Scope.REMOTE, true));
       verify(broadcastBuffer).invalidate(eq("k"), anyLong());
@@ -94,6 +96,7 @@ class RemoteInvalidationTransactionTest {
   @DisplayName("remote batch and clear wait for commit")
   void remoteBatchAndClearWaitForCommit() {
     TransactionSynchronizationManager.initSynchronization();
+    TransactionSynchronizationManager.setActualTransactionActive(true);
     try {
       InvalidatePolicy remote = new InvalidatePolicy(InvalidatePolicy.Scope.REMOTE, false);
       cache.invalidate(List.of("k1", "k2"), remote);

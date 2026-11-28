@@ -30,6 +30,12 @@ import org.jspecify.annotations.Nullable;
  * <p>TTL resolution occurs once at the configuration boundary so entries store only resolved
  * durations and deadlines. Freshness jitter is strictly one-sided (subtractive), guaranteeing that
  * an entry never outlives its declared {@code hardTtl}.
+ *
+ * <p><b>Deadlines are monotonic instants.</b> Every deadline is minted from and judged against
+ * {@link TimeSource#monotonicMillis()}, the per-JVM clock anchored near the wall clock at startup.
+ * A deadline never leaves the node that computed it (entries are process-local; no wire message
+ * carries one), so the wall clock is never needed for TTL arithmetic — and keeping it out means an
+ * NTP step can neither expire a live entry nor extend an expired one.
  */
 @Internal
 public final class TtlPolicy implements EntryDraft.ExpiryArithmetic {
@@ -52,20 +58,21 @@ public final class TtlPolicy implements EntryDraft.ExpiryArithmetic {
   }
 
   /**
-   * Checks whether {@code entry}'s hard expiry deadline has passed as of the current wall clock.
+   * Checks whether {@code entry}'s hard expiry deadline has passed as of the current monotonic
+   * instant.
    *
    * @param entry the cache entry to inspect
    * @return {@code true} if the hard deadline is finite and has elapsed
    */
   public boolean isLogicallyExpired(CacheEntry entry) {
-    return isLogicallyExpired(entry, TimeSource.currentTimeMillis());
+    return isLogicallyExpired(entry, TimeSource.monotonicMillis());
   }
 
   /**
    * Checks whether {@code entry}'s hard expiry deadline has passed at the given timestamp.
    *
    * @param entry the cache entry to inspect
-   * @param now   the per-call epoch-millisecond timestamp
+   * @param now   the per-call monotonic-millisecond timestamp
    * @return {@code true} if the hard deadline is finite and {@code now >= hardExpireAtMs}
    */
   public boolean isLogicallyExpired(CacheEntry entry, long now) {
@@ -88,21 +95,21 @@ public final class TtlPolicy implements EntryDraft.ExpiryArithmetic {
 
   /**
    * Checks whether {@code cacheEntry} is absent or its soft-refresh window has expired as of the
-   * current wall clock.
+   * current monotonic instant.
    *
    * @param cacheEntry the cache entry to inspect, or {@code null}
    * @return {@code true} if {@code cacheEntry} is {@code null} or its soft window is enabled and
    *         has elapsed
    */
   public boolean isSoftExpired(@Nullable CacheEntry cacheEntry) {
-    return isSoftExpired(cacheEntry, TimeSource.currentTimeMillis());
+    return isSoftExpired(cacheEntry, TimeSource.monotonicMillis());
   }
 
   /**
    * Checks whether {@code cacheEntry} is absent or its soft-refresh window has expired at {@code now}.
    *
    * @param cacheEntry the cache entry to inspect, or {@code null}
-   * @param now        the per-call epoch-millisecond timestamp
+   * @param now        the per-call monotonic-millisecond timestamp
    * @return {@code true} if {@code cacheEntry} is {@code null} or its soft window is enabled and
    *         {@code softExpireAtMs <= now}
    */
@@ -198,12 +205,12 @@ public final class TtlPolicy implements EntryDraft.ExpiryArithmetic {
   }
 
   /**
-   * Converts a resolved hard TTL duration into an absolute epoch-millisecond deadline with
+   * Converts a resolved hard TTL duration into an absolute monotonic-millisecond deadline with
    * one-sided subtractive jitter.
    *
    * @param hardTtlMs the resolved hard TTL in milliseconds (positive, or {@link Long#MAX_VALUE}
    *                  for permanent entries)
-   * @return the absolute epoch-millisecond hard deadline
+   * @return the absolute monotonic-millisecond hard deadline
    */
   @Override
   public long hardExpireAt(long hardTtlMs) {
@@ -214,11 +221,11 @@ public final class TtlPolicy implements EntryDraft.ExpiryArithmetic {
   }
 
   /**
-   * Converts a resolved soft TTL duration into an absolute epoch-millisecond deadline with
+   * Converts a resolved soft TTL duration into an absolute monotonic-millisecond deadline with
    * one-sided subtractive jitter.
    *
    * @param softTtlMs the resolved soft TTL in milliseconds ({@code <= 0} means disabled)
-   * @return the absolute epoch-millisecond soft deadline, or {@code 0} when disabled
+   * @return the absolute monotonic-millisecond soft deadline, or {@code 0} when disabled
    */
   @Override
   public long softExpireAt(long softTtlMs) {
@@ -237,10 +244,10 @@ public final class TtlPolicy implements EntryDraft.ExpiryArithmetic {
    *
    * @param ttlMs    the resolved TTL duration in milliseconds
    * @param jitterMs the non-positive jitter offset in milliseconds
-   * @return the saturated epoch-millisecond deadline
+   * @return the saturated monotonic-millisecond deadline
    */
   private static long expireAtFromNow(long ttlMs, long jitterMs) {
-    long now = TimeSource.currentTimeMillis();
+    long now = TimeSource.monotonicMillis();
     long delta = Math.max(1L, ttlMs + jitterMs);
     return now > Long.MAX_VALUE - delta ? Long.MAX_VALUE : now + delta;
   }

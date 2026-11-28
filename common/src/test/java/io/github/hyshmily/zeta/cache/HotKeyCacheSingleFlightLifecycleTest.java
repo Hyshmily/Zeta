@@ -95,7 +95,7 @@ class HotKeyCacheSingleFlightLifecycleTest {
       lifecycle,
       new DefaultBackgroundRefresher(l1, Runnable::run, lifecycle, 10, props.getRefreshTimeoutMs()),
       new AccessCounter(detector, null, scheduler, 50L, AccessCounter.DEFAULT_DETECTOR_INTERVAL_MS),
-      new BroadcastBuffer(scheduler, null, 500, 2_000, null),
+      new BroadcastBuffer(scheduler, null, 500, null),
       new MonotonicStampClock(1L, MonotonicStampClock.DEFAULT_MAX_FORWARD_DRIFT_MS)
     );
   }
@@ -111,6 +111,7 @@ class HotKeyCacheSingleFlightLifecycleTest {
   void transactionalLoadDoesNotStore() {
     GetPolicy policy = new GetPolicy(() -> 0L, () -> 0L, StalePolicy.SOFT_REFRESH, true, true);
     TransactionSynchronizationManager.initSynchronization();
+    TransactionSynchronizationManager.setActualTransactionActive(true);
     try {
       String value = hotKeyCache.get("tx", () -> "v", policy);
 

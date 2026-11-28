@@ -124,10 +124,10 @@ class WaveCounterKthShortcutTest {
    * keys (the crossing invariant — the top-down accumulation stops at the
    * first bucket that reaches {@code hotLimit} — makes
    * {@code bucketSize < need} unreachable), so the shipped boundary IS the
-   * bucket minimum AND the true k-th largest; the shortcut fires there too
-   * and must reproduce it.  (A fitting bucket holds at most
-   * {@code need <= hotLimit} keys, so this corner is cheap either way —
-   * the shortcut's value is the overflowing bucket.)
+   * bucket minimum AND the true k-th largest. The bucket path computes it
+   * with a single minimum scan, and the shortcut (when the cost gate lets it
+   * run) must reproduce it exactly; a fitting bucket holds at most
+   * {@code need <= hotLimit} keys, so this corner is cheap either way.
    */
   @Test
   void fitsCorner_shortcutStaysExact() throws Exception {
@@ -146,7 +146,6 @@ class WaveCounterKthShortcutTest {
     setLastKth(counter, 16);
     Object shortcut = runPass(counter, fits, FLOOR);
     assertThat(passInt(shortcut, "aboveKthSize")).isEqualTo(1024);
-    assertThat(fired(shortcut)).as("the list holds hotLimit keys").isTrue();
     assertThat(passLong(shortcut, "boundary")).isEqualTo(16);
     setLastKth(counter, -1);
     Object reference = runPass(counter, fits, FLOOR);
@@ -240,11 +239,19 @@ class WaveCounterKthShortcutTest {
   void staleSeed_shortcutStaysExactOrFallsBack() throws Exception {
     Map<String, Long> snapshot = flatSnapshot(3000, 100);
 
-    setLastKth(counter, 1); // far below the kth: the list is the whole snapshot
+    setLastKth(counter, 2); // far below the kth: the list is the whole snapshot
     Object wide = runPass(counter, snapshot, FLOOR);
     assertThat(passInt(wide, "aboveKthSize")).isEqualTo(3000);
     assertThat(fired(wide)).isTrue();
     assertThat(passLong(wide, "boundary")).isEqualTo(100);
+
+    // A seed of 1 admits almost every key, so the filter would be as large as the snapshot and
+    // buys nothing: it is not collected at all.
+    setLastKth(counter, 1);
+    Object trivial = runPass(counter, snapshot, FLOOR);
+    assertThat(passInt(trivial, "aboveKthSize")).isZero();
+    assertThat(fired(trivial)).isFalse();
+    assertThat(passLong(trivial, "boundary")).isEqualTo(100);
 
     setLastKth(counter, 1000); // far above the kth: nothing qualifies
     Object narrow = runPass(counter, snapshot, FLOOR);
@@ -255,6 +262,7 @@ class WaveCounterKthShortcutTest {
     setLastKth(counter, -1);
     Object reference = runPass(counter, snapshot, FLOOR);
     assertSamePassOutputs(wide, reference, "wide seed");
+    assertSamePassOutputs(trivial, reference, "trivial seed");
     assertSamePassOutputs(narrow, reference, "narrow seed");
     assertThat(passLong(reference, "boundary")).isEqualTo(trueKth(snapshot, HOT_LIMIT));
   }
@@ -361,7 +369,10 @@ class WaveCounterKthShortcutTest {
     return f.getLong(c);
   }
 
-  /** Whether the shortcut branch fired for the pass (mirrors the production gate). */
+  /**
+   * Whether the shortcut list was eligible for the selection (mirrors the production collection
+   * gate; the cost gate can still decline a list that is larger than what the bucket path scans).
+   */
   private static boolean fired(Object pass) throws Exception {
     return passInt(pass, "aboveKthSize") >= HOT_LIMIT;
   }

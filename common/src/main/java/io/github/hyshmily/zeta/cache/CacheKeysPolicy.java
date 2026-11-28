@@ -54,29 +54,9 @@ public final class CacheKeysPolicy {
   }
 
   /**
-   * The namespace a physical key belongs to, or {@code null} when it has none.
-   *
-   * <p>The one prefix rule of the library: an annotation key carries the namespace before
-   * {@link #NAMESPACE_DELIMITER} (returned including the delimiter, so it can never prefix-match
-   * a sibling namespace), and a programmatic key its first {@code ':'} segment. The annotation
-   * layer builds the prefix through {@link #namespacePrefix(String)} and the TTL contract registry
-   * resolves through this method, so the two cannot disagree about which namespace a key is in.
-   *
-   * @param cacheKey the physical key
-   * @return the namespace, or {@code null} when the key carries no prefix
-   */
-  public static @Nullable String namespaceOf(String cacheKey) {
-    int idx = delimiterIndex(cacheKey);
-    if (idx < 0) {
-      return null;
-    }
-    return cacheKey.charAt(idx) == NAMESPACE_DELIMITER ? cacheKey.substring(0, idx + 1) : cacheKey.substring(0, idx);
-  }
-
-  /**
-   * The logical name of a key's namespace: {@link #namespaceOf(String)} without the delimiter its
-   * encoding uses. A TYPED key ({@code users\u0000u-1}) and a PLAIN key ({@code users:u-1}) in the
-   * same namespace both answer {@code users}, so a caller can compare a key against a namespace
+   * The logical name of a key's namespace: the segment before the delimiter, without the delimiter
+   * its encoding uses. A TYPED key ({@code users\u0000u-1}) and a PLAIN key ({@code users:u-1}) in
+   * the same namespace both answer {@code users}, so a caller can compare a key against a namespace
    * name without knowing which layer produced it.
    *
    * @param cacheKey the physical key
@@ -103,7 +83,7 @@ public final class CacheKeysPolicy {
   }
 
   /**
-   * The bare prefix of a physical key: the same two-level split as {@link #namespaceOf(String)},
+   * The bare prefix of a physical key: the same two-level split as {@link #logicalNamespaceOf},
    * without the annotation delimiter and with a caller-supplied fallback.
    *
    * <p>The circuit-breaker shard id and the namespace policy must resolve the same key to the same

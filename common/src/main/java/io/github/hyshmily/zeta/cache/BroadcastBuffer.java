@@ -22,7 +22,6 @@ import io.github.hyshmily.zeta.sync.local.CacheSyncPublisher;
 import io.github.hyshmily.zeta.sync.local.SyncMessage;
 import io.github.hyshmily.zeta.sync.local.SyncType;
 import io.github.hyshmily.zeta.util.Internal;
-import io.github.hyshmily.zeta.util.TimeSource;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicLong;
@@ -43,8 +42,9 @@ import org.springframework.beans.factory.DisposableBean;
  *
  * <p><b>Version-ordered merging and deferral.</b> Concurrent records for the same key merge so the
  * strictly newest version (and its optional immutable serialized payload) always wins. The first
- * record after an idle period schedules a one-shot flush after {@code flushDelayMs}, capped by
- * {@code maxDeferMs}, {@value #MAX_PENDING_ENTRIES} entries, and {@code maxPendingPayloadBytes}.
+ * record after an idle period schedules one one-shot flush after {@code flushDelayMs}; the window
+ * never slides, so a record waits at most that delay. Crossing {@value #MAX_PENDING_ENTRIES}
+ * entries or {@code maxPendingPayloadBytes} expedites the armed flush instead of waiting it out.
  *
  * <p><b>Isolation and shutdown.</b> When a dedicated {@code sendExecutor} is wired, flushed chunks
  * and invalidations run off the shared scheduler thread; without one, sends run inline. On
@@ -69,7 +69,6 @@ public class BroadcastBuffer implements DisposableBean {
   private final long maxPendingPayloadBytes;
   private final @Nullable Executor sendExecutor;
   private final long flushDelayMs;
-  private final long maxDeferMs;
 
   /**
    * Guards the {@link #pending} map reference swap: records and cancellations hold the read lock
@@ -78,7 +77,7 @@ public class BroadcastBuffer implements DisposableBean {
    */
   private final ReentrantReadWriteLock swapLock = new ReentrantReadWriteLock();
 
-  /** Serializes flush scheduling, cancellation, and deferral-window anchoring. */
+  /** Serializes flush scheduling and cancellation. */
   private final Object scheduleLock = new Object();
 
   /** Approximate total serialized payload bytes currently buffered in {@link #pending}. */
@@ -105,9 +104,6 @@ public class BroadcastBuffer implements DisposableBean {
   /** Armed deferred flush future, or {@code null} when idle; mutated only under {@link #scheduleLock}. */
   private volatile @Nullable ScheduledFuture<?> scheduledFlush;
 
-  /** Monotonic timestamp of the first record in the active deferral window; {@code 0} when idle. */
-  private volatile long firstRecordAtMs = 0L;
-
   /**
    * Creates a {@link BroadcastBuffer} with the default pending payload byte cap
    * ({@value #DEFAULT_MAX_PENDING_PAYLOAD_BYTES}).
@@ -115,17 +111,15 @@ public class BroadcastBuffer implements DisposableBean {
    * @param scheduler    the shared scheduler driving deferred flushes; must not be {@code null}
    * @param publisher    the optional sync publisher, or {@code null} in local-only mode
    * @param flushDelayMs deferral delay in milliseconds before a scheduled flush fires
-   * @param maxDeferMs   maximum deferral duration in milliseconds before forcing a flush
    * @param sendExecutor optional dedicated executor for broker sends, or {@code null} for inline sends
    */
   public BroadcastBuffer(
     ScheduledExecutorService scheduler,
     @Nullable CacheSyncPublisher publisher,
     long flushDelayMs,
-    long maxDeferMs,
     @Nullable Executor sendExecutor
   ) {
-    this(scheduler, publisher, flushDelayMs, maxDeferMs, sendExecutor, DEFAULT_MAX_PENDING_PAYLOAD_BYTES);
+    this(scheduler, publisher, flushDelayMs, sendExecutor, DEFAULT_MAX_PENDING_PAYLOAD_BYTES);
   }
 
   /**
@@ -134,7 +128,6 @@ public class BroadcastBuffer implements DisposableBean {
    * @param scheduler              the shared scheduler driving deferred flushes; must not be {@code null}
    * @param publisher              the optional sync publisher, or {@code null} in local-only mode
    * @param flushDelayMs           deferral delay in milliseconds before a scheduled flush fires
-   * @param maxDeferMs             maximum deferral duration in milliseconds before forcing a flush
    * @param sendExecutor           optional dedicated executor for broker sends, or {@code null} for inline sends
    * @param maxPendingPayloadBytes soft cap on total pending serialized payload bytes
    */
@@ -142,14 +135,12 @@ public class BroadcastBuffer implements DisposableBean {
     ScheduledExecutorService scheduler,
     @Nullable CacheSyncPublisher publisher,
     long flushDelayMs,
-    long maxDeferMs,
     @Nullable Executor sendExecutor,
     long maxPendingPayloadBytes
   ) {
     this.scheduler = Objects.requireNonNull(scheduler, "scheduler must not be null");
     this.publisher = publisher;
     this.flushDelayMs = flushDelayMs;
-    this.maxDeferMs = maxDeferMs;
     this.sendExecutor = sendExecutor;
     this.maxPendingPayloadBytes = maxPendingPayloadBytes;
     if (publisher != null && sendExecutor == null) {
@@ -557,41 +548,33 @@ public class BroadcastBuffer implements DisposableBean {
   }
 
   /**
-   * Ensures a flush task is armed on {@link #scheduler}, re-using an existing pending task within
-   * the deferral window and expediting to zero delay when {@code immediate} is {@code true} or
-   * {@link #maxDeferMs} has elapsed.
+   * Ensures a flush task is armed on {@link #scheduler}. An armed task is reused as-is, because the
+   * deferral window is measured from the record that armed it; {@code immediate} cancels and replaces
+   * it with a zero-delay task only when it has not fired yet.
    *
    * @param immediate {@code true} when a pending entry or payload cap was crossed
    * @throws RejectedExecutionException if {@link #scheduler} rejects the flush task
    */
   private void ensureFlushScheduled(boolean immediate) {
-    long now = TimeSource.monotonicMillis();
-    long firstAt = firstRecordAtMs;
-    boolean fireNow = immediate || (firstAt != 0L && now - firstAt >= maxDeferMs);
     ScheduledFuture<?> scheduled = scheduledFlush;
     if (scheduled != null && !scheduled.isDone()) {
-      if ((!fireNow && firstAt != 0L) || scheduled.getDelay(TimeUnit.MILLISECONDS) <= 0L) {
+      if (!immediate || scheduled.getDelay(TimeUnit.MILLISECONDS) <= 0L) {
         return;
       }
     }
 
     synchronized (scheduleLock) {
-      long anchorNow = TimeSource.monotonicMillis();
       if (pendingSizeApprox.get() == 0L) {
         return;
       }
-      if (firstRecordAtMs == 0L) {
-        firstRecordAtMs = anchorNow;
-      }
-      boolean urgent = immediate || anchorNow - firstRecordAtMs >= maxDeferMs;
       ScheduledFuture<?> current = scheduledFlush;
       if (current != null && !current.isDone()) {
-        if (!urgent || current.getDelay(TimeUnit.MILLISECONDS) <= 0L) {
+        if (!immediate || current.getDelay(TimeUnit.MILLISECONDS) <= 0L) {
           return;
         }
         cancelScheduledFlush();
       }
-      scheduledFlush = scheduler.schedule(this::flush, urgent ? 0L : flushDelayMs, TimeUnit.MILLISECONDS);
+      scheduledFlush = scheduler.schedule(this::flush, immediate ? 0L : flushDelayMs, TimeUnit.MILLISECONDS);
     }
   }
 
@@ -612,8 +595,8 @@ public class BroadcastBuffer implements DisposableBean {
   }
 
   /**
-   * Atomically resets the deferral window, optionally marks the buffer closed, swaps out
-   * {@link #pending}, and dispatches the swapped snapshot asynchronously or synchronously.
+   * Atomically marks the buffer closed when {@code close} is set, swaps out {@link #pending}, and
+   * dispatches the swapped snapshot asynchronously or synchronously.
    *
    * @param async {@code true} to offload chunked sends to {@link #sendExecutor} when available;
    *              {@code false} to send inline on the calling thread
@@ -624,7 +607,6 @@ public class BroadcastBuffer implements DisposableBean {
     synchronized (scheduleLock) {
       // Cancel before swapping so any record landing in the fresh map arms a successor flush.
       cancelScheduledFlush();
-      firstRecordAtMs = 0L;
 
       swapLock.writeLock().lock();
       try {

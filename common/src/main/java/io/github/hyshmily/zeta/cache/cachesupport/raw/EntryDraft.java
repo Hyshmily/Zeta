@@ -49,18 +49,19 @@ public final class EntryDraft {
 
   /**
    * Duration-to-timestamp arithmetic. {@link #SYSTEM} is the plain {@code now + ttl} form;
-   * production drafts carry the cache's jitter-aware policy.
+   * production drafts carry the cache's jitter-aware policy. Both mint absolute instants on the
+   * monotonic axis ({@code TimeSource.monotonicMillis()}), the axis every deadline comparison uses.
    */
   public interface ExpiryArithmetic {
     /**
      * @param hardTtlMs the resolved hard TTL duration (positive)
-     * @return absolute epoch-ms hard expiry
+     * @return absolute monotonic-ms hard expiry
      */
     long hardExpireAt(long hardTtlMs);
 
     /**
      * @param softTtlMs the resolved soft TTL duration ({@code 0} = disabled)
-     * @return absolute epoch-ms soft expiry, or {@code 0}
+     * @return absolute monotonic-ms soft expiry, or {@code 0}
      */
     long softExpireAt(long softTtlMs);
   }
@@ -81,13 +82,15 @@ public final class EntryDraft {
     }
 
     /**
-     * Adds a resolved TTL to the current clock sample. The addition saturates: a wrap into the
-     * negative range is clamped to {@link Long#MAX_VALUE}, which the entry reads as permanent
-     * rather than as an already-expired instant in the past.
+     * Adds a resolved TTL to the current monotonic clock sample, saturating at
+     * {@link Long#MAX_VALUE} so an entry reads as permanent rather than as an instant in the past.
+     * The saturation is decided on the {@code now} side of the addition: the clock sample itself may
+     * be negative (a negative-offset base, a test clock), and a sum that stays negative is a valid
+     * future deadline, not an overflow.
      */
     private long fromNow(long ttlMs) {
-      long at = TimeSource.currentTimeMillis() + ttlMs;
-      return at < 0L ? Long.MAX_VALUE : at;
+      long now = TimeSource.monotonicMillis();
+      return now > Long.MAX_VALUE - ttlMs ? Long.MAX_VALUE : now + ttlMs;
     }
   };
 

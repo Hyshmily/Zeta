@@ -22,6 +22,7 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 
 import io.github.hyshmily.zeta.hotkeydetector.HotKeyDetector;
+import io.github.hyshmily.zeta.reporting.KeyReporter;
 import io.github.hyshmily.zeta.util.TimeSource;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
@@ -41,6 +42,9 @@ import org.mockito.ArgumentCaptor;
  *
  * <p>A fresh counter anchors {@code lastDetectorFlushMs} at construction, so its first tide
  * accumulates like every other one instead of flushing a partial batch immediately.
+ *
+ * <p>The accumulator exists only when a reporter is wired: without one the tide interval already is
+ * the detector interval and each tide is ingested directly.
  */
 class AccessCounterTideTest {
 
@@ -56,7 +60,25 @@ class AccessCounterTideTest {
   }
 
   private static AccessCounter counterFor(HotKeyDetector detector) {
-    return new AccessCounter(detector, null, mock(ScheduledExecutorService.class), 50L, 500L);
+    // The reporter is what makes the tide cadence shorter than the detector cadence, so the
+    // accumulator under test only exists in this shape.
+    return new AccessCounter(detector, mock(KeyReporter.class), mock(ScheduledExecutorService.class), 50L, 500L);
+  }
+
+  /**
+   * Without a reporter the tide already runs at the detector cadence: each snapshot goes straight
+   * to the sketch instead of being copied through a second buffer and a deferred 1 ms flush.
+   */
+  @Test
+  void withoutReporter_eachTideIsIngestedDirectly() {
+    HotKeyDetector detector = mock(HotKeyDetector.class);
+    AccessCounter counter = new AccessCounter(detector, null, mock(ScheduledExecutorService.class), 50L, 500L);
+
+    counter.onTide(Map.of("k", 1L), 500L);
+
+    ArgumentCaptor<Map<String, Long>> ingested = ArgumentCaptor.forClass(Map.class);
+    verify(detector, times(1)).ingest(ingested.capture());
+    assertThat(ingested.getValue()).containsExactly(Map.entry("k", 1L));
   }
 
   /**

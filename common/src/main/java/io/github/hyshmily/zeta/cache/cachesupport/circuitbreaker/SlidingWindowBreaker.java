@@ -24,6 +24,7 @@ import java.util.List;
 import java.util.concurrent.atomic.AtomicLongArray;
 import java.util.concurrent.atomic.AtomicReference;
 import lombok.extern.slf4j.Slf4j;
+import org.jspecify.annotations.Nullable;
 import org.springframework.util.Assert;
 import org.springframework.util.ClassUtils;
 
@@ -93,8 +94,13 @@ public class SlidingWindowBreaker implements CircuitBreaker {
   /** Resolved exception classes excluded from tripping the breaker. */
   private final Class<?>[] excludeClasses;
 
-  /** Resolved exception classes explicitly eligible to trip the breaker. */
-  private final Class<?>[] includeClasses;
+  /**
+   * Resolved exception classes explicitly eligible to trip the breaker, or {@code null} when no
+   * include list is configured. An empty array means a configured list whose every name failed to
+   * load: it matches no exception, so nothing is eligible — a broken whitelist must not silently
+   * invert into "every exception trips".
+   */
+  private final @Nullable Class<?>[] includeClasses;
 
   /** Clock-driven ring buffer of packed {@code [window | failures | successes]} words. */
   private final AtomicLongArray buckets;
@@ -114,19 +120,57 @@ public class SlidingWindowBreaker implements CircuitBreaker {
    *                                  violate the 24-bit ring invariants
    */
   public SlidingWindowBreaker(ZetaProperties.CircuitBreaker config) {
-    validateConfig(config);
+    this(config, new Spec(config));
+  }
+
+  /**
+   * Creates a shard from pre-validated, pre-resolved window constants.
+   *
+   * <p>Every shard of one configuration shares a single {@link Spec}, so the window validation and
+   * the {@code ClassUtils.forName} resolution of the exception filters run once per configuration
+   * instead of once per prefix (which also re-logged every unloadable class name per shard).
+   *
+   * @param config circuit breaker configuration, read live on every decision
+   * @param spec   window geometry and resolved exception filters shared by every shard
+   */
+  SlidingWindowBreaker(ZetaProperties.CircuitBreaker config, Spec spec) {
     this.config = config;
-    this.bucketSize = config.getWindowBuckets();
-    this.slideMs = config.getWindowTimeMs() / bucketSize;
-    this.halfRingMs = HALF_WINDOW_RANGE > Long.MAX_VALUE / slideMs ? Long.MAX_VALUE : HALF_WINDOW_RANGE * slideMs;
+    this.bucketSize = spec.bucketSize;
+    this.slideMs = spec.slideMs;
+    this.halfRingMs = spec.halfRingMs;
 
     long now = monotonicMillis();
     long initialWindow = currentWindowIndex(now);
     this.epoch.set(Epoch.initial(initialWindow, now));
     this.buckets = new AtomicLongArray(bucketSize);
-    this.excludeClasses = resolveClasses(config.getExcludeExceptions());
-    this.includeClasses = resolveClasses(config.getIncludeExceptions());
+    this.excludeClasses = spec.excludeClasses;
+    this.includeClasses = spec.includeClasses;
     initializeBuckets(initialWindow);
+  }
+
+  /**
+   * Immutable window geometry and exception filters derived once from a configuration.
+   *
+   * <p>Building it validates the configuration, so constructing one at startup turns a bad window
+   * into a startup failure instead of a first-request {@link IllegalArgumentException}. Thresholds
+   * and the enabled switch are deliberately NOT snapshot here: they stay live on the configuration.
+   */
+  static final class Spec {
+
+    final int bucketSize;
+    final long slideMs;
+    final long halfRingMs;
+    final Class<?>[] excludeClasses;
+    final @Nullable Class<?>[] includeClasses;
+
+    Spec(ZetaProperties.CircuitBreaker config) {
+      validateConfig(config);
+      this.bucketSize = config.getWindowBuckets();
+      this.slideMs = config.getWindowTimeMs() / bucketSize;
+      this.halfRingMs = HALF_WINDOW_RANGE > Long.MAX_VALUE / slideMs ? Long.MAX_VALUE : HALF_WINDOW_RANGE * slideMs;
+      this.excludeClasses = resolveClasses(config.getExcludeExceptions());
+      this.includeClasses = resolveIncludeClasses(config.getIncludeExceptions());
+    }
   }
 
   /**
@@ -618,11 +662,27 @@ public class SlidingWindowBreaker implements CircuitBreaker {
   }
 
   /**
+   * Resolves the include whitelist, keeping "no whitelist configured" distinct from "whitelist
+   * configured but nothing loadable". Both resolve to zero classes, but only the first admits every
+   * exception as a failure; the second admits none, so a misspelled name or an absent optional
+   * driver narrows the breaker instead of silently turning every business exception into a trip.
+   *
+   * @param classNames the configured fully qualified exception class names
+   * @return the resolved classes, an empty array for a configured list that resolved nothing, or
+   *         {@code null} when no list is configured
+   */
+  private static @Nullable Class<?>[] resolveIncludeClasses(@Nullable List<String> classNames) {
+    return classNames == null || classNames.isEmpty() ? null : resolveClasses(classNames);
+  }
+
+  /**
    * Determines whether {@code throwable} (or any cause in its chain) should be ignored by the
    * circuit breaker according to {@code excludeExceptions} and {@code includeExceptions}.
    *
    * <p>When both lists are configured, {@code excludeExceptions} takes precedence over
-   * {@code includeExceptions}. When both are empty, no exception is ignored.
+   * {@code includeExceptions}. When neither is configured, no exception is ignored. A configured
+   * include list matches exactly the types it resolved to, so a list that resolved to nothing
+   * ignores every failure.
    *
    * @param throwable the failure to classify
    * @return {@code true} if the failure is ignorable and should count as a success
@@ -631,7 +691,7 @@ public class SlidingWindowBreaker implements CircuitBreaker {
     if (excludeClasses.length > 0 && causeChainMatchesAny(throwable, excludeClasses)) {
       return true;
     }
-    if (includeClasses.length > 0) {
+    if (includeClasses != null) {
       return !causeChainMatchesAny(throwable, includeClasses);
     }
     return false;

@@ -151,7 +151,31 @@ public record GetPolicy(
    * @return a new options instance
    */
   public static GetPolicy of(long hardTtlMs, long softTtlMs, boolean reportEnabled, StalePolicy stalePolicy) {
-    return new GetPolicy(ttlSupplier(hardTtlMs), softTtlSupplier(softTtlMs), stalePolicy, reportEnabled, false);
+    return of(hardTtlMs, softTtlMs, reportEnabled, stalePolicy, false);
+  }
+
+  /**
+   * Builds full options from static TTL values, preserving the caller's loader-thread requirement.
+   *
+   * <p>Any layer that rebuilds a caller's policy (the batch {@code getAll} path, which resolves the
+   * TTL overrides once for the whole call) must carry {@link #callerRunsLoader()} across, or a
+   * batch read silently loses the thread affinity the caller asked for.
+   *
+   * @param hardTtlMs        hard TTL override ({@code 0}/{@code -1} = configured default)
+   * @param softTtlMs        soft TTL override ({@code 0} = configured default, {@code -1} = disabled)
+   * @param reportEnabled    whether to allow reporting this access to the Worker
+   * @param stalePolicy      what to do on soft-expire (stale) entries; {@code null} = unspecified
+   * @param callerRunsLoader whether the loader must execute on the calling thread
+   * @return a new options instance
+   */
+  public static GetPolicy of(
+    long hardTtlMs,
+    long softTtlMs,
+    boolean reportEnabled,
+    StalePolicy stalePolicy,
+    boolean callerRunsLoader
+  ) {
+    return new GetPolicy(ttlSupplier(hardTtlMs), softTtlSupplier(softTtlMs), stalePolicy, reportEnabled, callerRunsLoader);
   }
 
   /**

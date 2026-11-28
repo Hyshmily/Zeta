@@ -285,6 +285,31 @@ class SingleFlightTest {
   }
 
   /**
+   * An isolated load settles its circuit breaker admission exactly once: the reader's outcome. A
+   * commit callback that throws afterwards is a local commit failure, not a second data-source
+   * result — settling it as a failure would count one success and one failure for the same call,
+   * and in {@code HALF_OPEN} would spend a second probe credit and reopen a recovered shard.
+   */
+  @Test
+  void loadIsolated_whenCommitThrows_shouldSettleTheBreakerOnce() {
+    CircuitBreaker breaker = mock(CircuitBreaker.class);
+    when(breaker.tryAcquireStamp()).thenReturn(CircuitBreaker.STAMP_CLOSED);
+    TestSingleFlight flight = new TestSingleFlight(1000, 10, 5, executor, registryOf(breaker));
+
+    LoaderOutcome<String> outcome = flight.loadIsolated(
+      "k",
+      () -> "v",
+      value -> {
+        throw new IllegalStateException("commit failed");
+      }
+    );
+
+    assertThat(outcome.status()).isEqualTo(LoadStatus.FAILED);
+    verify(breaker, times(1)).onSuccess(CircuitBreaker.STAMP_CLOSED);
+    verify(breaker, times(0)).onFailure(any(Throwable.class), anyLong());
+  }
+
+  /**
    * Verifies that the estimated inflight request size is never negative.
    */
   @Test
@@ -1044,6 +1069,56 @@ class SingleFlightTest {
       release.countDown();
       callers.shutdownNow();
       pool.shutdownNow();
+    }
+  }
+
+  /**
+   * A leader task that starts after {@code close()} settled its flight must not run the reader:
+   * the result can no longer be committed, so the call would only spend a downstream query during
+   * shutdown. The executor below holds the submitting thread inside {@code execute}, which is the
+   * window in which a real pool can start a queued task before the flight's task handle is attached
+   * (and cancelled).
+   */
+  @Test
+  @Timeout(10)
+  void aLeaderTaskThatStartsAfterCloseDoesNotCallTheReader() throws Exception {
+    CountDownLatch taskQueued = new CountDownLatch(1);
+    CountDownLatch closed = new CountDownLatch(1);
+    TestSingleFlight[] holder = new TestSingleFlight[1];
+    Executor racing = task -> {
+      taskQueued.countDown();
+      awaitQuietly(closed, 5);
+      task.run();
+    };
+    TestSingleFlight flight = new TestSingleFlight(1000, 10, 5, racing, registryOf(disabledBreaker));
+    holder[0] = flight;
+    AtomicInteger reads = new AtomicInteger();
+    ExecutorService caller = Executors.newSingleThreadExecutor();
+    try {
+      Future<LoaderOutcome<String>> pending = caller.submit(() ->
+        flight.loadOutcome("queued", () -> {
+          reads.incrementAndGet();
+          return "v";
+        })
+      );
+      assertThat(taskQueued.await(5, TimeUnit.SECONDS)).isTrue();
+
+      holder[0].close();
+      closed.countDown();
+
+      assertThat(pending.get(5, TimeUnit.SECONDS).status()).isEqualTo(LoadStatus.SUPPRESSED_EXECUTOR);
+      assertThat(reads.get()).isZero();
+    } finally {
+      closed.countDown();
+      caller.shutdownNow();
+    }
+  }
+
+  private static void awaitQuietly(CountDownLatch latch, long seconds) {
+    try {
+      latch.await(seconds, TimeUnit.SECONDS);
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
     }
   }
 

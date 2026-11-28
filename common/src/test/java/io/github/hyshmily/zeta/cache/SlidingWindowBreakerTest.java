@@ -422,19 +422,20 @@ class SlidingWindowBreakerTest {
   }
 
   /**
-   * A filter list that resolves to EMPTY is cached as resolved (no re-run):
-   * the documented semantics apply — an empty include list counts every
-   * failure, and resolution is never retried per classification.
+   * A configured include list whose every name fails to load matches no exception: the whitelist
+   * asked for "only these trip", and none of them exist. Treating the resolution result as an
+   * absent whitelist would invert the operator's intent — one typo or one optional driver missing
+   * from the classpath would make every business exception trip the breaker.
    */
   @Test
-  void onFailure_unresolvableOnlyInclude_countsAllFailures() {
+  void onFailure_unresolvableOnlyInclude_shouldIgnoreEveryFailure() {
     config.setFailThreshold(0.1);
     config.setRequestVolumeThreshold(1);
     config.setIncludeExceptions(List.of("com.missing.DoesNotExist"));
     breaker = new SlidingWindowBreaker(config);
 
     breaker.onFailure(new NullPointerException("any"), CircuitBreaker.STAMP_CLOSED);
-    assertThat(breaker.isOpen()).isTrue();
+    assertThat(breaker.isOpen()).isFalse();
   }
 
   // ── Asymmetric probe credit (RocksDB write_controller.cc asymmetry) ──

@@ -99,11 +99,11 @@ class CacheKeysPolicyTest {
    */
   @Test
   void namespaceAndPrefix_shouldShareTheTwoLevelSplit() {
-    assertThat(CacheKeysPolicy.namespaceOf("users\u0000u-1")).isEqualTo("users\u0000");
+    assertThat(CacheKeysPolicy.physicalPrefixOf("users\u0000u-1")).isEqualTo("users\u0000");
     assertThat(CacheKeysPolicy.prefixOf("users\u0000u-1", "default")).isEqualTo("users");
-    assertThat(CacheKeysPolicy.namespaceOf("user:1")).isEqualTo("user");
+    assertThat(CacheKeysPolicy.physicalPrefixOf("user:1")).isEqualTo("user:");
     assertThat(CacheKeysPolicy.prefixOf("user:1", "default")).isEqualTo("user");
-    assertThat(CacheKeysPolicy.namespaceOf("plain")).isNull();
+    assertThat(CacheKeysPolicy.physicalPrefixOf("plain")).isNull();
     assertThat(CacheKeysPolicy.prefixOf("plain", "default")).isEqualTo("default");
     assertThat(CacheKeysPolicy.prefixOf(null, "default")).isEqualTo("default");
     assertThat(CacheKeysPolicy.prefixOf("\u0000k", "default")).isEqualTo("default");
@@ -115,18 +115,17 @@ class CacheKeysPolicyTest {
    */
   @Test
   void namespaceEnd_shouldStopAtTheFirstDelimiter() {
-    assertThat(CacheKeysPolicy.namespaceOf("users:u\u0000-1")).isEqualTo("users");
     assertThat(CacheKeysPolicy.logicalNamespaceOf("users:u\u0000-1")).isEqualTo("users");
     assertThat(CacheKeysPolicy.physicalPrefixOf("users:u\u0000-1")).isEqualTo("users:");
-    assertThat(CacheKeysPolicy.namespaceOf(":a\u0000b")).isNull();
-    assertThat(CacheKeysPolicy.namespaceOf("\u0000a:b")).isNull();
     assertThat(CacheKeysPolicy.logicalNamespaceOf(":a\u0000b")).isNull();
     assertThat(CacheKeysPolicy.logicalNamespaceOf("\u0000a:b")).isNull();
+    assertThat(CacheKeysPolicy.physicalPrefixOf(":a\u0000b")).isNull();
+    assertThat(CacheKeysPolicy.physicalPrefixOf("\u0000a:b")).isNull();
   }
 
   /**
    * The logical name is the one form a business comparison can use: both encodings answer with the
-   * bare name, while {@link CacheKeysPolicy#namespaceOf(String)} keeps the TYPED delimiter.
+   * bare name, while {@link CacheKeysPolicy#physicalPrefixOf(String)} keeps the encoding delimiter.
    */
   @Test
   void logicalNamespaceOf_shouldDropTheEncodingDelimiter() {

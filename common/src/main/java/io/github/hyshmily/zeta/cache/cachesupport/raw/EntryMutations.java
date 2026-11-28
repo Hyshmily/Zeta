@@ -81,28 +81,11 @@ public final class EntryMutations {
   }
 
   /**
-   * Applies one copy-on-write mutation and returns the post-image the bin lock
-   * observed — the load-fill and write-through paths, which use the returned
-   * entry (or its version) instead of a pre/post pair.
-   *
-   * @param cache    the L1 table
-   * @param key      the key to mutate
-   * @param mutation receives the current entry ({@code null} when absent) and
-   *                 returns the entry to store: the same instance for "no
-   *                 change", a new instance for a rewrite, or {@code null} for
-   *                 a removal
-   * @return the entry now stored, or {@code null} when the key is absent
-   */
-  public static @Nullable CacheEntry mutate(
-    Cache<String, CacheEntry> cache,
-    String key,
-    UnaryOperator<CacheEntry> mutation
-  ) {
-    return cache.asMap().compute(key, (k, existing) -> mutation.apply(existing));
-  }
-
-  /**
    * The pre- and post-images of one mutation, captured inside the bin lock.
+   *
+   * <p>The post-image is the only reliable "did this call apply?" marker: a refused mutation
+   * returns the instance it was handed, so an equal data version is not evidence of a write (a
+   * resident may already carry the incoming stamp).
    *
    * @param previous the entry the mutation replaced, or {@code null} when the
    *                 key was absent

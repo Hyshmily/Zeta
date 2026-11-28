@@ -54,15 +54,21 @@ public final class CircuitBreakerRegistry implements AutoCloseable {
 
   private final Cache<String, CircuitBreaker> breakers;
   private final ZetaProperties.CircuitBreaker config;
+  private final SlidingWindowBreaker.Spec spec;
 
   /**
    * Sharded registry: one breaker per key prefix, up to {@code maxPrefixes}.
+   *
+   * <p>The window validation and the exception-filter class resolution run once here, so a bad
+   * window fails the context at startup and a prefix churn allocates shards without repeating
+   * either.
    *
    * @param config       breaker configuration shared by every shard (never {@code null})
    * @param maxPrefixes  live-breaker cap (positive; Caffeine size eviction past it)
    */
   public CircuitBreakerRegistry(ZetaProperties.CircuitBreaker config, int maxPrefixes) {
     this.config = config;
+    this.spec = new SlidingWindowBreaker.Spec(config);
     this.breakers = Caffeine.newBuilder()
       .maximumSize(Math.max(1, maxPrefixes))
       .expireAfterAccess(30, TimeUnit.MINUTES)
@@ -76,7 +82,10 @@ public final class CircuitBreakerRegistry implements AutoCloseable {
    * @return the responsible breaker (never {@code null})
    */
   public CircuitBreaker breakerFor(String cacheKey) {
-    return breakers.get(CacheKeysPolicy.prefixOf(cacheKey, DEFAULT_BUCKET), prefix -> new SlidingWindowBreaker(config));
+    return breakers.get(
+      CacheKeysPolicy.prefixOf(cacheKey, DEFAULT_BUCKET),
+      prefix -> new SlidingWindowBreaker(config, spec)
+    );
   }
 
   /**

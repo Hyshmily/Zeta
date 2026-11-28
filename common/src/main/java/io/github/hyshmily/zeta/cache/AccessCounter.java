@@ -100,9 +100,13 @@ public class AccessCounter implements InitializingBean, DisposableBean {
   /** Observer notified with the keys read on each tide; defaults to a no-op. */
   private volatile ReadObserver readObserver = ReadObserver.NONE;
 
-  /** Accumulator batching reporter-cadence tides until {@link #detectorIntervalMs} elapses. */
+  /**
+   * Accumulator batching reporter-cadence tides until {@link #detectorIntervalMs} elapses, or
+   * {@code null} when no reporter is wired: the tide then already runs at the detector cadence, so
+   * it feeds the sketch directly and a second buffer would only copy it.
+   */
   @GuardedBy("this")
-  private HashMap<String, Long> detectorAccumulator = new HashMap<>(ACCUMULATOR_INITIAL_TABLE_SIZE);
+  private @Nullable HashMap<String, Long> detectorAccumulator;
 
   /** Armed one-shot task flushing {@link #detectorAccumulator} even when traffic goes idle. */
   @GuardedBy("this")
@@ -141,6 +145,7 @@ public class AccessCounter implements InitializingBean, DisposableBean {
     this.lastDetectorFlushMs = TimeSource.monotonicMillis();
     this.detectorIntervalMs = Math.max(1L, detectorIntervalMs);
     long tideBaseMs = reporter != null ? Math.max(1L, reportIntervalMs) : this.detectorIntervalMs;
+    this.detectorAccumulator = reporter != null ? new HashMap<>(ACCUMULATOR_INITIAL_TABLE_SIZE) : null;
     this.counter = new WaveCounter(this::onTide, MAX_BUFFER_SIZE, scheduler, tideBaseMs);
   }
 
@@ -315,13 +320,19 @@ public class AccessCounter implements InitializingBean, DisposableBean {
    * @param snapshot the immutable tide snapshot of key counts (may be empty)
    */
   private synchronized void mergeIntoSketches(Map<String, Long> snapshot) {
+    HashMap<String, Long> accumulator = detectorAccumulator;
+    if (accumulator == null) {
+      // No reporter: the tide interval already is the detector interval, so nothing needs merging.
+      ingestSafely(snapshot);
+      return;
+    }
     long now = TimeSource.monotonicMillis();
     boolean due = now - lastDetectorFlushMs >= detectorIntervalMs;
 
     if (snapshot.isEmpty()) {
       // Empty tides must not advance the cadence anchor, or subsequent traffic after an idle
       // period would wait a full detector interval. Drain any due residual or keep its timer armed.
-      if (!detectorAccumulator.isEmpty()) {
+      if (!accumulator.isEmpty()) {
         if (due) {
           flushNow(now);
         } else {
@@ -332,29 +343,19 @@ public class AccessCounter implements InitializingBean, DisposableBean {
     }
 
     boolean oversize = snapshot.size() >= maxAccumulatedKeys;
-    boolean emptyAtBoundary = due && detectorAccumulator.isEmpty();
+    boolean emptyAtBoundary = due && accumulator.isEmpty();
     if (oversize || emptyAtBoundary) {
       flushNow(now);
       ingestSafely(snapshot);
       return;
     }
 
-    mergeSnapshot(snapshot);
-    if (due || detectorAccumulator.size() >= maxAccumulatedKeys) {
+    snapshot.forEach((key, count) -> accumulator.merge(key, count, Long::sum));
+    if (due || accumulator.size() >= maxAccumulatedKeys) {
       flushNow(now);
     } else {
       scheduleDetectorFlush(now);
     }
-  }
-
-  /**
-   * Merges all entries of {@code snapshot} into {@link #detectorAccumulator}.
-   *
-   * @param snapshot the tide snapshot to merge
-   */
-  @GuardedBy("this")
-  private void mergeSnapshot(Map<String, Long> snapshot) {
-    snapshot.forEach((key, count) -> detectorAccumulator.merge(key, count, Long::sum));
   }
 
   /**
@@ -377,7 +378,7 @@ public class AccessCounter implements InitializingBean, DisposableBean {
   @GuardedBy("this")
   private void flushBatch() {
     HashMap<String, Long> batch = detectorAccumulator;
-    if (batch.isEmpty()) {
+    if (batch == null || batch.isEmpty()) {
       return;
     }
     int size = batch.size();
@@ -419,7 +420,8 @@ public class AccessCounter implements InitializingBean, DisposableBean {
       return;
     }
     pendingDetectorFlush = null;
-    if (detectorAccumulator.isEmpty()) {
+    HashMap<String, Long> batch = detectorAccumulator;
+    if (batch == null || batch.isEmpty()) {
       return;
     }
     lastDetectorFlushMs = TimeSource.monotonicMillis();

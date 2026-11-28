@@ -90,20 +90,28 @@ public final class TransactionSupport {
   private TransactionSupport() {}
 
   /**
-   * Whether a Spring transaction synchronization is active on the current thread and the caller is
-   * not already inside one of this class's {@code afterCommit} callbacks.
+   * Whether a real Spring transaction is active on the current thread and the caller is not already
+   * inside one of this class's {@code afterCommit} callbacks.
    *
    * <p>Write paths consult this to decide version-allocation timing: inside a transaction the
    * version bump must wait for {@code afterCommit} (registration order = version order),
    * otherwise an uncommitted bump leaks on rollback and a same-transaction put-then-invalidate
-   * inverts versions. {@link TransactionSynchronizationManager#isSynchronizationActive()} stays
-   * true for the whole {@code afterCommit}/{@code afterCompletion} phase, so the transaction flag
-   * alone would defer a nested write into a callback Spring has already snapshotted.
+   * inverts versions. {@link TransactionSynchronizationManager#isSynchronizationActive()} alone is
+   * not evidence of a transaction: under the default {@code SYNCHRONIZATION_ALWAYS} strategy a
+   * {@code SUPPORTS}/{@code NOT_SUPPORTED}/{@code NEVER} call with no outer transaction still
+   * initializes a synchronization while the data source runs in auto-commit, and deferring there
+   * drops the write entirely when the method later throws. The flag also stays true for the whole
+   * {@code afterCommit}/{@code afterCompletion} phase, so it cannot gate a nested write on its own
+   * either.
    *
-   * @return {@code true} when deferred work would run in {@code afterCommit}
+   * @return {@code true} when deferred work would run in {@code afterCommit} of a real transaction
    */
   private static boolean isTransactionActive() {
-    return TransactionSynchronizationManager.isSynchronizationActive() && AFTER_COMMIT_DEPTH.get() == null;
+    return (
+      TransactionSynchronizationManager.isSynchronizationActive() &&
+      TransactionSynchronizationManager.isActualTransactionActive() &&
+      AFTER_COMMIT_DEPTH.get() == null
+    );
   }
 
   /**
@@ -119,17 +127,23 @@ public final class TransactionSupport {
   }
 
   /**
-   * Whether the active transaction declared itself read-only
-   * ({@link TransactionSynchronizationManager#isCurrentTransactionReadOnly()}). A read performed
-   * inside one cannot have observed the transaction's own uncommitted writes — it declared none —
-   * so its loaded value is committed data and may be shared and stored like any other read.
+   * Whether a real read-write Spring transaction is active on the current thread, excluding work
+   * already executing inside an {@code afterCommit} callback.
    *
-   * @return {@code true} only when a transaction is active and marked read-only
+   * <p>A read performed inside one may observe that transaction's own uncommitted writes, so its
+   * loaded value must not be shared with a concurrent follower or stored in L1. This deliberately
+   * does not require {@link TransactionSynchronizationManager#isSynchronizationActive()}: with
+   * {@code SYNCHRONIZATION_NEVER} a real transaction has no synchronization, and the read must
+   * still be isolated. A read-only transaction declared none of its own writes, so its value is
+   * committed data and may be shared and stored like any other read.
+   *
+   * @return {@code true} only when an actual transaction is active and not marked read-only
    */
-  public static boolean isCurrentTransactionReadOnly() {
+  public static boolean isReadWriteTransactionActive() {
     return (
-      TransactionSynchronizationManager.isSynchronizationActive() &&
-      TransactionSynchronizationManager.isCurrentTransactionReadOnly()
+      TransactionSynchronizationManager.isActualTransactionActive() &&
+      !TransactionSynchronizationManager.isCurrentTransactionReadOnly() &&
+      AFTER_COMMIT_DEPTH.get() == null
     );
   }
 

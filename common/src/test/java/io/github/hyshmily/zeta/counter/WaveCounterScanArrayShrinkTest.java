@@ -48,35 +48,34 @@ class WaveCounterScanArrayShrinkTest {
 
   /**
    * Spike → quiet → regrow: a 20000-key spike tide grows every array (the
-   * packed pair, the candidate and bucket views, and — via the overflow's
-   * incumbent split and the shortcut's filter — the kth/incumbent/newcomer
-   * views), a 100-key tide shrinks them ALL back to the initial capacity
-   * (the floor), and a further spike tide regrows and reproduces the exact
-   * boundary.
+   * packed pair, the candidate view, the compact selection buffer and the
+   * split array), a 100-key tide shrinks them ALL back to the initial
+   * capacity (the floor), and a further spike tide regrows and reproduces
+   * the exact boundary.
    */
   @Test
   void spike_thenQuiet_shrinksToFloor_andRegrowsExact() throws Exception {
     Map<String, Long> spike = flatSnapshot(20_000, 25);
 
-    // tide A: the reference path (no seed) — grows the packed pair and the
-    // candidate/bucket views; the boundary is exact
+    // tide A: the reference path (no seed) — grows the packed pair, the
+    // candidate view, the selection buffer and the split array; the
+    // boundary is exact
     setLastKth(counter, -1);
     Object a = runPass(counter, spike, FLOOR);
     assertThat(passLong(a, "boundary")).isEqualTo(25);
     assertThat(length("allValues")).isEqualTo(32_768); // pow2 growth of 20000
     assertThat(length("allHashes")).isEqualTo(32_768);
     assertThat(length("candidateIdx")).isEqualTo(32_768);
-    assertThat(length("bucketIdx")).isEqualTo(32_768);
+    assertThat(length("selectValues")).isEqualTo(20_000); // exact need
+    assertThat(length("splitIdx")).isEqualTo(20_000);
 
-    // tide B: the shortcut fires and overflows — the kth filter and the
-    // incumbent split grow their views to the snapshot size
+    // tide B: the shortcut collects the whole snapshot and overflows
     setLastKth(counter, 25);
     Object b = runPass(counter, spike, FLOOR);
     assertThat(passBool(b, "overflow")).isTrue();
     assertThat(passLong(b, "boundary")).isEqualTo(25);
     assertThat(length("aboveKthIdx")).isEqualTo(32_768);
-    assertThat(length("incumbentIdx")).isEqualTo(20_000);
-    assertThat(length("newcomerIdx")).isEqualTo(20_000);
+    assertThat(length("splitIdx")).isEqualTo(20_000);
 
     // tide C: the quiet tail — every array is >= 4x the need, all shrink
     // to the floor, and the pass output stays exact
@@ -113,10 +112,9 @@ class WaveCounterScanArrayShrinkTest {
     assertThat(length("allValues")).isEqualTo(8192);
     assertThat(length("allHashes")).isEqualTo(8192);
     assertThat(length("candidateIdx")).isEqualTo(8192);
-    assertThat(length("bucketIdx")).isEqualTo(8192);
     assertThat(length("aboveKthIdx")).isEqualTo(INITIAL); // no seed: never touched
-    assertThat(length("incumbentIdx")).isEqualTo(8192);
-    assertThat(length("newcomerIdx")).isEqualTo(8192);
+    assertThat(length("splitIdx")).isEqualTo(8192);
+    assertThat(length("selectValues")).isEqualTo(8192);
   }
 
   /**
@@ -143,10 +141,9 @@ class WaveCounterScanArrayShrinkTest {
     assertThat(length("allValues")).isEqualTo(INITIAL);
     assertThat(length("allHashes")).isEqualTo(INITIAL);
     assertThat(length("candidateIdx")).isEqualTo(INITIAL);
-    assertThat(length("bucketIdx")).isEqualTo(INITIAL);
     assertThat(length("aboveKthIdx")).isEqualTo(INITIAL);
-    assertThat(length("incumbentIdx")).isEqualTo(INITIAL);
-    assertThat(length("newcomerIdx")).isEqualTo(INITIAL);
+    assertThat(length("splitIdx")).isEqualTo(INITIAL);
+    assertThat(length("selectValues")).isEqualTo(INITIAL);
   }
 
   // ---------------- reflection plumbing ----------------

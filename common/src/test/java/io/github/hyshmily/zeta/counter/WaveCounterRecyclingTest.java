@@ -17,7 +17,6 @@ package io.github.hyshmily.zeta.counter;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-import java.lang.ref.SoftReference;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
@@ -35,10 +34,9 @@ import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 
 /**
- * Correctness assertions for the 2026-08-07 WaveCounter optimizations:
- * the #2a empty-tide early return (no quiescence spin on empty cycles) and
- * the #2b adder-recycling pool (no cross-cycle contamination, instance
- * reuse, pool lifecycle).
+ * Correctness assertions for the tide's shared-table lifecycle: the empty-tide early return (no
+ * quiescence spin on empty cycles), snapshot isolation across cycles, and the dead-writer map
+ * pool.
  *
  * <p>Deliberately NOT tagged {@code performance} (unlike
  * {@link WaveCounterTest}) so these run in every CI/local {@code mvn test}
@@ -122,12 +120,12 @@ class WaveCounterRecyclingTest {
   }
 
   /**
-   * #2b adder recycling: a key counted 5 in tide 1, then 3 in tide 2, must
-   * deliver exactly [5, 3] — the recycled adder must not carry the
-   * previous cycle's 5 into the next (steal-time reset).
+   * Snapshot isolation: a key counted 5 in tide 1, then 3 in tide 2, must
+   * deliver exactly [5, 3] — the fresh table per cycle must not carry the
+   * previous cycle's 5 into the next.
    */
   @Test
-  void recycledAdder_shouldNotContaminateAcrossTides() {
+  void snapshotCounts_shouldNotContaminateAcrossTides() {
     counter.count("k", 5);
     invokeDeliver(counter);
     assertThat(mergedTotal(batches)).isEqualTo(5);
@@ -135,43 +133,6 @@ class WaveCounterRecyclingTest {
     invokeDeliver(counter);
     assertThat(mergedTotal(batches)).isEqualTo(8);
     assertThat(batches.get(batches.size() - 1)).containsEntry("k", 3L);
-  }
-
-  /**
-   * #2b: the steal must actually reuse the pooled instance — the adder
-   * that served tide 1 must be the very object re-inserted for tide 2's
-   * first add (identity, not a copy).
-   */
-  @Test
-  void steal_shouldReuseSameAdderInstance() throws Exception {
-    counter.count("k", 1);
-    invokeDeliver(counter);
-    Field poolField = WaveCounter.class.getDeclaredField("ebbReservoir");
-    poolField.setAccessible(true);
-    @SuppressWarnings("unchecked")
-    SoftReference<ConcurrentHashMap<String, LongAdder>> poolRef = (SoftReference<
-      ConcurrentHashMap<String, LongAdder>
-    >) poolField.get(counter);
-    LongAdder original = poolRef.get().get("k");
-    assertThat(original).isNotNull();
-    counter.count("k", 1);
-    ConcurrentHashMap<String, LongAdder> table = reservoirMap(counter);
-    assertThat(table.get("k")).isSameAs(original);
-  }
-
-  /** #2b: destroy() must drop the adder pool reference. */
-  @Test
-  void destroy_shouldDropPool() throws Exception {
-    Field poolField = WaveCounter.class.getDeclaredField("ebbReservoir");
-    poolField.setAccessible(true);
-    counter.count("k", 1);
-    invokeDeliver(counter);
-    assertThat(poolField.get(counter)).isNotNull();
-    counter.count("k", 1);
-    invokeDeliver(counter);
-    assertThat(poolField.get(counter)).isNotNull();
-    counter.destroy();
-    assertThat(poolField.get(counter)).isNull();
   }
 
   /**
@@ -393,35 +354,6 @@ class WaveCounterRecyclingTest {
   }
 
   /**
-   * Hot-path drain (2026-08-08): the batch drain must recycle the pooled
-   * adder across tides, mirroring the cold-path steal test — tide 1
-   * allocates (pool empty), tide 2's waveTo steals the very same instance.
-   * The stolen adder lands in the pre-swap table, which becomes the NEW
-   * pool after tide 2, so the identity is asserted on the pool.
-   */
-  @Test
-  void hotPath_shouldRecycleAdderAcrossTides() throws Exception {
-    markHot(counter, "hot");
-    counter.count("hot", 1);
-    invokeDeliver(counter);
-    Field poolField = WaveCounter.class.getDeclaredField("ebbReservoir");
-    poolField.setAccessible(true);
-    @SuppressWarnings("unchecked")
-    SoftReference<ConcurrentHashMap<String, LongAdder>> poolRef = (SoftReference<
-      ConcurrentHashMap<String, LongAdder>
-    >) poolField.get(counter);
-    LongAdder original = poolRef.get().get("hot");
-    assertThat(original).isNotNull();
-    counter.count("hot", 1);
-    invokeDeliver(counter);
-    @SuppressWarnings("unchecked")
-    SoftReference<ConcurrentHashMap<String, LongAdder>> poolRef2 = (SoftReference<
-      ConcurrentHashMap<String, LongAdder>
-    >) poolField.get(counter);
-    assertThat(poolRef2.get().get("hot")).as("tide 2 waveTo must steal the pooled adder").isSameAs(original);
-  }
-
-  /**
    * Bitmap sweep (2026-08-08): batch discharges (every opMaxCount) and
    * destroy must deliver hot counts exactly — the claimed-slot sweep must
    * lose nothing.
@@ -484,16 +416,12 @@ class WaveCounterRecyclingTest {
   }
 
   /**
-   * Drain signal on the cross-thread recovery sweep (2026-08-12,
-   * adversarial audit H1): {@code destroy()} calls
-   * {@code Ceils.reconcile} from the deliverer side, and the sweep must
-   * flip the drainStamp exactly like {@code tryDrainInto} — otherwise a
-   * writer's lock-free fast add races the sweep with no stamp change to
-   * trigger the post-check recovery.  Asserts the flip-restore (fresh even
-   * epoch) and that the sweep drains the map into the shared table.
+   * The final drain destroy() uses: {@code Ceils.drainFinal} merges the writer's published delta
+   * into the shared table and advances the drain baseline, so a second drain — and the tide's
+   * {@code hasPendingUpdates} skip test — sees nothing pending.
    */
   @Test
-  void reconcile_shouldFlipAndRestoreDrainStamp() throws Exception {
+  void drainFinal_shouldMergeResidualAndComplete() throws Exception {
     markHot(counter, "k");
     Thread w = new Thread(() -> counter.count("k", 1));
     w.start();
@@ -504,34 +432,27 @@ class WaveCounterRecyclingTest {
       counter
     );
     Object ceils = registry.get(w);
-    Field stampField = ceils.getClass().getDeclaredField("drainStamp");
-    stampField.setAccessible(true);
-    long before = (long) stampField.get(ceils);
+    assertThat(ceils).as("dead writer still registered until the tide reaps it").isNotNull();
 
-    // The cross-thread recovery path destroy() uses (WaveCounter.reconcile).
-    Method m = WaveCounter.class.getDeclaredMethod("reconcile", ceils.getClass());
-    m.setAccessible(true);
-    m.invoke(counter, ceils);
-
-    long after = (long) stampField.get(ceils);
-    assertThat(after).as("stamp restored to a fresh even epoch (s+2)").isEqualTo(before + 2);
     @SuppressWarnings("unchecked")
     ConcurrentHashMap<String, LongAdder> table = reservoirMap(counter);
-    assertThat(table.get("k").sum()).as("reconcile merges the residual into the shared table").isEqualTo(1);
-    Field sizeField = ceils.getClass().getDeclaredField("size");
-    sizeField.setAccessible(true);
-    assertThat((int) sizeField.get(ceils)).as("local map drained").isZero();
+    Method m = ceils.getClass().getDeclaredMethod("drainFinal", WaveCounter.class, ConcurrentHashMap.class);
+    m.setAccessible(true);
+    m.invoke(ceils, counter, table);
+
+    assertThat(table.get("k").sum()).as("drainFinal merges the residual into the shared table").isEqualTo(1);
+    Method pending = ceils.getClass().getDeclaredMethod("hasPendingUpdates");
+    pending.setAccessible(true);
+    assertThat((boolean) pending.invoke(ceils)).as("baseline advanced to the published sequence").isFalse();
   }
 
   /**
-   * Periodic-tide drain bookkeeping: {@code Ceils.tryDrainInto} must reset
-   * the local-map size after {@code waveTo}, exactly like {@code drainInto},
-   * {@code drainDead} and {@code reconcile}.  Without the size reset a
-   * live hot writer stays "non-empty" forever, so every later tide pays
-   * the lock/drain-stamp/in-flight path for an already-empty map.
+   * Periodic-tide drain: {@code Ceils.tryDrainInto} merges the difference against its baseline and
+   * advances it, so a second immediate drain merges nothing. The writer's slot and last-key cache
+   * stay in place by design — the drain never clears a slot; only the owner's capacity reset does.
    */
   @Test
-  void tryDrainInto_shouldResetSize() throws Exception {
+  void tryDrainInto_shouldMergeDeltaAndComplete() throws Exception {
     markHot(counter, "k");
     counter.count("k", 3);
 
@@ -544,25 +465,24 @@ class WaveCounterRecyclingTest {
 
     Field sizeField = ceils.getClass().getDeclaredField("size");
     sizeField.setAccessible(true);
-    assertThat((int) sizeField.get(ceils)).as("precondition: local map non-empty").isPositive();
+    int claimedSlots = (int) sizeField.get(ceils);
+    assertThat(claimedSlots).as("precondition: local map non-empty").isPositive();
 
     @SuppressWarnings("unchecked")
     ConcurrentHashMap<String, LongAdder> table = reservoirMap(counter);
-    Field ebbField = WaveCounter.class.getDeclaredField("ebbReservoir");
-    ebbField.setAccessible(true);
-    @SuppressWarnings("unchecked")
-    SoftReference<ConcurrentHashMap<String, LongAdder>> ebb = (SoftReference<
-      ConcurrentHashMap<String, LongAdder>
-    >) ebbField.get(counter);
-
-    Method m = ceils
-      .getClass()
-      .getDeclaredMethod("tryDrainInto", WaveCounter.class, ConcurrentHashMap.class, SoftReference.class);
+    Method m = ceils.getClass().getDeclaredMethod("tryDrainInto", WaveCounter.class, ConcurrentHashMap.class);
     m.setAccessible(true);
-    assertThat((boolean) m.invoke(ceils, counter, table, ebb)).as("tryLock drain should succeed").isTrue();
+    assertThat((boolean) m.invoke(ceils, counter, table)).as("tryLock drain should succeed").isTrue();
 
-    assertThat((int) sizeField.get(ceils)).as("tryDrainInto must reset size").isZero();
     assertThat(table.get("k").sum()).as("drained hot add must reach the shared table").isEqualTo(3);
+    Method pending = ceils.getClass().getDeclaredMethod("hasPendingUpdates");
+    pending.setAccessible(true);
+    assertThat((boolean) pending.invoke(ceils)).as("nothing pending after the drain").isFalse();
+    assertThat((int) sizeField.get(ceils)).as("a drain keeps the writer's claimed slot").isEqualTo(claimedSlots);
+
+    // A second drain must not merge the same delta twice.
+    assertThat((boolean) m.invoke(ceils, counter, table)).isTrue();
+    assertThat(table.get("k").sum()).as("the baseline prevents a double merge").isEqualTo(3);
   }
 
   /**
@@ -852,15 +772,5 @@ class WaveCounterRecyclingTest {
     h *= 0x31848bab;
     h ^= h >>> 14;
     return h;
-  }
-
-  private static void setBit(java.util.concurrent.atomic.AtomicLongArray bits, int mask, int bit) {
-    int word = bit & mask;
-    bits.getAndSet(word >>> 6, bits.get(word >>> 6) | (1L << (word & 63)));
-  }
-
-  private static boolean getBit(java.util.concurrent.atomic.AtomicLongArray bits, int mask, int bit) {
-    int word = bit & mask;
-    return (bits.get(word >>> 6) & (1L << (word & 63))) != 0;
   }
 }

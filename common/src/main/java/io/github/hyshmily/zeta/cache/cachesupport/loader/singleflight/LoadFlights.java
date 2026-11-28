@@ -270,8 +270,12 @@ public class LoadFlights implements SingleFlight {
     }
 
     runningLoads.incrementAndGet();
+    boolean settled = false;
     try {
       T value = reader.get();
+      // The breaker is settled once per admission: a leaderCommit failure is a local commit
+      // failure, not a second data-source outcome for the same stamp.
+      settled = true;
       breaker.onSuccess(stamp);
       if (value != null) {
         leaderCommit.accept(value);
@@ -279,7 +283,9 @@ public class LoadFlights implements SingleFlight {
       return LoaderOutcome.ofNullable(value);
     } catch (Throwable t) {
       Throwable cause = causeOf(t);
-      breaker.onFailure(cause, stamp);
+      if (!settled) {
+        breaker.onFailure(cause, stamp);
+      }
       if (t instanceof Error err) {
         throw err;
       }
@@ -369,22 +375,23 @@ public class LoadFlights implements SingleFlight {
   }
 
   /**
-   * Flags every active flight as invalidated and clears the entire deduplication table. Marking
-   * before clearing matters: a leader that has captured its flight but not yet committed sees the
-   * invalidated bit and drops its result, while a new load after the clear starts a fresh flight.
-   * Existing joiners settle against the marked flight rather than waiting for a commit that will
-   * never land.
+   * Flags every flight in the deduplication table as invalidated and removes it. Marking matters:
+   * a leader that has captured its flight but not yet committed sees the invalidated bit and drops
+   * its result, while a new load after the removal starts a fresh flight. Existing joiners settle
+   * against the marked flight rather than waiting for a commit that will never land.
+   *
+   * <p>Each key is removed through {@link #invalidate(String)} rather than one table-wide clear: a
+   * clear removes a live flight as an explicit removal, which Caffeine reports through the removal
+   * listener, never the eviction listener, so the flight it removed would reach neither
+   * {@link #detachedActive} nor {@link #close()}'s snapshot. A load elected after the traversal
+   * passed its key is left running — its stamp outranks the clear's — and stays visible to
+   * {@link #close()}.
    */
   @Override
   public void invalidateAll() {
-    inFlightLoads
-      .asMap()
-      .values()
-      .forEach(flight -> {
-        flight.markInvalidated();
-        detach(flight);
-      });
-    inFlightLoads.invalidateAll();
+    for (String key : inFlightLoads.asMap().keySet()) {
+      invalidate(key);
+    }
   }
 
   /**
@@ -479,7 +486,9 @@ public class LoadFlights implements SingleFlight {
 
   /**
    * Submits an elected leader's reader task to {@link #executor} with an interrupting timeout and
-   * wires completion settlement.
+   * wires completion settlement. A task that reaches the executor after the flight was settled —
+   * closed, abandoned, or cancelled while queued — exits without calling the reader, so no
+   * downstream source call is spent on a result that can no longer be committed.
    *
    * @param key    the physical cache key
    * @param flight the elected leader flight
@@ -491,7 +500,7 @@ public class LoadFlights implements SingleFlight {
   private <T> InFlight submit(String key, InFlight flight, Supplier<T> reader, Consumer<? super T> commit) {
     CompletableFuture<Object> submitted;
     try {
-      submitted = submitReader(flight, () -> executeLeaderTask(flight, reader, commit));
+      submitted = submitReader(flight, () -> flight.isDone() ? null : executeLeaderTask(flight, reader, commit));
     } catch (RuntimeException | Error e) {
       abortLeaderElection(key, flight, e);
       if (e instanceof RejectedExecutionException) {
@@ -501,9 +510,12 @@ public class LoadFlights implements SingleFlight {
     }
     submitted.whenComplete((result, error) -> finishFlight(key, flight, result, error));
     flight.attachTask(submitted);
-    // close() may have drained the table between elect() and this submission; cancelling an
-    // already-queued task releases its waiter instead of letting it run against a closed pool.
+    // close() may have drained the table between elect() and this submission; retiring the flight
+    // here (before cancelling the task) keeps its waiters classified as a suppression instead of
+    // letting the cancellation settle the breaker as a failure. Abandoning is idempotent, so a
+    // close() that already took this flight leaves nothing behind.
     if (closed.get()) {
+      abortLeaderElection(key, flight, new RejectedExecutionException("SingleFlight closed"));
       flight.cancelTask();
     }
     logHighBacklog();
@@ -613,6 +625,14 @@ public class LoadFlights implements SingleFlight {
    * Retires {@code flight} from the deduplication table, releases its backlog slot, settles any
    * timeout failure not observed by the reader thread, and completes the shared future.
    *
+   * <p>Only the first caller finalizes a flight. A later one is the cancellation callback of a
+   * flight {@link #close()} or {@link #detach(InFlight)} already settled — a running leader that
+   * ignores its interrupt, or a queued task the executor drops — and has nothing left to release.
+   * It must also stay out of the table (the detach hook runs inside Caffeine's eviction
+   * notification for the same key, so a nested removal re-enters the removal it is part of) and out
+   * of the metrics (a leader timeout that lands after a shutdown already answered the waiters with a
+   * suppression must not raise the source-degradation signal).
+   *
    * <p>The error is classified after unwrapping transport envelopes, so a coordinator timeout that
    * arrives wrapped in a {@link CompletionException} still reaches the timeout counter and is not
    * logged as a join failure. A {@link ReaderFailure}-wrapped timeout is a reader failure and is
@@ -624,6 +644,10 @@ public class LoadFlights implements SingleFlight {
    * @param error  the execution error or timeout, or {@code null} on success
    */
   private void finishFlight(String key, InFlight flight, @Nullable Object result, @Nullable Throwable error) {
+    if (flight.isDone()) {
+      return;
+    }
+
     boolean retired = inFlightLoads.asMap().remove(key, flight);
     releasePending(flight);
     if (error == null) {

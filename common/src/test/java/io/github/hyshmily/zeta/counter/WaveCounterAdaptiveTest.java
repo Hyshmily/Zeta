@@ -101,7 +101,7 @@ class WaveCounterAdaptiveTest {
   @Test
   void boundary_isClampedBeforeTheIntNarrowing() throws Exception {
     Object governor = governorOf(counter);
-    Method bounded = governor.getClass().getDeclaredMethod("computeBoundedFloor", long.class);
+    Method bounded = governor.getClass().getDeclaredMethod("effectiveBoundary", long.class);
     bounded.setAccessible(true);
 
     assertThat((int) bounded.invoke(governor, Long.MAX_VALUE)).isEqualTo(256);
@@ -150,8 +150,6 @@ class WaveCounterAdaptiveTest {
     switch (accessor) {
       case "anchorFloor":
         return "anchorD";
-      case "anchorConfirmFloor":
-        return "anchorS";
       case "retreatWorseStreak":
         return "retreatWorseCount";
       case "anchorRenewal":
@@ -167,7 +165,6 @@ class WaveCounterAdaptiveTest {
       case "floor":
       case "retreatTarget":
       case "anchorD":
-      case "anchorS":
       case "anchorD_Renewal":
         return positionsOf(c);
       case "smoothedRenewal":
@@ -1225,6 +1222,39 @@ class WaveCounterAdaptiveTest {
   }
 
   /**
+   * P1 exit is a full regime switch: a probe in flight when the noise confirm fires is cancelled,
+   * and the anchor from the pre-quiet regime is discarded with it. Restoring only the floor left
+   * the walk armed against the quiet floor's base, so its crash undo dragged the floor back to
+   * {@code QUIET_FLOOR} — below the seed, a position the governor then had to climb out of.
+   */
+  @Test
+  void governor_quietExit_discardsProbesAndAnchors() throws Exception {
+    // 4 x 500 ms of quiet: the bypass engages.
+    for (int i = 0; i < 4; i++) {
+      onTide(counter, 0.0, 0, 1024, 0, 1, Double.MAX_VALUE, 30L, 20, 500L);
+    }
+    assertThat(floorOf(counter)).as("the quiet bypass engaged").isEqualTo(1);
+
+    // Construct the state the exit must clear: a raise walk armed at the quiet floor and a stale
+    // anchor. The arm gates now require a floor at or above the seed, so the walk is injected.
+    Object governor = governorOf(counter);
+    Class<?> walkType = Class.forName("io.github.hyshmily.zeta.counter.WaveCounter$MoonsTidalForce$Walk");
+    Constructor<?> ctor = walkType.getDeclaredConstructor(int.class, double.class, boolean.class);
+    ctor.setAccessible(true);
+    Field walkField = governor.getClass().getDeclaredField("walk");
+    walkField.setAccessible(true);
+    walkField.set(governor, ctor.newInstance(1, 0.5, true));
+    setGovernorField(counter, "anchorFloor", 40);
+
+    // One tide at noise volume crosses the re-engage threshold.
+    onTide(counter, 1.0, 300, 1024, 0, 1, 2.0, 10_000L, 300, 500L);
+
+    assertThat(floorOf(counter)).as("the seed floor is restored").isEqualTo(10);
+    assertThat(walkOf(counter)).as("an in-flight probe is cancelled by the regime switch").isNull();
+    assertThat(governorField(counter, "anchorFloor")).as("the old regime's anchor is discarded").isZero();
+  }
+
+  /**
    * P2 flood collapse: a RAISED floor on which NO key earns the threshold
    * at high volume is stale from another regime — one FLOOD tide collapses
    * it to the seed (instead of the parked raise-walk plus the slow
@@ -1319,9 +1349,6 @@ class WaveCounterAdaptiveTest {
     for (int i = 0; i < 3; i++) {
       onTide(counter, 1.0, 3, 16, 0, 2, 1.5); // at-target: durable confirm, anchor (10, 0.25)
     }
-    assertThat(governorField(counter, "anchorConfirmFloor"))
-      .as("the raise confirm plants the interval anchor at the verified position")
-      .isEqualTo(18);
     // Persistent below-target distress: the veto fires, HOLDING position 18
     // (the probe's stage 1) instead of committing straight to the anchor.
     int guard = 0;
@@ -1342,30 +1369,25 @@ class WaveCounterAdaptiveTest {
     assertThat(governorField(counter, "anchorFloor"))
       .as("the anchor is re-planted at the VERIFIED position")
       .isEqualTo(18);
-    assertThat(governorField(counter, "anchorConfirmFloor")).isEqualTo(18);
   }
 
   /**
-   * design decisions: sketch direction probe, persistent shortfall DEEPENING to the
-   * interval anchor: when the floor stands measurably ABOVE the confirmed
-   * position ({@code anchorConfirmFloor}), a probe window that keeps
-   * under-earning deepens to the last VERIFIED position (the interval
-   * anchor) instead of straight to the raise's base — the retreat stages
-   * through the confirm floor before it commits the full descent.
+   * design decisions: sketch direction probe, persistent shortfall: a probe window that keeps
+   * under-earning deepens to the last confirmed anchor instead of holding the failed position —
+   * the retreat commits the full descent to the claim it can still trust.
    */
   @Test
-  void governor_vetoProbe_persistentShortfallDeepensToIntervalAnchor() throws Exception {
+  void governor_vetoProbe_persistentShortfallDeepensToAnchor() throws Exception {
     onTide(counter, 0.25, 16, 16, 10, 2, 0.5); // arm
     onTide(counter, 0.25, 16, 16, 10, 2, 0.5); // step: floor 18
     for (int i = 0; i < 3; i++) {
-      onTide(counter, 1.0, 3, 16, 0, 2, 1.5); // confirm: anchor (10, 0.25), interval (18)
+      onTide(counter, 1.0, 3, 16, 0, 2, 1.5); // confirm: anchor (10, 0.25)
     }
-    // A higher floor above the confirmed position (a second raise ladder
-    // climb or a constructed state): the interval covers [10, 18], and the
-    // floor at 26 stands measurably above the 18 confirm.
+    // A higher floor above the confirmed position (a second raise ladder climb or a constructed
+    // state): the anchor is 10, the floor at 26 stands measurably above it.
     setGovernorField(counter, "floor", 26);
     // Persistent distress with no recovery: the probe window burns, then
-    // deepens to the interval anchor 18 — not to the base 10.  The veto
+    // deepens to the anchor 10.  The veto
     // needs ~14 distress tides (the EMA noise margin wash-out), so wait
     // for the probe to open, then let the window expire.
     int guard = 0;
@@ -1378,13 +1400,13 @@ class WaveCounterAdaptiveTest {
       onTide(counter, 0.1, 100, 1024, 0, 4, 1.5); // the probe window expires without recovery
     }
     assertThat(governorField(counter, "retreatTarget"))
-      .as("the probe deepens to the VERIFIED position while it stands above")
-      .isEqualTo(18);
+      .as("the probe deepens to the confirmed anchor")
+      .isEqualTo(10);
     int settle = 0;
-    while (floorOf(counter) > 18 && settle++ < 20) {
+    while (floorOf(counter) > 10 && settle++ < 20) {
       onTide(counter, 0.1, 100, 1024, 0, 4, 1.5);
     }
-    assertThat(floorOf(counter)).as("the retreat settles at the interval anchor 18, not the base").isEqualTo(18);
+    assertThat(floorOf(counter)).as("the retreat settles at the anchor, not the held position").isEqualTo(10);
   }
 
   /** Scenario G's renewal law: strictly improves as the floor rises (the
@@ -1398,7 +1420,7 @@ class WaveCounterAdaptiveTest {
    * design decisions: sketch descent slope probe, mid-descent recovery: a veto retreat
    * whose descent crosses a healthy band parks at the FIRST rung that
    * earns the target and RE-PLANTS the anchor there — the blind descent
-   * walked past the first healthy rung to an interval/base that was never
+   * walked past the first healthy rung to an anchor that was never
    * re-measured.
    */
   @Test
@@ -1406,32 +1428,30 @@ class WaveCounterAdaptiveTest {
     setGovernorField(counter, "floor", 26);
     setGovernorField(counter, "anchorFloor", 10);
     setGovernorDoubleField(counter, "anchorRenewal", 0.2);
-    setGovernorField(counter, "anchorConfirmFloor", 18);
     // Distressed at/above 23 (the veto position and the probe hold),
-    // healthy below it: the descent's first stride (26 -> 21) lands in
-    // the healthy band and must park there instead of striding on to 18.
+    // healthy below it: the descent's first stride (26 -> 18) lands in
+    // the healthy band and must park there instead of striding on to 10.
     // The guard exits as soon as the probe OPENS (stage 2 — the arm), so
     // both probe samples and the deepen burn inside the expire loop below
     // and the descent loop below measures the rung the first stride lands
-    // on (21) with the floor-dependent renewal.
+    // on (18) with the floor-dependent renewal.
     int guard = 0;
     while (governorField(counter, "retreatStage") != 2 && guard++ < 40) {
       onTide(counter, 0.05, 100, 1024, 0, 4, 1.5);
     }
     assertThat(booleanGovernorField(counter, "retreating")).as("the veto opened the descent").isTrue();
     for (int i = 0; i < 3; i++) {
-      onTide(counter, 0.05, 100, 1024, 0, 4, 1.5); // probe sample 1, probe sample 2 + deepen to 18, first stride 26 -> 21
+      onTide(counter, 0.05, 100, 1024, 0, 4, 1.5); // probe sample 1, probe sample 2 + deepen to 10, first stride 26 -> 18
     }
-    assertThat(governorField(counter, "retreatTarget")).isEqualTo(18);
+    assertThat(governorField(counter, "retreatTarget")).isEqualTo(10);
     int descent = 0;
     while (booleanGovernorField(counter, "retreating") && descent++ < 20) {
       onTide(counter, floorOf(counter) >= 23 ? 0.05 : 0.6, 100, 1024, 0, 4, 1.5);
     }
     assertThat(floorOf(counter))
-      .as("the descent parks at the first healthy rung, not the unre-measured interval")
-      .isEqualTo(21);
-    assertThat(governorField(counter, "anchorFloor")).as("the anchor re-plants at the parked rung").isEqualTo(21);
-    assertThat(governorField(counter, "anchorConfirmFloor")).isEqualTo(21);
+      .as("the descent parks at the first healthy rung, not the unre-measured anchor")
+      .isEqualTo(18);
+    assertThat(governorField(counter, "anchorFloor")).as("the anchor re-plants at the parked rung").isEqualTo(18);
     assertThat(booleanGovernorField(counter, "retreating")).isFalse();
   }
 
@@ -1453,7 +1473,6 @@ class WaveCounterAdaptiveTest {
     setGovernorField(counter, "floor", 26);
     setGovernorField(counter, "anchorFloor", 10);
     setGovernorDoubleField(counter, "anchorRenewal", 0.7); // stale claim
-    setGovernorField(counter, "anchorConfirmFloor", 18);
     int guard = 0;
     while (governorField(counter, "retreatStage") != 1 && guard++ < 40) {
       onTide(counter, renewalImprovingUpward(floorOf(counter)), 100, 1024, 0, 26, 1.5);
@@ -1463,41 +1482,35 @@ class WaveCounterAdaptiveTest {
       onTide(counter, renewalImprovingUpward(floorOf(counter)), 100, 1024, 0, 26, 1.5);
     }
     assertThat(governorField(counter, "retreatTarget"))
-      .as("the probe deepens toward the interval anchor")
-      .isEqualTo(18);
-    // The descent: 26 -> 21 (in-band), 21 -> 19 (worse 1), 19 (worse 2 =
-    // SLOPE_STREAK) -> PIVOT.  The pivot discards the anchor; the parked
-    // distress then RE-ARMS the raise (the ARM gates re-engage).
+      .as("the probe deepens toward the confirmed anchor")
+      .isEqualTo(10);
+    // The descent: 26 -> 18 (worse 1), 18 -> 13 (worse 2 = SLOPE_STREAK) -> PIVOT. The pivot
+    // discards the anchor; the parked distress then RE-ARMS the raise (the ARM gates re-engage).
     int descent = 0;
     while (booleanGovernorField(counter, "retreating") && descent++ < 20) {
       onTide(counter, renewalImprovingUpward(floorOf(counter)), 100, 1024, 0, 26, 1.5);
     }
     assertThat(floorOf(counter))
       .as("the pivot holds the falsified rung instead of dumping to the stale base")
-      .isEqualTo(19);
+      .isEqualTo(13);
     assertThat(booleanGovernorField(counter, "retreating")).isFalse();
     assertThat(governorField(counter, "anchorFloor")).as("the stale claim is discarded with the pivot").isZero();
-    assertThat(governorField(counter, "anchorConfirmFloor")).isZero();
     assertThat(governorField(counter, "retreatWorseStreak")).as("the pivot consumed the slope's persistence").isZero();
     // The reverse attempt: the raise direction re-arms and re-climbs to
-    // the healthier heights, confirming durably at 27.
+    // the healthier heights, confirming durably at 29.
     int climb = 0;
     do {
       onTide(counter, renewalImprovingUpward(floorOf(counter)), 100, 1024, 10, 32, 0.5);
     } while ((booleanGovernorField(counter, "retreating") || walkOf(counter) != null) && climb++ < 40);
-    assertThat(floorOf(counter)).as("the reverse raise re-climbs and confirms at the healthier rung").isEqualTo(27);
-    assertThat(governorField(counter, "anchorConfirmFloor"))
-      .as("the re-confirmed raise re-plants its interval")
-      .isEqualTo(27);
+    assertThat(floorOf(counter)).as("the reverse raise re-climbs and confirms at the healthier rung").isEqualTo(29);
   }
 
   /**
    * design decisions: sketch descent slope probe, flat regime: a regime-wide decay (stale
    * claim 0.7, renewal flat at 0.35 on every rung) neither recovers
    * mid-descent (0.35 < target) nor under-earns the descent's start
-   * (0.35 > 0.35 - margin): the descent completes EXACTLY as the blind
-   * walk — first to the interval 18, then, after a second veto, to the
-   * base 10 — with no invented park/pivot verdicts and no slope
+   * (0.35 > 0.35 - margin): the descent completes to the anchor 10
+   * with no invented park/pivot verdicts and no slope
    * persistence accumulating.
    */
   @Test
@@ -1505,31 +1518,22 @@ class WaveCounterAdaptiveTest {
     setGovernorField(counter, "floor", 26);
     setGovernorField(counter, "anchorFloor", 10);
     setGovernorDoubleField(counter, "anchorRenewal", 0.7);
-    setGovernorField(counter, "anchorConfirmFloor", 18);
     int guard = 0;
     while (governorField(counter, "retreatStage") != 1 && guard++ < 40) {
       onTide(counter, 0.35, 100, 1024, 0, 4, 1.5);
     }
     for (int i = 0; i < 3; i++) {
-      onTide(counter, 0.35, 100, 1024, 0, 4, 1.5); // the probe expires: deepen to 18
+      onTide(counter, 0.35, 100, 1024, 0, 4, 1.5); // the probe expires: deepen to 10
     }
-    assertThat(governorField(counter, "retreatTarget")).isEqualTo(18);
+    assertThat(governorField(counter, "retreatTarget")).isEqualTo(10);
     int descent = 0;
     while (booleanGovernorField(counter, "retreating") && descent++ < 20) {
       onTide(counter, 0.35, 100, 1024, 0, 4, 1.5);
     }
     assertThat(floorOf(counter))
-      .as("a flat band parks nowhere mid-descent — the interval anchor is reached")
-      .isEqualTo(18);
+      .as("a flat band parks nowhere mid-descent — the anchor is reached")
+      .isEqualTo(10);
     assertThat(governorField(counter, "anchorFloor")).as("a flat band does not discard the anchor").isEqualTo(10);
-    // The persistent flat decay re-vetoes at the interval; the second
-    // retreat (flat again) deepens to the base — still no invented
-    // verdicts.
-    int settle = 0;
-    while (floorOf(counter) > 10 && settle++ < 60) {
-      onTide(counter, 0.35, 100, 1024, 0, 4, 1.5);
-    }
-    assertThat(floorOf(counter)).as("the second retreat completes to the base on the flat decay").isEqualTo(10);
     assertThat(governorField(counter, "retreatWorseStreak")).as("no worse samples accumulated on a flat band").isZero();
     assertThat(booleanGovernorField(counter, "retreating")).isFalse();
   }

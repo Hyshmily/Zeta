@@ -50,7 +50,7 @@ public interface EntryLifecycle {
    *
    * @param cacheKey the cache key
    * @param raw      the entry the caller read, or {@code null}
-   * @param now      the per-call epoch-millis sample
+   * @param now      the per-call monotonic-millis sample
    * @return the surviving resident, or {@code null} when the key is absent
    */
   @Nullable

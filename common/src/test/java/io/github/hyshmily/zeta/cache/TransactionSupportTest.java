@@ -79,6 +79,7 @@ class TransactionSupportTest {
   @Test
   void run_withinTransaction_shouldDeferAfterCommit() {
     TransactionSynchronizationManager.initSynchronization();
+    TransactionSynchronizationManager.setActualTransactionActive(true);
     try {
       AtomicBoolean executed = new AtomicBoolean(false);
       TransactionSupport.run(false, () -> executed.set(true));
@@ -100,6 +101,7 @@ class TransactionSupportTest {
   @Test
   void run_withinTransaction_failure_shouldRethrow() {
     TransactionSynchronizationManager.initSynchronization();
+    TransactionSynchronizationManager.setActualTransactionActive(true);
     try {
       TransactionSupport.run(false, () -> {
         throw new IllegalStateException("post-commit-fail");
@@ -121,6 +123,7 @@ class TransactionSupportTest {
   @Test
   void aTaskRegisteredInsideAfterCommitRunsInline() {
     TransactionSynchronizationManager.initSynchronization();
+    TransactionSynchronizationManager.setActualTransactionActive(true);
     try {
       AtomicBoolean executed = new AtomicBoolean(false);
       TransactionSupport.run(false, () -> TransactionSupport.run(false, () -> executed.set(true)));
@@ -138,6 +141,73 @@ class TransactionSupportTest {
   }
 
   /**
+   * Spring's default {@code SYNCHRONIZATION_ALWAYS} strategy initializes a synchronization even
+   * when {@code SUPPORTS}/{@code NOT_SUPPORTED}/{@code NEVER} found no transaction to join. The data
+   * source is then in auto-commit, so deferring would drop the cache update of an already durable
+   * write whenever the method throws before returning.
+   */
+  @Test
+  void aSynchronizationWithoutATransactionMustNotDefer() {
+    TransactionSynchronizationManager.initSynchronization();
+    try {
+      AtomicBoolean executed = new AtomicBoolean(false);
+      TransactionSupport.run(false, () -> executed.set(true));
+
+      assertThat(executed).isTrue();
+      assertThat(TransactionSupport.isDeferred(false)).isFalse();
+    } finally {
+      TransactionSynchronizationManager.clear();
+    }
+  }
+
+  /**
+   * With {@code SYNCHRONIZATION_NEVER} a real transaction has no synchronization: the write path
+   * cannot defer, but the read path must still isolate its uncommitted values.
+   */
+  @Test
+  void aReadWriteTransactionHidesUncommittedWritesWithoutSynchronization() {
+    TransactionSynchronizationManager.setActualTransactionActive(true);
+    try {
+      assertThat(TransactionSupport.isReadWriteTransactionActive()).isTrue();
+      assertThat(TransactionSupport.isDeferred(false)).isFalse();
+    } finally {
+      TransactionSynchronizationManager.clear();
+    }
+  }
+
+  /** A read-only transaction declared no writes of its own, so a read of it may be shared. */
+  @Test
+  void aReadOnlyTransactionDoesNotHideUncommittedWrites() {
+    TransactionSynchronizationManager.setActualTransactionActive(true);
+    TransactionSynchronizationManager.setCurrentTransactionReadOnly(true);
+    try {
+      assertThat(TransactionSupport.isReadWriteTransactionActive()).isFalse();
+    } finally {
+      TransactionSynchronizationManager.clear();
+    }
+  }
+
+  /**
+   * A task registered inside an {@code afterCommit} callback runs inline even though the transaction
+   * is still the thread's actual transaction until cleanup.
+   */
+  @Test
+  void afterCommitDepthSuppressesBothTransactionFlags() {
+    TransactionSynchronizationManager.initSynchronization();
+    TransactionSynchronizationManager.setActualTransactionActive(true);
+    try {
+      AtomicBoolean readWrite = new AtomicBoolean(true);
+      TransactionSupport.run(false, () -> readWrite.set(TransactionSupport.isReadWriteTransactionActive()));
+
+      TransactionSynchronizationManager.getSynchronizations().forEach(TransactionSynchronization::afterCommit);
+
+      assertThat(readWrite).isFalse();
+    } finally {
+      TransactionSynchronizationManager.clear();
+    }
+  }
+
+  /**
    * A task registered by another synchronization's {@code afterCommit} callback is absent from the
    * snapshot Spring is iterating. Its own callback runs from {@code afterCompletion} instead of
    * being lost at cleanup.
@@ -145,6 +215,7 @@ class TransactionSupportTest {
   @Test
   void aTaskRegisteredByAnotherAfterCommitCallbackRunsOnCompletion() {
     TransactionSynchronizationManager.initSynchronization();
+    TransactionSynchronizationManager.setActualTransactionActive(true);
     try {
       AtomicBoolean executed = new AtomicBoolean(false);
       TransactionSynchronizationManager.registerSynchronization(

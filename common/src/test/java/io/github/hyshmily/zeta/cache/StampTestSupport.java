@@ -158,7 +158,7 @@ final class StampTestSupport implements AutoCloseable {
   private final class RecordingBroadcastBuffer extends BroadcastBuffer {
 
     private RecordingBroadcastBuffer() {
-      super(scheduler, null, 500, 2_000, null);
+      super(scheduler, null, 500, null);
     }
 
     @Override

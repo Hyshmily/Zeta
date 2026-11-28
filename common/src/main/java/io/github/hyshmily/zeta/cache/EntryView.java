@@ -30,10 +30,18 @@ import org.jspecify.annotations.Nullable;
  * <p>{@link #value()} is the entry's own reference, not a copy. A policy must treat it as
  * read-only; mutating a value in place bypasses the cache's copy-on-write discipline.
  *
+ * <p><b>The two deadline components are node-local monotonic instants</b> (the axis
+ * {@code TtlPolicy} stamps and judges): compare or subtract them against
+ * {@link TimeSource#monotonicMillis()} only. They are not epoch milliseconds, they are meaningless
+ * on another node or after a restart, and {@code 0} means the soft window is disabled while
+ * {@link Long#MAX_VALUE} means the entry is permanent. For "is it still servable" and "is it stale"
+ * use {@link #logicallyExpired()}, {@link #softExpired()} and {@link #isLive(EntryView)} instead of
+ * comparing a deadline yourself.
+ *
  * @param value             the cached value, or {@code null} when the entry carries none
  * @param dataVersion       the data stamp ({@code 0} = unknown)
- * @param softExpireAtMs    the absolute soft-expiry timestamp
- * @param hardExpireAtMs    the absolute hard-expiry timestamp
+ * @param softExpireAtMs    the node-local monotonic soft-expiry instant, {@code 0} when disabled
+ * @param hardExpireAtMs    the node-local monotonic hard-expiry instant
  * @param softExpired       whether the soft window was closed at snapshot time
  * @param logicallyExpired  whether the hard expiry had passed at snapshot time
  */
@@ -51,7 +59,7 @@ public record EntryView(
    *
    * @param entry     the resident entry, or {@code null}
    * @param ttlPolicy the TTL policy used for the expiry judgments
-   * @param now       the epoch-millis sample shared by both judgments
+   * @param now       the monotonic-millisecond sample shared by both judgments
    * @return the snapshot, or {@code null} when {@code entry} is {@code null}
    */
   public static @Nullable EntryView of(@Nullable CacheEntry entry, TtlPolicy ttlPolicy, long now) {
@@ -78,7 +86,7 @@ public record EntryView(
    * @return the snapshot, or {@code null} when the key is absent
    */
   public static @Nullable EntryView snapshot(Cache<String, CacheEntry> cache, String key, TtlPolicy ttlPolicy) {
-    return of(QuietCache.getIfPresent(cache, key), ttlPolicy, TimeSource.currentTimeMillis());
+    return of(QuietCache.getIfPresent(cache, key), ttlPolicy, TimeSource.monotonicMillis());
   }
 
   /**

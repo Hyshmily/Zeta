@@ -60,7 +60,7 @@ class BroadcastBufferTest {
    */
   @Test
   void constructor_shouldAcceptMinimalParameters() {
-    assertThatCode(() -> new BroadcastBuffer(scheduler, null, 500, 2_000, null)).doesNotThrowAnyException();
+    assertThatCode(() -> new BroadcastBuffer(scheduler, null, 500, null)).doesNotThrowAnyException();
   }
 
   /**
@@ -69,7 +69,7 @@ class BroadcastBufferTest {
   @Test
   void constructor_shouldAcceptCustomFlushDelay() {
     assertThatCode(() ->
-      new BroadcastBuffer(scheduler, null, 100L, Math.max(100L, 2_000), null)
+      new BroadcastBuffer(scheduler, null, 100L, null)
     ).doesNotThrowAnyException();
   }
 
@@ -81,7 +81,7 @@ class BroadcastBufferTest {
    */
   @Test
   void record_shouldLazyInitPendingMap() {
-    BroadcastBuffer buf = new BroadcastBuffer(scheduler, publisher, 5000L, Math.max(5000L, 2_000), null);
+    BroadcastBuffer buf = new BroadcastBuffer(scheduler, publisher, 5000L, null);
     buf.record("key1", 1L, null, null);
     buf.flush();
     verify(publisher).broadcastRefresh("key1", 1L);
@@ -93,7 +93,7 @@ class BroadcastBufferTest {
    */
   @Test
   void record_shouldMergeSameKey_latestWins() {
-    BroadcastBuffer buf = new BroadcastBuffer(scheduler, publisher, 5000L, Math.max(5000L, 2_000), null);
+    BroadcastBuffer buf = new BroadcastBuffer(scheduler, publisher, 5000L, null);
     buf.record("key", 1L, null, null);
     buf.record("key", 5L, null, null);
     buf.flush();
@@ -106,7 +106,7 @@ class BroadcastBufferTest {
    */
   @Test
   void record_differentKeys_shouldBothBeFlushed() {
-    BroadcastBuffer buf = new BroadcastBuffer(scheduler, publisher, 5000L, Math.max(5000L, 2_000), null);
+    BroadcastBuffer buf = new BroadcastBuffer(scheduler, publisher, 5000L, null);
     buf.record("key1", 1L, null, null);
     buf.record("key2", 2L, null, null);
     buf.flush();
@@ -121,7 +121,7 @@ class BroadcastBufferTest {
    */
   @Test
   void flush_shouldSendPendingToPublisher() {
-    BroadcastBuffer buf = new BroadcastBuffer(scheduler, publisher, 5000L, Math.max(5000L, 2_000), null);
+    BroadcastBuffer buf = new BroadcastBuffer(scheduler, publisher, 5000L, null);
     buf.record("a", 1L, null, null);
     buf.record("b", 2L, null, null);
     buf.flush();
@@ -144,7 +144,7 @@ class BroadcastBufferTest {
       }
       task.run();
     };
-    BroadcastBuffer buf = new BroadcastBuffer(scheduler, publisher, 5000L, Math.max(5000L, 2_000), failingTailExecutor);
+    BroadcastBuffer buf = new BroadcastBuffer(scheduler, publisher, 5000L, failingTailExecutor);
     for (int i = 0; i < 1100; i++) {
       buf.record("k" + i, i, null, null);
     }
@@ -159,7 +159,7 @@ class BroadcastBufferTest {
    */
   @Test
   void flush_withNoPublisher_shouldNotThrow() {
-    BroadcastBuffer buf = new BroadcastBuffer(scheduler, null, 500, 2_000, null);
+    BroadcastBuffer buf = new BroadcastBuffer(scheduler, null, 500, null);
     buf.record("key", 1L, null, null);
     assertThatCode(buf::flush).doesNotThrowAnyException();
   }
@@ -169,7 +169,7 @@ class BroadcastBufferTest {
    */
   @Test
   void flush_withNoRecords_shouldNotPublish() {
-    BroadcastBuffer buf = new BroadcastBuffer(scheduler, publisher, 5000L, Math.max(5000L, 2_000), null);
+    BroadcastBuffer buf = new BroadcastBuffer(scheduler, publisher, 5000L, null);
     buf.flush();
     verifyNoInteractions(publisher);
   }
@@ -207,7 +207,7 @@ class BroadcastBufferTest {
     CountDownLatch allSent = installCountingPublisher(sent, BroadcastBuffer.MAX_PENDING_ENTRIES + 1);
 
     // Long flush delay so the deferred flush cannot fire during this test
-    BroadcastBuffer buf = new BroadcastBuffer(scheduler, publisher, 5000L, Math.max(5000L, 2_000), null);
+    BroadcastBuffer buf = new BroadcastBuffer(scheduler, publisher, 5000L, null);
 
     for (int i = 0; i < BroadcastBuffer.MAX_PENDING_ENTRIES; i++) {
       buf.record("key-" + i, i, null, null);
@@ -239,7 +239,7 @@ class BroadcastBufferTest {
     AtomicInteger sent = new AtomicInteger(0);
     CountDownLatch allSent = installCountingPublisher(sent, BroadcastBuffer.MAX_PENDING_ENTRIES + 1);
 
-    BroadcastBuffer buf = new BroadcastBuffer(scheduler, publisher, 5000L, Math.max(5000L, 2_000), null);
+    BroadcastBuffer buf = new BroadcastBuffer(scheduler, publisher, 5000L, null);
 
     for (int i = 0; i < BroadcastBuffer.MAX_PENDING_ENTRIES + 1; i++) {
       buf.record("key-" + i, i, null, null);
@@ -271,7 +271,7 @@ class BroadcastBufferTest {
       .when(spyPublisher)
       .broadcastRefresh("auto-key", 1L);
 
-    BroadcastBuffer buf = new BroadcastBuffer(scheduler, spyPublisher, 100L, Math.max(100L, 2_000), null);
+    BroadcastBuffer buf = new BroadcastBuffer(scheduler, spyPublisher, 100L, null);
     buf.record("auto-key", 1L, null, null);
 
     boolean fired = latch.await(2000, TimeUnit.MILLISECONDS);
@@ -297,7 +297,7 @@ class BroadcastBufferTest {
       .when(spyPublisher)
       .broadcastRefresh("second", 2L);
 
-    BroadcastBuffer buf = new BroadcastBuffer(scheduler, spyPublisher, 400L, Math.max(400L, 2_000), null);
+    BroadcastBuffer buf = new BroadcastBuffer(scheduler, spyPublisher, 400L, null);
     long firstRecordAt = System.nanoTime();
     buf.record("first", 1L, null, null);
     // Lands while the first record's flush is pending: the flush must NOT be
@@ -329,7 +329,7 @@ class BroadcastBufferTest {
     doThrow(new RuntimeException("publisher failure")).when(throwingPub).broadcastRefresh("bad-key", 1L);
     when(throwingPub.broadcastRefresh("good-key", 2L)).thenReturn(true);
 
-    BroadcastBuffer buf = new BroadcastBuffer(scheduler, throwingPub, 5000L, Math.max(5000L, 2_000), null);
+    BroadcastBuffer buf = new BroadcastBuffer(scheduler, throwingPub, 5000L, null);
     buf.record("bad-key", 1L, null, null);
     buf.record("good-key", 2L, null, null);
 
@@ -349,7 +349,7 @@ class BroadcastBufferTest {
     CacheSyncPublisher failing = mock(CacheSyncPublisher.class);
     when(failing.broadcastRefresh(anyString(), anyLong())).thenReturn(false);
 
-    BroadcastBuffer buf = new BroadcastBuffer(scheduler, failing, 5000L, Math.max(5000L, 2_000), null);
+    BroadcastBuffer buf = new BroadcastBuffer(scheduler, failing, 5000L, null);
     buf.record("a", 1L, null, null);
     buf.record("b", 2L, null, null);
     buf.flush();
@@ -375,7 +375,7 @@ class BroadcastBufferTest {
         .when(publisher)
         .broadcastRefresh("key", 1L);
 
-      BroadcastBuffer buf = new BroadcastBuffer(scheduler, publisher, 5000L, 2000L, sendExecutor);
+      BroadcastBuffer buf = new BroadcastBuffer(scheduler, publisher, 5000L, sendExecutor);
       buf.record("key", 1L, null, null);
       buf.flush();
 
@@ -399,7 +399,7 @@ class BroadcastBufferTest {
     Executor rejecting = mock(Executor.class);
     doThrow(new RejectedExecutionException("saturated")).when(rejecting).execute(any(Runnable.class));
 
-    BroadcastBuffer buf = new BroadcastBuffer(scheduler, publisher, 5000L, 2000L, rejecting);
+    BroadcastBuffer buf = new BroadcastBuffer(scheduler, publisher, 5000L, rejecting);
     buf.record("key", 1L, null, null);
 
     assertThatCode(buf::flush).doesNotThrowAnyException();
@@ -418,7 +418,7 @@ class BroadcastBufferTest {
       throw new IllegalStateException("custom pool is shutting down");
     };
 
-    BroadcastBuffer buf = new BroadcastBuffer(scheduler, publisher, 5000L, 2000L, hostile);
+    BroadcastBuffer buf = new BroadcastBuffer(scheduler, publisher, 5000L, hostile);
     buf.record("key", 1L, null, null);
 
     assertThatCode(buf::flush).doesNotThrowAnyException();
@@ -450,7 +450,7 @@ class BroadcastBufferTest {
         sendExecutor.execute(task);
       };
 
-      BroadcastBuffer buf = new BroadcastBuffer(scheduler, publisher, 5000L, 2000L, flaky);
+      BroadcastBuffer buf = new BroadcastBuffer(scheduler, publisher, 5000L, flaky);
       buf.record("key1", 1L, null, null);
       buf.flush(); // dropped
 
@@ -477,7 +477,7 @@ class BroadcastBufferTest {
       new RejectedExecutionException("saturated")
     );
 
-    BroadcastBuffer buf = new BroadcastBuffer(rejecting, publisher, 5000L, Math.max(5000L, 2_000), null);
+    BroadcastBuffer buf = new BroadcastBuffer(rejecting, publisher, 5000L, null);
     buf.record("key1", 1L, null, null);
 
     verify(publisher).broadcastRefresh("key1", 1L);
@@ -501,7 +501,7 @@ class BroadcastBufferTest {
     when(armed.isDone()).thenReturn(false);
     when(armed.getDelay(any(TimeUnit.class))).thenReturn(0L);
 
-    BroadcastBuffer buf = new BroadcastBuffer(scheduler, publisher, 5000L, Math.max(5000L, 2_000), null);
+    BroadcastBuffer buf = new BroadcastBuffer(scheduler, publisher, 5000L, null);
 
     for (int i = 0; i < BroadcastBuffer.MAX_PENDING_ENTRIES + 50; i++) {
       buf.record("key-" + i, i, null, null);
@@ -527,7 +527,7 @@ class BroadcastBufferTest {
     doReturn(armed).when(scheduler).schedule(any(Runnable.class), anyLong(), any(TimeUnit.class));
     when(armed.isDone()).thenReturn(false);
 
-    BroadcastBuffer buf = new BroadcastBuffer(scheduler, publisher, 5000L, Math.max(5000L, 2_000), null);
+    BroadcastBuffer buf = new BroadcastBuffer(scheduler, publisher, 5000L, null);
     buf.record("key1", 1L, null, null);
 
     verify(scheduler, times(1)).schedule(any(Runnable.class), anyLong(), any(TimeUnit.class));
@@ -549,7 +549,7 @@ class BroadcastBufferTest {
       .when(spyPub)
       .broadcastRefresh(anyString(), anyLong());
 
-    BroadcastBuffer buf = new BroadcastBuffer(scheduler, spyPub, 5000L, Math.max(5000L, 2_000), null);
+    BroadcastBuffer buf = new BroadcastBuffer(scheduler, spyPub, 5000L, null);
     buf.record("pre-flush", 1L, null, null);
 
     // flush swaps pending so the old map is iterated; record after swap goes to new map
@@ -581,7 +581,7 @@ class BroadcastBufferTest {
       .when(spyPub)
       .broadcastRefresh(anyString(), anyLong());
 
-    BroadcastBuffer buf = new BroadcastBuffer(scheduler, spyPub, 5000L, Math.max(5000L, 2_000), null);
+    BroadcastBuffer buf = new BroadcastBuffer(scheduler, spyPub, 5000L, null);
     int threadCount = 4;
     int recordsPerThread = 100;
 
@@ -620,7 +620,7 @@ class BroadcastBufferTest {
   void broadcastInvalidate_withPublisher_runsOnTheSendExecutor() throws Exception {
     ExecutorService sendExecutor = Executors.newSingleThreadExecutor();
     try {
-      BroadcastBuffer buf = new BroadcastBuffer(scheduler, publisher, 5000L, 2_000L, sendExecutor);
+      BroadcastBuffer buf = new BroadcastBuffer(scheduler, publisher, 5000L, sendExecutor);
       CountDownLatch latch = new CountDownLatch(1);
       doAnswer(inv -> {
         latch.countDown();
@@ -640,14 +640,14 @@ class BroadcastBufferTest {
 
   @Test
   void broadcastInvalidate_withoutExecutor_runsInline() {
-    BroadcastBuffer buf = new BroadcastBuffer(scheduler, publisher, 5000L, 2_000L, null);
+    BroadcastBuffer buf = new BroadcastBuffer(scheduler, publisher, 5000L, null);
     buf.invalidate("key5b", 1L);
     verify(publisher, timeout(1000)).broadcastInvalidate("key5b", 1L);
   }
 
   @Test
   void broadcastInvalidate_withoutPublisher_isNoOp() {
-    BroadcastBuffer buf = new BroadcastBuffer(scheduler, null, 5000L, 2_000L, null);
+    BroadcastBuffer buf = new BroadcastBuffer(scheduler, null, 5000L, null);
     assertThatCode(() -> buf.invalidate("key6", 2L)).doesNotThrowAnyException();
   }
 
@@ -656,7 +656,7 @@ class BroadcastBufferTest {
     Executor rejecting = command -> {
       throw new RejectedExecutionException("saturated");
     };
-    BroadcastBuffer buf = new BroadcastBuffer(scheduler, publisher, 5000L, 2_000L, rejecting);
+    BroadcastBuffer buf = new BroadcastBuffer(scheduler, publisher, 5000L, rejecting);
 
     buf.invalidate("key7", 3L);
 
@@ -665,7 +665,7 @@ class BroadcastBufferTest {
 
   @Test
   void broadcastInvalidateBatch_sendsOneChunk() {
-    BroadcastBuffer buf = new BroadcastBuffer(scheduler, publisher, 5000L, 2_000L, null);
+    BroadcastBuffer buf = new BroadcastBuffer(scheduler, publisher, 5000L, null);
     List<SyncMessage.Entry> entries = List.of(new SyncMessage.Entry("a", 1L), new SyncMessage.Entry("b", 2L));
     buf.invalidateBatch(entries);
     verify(publisher).broadcastInvalidateBatch(entries);
@@ -673,14 +673,14 @@ class BroadcastBufferTest {
 
   @Test
   void broadcastInvalidateAll_sendsOneClear() {
-    BroadcastBuffer buf = new BroadcastBuffer(scheduler, publisher, 5000L, 2_000L, null);
+    BroadcastBuffer buf = new BroadcastBuffer(scheduler, publisher, 5000L, null);
     buf.invalidateAll(9L);
     verify(publisher).broadcastInvalidateAll(9L);
   }
 
   @Test
   void broadcastPut_serializable_buffersPutRecord() {
-    BroadcastBuffer buf = new BroadcastBuffer(scheduler, publisher, 5000L, 2_000L, null);
+    BroadcastBuffer buf = new BroadcastBuffer(scheduler, publisher, 5000L, null);
     byte[] payload = "value-bytes".getBytes(StandardCharsets.UTF_8);
     when(publisher.serializePutPayload("v")).thenReturn(payload);
 
@@ -693,7 +693,7 @@ class BroadcastBufferTest {
 
   @Test
   void broadcastPut_serializationFails_degradesToRefresh() {
-    BroadcastBuffer buf = new BroadcastBuffer(scheduler, publisher, 5000L, 2_000L, null);
+    BroadcastBuffer buf = new BroadcastBuffer(scheduler, publisher, 5000L, null);
     when(publisher.serializePutPayload("v")).thenReturn(null);
 
     buf.put("key10", "v", 6L, null);
@@ -705,14 +705,14 @@ class BroadcastBufferTest {
 
   @Test
   void broadcastPut_withoutPublisher_isNoOp() {
-    BroadcastBuffer buf = new BroadcastBuffer(scheduler, null, 5000L, 2_000L, null);
+    BroadcastBuffer buf = new BroadcastBuffer(scheduler, null, 5000L, null);
     assertThatCode(() -> buf.put("key11", "v", 7L, null)).doesNotThrowAnyException();
   }
 
   /** A version already invalidated must not pay for serialization on its way out. */
   @Test
   void broadcastPut_staleVersion_skipsSerialization() {
-    BroadcastBuffer buf = new BroadcastBuffer(scheduler, publisher, 5000L, 2_000L, null);
+    BroadcastBuffer buf = new BroadcastBuffer(scheduler, publisher, 5000L, null);
 
     buf.put("key12", "v", 8L, version -> false);
 
@@ -725,7 +725,7 @@ class BroadcastBufferTest {
   @Test
   void destroy_drainsPendingSynchronouslyEvenWithExecutor() {
     Executor neverRuns = command -> {};
-    BroadcastBuffer buf = new BroadcastBuffer(scheduler, publisher, 5000L, 2_000L, neverRuns);
+    BroadcastBuffer buf = new BroadcastBuffer(scheduler, publisher, 5000L, neverRuns);
     buf.record("key13", 9L, null, null);
 
     buf.destroy();

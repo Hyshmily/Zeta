@@ -108,12 +108,12 @@ class WaveCounterDrainRaceTest {
     Object ceils = registry(counter).get(Thread.currentThread());
     assertThat(ceils).as("writer registered").isNotNull();
 
-    Method fast = ceils.getClass().getDeclaredMethod("tryFastAdd", WaveCounter.class, String.class, long.class);
+    Method fast = ceils.getClass().getDeclaredMethod("tryFastAdd", String.class, long.class);
     fast.setAccessible(true);
-    assertThat((boolean) fast.invoke(ceils, counter, new String("hot"), 1L))
+    assertThat((boolean) fast.invoke(ceils, new String("hot"), 1L))
       .as("content-equal but a different reference must take the full probe")
       .isFalse();
-    assertThat((boolean) fast.invoke(ceils, counter, "hot", 1L)).as("same reference hits").isTrue();
+    assertThat((boolean) fast.invoke(ceils, "hot", 1L)).as("same reference hits").isTrue();
   }
 
   /**
@@ -136,14 +136,17 @@ class WaveCounterDrainRaceTest {
 
   /**
    * Writers cycling over several hot keys (full-path {@code add}, not the
-   * last-key fast hit) while a concurrent drainer empties their maps: no
-   * throwable may escape on either side and the hot path must stay EXACT
-   * (every add is merged, none twice).
+   * last-key fast hit) while a concurrent deliverer-style drainer merges their
+   * maps: no throwable may escape on either side and the hot path must stay
+   * EXACT (every add is merged, none twice).
    *
    * <p>
-   * The drainer calls {@code discharge} reflectively instead of
+   * The drainer calls {@code tryDrainInto} reflectively — the deliverer's own
+   * path, which merges the writer's delta and never wipes a slot — instead of
    * {@code tide()} on purpose: {@code tide()} catches {@code Throwable} and
-   * would swallow the very NPE this guards against.
+   * would swallow the very NPE this guards against. {@code discharge} is not
+   * used because it is the OWNER's capacity reset (it runs on the writer's
+   * thread only, see {@code Ceils.dischargeInto}).
    */
   @Test
   void concurrentDrainAndAdd_shouldNeitherThrowNorLoseCounts() throws Exception {
@@ -186,14 +189,15 @@ class WaveCounterDrainRaceTest {
       () -> {
         try {
           start.await();
-          Method discharge = null;
+          ConcurrentHashMap<String, java.util.concurrent.atomic.LongAdder> table = reservoirMap(counter);
+          Method drain = null;
           while (done.getCount() > 1) {
             for (Object ceils : registry(counter).values()) {
-              if (discharge == null || discharge.getParameterTypes()[0] != ceils.getClass()) {
-                discharge = WaveCounter.class.getDeclaredMethod("discharge", ceils.getClass());
-                discharge.setAccessible(true);
+              if (drain == null || drain.getDeclaringClass() != ceils.getClass()) {
+                drain = ceils.getClass().getDeclaredMethod("tryDrainInto", WaveCounter.class, ConcurrentHashMap.class);
+                drain.setAccessible(true);
               }
-              discharge.invoke(counter, ceils);
+              drain.invoke(ceils, counter, table);
             }
           }
         } catch (Throwable e) {
@@ -281,5 +285,17 @@ class WaveCounterDrainRaceTest {
     } catch (ReflectiveOperationException e) {
       throw new RuntimeException(e);
     }
+  }
+
+  /** The current shared accumulation table (the deliverer's drain target). */
+  @SuppressWarnings("unchecked")
+  private static ConcurrentHashMap<String, java.util.concurrent.atomic.LongAdder> reservoirMap(WaveCounter c)
+    throws Exception {
+    Field reservoir = WaveCounter.class.getDeclaredField("reservoir");
+    reservoir.setAccessible(true);
+    Object r = reservoir.get(c);
+    Field map = r.getClass().getDeclaredField("map");
+    map.setAccessible(true);
+    return (ConcurrentHashMap<String, java.util.concurrent.atomic.LongAdder>) map.get(r);
   }
 }

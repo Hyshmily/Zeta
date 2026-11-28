@@ -38,6 +38,10 @@ import org.jspecify.annotations.Nullable;
  * 31-bit magnitude: durations up to {@code 2^31 - 1} ms round-trip exactly; longer ones are stored
  * in whole seconds, rounded up, and {@link Long#MAX_VALUE} has a dedicated sentinel. The absolute
  * deadlines stay full {@code long}s and are the enforcement point.
+ *
+ * <p><b>The deadlines are monotonic instants</b> ({@code TimeSource.monotonicMillis()}), not epoch
+ * milliseconds: they are minted and compared on the node that owns the entry, so they must never be
+ * persisted, sent to a peer, or compared with {@link System#currentTimeMillis()}.
  */
 @Getter
 @ToString
@@ -72,7 +76,7 @@ public class CacheEntry {
   @ToString.Exclude
   private final int hardTtlMs;
 
-  /** Absolute epoch-millis hard deadline: the entry is never served at or after it. */
+  /** Absolute monotonic hard deadline: the entry is never served at or after it. */
   private final long hardExpireAtMs;
 
   /** Packed soft TTL duration; decoded through {@link #getSoftTtlMs()}. {@code 0} = disabled. */
@@ -80,7 +84,7 @@ public class CacheEntry {
   @ToString.Exclude
   private final int softTtlMs;
 
-  /** Absolute epoch-millis soft deadline; {@code 0} means the window is disabled. */
+  /** Absolute monotonic soft deadline; {@code 0} means the window is disabled. */
   private final long softExpireAtMs;
 
   /**
@@ -98,9 +102,9 @@ public class CacheEntry {
    * @param value           the cached value
    * @param dataVersion     the data stamp ({@code > 0} real, {@code 0} unknown)
    * @param hardTtlMs       the resolved hard TTL (positive or {@link Long#MAX_VALUE})
-   * @param hardExpireAtMs  the absolute hard deadline
+   * @param hardExpireAtMs  the absolute monotonic hard deadline
    * @param softTtlMs       the resolved soft TTL ({@code 0} = disabled)
-   * @param softExpireAtMs  the absolute soft deadline
+   * @param softExpireAtMs  the absolute monotonic soft deadline
    * @throws IllegalArgumentException when a duration is unresolved, negative or unencodable
    */
   CacheEntry(

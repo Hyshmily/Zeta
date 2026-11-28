@@ -31,7 +31,7 @@ import org.junit.jupiter.api.Test;
  * Batched version allocation against the real stamp clock (review 2026-10
  * P2-3): a batch's versions are one contiguous block, a single write ordered
  * against the batch is applied or superseded all-or-nothing, and a batch load
- * stamps its keys inside one reserved block.
+ * stamps each key when its own load runs.
  */
 class BatchStampRangeTest {
 
@@ -129,7 +129,7 @@ class BatchStampRangeTest {
   }
 
   @Test
-  void batchLoad_stampsItsKeysInsideOneContiguousBlock() {
+  void batchLoad_stampsEachKeyWhenItsOwnLoadRuns() {
     try (
       StampTestSupport support = new StampTestSupport(
         new MonotonicStampClock(1L, MonotonicStampClock.DEFAULT_MAX_FORWARD_DRIFT_MS)
@@ -144,11 +144,11 @@ class BatchStampRangeTest {
       long a = support.cache.table().getIfPresent("a").getDataVersion();
       long b = support.cache.table().getIfPresent("b").getDataVersion();
       long c = support.cache.table().getIfPresent("c").getDataVersion();
-      // Keys are stamped in batch order inside one reserved block, all above
-      // the seed allocation.
+      // Each stamp is allocated by the load it belongs to, so a key that never loads spends none
+      // and no key can carry a stamp minted before a concurrent invalidation.
       assertThat(a).isGreaterThan(seedStamp);
-      assertThat(b).isEqualTo(a + 1);
-      assertThat(c).isEqualTo(a + 2);
+      assertThat(b).isGreaterThan(a);
+      assertThat(c).isGreaterThan(b);
     }
   }
 }

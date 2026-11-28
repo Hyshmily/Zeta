@@ -45,7 +45,6 @@ import java.util.*;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.atomic.LongAdder;
-import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.function.Supplier;
 import lombok.extern.slf4j.Slf4j;
@@ -269,7 +268,7 @@ public class HotKeyCache {
     List<String> misses = null;
     Map<String, T> results = new LinkedHashMap<>(CollectionSizing.capacity(cacheKeys.size()));
     Set<String> seen = new HashSet<>(CollectionSizing.capacity(cacheKeys.size()));
-    long now = TimeSource.currentTimeMillis();
+    long now = TimeSource.monotonicMillis();
     StalePolicy stalePolicy = StalePolicy.orDefault(options.stalePolicy());
     ReadContext ctx = null;
 
@@ -319,6 +318,9 @@ public class HotKeyCache {
    * Asynchronously warms a missing or expired entry through a policy loader without blocking the
    * calling worker and without recording synthetic read heat.
    *
+   * <p>A foreground read that joins this flight as a follower receives the loaded value even when
+   * {@link CacheLoader#isCacheable} declines to store it; the refusal only skips the L1 write.
+   *
    * @param key     the physical key to warm
    * @param loader  the background cache loader
    * @param hardTtl the namespace's resolved hard TTL in milliseconds
@@ -335,13 +337,27 @@ public class HotKeyCache {
     if (ttlPolicy.isLive(live)) {
       return CompletableFuture.completedFuture(false);
     }
-    Supplier<VersionedValue> reader = VersionedValue.stampedReload(key, loader, stampClock);
+    // The reader only loads and stamps; admission belongs to the leader commit. A foreground read
+    // may join this flight as a follower, and a value the loader declines to cache must still be
+    // served to it — folding that refusal into a null reader result would hand every waiter null
+    // and charge an isCacheable failure to the data source on the breaker.
+    Supplier<VersionedValue> reader = () -> {
+      long stamp = nextStamp();
+      Object loaded = loader.reload(key);
+      return loaded == null ? null : new VersionedValue(loaded, stamp);
+    };
+
     return singleFlight
-      .loadAsync(key, reader, value -> loadCacheEntry(key, hardTtl, softTtl, value, null, WarmSignal.HEAT))
+      .loadAsync(key, reader, value -> {
+        if (loader.isCacheable(value.value())) {
+          loadCacheEntry(key, hardTtl, softTtl, value, null, WarmSignal.HEAT);
+        }
+      })
       .thenApply(outcome -> {
         if (outcome.status() != LoadStatus.LOADED || outcome.value() == null || outcome.value().value() == null) {
           return false;
         }
+
         CacheEntry resident = quietCache.getIfPresent(key);
         return ttlPolicy.isLive(resident);
       });
@@ -508,7 +524,7 @@ public class HotKeyCache {
     if (entry == null) {
       return null;
     }
-    return entryLifecycle.evictIfExpired(key, entry, TimeSource.currentTimeMillis());
+    return entryLifecycle.evictIfExpired(key, entry, TimeSource.monotonicMillis());
   }
 
   /**
@@ -529,7 +545,7 @@ public class HotKeyCache {
     GetPolicy options
   ) {
     CacheEntry entry = caffeineCache.getIfPresent(key);
-    long now = entry != null ? TimeSource.currentTimeMillis() : 0L;
+    long now = entry != null ? TimeSource.monotonicMillis() : 0L;
     CacheEntry live = entry != null ? entryLifecycle.evictIfExpired(key, entry, now) : null;
     StalePolicy policy = StalePolicy.orDefault(options.stalePolicy());
     boolean softExpired = live != null && ttlPolicy.isSoftExpired(live, now);
@@ -611,28 +627,26 @@ public class HotKeyCache {
       return resolveNullAnswer(key, ctx.report());
     }
 
-    long hardTtl = ttlPolicy.resolveHardTtl(ctx.hardTtlMs());
-    long softTtl = ttlPolicy.resolveSoftTtl(ctx.softTtlMs());
     Supplier<VersionedValue> stampedReader = () -> {
       long stamp = nextStamp();
       Object loaded = ctx.loadValue(key);
       return loaded == null ? null : new VersionedValue(loaded, stamp);
     };
 
-    boolean uncommittedVisible =
-      ctx.callerRunsLoader() &&
-      TransactionSupport.isDeferred(false) &&
-      !TransactionSupport.isCurrentTransactionReadOnly();
+    boolean uncommittedVisible = ctx.callerRunsLoader() && TransactionSupport.isReadWriteTransactionActive();
     // An isolated load observes the transaction's own uncommitted writes, so it must not store
     // anything: not inline, and not through an afterCommit hook either (the pre-read stamp could
     // outrank a concurrent invalidation registered later in the same transaction).
-    Consumer<VersionedValue> leaderCommit = uncommittedVisible
-      ? value -> {}
-      : value -> loadCacheEntry(key, hardTtl, softTtl, value, ctx, WarmSignal.READ);
-
-    LoaderOutcome<VersionedValue> outcome = uncommittedVisible
-      ? singleFlight.loadIsolated(key, stampedReader, leaderCommit)
-      : singleFlight.load(key, stampedReader, ctx.callerRunsLoader(), leaderCommit);
+    LoaderOutcome<VersionedValue> outcome;
+    if (uncommittedVisible) {
+      outcome = singleFlight.loadIsolated(key, stampedReader, value -> {});
+    } else {
+      long hardTtl = ttlPolicy.resolveHardTtl(ctx.hardTtlMs());
+      long softTtl = ttlPolicy.resolveSoftTtl(ctx.softTtlMs());
+      outcome = singleFlight.load(key, stampedReader, ctx.callerRunsLoader(), value ->
+        loadCacheEntry(key, hardTtl, softTtl, value, ctx, WarmSignal.READ)
+      );
+    }
     return resolveLoaded(key, outcome, ctx.report());
   }
 
@@ -666,23 +680,43 @@ public class HotKeyCache {
       return;
     }
 
-    long effectiveHardTtlMs = ttlPolicy.resolveHardTtl(ctx.hardTtlMs());
-    long effectiveSoftTtlMs = ttlPolicy.resolveSoftTtl(ctx.softTtlMs());
-    Map<String, Long> stamps = new HashMap<>(CollectionSizing.capacity(cacheKeys.size()));
-    allocateStampBlocks(cacheKeys, stamps);
-
-    Map<String, LoaderOutcome<VersionedValue>> loaded = singleFlight.load(
-      cacheKeys,
-      k -> {
-        T value = reader.apply(k);
-        if (value == null) {
-          return null;
-        }
-        Long allocated = stamps.get(k);
-        return new VersionedValue(value, allocated != null ? allocated : nextStamp());
-      },
-      (k, value) -> loadCacheEntry(k, effectiveHardTtlMs, effectiveSoftTtlMs, value, null, WarmSignal.READ)
-    );
+    Map<String, LoaderOutcome<VersionedValue>> loaded;
+    if (ctx.callerRunsLoader()) {
+      // Caller-affine batch: each key loads on the calling thread so the reader keeps its
+      // transaction, security context and MDC. Inside a read-write transaction that load also has
+      // to stay isolated — no sharing with a follower and no L1 store.
+      boolean uncommittedVisible = TransactionSupport.isReadWriteTransactionActive();
+      long hardTtlMs = uncommittedVisible ? 0L : ttlPolicy.resolveHardTtl(ctx.hardTtlMs());
+      long softTtlMs = uncommittedVisible ? 0L : ttlPolicy.resolveSoftTtl(ctx.softTtlMs());
+      loaded = new LinkedHashMap<>(CollectionSizing.capacity(cacheKeys.size()));
+      for (String key : cacheKeys) {
+        Supplier<VersionedValue> stampedReader = () -> {
+          long stamp = nextStamp();
+          T value = reader.apply(key);
+          return value == null ? null : new VersionedValue(value, stamp);
+        };
+        LoaderOutcome<VersionedValue> outcome = uncommittedVisible
+          ? singleFlight.loadIsolated(key, stampedReader, value -> {})
+          : singleFlight.load(key, stampedReader, true, value ->
+              loadCacheEntry(key, hardTtlMs, softTtlMs, value, null, WarmSignal.READ)
+            );
+        loaded.put(key, outcome);
+      }
+    } else {
+      long effectiveHardTtlMs = ttlPolicy.resolveHardTtl(ctx.hardTtlMs());
+      long effectiveSoftTtlMs = ttlPolicy.resolveSoftTtl(ctx.softTtlMs());
+      loaded = singleFlight.load(
+        cacheKeys,
+        k -> {
+          // Stamped by the load that owns the key: a block reserved before the reads started would
+          // outrank an invalidation that landed in between, and that fill would be refused.
+          long stamp = nextStamp();
+          T value = reader.apply(k);
+          return value == null ? null : new VersionedValue(value, stamp);
+        },
+        (k, value) -> loadCacheEntry(k, effectiveHardTtlMs, effectiveSoftTtlMs, value, null, WarmSignal.READ)
+      );
+    }
 
     Throwable failure = null;
     Set<Throwable> attached = null;
@@ -825,7 +859,7 @@ public class HotKeyCache {
     if (stale == null) {
       return null;
     }
-    CacheEntry resident = entryLifecycle.evictIfExpired(key, stale, TimeSource.currentTimeMillis());
+    CacheEntry resident = entryLifecycle.evictIfExpired(key, stale, TimeSource.monotonicMillis());
     if (resident == null) {
       return null;
     }
@@ -939,6 +973,12 @@ public class HotKeyCache {
    * Applies one version-guarded write to L1, retires in-flight SingleFlight state, offers the new
    * entry to {@link #warmScheduler}, and optionally broadcasts via {@link #broadcastBuffer}.
    *
+   * <p>The tail runs only for a write this call applied, detected by the mutation's post-image:
+   * a refused write leaves the resident instance untouched, and its version may equal the incoming
+   * stamp (a colliding node id, or a tombstone at that stamp), so a version comparison would treat
+   * the refusal as an application and drop a flight, re-arm renewal and broadcast for a value that
+   * never landed.
+   *
    * @param key       the physical key
    * @param value     the value to store
    * @param stamp     the pre-allocated data version stamp
@@ -947,13 +987,14 @@ public class HotKeyCache {
    * @param broadcast {@code true} to publish a value-carrying PUT broadcast
    */
   private void writeThroughApply(String key, Object value, long stamp, long hardTtl, long softTtl, boolean broadcast) {
-    CacheEntry applied = EntryMutations.mutate(caffeineCache, key, entry ->
+    EntryMutations.Applied applied = EntryMutations.apply(caffeineCache, key, entry ->
       entryForWrite(key, entry, value, stamp, hardTtl, softTtl, true)
     );
+    CacheEntry stored = applied.changed() ? applied.current() : null;
 
-    if (applied != null && applied.getDataVersion() == stamp) {
+    if (stored != null) {
       singleFlight.invalidate(key);
-      offerWarm(key, applied, WarmSignal.WRITE);
+      offerWarm(key, stored, WarmSignal.WRITE);
       if (broadcast) {
         broadcastBuffer.put(key, value, stamp, version -> !entryLifecycle.staleAgainstInvalidation(key, version));
       }
@@ -988,11 +1029,13 @@ public class HotKeyCache {
     if (ctx != null && !ctx.admits(loaded.value())) {
       return;
     }
-    CacheEntry applied = EntryMutations.mutate(caffeineCache, key, entry ->
+    EntryMutations.Applied applied = EntryMutations.apply(caffeineCache, key, entry ->
       entryForWrite(key, entry, loaded.value(), loaded.dataVersion(), hardTtl, softTtl, false)
     );
-    if (applied != null && applied.getDataVersion() == loaded.dataVersion()) {
-      offerWarm(key, applied, signal);
+
+    CacheEntry stored = applied.changed() ? applied.current() : null;
+    if (stored != null) {
+      offerWarm(key, stored, signal);
     }
   }
 
@@ -1018,7 +1061,7 @@ public class HotKeyCache {
     long softTtl,
     boolean equalApplies
   ) {
-    long now = TimeSource.currentTimeMillis();
+    long now = TimeSource.monotonicMillis();
     if (writeRefused(key, entry, stamp, equalApplies, now)) {
       return entry;
     }
@@ -1033,7 +1076,7 @@ public class HotKeyCache {
    * @param entry        the resident entry, or {@code null}
    * @param stamp        the incoming write stamp
    * @param equalApplies {@code true} when an equal stamp is permitted to overwrite
-   * @param now          the current epoch-millisecond timestamp
+   * @param now          the current monotonic-millisecond timestamp
    * @return {@code true} if the write must be skipped
    */
   private boolean writeRefused(String key, @Nullable CacheEntry entry, long stamp, boolean equalApplies, long now) {
@@ -1202,20 +1245,6 @@ public class HotKeyCache {
    */
   private long nextStamp() {
     return stampClock.nextStamp();
-  }
-
-  /**
-   * Allocates contiguous stamp blocks for {@code keys} and stores each key's stamp into {@code into}.
-   *
-   * @param keys the batch keys to stamp
-   * @param into map populated with key-to-stamp assignments
-   */
-  private void allocateStampBlocks(List<String> keys, Map<String, Long> into) {
-    forEachStampBlock(keys, StampClock.MAX_ATOMIC_RANGE, (blockKeys, base) -> {
-      for (int i = 0; i < blockKeys.size(); i++) {
-        into.put(blockKeys.get(i), base + i);
-      }
-    });
   }
 
   /**
