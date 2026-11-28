@@ -507,7 +507,8 @@ public final class KeepWarm implements WarmScheduler, ReadObserver, DisposableBe
     private final String key;
     private final long dataVersion;
     private final long armedAtMonoMs;
-    private final long lastReadMonoMs;
+    /** Raised through {@link #LAST_READ}, which cannot write a final field. */
+    private long lastReadMonoMs;
     private volatile boolean cancelled;
     private volatile @Nullable ScheduledFuture<?> future;
 
