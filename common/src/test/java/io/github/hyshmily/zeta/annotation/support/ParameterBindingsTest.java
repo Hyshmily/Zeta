@@ -18,6 +18,7 @@ package io.github.hyshmily.zeta.annotation.support;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import java.io.Serializable;
 import java.lang.reflect.Method;
 import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.DisplayName;
@@ -42,13 +43,27 @@ class ParameterBindingsTest {
   }
 
   @Test
-  @DisplayName("a parameter that would overwrite another argument's positional slot fails resolution")
-  void conflictingPositionalNameIsRejected() throws NoSuchMethodException {
+  @DisplayName("a parameter named for another positional slot cannot move #pN")
+  void positionalAliasWinsOverAParameterName() throws NoSuchMethodException {
+    Method method = ParameterBindingsTest.class.getDeclaredMethod("shadowedPositions", String.class, String.class);
+
+    ParameterBindings bindings = ParameterBindings.of(method, names(method));
+
+    assertThat(bindings.slotOf("p0")).isZero();
+    assertThat(bindings.slotOf("p1")).isEqualTo(1);
+    assertThat(bindings.resolve("p0", new Object[] { "first", "second" })).isEqualTo("first");
+    assertThat(bindings.resolve("p1", new Object[] { "first", "second" })).isEqualTo("second");
+  }
+
+  @Test
+  @DisplayName("a name that spells an out-of-range positional alias is reserved, not bound")
+  void outOfRangePositionalNameIsReserved() throws NoSuchMethodException {
     Method method = ParameterBindingsTest.class.getDeclaredMethod("conflictingPosition", String.class);
 
-    assertThatThrownBy(() -> ParameterBindings.of(method, names(method)))
-      .isInstanceOf(IllegalStateException.class)
-      .hasMessageContaining("reserved positional parameter 'p1'");
+    ParameterBindings bindings = ParameterBindings.of(method, names(method));
+
+    assertThat(bindings.slotOf("p1")).isEqualTo(-1);
+    assertThat(bindings.slotOf("p0")).isZero();
   }
 
   @Test
@@ -65,6 +80,75 @@ class ParameterBindingsTest {
     assertThat(bindings.resolve("result", args)).isNull();
   }
 
+  @Test
+  @DisplayName("a packed nested varargs tail may contain a null row")
+  void packedNestedVarargsTailAcceptsANullRow() throws NoSuchMethodException {
+    Method method = ParameterBindingsTest.class.getDeclaredMethod("nestedVarargs", String[][].class);
+    Object[] reported = { new Object[] { new String[] { "a" }, null } };
+
+    Object[] packed = ParameterBindings.pack(method, reported);
+
+    assertThat(packed).hasSize(1);
+    assertThat(packed[0]).isInstanceOf(String[][].class);
+    assertThat((Object[]) packed[0]).containsExactly(new String[] { "a" }, null);
+  }
+
+  @Test
+  @DisplayName("a single empty row of a nested varargs parameter stays one row")
+  void singleEmptyNestedVarargsRowIsPreserved() throws NoSuchMethodException {
+    Method method = ParameterBindingsTest.class.getDeclaredMethod("nestedVarargs", String[][].class);
+
+    Object[] packed = ParameterBindings.pack(method, new Object[] { new String[0] });
+
+    assertThat(packed).hasSize(1);
+    assertThat((String[][]) packed[0]).hasDimensions(1, 0);
+  }
+
+  @Test
+  @DisplayName("an expanded nested varargs tail is packed row by row")
+  void expandedNestedVarargsTailIsPacked() throws NoSuchMethodException {
+    Method method = ParameterBindingsTest.class.getDeclaredMethod("nestedVarargs", String[][].class);
+
+    Object[] packed = ParameterBindings.pack(method, new Object[] { new Object[] { "a" }, new Object[] { "b" } });
+
+    assertThat((Object[]) packed[0]).containsExactly(new String[] { "a" }, new String[] { "b" });
+  }
+
+  @Test
+  @DisplayName("an erased packed tail of a primitive-array varargs parameter is adapted row by row")
+  void erasedPackedPrimitiveVarargsTailIsAdapted() throws NoSuchMethodException {
+    Method method = ParameterBindingsTest.class.getDeclaredMethod("primitiveNestedVarargs", int[][].class);
+
+    Object[] packed = ParameterBindings.pack(method, new Object[] { new Object[] { new Object[] { 1, 2 } } });
+
+    assertThat(packed).hasSize(1);
+    assertThat(packed[0]).isInstanceOf(int[][].class);
+    int[][] rows = (int[][]) packed[0];
+    assertThat(rows).hasDimensions(1, 2);
+    assertThat(rows[0]).containsExactly(1, 2);
+  }
+
+  @Test
+  @DisplayName("an argument can be an array only when a declared type can hold one")
+  void mayContainArrayFollowsTheDeclaredTypes() {
+    assertThat(bindingsOf("scalarArgs").mayContainArray()).isFalse();
+    assertThat(bindingsOf("arrayArg").mayContainArray()).isTrue();
+    assertThat(bindingsOf("objectArg").mayContainArray()).isTrue();
+    assertThat(bindingsOf("cloneableArg").mayContainArray()).isTrue();
+    assertThat(bindingsOf("serializableArg").mayContainArray()).isTrue();
+    assertThat(bindingsOf("nestedVarargs").mayContainArray()).as("a varargs tail is declared as its array")
+      .isTrue();
+  }
+
+  private ParameterBindings bindingsOf(String name) {
+    for (Method method : ParameterBindingsTest.class.getDeclaredMethods()) {
+      if (method.getName().equals(name)) {
+        return ParameterBindings.of(method, names(method));
+      }
+    }
+    throw new AssertionError("no such method: " + name);
+  }
+
   @SuppressWarnings("unused")
   private String ownPosition(String p0) {
     return p0;
@@ -76,9 +160,35 @@ class ParameterBindingsTest {
   }
 
   @SuppressWarnings("unused")
+  private String shadowedPositions(String p1, String p0) {
+    return p1 + p0;
+  }
+
+  @SuppressWarnings("unused")
   private String reservedNames(String root, String result) {
     return root + result;
   }
+
+  @SuppressWarnings("unused")
+  private void nestedVarargs(String[]... tails) {}
+
+  @SuppressWarnings("unused")
+  private void primitiveNestedVarargs(int[]... tails) {}
+
+  @SuppressWarnings("unused")
+  private void scalarArgs(String id, long version) {}
+
+  @SuppressWarnings("unused")
+  private void arrayArg(String[] ids) {}
+
+  @SuppressWarnings("unused")
+  private void objectArg(Object payload) {}
+
+  @SuppressWarnings("unused")
+  private void cloneableArg(Cloneable payload) {}
+
+  @SuppressWarnings("unused")
+  private void serializableArg(Serializable payload) {}
 
   private String@Nullable [] names(Method method) {
     return parameterNames.getParameterNames(method);

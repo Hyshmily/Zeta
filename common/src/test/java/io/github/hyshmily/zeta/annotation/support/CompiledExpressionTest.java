@@ -19,16 +19,21 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.lang.reflect.Method;
+import java.util.Map;
 import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.core.DefaultParameterNameDiscoverer;
 import org.springframework.core.ParameterNameDiscoverer;
+import org.springframework.expression.EvaluationContext;
 import org.springframework.expression.spel.standard.SpelExpressionParser;
 
 @DisplayName("CompiledExpression")
 class CompiledExpressionTest {
+
+  private static final ZetaEvaluationContext.ExpressionSupport SUPPORT =
+    ZetaEvaluationContext.ExpressionSupport.defaults();
 
   private final SpelExpressionParser parser = new SpelExpressionParser();
 
@@ -59,16 +64,32 @@ class CompiledExpressionTest {
   @Test
   @DisplayName("a null, empty or whitespace-only attribute is absent, not a parse failure")
   void emptyIsAbsent() {
-    assertThat(CompiledExpression.of(null, parser, "key", method, names(method), true).absent()).isTrue();
-    assertThat(CompiledExpression.of("", parser, "key", method, names(method), true).absent()).isTrue();
-    assertThat(CompiledExpression.of("   ", parser, "unless", method, names(method), true).absent()).isTrue();
-    assertThat(CompiledExpression.of("\t\n", parser, "unless", method, names(method), true).absent()).isTrue();
+    assertThat(
+      CompiledExpression.of(null, parser, SUPPORT.emptyContext(), "key", method, bindings(method), true).absent()
+    ).isTrue();
+    assertThat(
+      CompiledExpression.of("", parser, SUPPORT.emptyContext(), "key", method, bindings(method), true).absent()
+    ).isTrue();
+    assertThat(
+      CompiledExpression.of("   ", parser, SUPPORT.emptyContext(), "unless", method, bindings(method), true).absent()
+    ).isTrue();
+    assertThat(
+      CompiledExpression.of("\t\n", parser, SUPPORT.emptyContext(), "unless", method, bindings(method), true).absent()
+    ).isTrue();
   }
 
   @Test
   @DisplayName("surrounding whitespace is stripped at this entry point")
   void whitespaceIsStripped() {
-    CompiledExpression compiled = CompiledExpression.of("  #p0  ", parser, "key", method, names(method), true);
+    CompiledExpression compiled = CompiledExpression.of(
+      "  #p0  ",
+      parser,
+      SUPPORT.emptyContext(),
+      "key",
+      method,
+      bindings(method),
+      true
+    );
 
     assertThat(compiled.absent()).isFalse();
     assertThat(compiled.raw()).isEqualTo("#p0");
@@ -77,7 +98,9 @@ class CompiledExpressionTest {
   @Test
   @DisplayName("a malformed attribute fails resolution with the role and method")
   void malformedFailsResolution() {
-    assertThatThrownBy(() -> CompiledExpression.of("#{", parser, "cache key", method, names(method), true))
+    assertThatThrownBy(() ->
+      CompiledExpression.of("#{", parser, SUPPORT.emptyContext(), "cache key", method, bindings(method), true)
+    )
       .isInstanceOf(IllegalStateException.class)
       .hasMessageContaining("cache key")
       .hasMessageContaining("cannot be parsed")
@@ -87,7 +110,15 @@ class CompiledExpressionTest {
   @Test
   @DisplayName("a present expression evaluates")
   void presentEvaluates() {
-    CompiledExpression compiled = CompiledExpression.of("1 + 1", parser, "key", method, names(method), true);
+    CompiledExpression compiled = CompiledExpression.of(
+      "1 + 1",
+      parser,
+      SUPPORT.emptyContext(),
+      "key",
+      method,
+      bindings(method),
+      true
+    );
 
     assertThat(compiled.absent()).isFalse();
     assertThat(
@@ -107,8 +138,8 @@ class CompiledExpressionTest {
   }
 
   @Test
-  @DisplayName("only canonical #pN/#aN names map to an index, and a discovered parameter name maps to its position")
-  void argumentIndexResolvesPositionAndName() {
+  @DisplayName("only canonical #pN/#aN names map to an index")
+  void argumentIndexResolvesPosition() {
     assertThat(CompiledExpression.argumentIndex("p0")).isZero();
     assertThat(CompiledExpression.argumentIndex("a7")).isEqualTo(7);
     assertThat(CompiledExpression.argumentIndex("p01")).isEqualTo(-1);
@@ -116,23 +147,21 @@ class CompiledExpressionTest {
     assertThat(CompiledExpression.argumentIndex("pX")).isEqualTo(-1);
     assertThat(CompiledExpression.argumentIndex("p2147483648")).isEqualTo(-1);
     assertThat(CompiledExpression.argumentIndex("result")).isEqualTo(-1);
-
-    assertThat(CompiledExpression.argumentIndex("id", new String[] { "id" })).isZero();
-    assertThat(CompiledExpression.argumentIndex("page", new String[] { "id", "page" })).isEqualTo(1);
-    assertThat(CompiledExpression.argumentIndex("p1", new String[] { "id" })).isEqualTo(1);
-    assertThat(CompiledExpression.argumentIndex("missing", new String[] { "id" })).isEqualTo(-1);
-    assertThat(CompiledExpression.argumentIndex("id", null)).isEqualTo(-1);
   }
 
   @Test
   @DisplayName("an out-of-range positional reference fails resolution with its role and method")
   void outOfRangePositionalReferenceFailsResolution() {
-    assertThatThrownBy(() -> CompiledExpression.of("#p1", parser, "hardTtl", method, names(method), true))
+    assertThatThrownBy(() ->
+      CompiledExpression.of("#p1", parser, SUPPORT.emptyContext(), "hardTtl", method, bindings(method), true)
+    )
       .isInstanceOf(IllegalStateException.class)
       .hasMessageContaining("hardTtl")
       .hasMessageContaining("addresses parameter 1")
       .hasMessageContaining("declares 1");
-    assertThatThrownBy(() -> CompiledExpression.of("#a1", parser, "unless", method, names(method), true))
+    assertThatThrownBy(() ->
+      CompiledExpression.of("#a1", parser, SUPPORT.emptyContext(), "unless", method, bindings(method), true)
+    )
       .isInstanceOf(IllegalStateException.class)
       .hasMessageContaining("unless")
       .hasMessageContaining("addresses parameter 1");
@@ -162,89 +191,54 @@ class CompiledExpressionTest {
   @Test
   @DisplayName("a named variable without parameter metadata fails resolution instead of resolving to null")
   void namedVariableWithoutParameterNamesFailsResolution() {
-    assertThatThrownBy(() -> CompiledExpression.of("#userId", parser, "key", method, null, true))
+    assertThatThrownBy(() ->
+      CompiledExpression.of(
+        "#userId",
+        parser,
+        SUPPORT.emptyContext(),
+        "key",
+        method,
+        ParameterBindings.of(method, null),
+        true
+      )
+    )
       .isInstanceOf(IllegalStateException.class)
       .hasMessageContaining("parameter names are not available")
       .hasMessageContaining("-parameters")
       .hasMessageContaining("#p0");
-    assertThat(CompiledExpression.of("#p0", parser, "key", method, null, true).absent()).isFalse();
-    assertThat(CompiledExpression.of("#root.args[0]", parser, "key", method, null, true).absent()).isFalse();
-    assertThat(CompiledExpression.of("#result", parser, "unless", method, null, true).absent()).isFalse();
-  }
-
-  @Test
-  @DisplayName("a SpEL function call is rejected: the evaluation context registers no functions")
-  void functionCallsAreRejected() {
-    assertThatThrownBy(() -> compiled("#hash(#p0)"))
-      .isInstanceOf(IllegalStateException.class)
-      .hasMessageContaining("cannot call SpEL function")
-      .hasMessageContaining("no functions are registered")
-      .hasMessageContaining("fixture");
-  }
-
-  @Test
-  @DisplayName("root-relative indexer, selection and projection are dynamic, never folded as constants")
-  void rootRelativeCollectionNodesAreDynamic() {
-    assertThat(compiled("[0]").constant()).isFalse();
-    assertThat(compiled("?[#this != null]").constant()).isFalse();
-    assertThat(compiled("![#this]").constant()).isFalse();
-  }
-
-  @Test
-  @DisplayName("every assignment form is rejected: cache expressions are read-only")
-  void assignmentsAreRejected() {
-    assertThatThrownBy(() -> compiled("#x = 1"))
-      .isInstanceOf(IllegalStateException.class)
-      .hasMessageContaining("must not contain assignments")
-      .hasMessageContaining("read-only");
-    assertThatThrownBy(() -> compiled("#result = 1"))
-      .isInstanceOf(IllegalStateException.class)
-      .hasMessageContaining("must not contain assignments");
-    assertThatThrownBy(() -> compiled("#id.foo = #typo"))
-      .isInstanceOf(IllegalStateException.class)
-      .hasMessageContaining("must not contain assignments");
-    assertThatThrownBy(() -> compiled("(#x = 1) + #x"))
-      .isInstanceOf(IllegalStateException.class)
-      .hasMessageContaining("must not contain assignments");
-    assertThatThrownBy(() -> compiled("#x++"))
-      .isInstanceOf(IllegalStateException.class)
-      .hasMessageContaining("must not contain assignments")
-      .hasMessageContaining("read-only");
-    assertThatThrownBy(() -> compiled("#x--"))
-      .isInstanceOf(IllegalStateException.class)
-      .hasMessageContaining("must not contain assignments");
-    assertThatThrownBy(() -> compiled("#root.args[0].age++"))
-      .isInstanceOf(IllegalStateException.class)
-      .hasMessageContaining("must not contain assignments");
-  }
-
-  @Test
-  @DisplayName("a context-free expression is marked constant; any variable or access keeps it dynamic")
-  void constantExpressionsAreMarked() {
-    assertThat(compiled("60000L").constant()).isTrue();
-    assertThat(compiled("60 * 1000").constant()).isTrue();
-    assertThat(compiled("'literal'").constant()).isTrue();
-    assertThat(compiled("#p0").constant()).isFalse();
-    assertThat(compiled("#p0 + 1").constant()).isFalse();
-    assertThat(compiled("T(java.lang.Long).MAX_VALUE").constant()).isFalse();
-    assertThat(compiled("new java.lang.String('x')").constant()).isFalse();
-  }
-
-  @Test
-  @DisplayName("a context-free expression is folded once and a failure names its role and method")
-  void constantExpressionsAreFoldedOnce() {
-    assertThat(compiled("60 * 1000").evaluateConstant()).isEqualTo(60_000);
-    assertThat(compiled("#p0").evaluateConstant()).isNull();
-    assertThat(compiled("null").evaluateConstant()).isNull();
-    assertThat(CompiledExpression.ABSENT.evaluateConstant()).isNull();
-
-    assertThatThrownBy(() ->
-      CompiledExpression.of("1 / 0", parser, "hardTtl", method, names(method), true)
-    )
-      .isInstanceOf(IllegalStateException.class)
-      .hasMessageContaining("hardTtl")
-      .hasMessageContaining("failed constant evaluation")
-      .hasMessageContaining("fixture");
+    assertThat(
+      CompiledExpression.of(
+        "#p0",
+        parser,
+        SUPPORT.emptyContext(),
+        "key",
+        method,
+        ParameterBindings.of(method, null),
+        true
+      ).absent()
+    ).isFalse();
+    assertThat(
+      CompiledExpression.of(
+        "#root.args[0]",
+        parser,
+        SUPPORT.emptyContext(),
+        "key",
+        method,
+        ParameterBindings.of(method, null),
+        true
+      ).absent()
+    ).isFalse();
+    assertThat(
+      CompiledExpression.of(
+        "#result",
+        parser,
+        SUPPORT.emptyContext(),
+        "unless",
+        method,
+        ParameterBindings.of(method, null),
+        true
+      ).absent()
+    ).isFalse();
   }
 
   @Test
@@ -262,9 +256,28 @@ class CompiledExpressionTest {
   void resultNamedParameterIsAllowed() throws NoSuchMethodException {
     Method withResult = CompiledExpressionTest.class.getDeclaredMethod("fixtureWithResultParameter", String.class);
 
-    assertThat(CompiledExpression.of("#p0", parser, "key", withResult, names(withResult), false).absent()).isFalse();
-    assertThat(CompiledExpression.of("#result", parser, "key", withResult, names(withResult), true).absent()).isFalse();
-    assertThat(CompiledExpression.argumentIndex("result", names(withResult))).isEqualTo(-1);
+    assertThat(
+      CompiledExpression.of(
+        "#p0",
+        parser,
+        SUPPORT.emptyContext(),
+        "key",
+        withResult,
+        bindings(withResult),
+        false
+      ).absent()
+    ).isFalse();
+    assertThat(
+      CompiledExpression.of(
+        "#result",
+        parser,
+        SUPPORT.emptyContext(),
+        "key",
+        withResult,
+        bindings(withResult),
+        true
+      ).absent()
+    ).isFalse();
   }
 
   @Test
@@ -273,8 +286,28 @@ class CompiledExpressionTest {
     Method methodWithP01 = CompiledExpressionTest.class.getDeclaredMethod("fixtureWithNonCanonicalName", String.class);
 
     assertThat(
-      CompiledExpression.of("#p01", parser, "key", methodWithP01, names(methodWithP01), true).absent()
+      CompiledExpression.of(
+        "#p01",
+        parser,
+        SUPPORT.emptyContext(),
+        "key",
+        methodWithP01,
+        bindings(methodWithP01),
+        true
+      ).absent()
     ).isFalse();
+  }
+
+  @Test
+  @DisplayName("a selection/projection condition reads its element, not the invocation root")
+  void elementScopedAccessIsNotAnInvocationDependency() {
+    assertThat(compiled("#result.items.?[active].isEmpty()").referencesInvocationContext()).isFalse();
+    assertThat(compiled("#result.?[#this.valid].isEmpty()").referencesInvocationContext()).isFalse();
+    assertThat(compiled("#result.![name]").referencesInvocationContext()).isFalse();
+    // The selection itself still applies to the root before it enters the element scope.
+    assertThat(compiled("?[active]").referencesInvocationContext()).isTrue();
+    // #root stays the invocation root inside the element scope.
+    assertThat(compiled("#result.?[#root.args[0] != null]").referencesInvocationContext()).isTrue();
   }
 
   @Test
@@ -284,7 +317,7 @@ class CompiledExpressionTest {
     assertThat(compiled("#result").referencesResult()).isTrue();
     assertThat(compiled("#p0 == #result").referencesResult()).isTrue();
 
-    assertThat(unchecked("#resultX").referencesResult()).isFalse();
+    assertThat(compiled("'#resultX'").referencesResult()).isFalse();
     assertThat(compiled("#p0").referencesResult()).isFalse();
     assertThat(compiled("'#result'").referencesResult()).isFalse();
     assertThat(compiled("#p0 == 'it''s #result'").referencesResult()).isFalse();
@@ -294,19 +327,65 @@ class CompiledExpressionTest {
     assertThat(compiled("\"#result\" + #result").referencesResult()).isTrue();
   }
 
-  private String@Nullable [] names(Method target) {
-    return parameterNames.getParameterNames(target);
+  @Test
+  @DisplayName("only an AST of literals and operators is a pure constant")
+  void pureConstantClassification() {
+    assertThat(compiled("1 + 1").isPureConstant()).isTrue();
+    assertThat(compiled("'v1:' + 1").isPureConstant()).isTrue();
+    assertThat(compiled("true ? 'a' : 'b'").isPureConstant()).isTrue();
+    assertThat(compiled("#p0").isPureConstant()).isFalse();
+    assertThat(compiled("#root.args[0]").isPureConstant()).isFalse();
+    assertThat(compiled("@cacheConfig").isPureConstant()).isFalse();
+    assertThat(compiled("T(java.lang.Math).abs(-1)").isPureConstant()).isFalse();
+    assertThat(compiled("new java.math.BigDecimal('1')").isPureConstant()).isFalse();
+    assertThat(compiled("'abc'.length()").isPureConstant()).isFalse();
+    assertThat(CompiledExpression.ABSENT.isPureConstant()).isFalse();
+  }
+
+  @Test
+  @DisplayName("an unquoted inline-map key is a literal name, not a #root read")
+  void inlineMapKeyIsNotAnInvocationDependency() {
+    CompiledExpression map = compiled("{ACTIVE: false, DRAFT: true}");
+
+    assertThat(map.referencesInvocationContext()).isFalse();
+    assertThat(map.isPureConstant()).isTrue();
+    assertThat(map.getValue(null)).isEqualTo(Map.of("ACTIVE", false, "DRAFT", true));
+  }
+
+  @Test
+  @DisplayName("the empty context is one read-only instance per support")
+  void emptyContextIsReadOnly() {
+    EvaluationContext context = SUPPORT.emptyContext();
+
+    assertThat(context).isSameAs(SUPPORT.emptyContext());
+    assertThatThrownBy(() -> context.setVariable("x", 1)).isInstanceOf(UnsupportedOperationException.class);
+    assertThat(context.lookupVariable("x")).isNull();
+    assertThat(compiled("T(java.lang.String).valueOf(1)").getValue(null)).isEqualTo("1");
+  }
+
+  @Test
+  @DisplayName("assignment and increment/decrement fail at resolution, not on the first call")
+  void assignmentIsRejectedAtResolution() {
+    assertThatThrownBy(() -> compiled("#id = 'x'"))
+      .isInstanceOf(IllegalStateException.class)
+      .hasMessageContaining("read-only");
+    assertThatThrownBy(() -> compiled("#id++"))
+      .isInstanceOf(IllegalStateException.class)
+      .hasMessageContaining("read-only");
+    assertThatThrownBy(() -> compiled("#id--"))
+      .isInstanceOf(IllegalStateException.class)
+      .hasMessageContaining("read-only");
+  }
+
+  private ParameterBindings bindings(Method target) {
+    return ParameterBindings.of(target, parameterNames.getParameterNames(target));
   }
 
   private CompiledExpression compiled(String raw) {
-    return CompiledExpression.of(raw, parser, "key", method, names(method), true);
+    return CompiledExpression.of(raw, parser, SUPPORT.emptyContext(), "key", method, bindings(method), true);
   }
 
   private CompiledExpression preBody(String raw) {
-    return CompiledExpression.of(raw, parser, "cache key", method, names(method), false);
-  }
-
-  private CompiledExpression unchecked(String raw) {
-    return new CompiledExpression.Present(raw, parser.parseExpression(raw), false, false, false, null);
+    return CompiledExpression.of(raw, parser, SUPPORT.emptyContext(), "cache key", method, bindings(method), false);
   }
 }

@@ -300,6 +300,9 @@ class ZetaCacheAdvisorTest {
     assertThat(filter.matches(String.class)).isFalse();
     assertThat(filter.matches(VerbService.class)).isTrue();
     assertThat(filter.matches(proxyClass)).isTrue();
+    assertThat(filter.matches(org.springframework.data.zeta.RepositoryImplementation.class))
+      .as("a repository's default implementation is where its business interface's advice applies")
+      .isTrue();
   }
 
   @Test
@@ -391,7 +394,10 @@ class ZetaCacheAdvisorTest {
 
     Field classPlans = PlanResolver.class.getDeclaredField("classPlans");
     classPlans.setAccessible(true);
-    Map<?, ?> plans = (Map<?, ?>) ((Map<?, ?>) classPlans.get(resolver)).get(DualKeyReaderImpl.class);
+    Object table = ((Map<?, ?>) classPlans.get(resolver)).get(DualKeyReaderImpl.class);
+    java.lang.reflect.Method plansAccessor = table.getClass().getDeclaredMethod("plans");
+    plansAccessor.setAccessible(true);
+    Map<?, ?> plans = (Map<?, ?>) plansAccessor.invoke(table);
 
     assertThat(plans).hasSize(2);
     assertThat(plans.get(declared))

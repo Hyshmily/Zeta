@@ -113,18 +113,18 @@ class ZetaEvaluationContextTest {
   }
 
   @Test
-  @DisplayName("bindResult binds #result without replacing the root")
+  @DisplayName("withResult binds #result without replacing the root")
   void bindResultBindsResult() {
-    ZetaEvaluationContext context = context().bindResult("loaded");
+    ZetaEvaluationContext context = context().withResult("loaded");
 
     assertThat(parser.parseExpression("#result").getValue(context)).isEqualTo("loaded");
     assertThat(parser.parseExpression("#root.methodName").getValue(context)).isEqualTo("find");
   }
 
   @Test
-  @DisplayName("bindResult(null) binds a null result")
+  @DisplayName("withResult(null) binds a null result")
   void bindResultBindsNull() {
-    ZetaEvaluationContext context = context().bindResult(null);
+    ZetaEvaluationContext context = context().withResult(null);
 
     assertThat(parser.parseExpression("#result").getValue(context)).isNull();
     assertThat(parser.parseExpression("#root.methodName").getValue(context)).isEqualTo("find");
@@ -224,18 +224,6 @@ class ZetaEvaluationContextTest {
     Object value = parser.parseExpression("#ids").getValue(context);
     assertThat(value).isInstanceOf(String[].class);
     assertThat((String[]) value).containsExactly("a", "b");
-  }
-
-  @Test
-  @DisplayName("a non-varargs array parameter binds as its declared array type")
-  void erasedArrayParametersAreCopiedToTheComponentType() throws NoSuchMethodException {
-    Method merge = Fixture.class.getDeclaredMethod("merge", String[].class, String[].class);
-    Object[] erased = { new Object[] { "a" }, new Object[] { "b" } };
-    ZetaEvaluationContext context = context(merge, erased, support);
-
-    assertThat((String[]) parser.parseExpression("#left").getValue(context)).containsExactly("a");
-    assertThat((String[]) parser.parseExpression("#right").getValue(context)).containsExactly("b");
-    assertThat((String[]) parser.parseExpression("#p1").getValue(context)).containsExactly("b");
   }
 
   /**

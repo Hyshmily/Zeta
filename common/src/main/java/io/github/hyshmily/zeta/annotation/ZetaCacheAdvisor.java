@@ -20,6 +20,7 @@ import io.github.hyshmily.zeta.util.Internal;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
 import org.jspecify.annotations.NonNull;
+import org.jspecify.annotations.Nullable;
 import org.springframework.aop.ClassFilter;
 import org.springframework.aop.Pointcut;
 import org.springframework.aop.framework.AopInfrastructureBean;
@@ -104,14 +105,59 @@ public final class ZetaCacheAdvisor extends AbstractBeanFactoryPointcutAdvisor {
    */
   private static final class AnnotationPointcut extends StaticMethodMatcherPointcut {
 
+    private final PlanResolver resolver;
+
+    private AnnotationPointcut(PlanResolver resolver) {
+      this.resolver = resolver;
+    }
+
+    @Override
+    @NonNull
+    public ClassFilter getClassFilter() {
+      return UserTypesClassFilter.INSTANCE;
+    }
+
+    @Override
+    public boolean matches(@NonNull Method method, @NonNull Class<?> targetClass) {
+      return resolver.matches(method, targetClass);
+    }
+
+    @Override
+    public boolean equals(@Nullable Object other) {
+      return this == other || (other instanceof AnnotationPointcut pointcut && resolver.equals(pointcut.resolver));
+    }
+
+    @Override
+    public int hashCode() {
+      return resolver.hashCode();
+    }
+
+    @Override
+    public String toString() {
+      return "ZetaAnnotationPointcut[resolver=" + resolver + "]";
+    }
+  }
+
+  /**
+   * The class-level fast negative, as a named singleton so Spring 6.0.13+'s matcher cache can rely
+   * on a stable, value-identical key across advisor instances and CGLIB proxy generation.
+   */
+  private static final class UserTypesClassFilter implements ClassFilter {
+
+    private static final UserTypesClassFilter INSTANCE = new UserTypesClassFilter();
+
     /**
      * A fast negative for beans that cannot carry a user cache annotation. Every method of every
      * bean otherwise reaches the resolver, whose first question scans and permanently caches that
      * class's method table. A JDK proxy is always admitted: a Spring Data repository's business
      * interfaces carry the annotation even though the generated proxy class is in a framework
-     * package. A CGLIB proxy keeps its user class's package name, so it is not filtered here.
+     * package. Spring Data's own types are admitted for the same reason: a repository's default
+     * implementation lives in {@code org.springframework.data} and carries the business interface
+     * the advice must match. A CGLIB proxy keeps its user class's package name, so it is not
+     * filtered here.
      */
-    private static final ClassFilter USER_TYPES = clazz -> {
+    @Override
+    public boolean matches(@NonNull Class<?> clazz) {
       if (Proxy.isProxyClass(clazz)) {
         return true;
       }
@@ -123,29 +169,27 @@ public final class ZetaCacheAdvisor extends AbstractBeanFactoryPointcutAdvisor {
         !name.startsWith("java.") &&
         !name.startsWith("javax.") &&
         !name.startsWith("jakarta.") &&
-        !name.startsWith("org.springframework.") &&
+        (!name.startsWith("org.springframework.") || name.startsWith("org.springframework.data.")) &&
         !name.startsWith("org.aopalliance.") &&
         !name.startsWith("sun.") &&
         !name.startsWith("com.sun.") &&
         !name.startsWith("jdk.")
       );
-    };
-
-    private final PlanResolver resolver;
-
-    private AnnotationPointcut(PlanResolver resolver) {
-      this.resolver = resolver;
     }
 
     @Override
-    @NonNull
-    public ClassFilter getClassFilter() {
-      return USER_TYPES;
+    public boolean equals(@Nullable Object other) {
+      return other instanceof UserTypesClassFilter;
     }
 
     @Override
-    public boolean matches(@NonNull Method method, @NonNull Class<?> targetClass) {
-      return resolver.matches(method, targetClass);
+    public int hashCode() {
+      return UserTypesClassFilter.class.hashCode();
+    }
+
+    @Override
+    public String toString() {
+      return "ZetaUserTypesClassFilter";
     }
   }
 }

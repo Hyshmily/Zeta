@@ -15,6 +15,8 @@
  */
 package io.github.hyshmily.zeta.annotation;
 
+import io.github.hyshmily.zeta.policy.HeatTrigger;
+import io.github.hyshmily.zeta.policy.KeyFormat;
 import java.lang.annotation.Documented;
 import java.lang.annotation.ElementType;
 import java.lang.annotation.Retention;
@@ -28,21 +30,20 @@ import java.lang.annotation.Target;
  *
  * <p>
  * A method attribute wins when it is non-blank. An empty {@code hardTtl} or
- * {@code softTtl} inherits the class value; the literal {@code "0"} is an
- * explicit "use the configured default" and does not inherit. A cache name that
- * is still blank after the fallback fails startup.
+ * {@code softTtl} inherits the class value; the literal {@code "0"} (like {@code "-1"}) is an
+ * explicit "use the configured default" and does not inherit, so it can mask an inherited value.
+ * A cache name that is still blank after the fallback fails startup.
  *
  * <p>
  * Class declarations merge attribute by attribute, nearest first: a subclass may override only
  * {@code hardTtl} and inherit the parent's {@code cache}. A blank attribute inherits the next
- * declaration outward. The roots are the bean's user class, or the maximal business interfaces of
- * a JDK proxy; only a root the method's declaring type is assignable from contributes, so a
- * sibling interface never lends its namespace or TTLs to another view's method. Complementary
- * attributes from two applicable sibling roots merge; two roots that set the same attribute to
- * different values fail resolution instead of depending on interface order.
- * When no root exposes a configuration, the method's declaring class supplies the fallback. A
- * composed config annotation is discovered through its meta-annotation and {@code @AliasFor}
- * overrides.
+ * declaration outward. A class root merges its superclass chain first and then the interfaces that
+ * declare the method: a sibling interface never lends its namespace or TTLs to another interface's
+ * method, while a method only the class declares falls back to every interface the class
+ * implements. Within that interface graph a sub-interface overrides its parents, and two interfaces
+ * that disagree on an attribute fail startup instead of one winning by scan order. A JDK proxy
+ * resolves against its business interface hierarchy the same way. A composed config annotation is
+ * discovered through its meta-annotation and {@code @AliasFor} overrides.
  */
 @Target({ ElementType.TYPE, ElementType.ANNOTATION_TYPE })
 @Retention(RetentionPolicy.RUNTIME)
@@ -69,4 +70,33 @@ public @interface ZetaConfig {
    * @return the default soft TTL
    */
   String softTtl() default "";
+
+  /**
+   * The type-level default prewarm trigger. {@link HeatTrigger.Option#INHERIT} means "no type-level
+   * default"; a method attribute always wins over this value.
+   *
+   * @return the type-level prewarm trigger declaration
+   */
+  HeatTrigger.Option prewarm() default HeatTrigger.Option.INHERIT;
+
+  /**
+   * The type-level default keep-warm trigger. {@link HeatTrigger.Option#INHERIT} means "no
+   * type-level default"; a method attribute always wins over this value.
+   *
+   * @return the type-level keep-warm trigger declaration
+   */
+  HeatTrigger.Option keepWarm() default HeatTrigger.Option.INHERIT;
+
+  /**
+   * The physical key format for the namespaces this type declares. It is inherited by a method
+   * only when that method also inherits {@link #cache()}: a method that names its own cache must
+   * not silently lend this type's format to another namespace.
+   *
+   * <p>{@link KeyFormat.Option#PLAIN} prints a single scalar key value directly after the
+   * delimiter without type tags and forbids a default key, so every key-bearing declaration in a
+   * PLAIN namespace must name one explicit single-value key.
+   *
+   * @return the key format declaration, or {@link KeyFormat.Option#INHERIT}
+   */
+  KeyFormat.Option keyFormat() default KeyFormat.Option.INHERIT;
 }

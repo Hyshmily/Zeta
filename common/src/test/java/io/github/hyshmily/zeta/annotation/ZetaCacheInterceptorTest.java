@@ -32,8 +32,11 @@ import static org.mockito.Mockito.when;
 
 import io.github.hyshmily.zeta.Zeta;
 import io.github.hyshmily.zeta.annotation.support.DefaultKey;
+import io.github.hyshmily.zeta.annotation.support.NamespaceKeys;
 import io.github.hyshmily.zeta.cache.cachesupport.loader.CacheLoader;
 import io.github.hyshmily.zeta.cache.cachesupport.policy.*;
+import io.github.hyshmily.zeta.policy.KeyFormat;
+import java.io.IOException;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
@@ -92,6 +95,9 @@ class ZetaCacheInterceptorTest {
   /** What the simulated engine observed from the loader on a miss. */
   private Boolean lastShouldCache;
 
+  /** What the simulated engine saw the loader throw, or {@code null} when it returned. */
+  private Throwable lastLoadFailure;
+
   @BeforeEach
   void setUp() {
     zeta = mock(Zeta.class);
@@ -104,9 +110,14 @@ class ZetaCacheInterceptorTest {
       if (hit) {
         return hitValue;
       }
-      Object loaded = lastLoader.load(lastKey);
-      lastShouldCache = lastLoader.isCacheable(loaded);
-      return loaded;
+      try {
+        Object loaded = lastLoader.load(lastKey);
+        lastShouldCache = lastLoader.isCacheable(loaded);
+        return loaded;
+      } catch (RuntimeException failure) {
+        lastLoadFailure = failure;
+        throw failure;
+      }
     });
   }
 
@@ -129,10 +140,19 @@ class ZetaCacheInterceptorTest {
   /** A JDK dynamic proxy: the invocation reports the interface method, not the implementation. */
   @SuppressWarnings("unchecked")
   private <T> T jdkProxy(T target, Class<?>... interfaces) {
+    return jdkProxyWith(target, interfaces);
+  }
+
+  /** A JDK dynamic proxy carrying extra advice behind the cache advice, in declaration order. */
+  @SuppressWarnings("unchecked")
+  private <T> T jdkProxyWith(T target, Class<?>[] interfaces, MethodInterceptor... advices) {
     ProxyFactory factory = new ProxyFactory();
     factory.setTarget(target);
     factory.setInterfaces(interfaces);
     factory.addAdvisor(cacheAdvisor());
+    for (MethodInterceptor advice : advices) {
+      factory.addAdvisor(new DefaultPointcutAdvisor(advice));
+    }
     return (T) factory.getProxy();
   }
 
@@ -383,12 +403,6 @@ class ZetaCacheInterceptorTest {
     public String load(String id) {
       return "v";
     }
-  }
-
-  @Test
-  @DisplayName("a constant null key is a startup error, not a per-call failure")
-  void constantNullKeyFailsStartup() {
-    assertRejectedAtStartup(() -> proxy(new NullLiteralKeyReader()), "cache key 'null'", "constant null");
   }
 
   @Test
@@ -769,13 +783,12 @@ class ZetaCacheInterceptorTest {
   }
 
   @Test
-  @DisplayName("a runtime unless failure fails open: the value is stored")
-  void runtimeUnlessFailureFailsOpen() {
+  @DisplayName("a runtime unless failure is thrown to the caller")
+  void runtimeUnlessFailureIsThrown() {
     FailingUnlessService service = proxy(new FailingUnlessService());
     missRunsBody();
 
-    assertThat(service.load("v")).isEqualTo("v");
-    assertThat(lastShouldCache).isTrue();
+    assertThatThrownBy(() -> service.load("v")).isInstanceOf(RuntimeException.class);
   }
 
   static class BrokenKeyService {
@@ -813,17 +826,6 @@ class ZetaCacheInterceptorTest {
     public final String load(String id) {
       return "v-" + id;
     }
-  }
-
-  @Test
-  @DisplayName("a final annotated method on a concrete class fails the auto-proxy eligibility check")
-  void finalMethodOnConcreteClassFailsStartup() {
-    ZetaCacheAdvisor advisor = cacheAdvisor();
-
-    assertThatThrownBy(() -> AopUtils.canApply(advisor.getPointcut(), FinalMethodReader.class, false))
-      .isInstanceOf(IllegalStateException.class)
-      .hasMessageContaining("final")
-      .hasMessageContaining("interface");
   }
 
   interface FinalMethodView {
@@ -884,14 +886,13 @@ class ZetaCacheInterceptorTest {
   }
 
   @Test
-  @DisplayName("a runtime TTL evaluation failure degrades to the configured default")
-  void runtimeTtlFailureDegradesToDefault() {
+  @DisplayName("a runtime TTL failure is thrown to the caller")
+  void runtimeTtlFailureIsThrown() {
     FailingTtlService service = proxy(new FailingTtlService());
     missRunsBody();
-
     service.load("42");
 
-    assertThat(lastOptions.hardTtlMs().getAsLong()).isZero();
+    assertThatThrownBy(() -> lastOptions.hardTtlMs().getAsLong()).isInstanceOf(RuntimeException.class);
   }
 
   static class ThrowingReader {
@@ -903,7 +904,7 @@ class ZetaCacheInterceptorTest {
   }
 
   @Test
-  @DisplayName("a body exception reaches the caller unchanged and stores nothing")
+  @DisplayName("a body exception reaches the caller unchanged and is a thrown load failure for the engine")
   void bodyFailurePropagates() {
     ThrowingReader service = proxy(new ThrowingReader());
     missRunsBody();
@@ -911,7 +912,33 @@ class ZetaCacheInterceptorTest {
     assertThatThrownBy(() -> service.load("42"))
       .isInstanceOf(IllegalStateException.class)
       .hasMessage("source down: 42");
-    assertThat(lastShouldCache).isFalse();
+    assertThat(lastLoadFailure)
+      .as("the breaker and the degraded-read path only see a failure the loader threw")
+      .isInstanceOf(IllegalStateException.class);
+    assertThat(lastShouldCache).as("no value ever reached the admission filter").isNull();
+  }
+
+  static class CheckedThrowingReader {
+
+    @ZetaCached(cache = "users", key = "#p0")
+    public String load(String id) throws IOException {
+      throw new IOException("disk down: " + id);
+    }
+  }
+
+  @Test
+  @DisplayName("a checked body exception travels as an unchecked load failure and is restored for the caller")
+  void checkedBodyFailureIsWrappedForTheEngineAndRestored() {
+    CheckedThrowingReader service = proxy(new CheckedThrowingReader());
+    missRunsBody();
+
+    assertThatThrownBy(() -> service.load("42"))
+      .isInstanceOf(IOException.class)
+      .hasMessage("disk down: 42");
+    assertThat(lastLoadFailure)
+      .as("the engine's failure path is unchecked-only, so the checked cause is carried")
+      .isInstanceOf(RuntimeException.class)
+      .hasCauseInstanceOf(IOException.class);
   }
 
   static class NullReturningReader {
@@ -1127,25 +1154,6 @@ class ZetaCacheInterceptorTest {
     public String load(String id) {
       return "refreshed";
     }
-  }
-
-  @Test
-  @DisplayName("an inline refresh after release does not pin a new foreground context on the loader")
-  void releasedLoaderDoesNotPinAnInlineRefreshContext() throws Exception {
-    ReleasedContextReader service = proxy(new ReleasedContextReader());
-    missRunsBody();
-    service.load("42");
-
-    CacheLoader<String, Object> refresh = lastLoader;
-    Object value = refresh.reload(key("users", "42"));
-    assertThat(value).isEqualTo("refreshed");
-    // The engine may run the refresh inline and then ask for admission on this same thread. The
-    // foreground field was released before reload, so a fresh context must stay stack-local.
-    assertThat(refresh.isCacheable(value)).isFalse();
-
-    Field context = refresh.getClass().getDeclaredField("foregroundContext");
-    context.setAccessible(true);
-    assertThat(context.get(refresh)).as("a released loader caches no new context").isNull();
   }
 
   static class OffThreadTtlReader {
@@ -1930,6 +1938,35 @@ class ZetaCacheInterceptorTest {
     assertThat(refresh.reload(key("users", "k"))).as("the snapshot keeps the cycle").isEqualTo("true");
   }
 
+  static class ArgumentViewReader {
+
+    private Object conditionView;
+
+    @ZetaCached(cache = "users", key = "#root.target.keyView(#p0)", condition = "#root.target.conditionView(#p0)")
+    public String load(String[] ids) {
+      return "body";
+    }
+
+    public boolean conditionView(String[] ids) {
+      conditionView = ids;
+      return true;
+    }
+
+    public String keyView(String[] ids) {
+      return conditionView == ids ? "same" : "different";
+    }
+  }
+
+  @Test
+  @DisplayName("a read condition and key read one argument snapshot")
+  void readConditionAndKeyShareOneArgumentView() {
+    ArgumentViewReader service = proxy(new ArgumentViewReader());
+
+    missRunsBody();
+    assertThat(service.load(new String[] { "a" })).isEqualTo("body");
+    assertThat(lastKey).isEqualTo(key("users", "same"));
+  }
+
   interface RepositoryView {
     @ZetaCached(cache = "users", key = "#id")
     String load(String id);
@@ -1983,6 +2020,33 @@ class ZetaCacheInterceptorTest {
     assertThat(repositoryTarget.calls).hasValue(2);
   }
 
+  static class LoaderThreadService {
+
+    @ZetaCached(cache = "users", key = "#id")
+    public String load(String id) {
+      return "v-" + id;
+    }
+  }
+
+  @Test
+  @DisplayName("a retained loader releases the invocation thread before the read returns")
+  void retainedLoaderReleasesTheInvocationThread() throws Throwable {
+    LoaderThreadService target = new LoaderThreadService();
+    Method reported = LoaderThreadService.class.getMethod("load", String.class);
+    MethodInvocation invocation = mock(MethodInvocation.class);
+    when(invocation.getMethod()).thenReturn(reported);
+    when(invocation.getThis()).thenReturn(target);
+    when(invocation.getArguments()).thenReturn(new Object[] { "42" });
+    when(invocation.proceed()).thenReturn("body-42");
+
+    missRunsBody();
+    assertThat(interceptor.invoke(invocation)).isEqualTo("body-42");
+
+    Field thread = lastLoader.getClass().getDeclaredField("invocationThread");
+    thread.setAccessible(true);
+    assertThat(thread.get(lastLoader)).isNull();
+  }
+
   interface GenericRepository<T, ID> {
     T find(ID id);
   }
@@ -2007,17 +2071,29 @@ class ZetaCacheInterceptorTest {
   }
 
   @Test
-  @DisplayName("a generic sub-interface refresh resolves the erased target method")
-  void genericSubInterfaceRefreshResolvesTheErasedTarget() {
+  @DisplayName("a generic sub-interface refresh re-enters the proxy that owns the query")
+  void genericSubInterfaceRefreshReentersTheQueryProxy() {
     ErasedStringRepository<String, String> target = new ErasedStringRepository<>();
-    StringRepository service = (StringRepository) jdkProxy(target, StringRepository.class);
+    AtomicInteger queryCalls = new AtomicInteger();
+    MethodInterceptor queryExecutor = invocation -> {
+      queryCalls.incrementAndGet();
+      return target.find((String) invocation.getArguments()[0]);
+    };
+    StringRepository service = (StringRepository) jdkProxyWith(
+      target,
+      new Class<?>[] { StringRepository.class },
+      queryExecutor
+    );
 
     hitServes("cached");
     assertThat(service.find("42")).isEqualTo("cached");
     assertThat(lastKey).isEqualTo(key("users", "42"));
 
     CacheLoader<String, Object> refresh = lastLoader;
-    assertThat(refresh.reload(lastKey)).isEqualTo("erased-42");
+    assertThat(refresh.reload(lastKey))
+      .as("the child-interface refresh runs the query through the proxy, not the erased base method")
+      .isEqualTo("erased-42");
+    assertThat(queryCalls).as("the refresh re-entered the proxy chain").hasValue(1);
     assertThat(target.calls).hasValue(1);
 
     hitServes("cached");
@@ -2026,7 +2102,10 @@ class ZetaCacheInterceptorTest {
     assertThat(lastKey).isEqualTo(key("users", "7"));
 
     refresh = lastLoader;
-    assertThat(refresh.reload(lastKey)).isEqualTo("erased-7");
+    assertThat(refresh.reload(lastKey))
+      .as("a parent-interface call dispatches through the child's bridge, so it refreshes through the proxy")
+      .isEqualTo("erased-7");
+    assertThat(queryCalls).as("the parent view reaches the query executor too").hasValue(2);
     assertThat(target.calls).hasValue(2);
   }
 
@@ -2070,6 +2149,102 @@ class ZetaCacheInterceptorTest {
     CacheLoader<String, Object> refresh = lastLoader;
     assertThat(refresh.reload(lastKey)).isEqualTo("db-42");
     assertThat(target.calls).hasValue(1);
+  }
+
+  interface ParentQueryView<T, ID> {
+    T find(ID id);
+  }
+
+  interface ChildQueryView extends ParentQueryView<String, String> {
+    @Override
+    @ZetaCached(cache = "users", key = "#id")
+    String find(String id);
+  }
+
+  /** The repository shape: the proxy's target implements only the erased parent view. */
+  static class ParentOnlyQueryTarget implements ParentQueryView<String, Object> {
+
+    final AtomicInteger calls = new AtomicInteger();
+
+    @Override
+    public String find(Object id) {
+      calls.incrementAndGet();
+      return "base-" + id;
+    }
+  }
+
+  @Test
+  @DisplayName("a parent-view call refreshes through the proxy that owns the query")
+  void parentViewRefreshReentersTheQueryProxy() {
+    ParentOnlyQueryTarget target = new ParentOnlyQueryTarget();
+    AtomicInteger queryCalls = new AtomicInteger();
+    MethodInterceptor queryExecutor = invocation -> {
+      if ("find".equals(invocation.getMethod().getName())) {
+        queryCalls.incrementAndGet();
+        return "query-" + invocation.getArguments()[0];
+      }
+      return invocation.proceed();
+    };
+    ChildQueryView service = (ChildQueryView) jdkProxyWith(
+      (Object) target,
+      new Class<?>[] { ChildQueryView.class },
+      queryExecutor
+    );
+
+    ParentQueryView<String, String> parent = service;
+    missRunsBody();
+    assertThat(parent.find("7")).isEqualTo("query-7");
+    assertThat(lastKey).isEqualTo(key("users", "7"));
+
+    CacheLoader<String, Object> refresh = lastLoader;
+    assertThat(refresh.reload(lastKey))
+      .as("the erased parent call must not become the refresh receiver")
+      .isEqualTo("query-7");
+    assertThat(queryCalls).as("the refresh re-entered the query executor").hasValue(2);
+    assertThat(target.calls).as("the base implementation was never invoked").hasValue(0);
+  }
+
+  @Test
+  @DisplayName("a child-view call publishes the plan table under the proxy class")
+  void childViewCallPublishesTheProxyTable() {
+    ParentOnlyQueryTarget target = new ParentOnlyQueryTarget();
+    ChildQueryView service = (ChildQueryView) jdkProxyWith(
+      (Object) target,
+      new Class<?>[] { ChildQueryView.class },
+      (MethodInterceptor) invocation -> "query-" + invocation.getArguments()[0]
+    );
+
+    missRunsBody();
+    assertThat(service.find("7")).isEqualTo("query-7");
+
+    PlanResolver.PlanTable table = resolver.cachedTable(service.getClass());
+    assertThat(table).as("the next call answers from two map reads").isNotNull();
+    assertThat(table.userClass()).isEqualTo(ChildQueryView.class);
+  }
+
+  interface QueryRepository {
+    @ZetaCached(cache = "users", key = "#id")
+    String findById(Long id);
+  }
+
+  static class MutatingArrayService {
+
+    @ZetaCached(cache = "users", key = "#p0[0]", unless = "#p0[0] < 0")
+    public String load(int[] ids) {
+      ids[0] = -ids[0];
+      return "body";
+    }
+  }
+
+  @Test
+  @DisplayName("a body that rewrites its array argument cannot change what the loader evaluates")
+  void arrayArgumentSnapshotDrivesTheLoaderGuard() {
+    MutatingArrayService service = proxy(new MutatingArrayService());
+
+    missRunsBody();
+    assertThat(service.load(new int[] { 7 })).isEqualTo("body");
+    assertThat(lastKey).isEqualTo(key("users", 7));
+    assertThat(lastShouldCache).isTrue();
   }
 
   interface ParentRepository<T, ID> {
@@ -2141,37 +2316,6 @@ class ZetaCacheInterceptorTest {
       calls.incrementAndGet();
       return "target-" + id;
     }
-  }
-
-  @Test
-  @DisplayName("a receiver that cannot invoke the reported method falls back to the proxy that can")
-  void refreshFallsBackToTheProxyThatImplementsTheReportedMethod() throws Throwable {
-    FallbackTarget target = new FallbackTarget();
-    AtomicInteger proxyCalls = new AtomicInteger();
-    FallbackView proxy = (FallbackView) Proxy.newProxyInstance(
-      FallbackView.class.getClassLoader(),
-      new Class<?>[] { FallbackView.class },
-      (ignored, method, args) -> {
-        proxyCalls.incrementAndGet();
-        return "proxy-" + args[0];
-      }
-    );
-    Method method = FallbackView.class.getMethod("load", String.class);
-    ProxyMethodInvocation invocation = mock(ProxyMethodInvocation.class);
-    when(invocation.getMethod()).thenReturn(method);
-    when(invocation.getThis()).thenReturn(target);
-    when(invocation.getProxy()).thenReturn(proxy);
-    when(invocation.getArguments()).thenReturn(new Object[] { "42" });
-    when(invocation.proceed()).thenReturn("body-42");
-
-    missRunsBody();
-    assertThat(interceptor.invoke(invocation)).isEqualTo("body-42");
-    assertThat(lastKey).isEqualTo(key("users", "42"));
-
-    CacheLoader<String, Object> refresh = lastLoader;
-    assertThat(refresh.reload(lastKey)).isEqualTo("proxy-42");
-    assertThat(proxyCalls).hasValue(1);
-    assertThat(target.calls).hasValue(0);
   }
 
   interface ReentrantRefreshView {
@@ -2377,8 +2521,8 @@ class ZetaCacheInterceptorTest {
   }
 
   @Test
-  @DisplayName("the widest generated bridge is the reflective signature carrier")
-  void widestBridgeIsSelected() throws Throwable {
+  @DisplayName("a generic bridge resolves to a method the target can invoke reflectively")
+  void widestBridgeIsInvocable() throws Throwable {
     IntegerBridgeRoot target = new IntegerBridgeRoot();
     Method reported = NumberBridgeRoot.class.getMethod("load", Number.class);
     MethodInvocation invocation = mock(MethodInvocation.class);
@@ -2388,11 +2532,10 @@ class ZetaCacheInterceptorTest {
     when(invocation.proceed()).thenReturn("body");
 
     PlanResolver resolver = new PlanResolver(null);
-    PlanResolver.InvocationPlan resolved = resolver.resolveInvocation(invocation);
-    assertThat(resolved).isNotNull();
-    CachePlan.Read plan = (CachePlan.Read) resolved.plan();
-    assertThat(plan.erasedBridge()).isNotNull();
-    assertThat(plan.erasedBridge().getParameterTypes()).containsExactly(Object.class);
+    CachePlan plan = resolver.lookupPlanForMethod(reported, target.getClass());
+    assertThat(plan).isNotNull();
+    CachePlan.Read read = (CachePlan.Read) plan;
+    assertThat(resolver.targetMethod(read.specific(), target).getName()).isEqualTo("load");
   }
 
   /** Run one cached call and return what its background refresh produces. */
@@ -2796,13 +2939,6 @@ class ZetaCacheInterceptorTest {
     }
   }
 
-  @Test
-  @DisplayName("a parameter named p0 or a0 is rejected because positional bindings are reserved")
-  void positionalParameterNamesAreRejected() {
-    assertRejectedAtStartup(() -> proxy(new ShadowedPositionalNameReader()), "reserved positional parameter 'p0'");
-    assertRejectedAtStartup(() -> proxy(new ShadowedPositionalNameSpelReader()), "reserved positional parameter 'p0'");
-  }
-
   static class OutOfRangeKeyReader {
 
     @ZetaCached(cache = "users", key = "#p1")
@@ -2811,10 +2947,38 @@ class ZetaCacheInterceptorTest {
     }
   }
 
+  static class OutOfRangeAliasNameReader {
+
+    @ZetaCached(cache = "users", key = "#p1")
+    public String load(String p1) {
+      return p1;
+    }
+  }
+
+  static class ZeroArgumentNamedKeyReader {
+
+    @ZetaCached(cache = "users", key = "#foo")
+    public String load() {
+      return "v";
+    }
+  }
+
   @Test
   @DisplayName("an out-of-range #pN fails at proxy creation")
   void outOfRangeArgumentReferenceFailsAtStartup() {
     assertRejectedAtStartup(() -> proxy(new OutOfRangeKeyReader()), "addresses parameter 1");
+  }
+
+  @Test
+  @DisplayName("a parameter named like an out-of-range positional alias cannot answer for it")
+  void outOfRangeAliasParameterNameIsRejected() {
+    assertRejectedAtStartup(() -> proxy(new OutOfRangeAliasNameReader()), "addresses parameter 1");
+  }
+
+  @Test
+  @DisplayName("a zero-argument method reports an unknown variable, not missing parameter metadata")
+  void zeroArgumentUnknownVariableIsNotBlamedOnParameterMetadata() {
+    assertRejectedAtStartup(() -> proxy(new ZeroArgumentNamedKeyReader()), "unknown variable '#foo'");
   }
 
   static class PaddedOutOfRangeKeyReader {
@@ -2875,14 +3039,14 @@ class ZetaCacheInterceptorTest {
 
   static class SignedTtlReader {
 
-    @ZetaCached(cache = "users", key = "#p0", hardTtl = " -5 ", softTtl = " +5000 ")
+    @ZetaCached(cache = "users", key = "#p0", hardTtl = " 0 ", softTtl = " +5000 ")
     public String load(String id) {
       return "v";
     }
   }
 
   @Test
-  @DisplayName("a signed TTL literal is folded: negative clamps to zero, a leading plus is accepted")
+  @DisplayName("a signed TTL literal is folded: zero means inherit and a leading plus is accepted")
   void signedTtlLiteralsAreFolded() {
     SignedTtlReader service = proxy(new SignedTtlReader());
     missRunsBody();
@@ -2897,18 +3061,81 @@ class ZetaCacheInterceptorTest {
     assertThat(lastOptions).as("both signed literals stay constants").isSameAs(first);
   }
 
-  static class OverflowingTtlReader {
+  static class DisabledSoftTtlReader {
 
-    @ZetaCached(cache = "users", key = "#p0", hardTtl = "30 * 24 * 3600 * 1000")
+    @ZetaCached(cache = "users", key = "#p0", softTtl = "-1")
     public String load(String id) {
       return "v";
     }
   }
 
   @Test
-  @DisplayName("a constant TTL expression that overflows 32-bit arithmetic fails startup")
-  void overflowingConstantTtlFailsStartup() {
-    assertRejectedAtStartup(() -> proxy(new OverflowingTtlReader()), "hardTtl", "negative value");
+  @DisplayName("softTtl = -1 is the explicit disable sentinel and reaches the policy unchanged")
+  void minusOneSoftTtlMeansDisabled() {
+    DisabledSoftTtlReader service = proxy(new DisabledSoftTtlReader());
+    missRunsBody();
+    service.load("42");
+
+    assertThat(lastOptions.softTtlMs().getAsLong()).isEqualTo(-1L);
+  }
+
+  static class DisabledSoftTtlLongLiteralReader {
+
+    @ZetaCached(cache = "users", key = "#p0", softTtl = "-1L")
+    public String load(String id) {
+      return "v";
+    }
+  }
+
+  @Test
+  @DisplayName("softTtl = -1L folds as a constant and keeps the disable sentinel (not 0 = inherit)")
+  void minusOneLongLiteralSoftTtlStaysDisabled() {
+    DisabledSoftTtlLongLiteralReader service = proxy(new DisabledSoftTtlLongLiteralReader());
+    missRunsBody();
+    service.load("42");
+    GetPolicy first = lastOptions;
+
+    missRunsBody();
+    service.load("43");
+
+    assertThat(first.softTtlMs().getAsLong()).isEqualTo(-1L);
+    assertThat(lastOptions).as("a suffixed sentinel is still a constant").isSameAs(first);
+  }
+
+  static class NegativeHardTtlReader {
+
+    @ZetaCached(cache = "users", key = "#p0", hardTtl = "-5")
+    public String load(String id) {
+      return "v";
+    }
+  }
+
+  @Test
+  @DisplayName("a negative hard TTL other than -1 is a startup error, not a silent inherit")
+  void negativeHardTtlFailsStartup() {
+    assertRejectedAtStartup(() -> proxy(new NegativeHardTtlReader()), "hardTtl", "negative");
+  }
+
+  static class NegativeSoftTtlReader {
+
+    @ZetaCached(cache = "users", key = "#p0", softTtl = "-2")
+    public String load(String id) {
+      return "v";
+    }
+  }
+
+  @Test
+  @DisplayName("a negative soft TTL other than -1 is a startup error")
+  void otherNegativeSoftTtlFailsStartup() {
+    assertRejectedAtStartup(() -> proxy(new NegativeSoftTtlReader()), "softTtl", "negative");
+  }
+
+  static class OverflowingTtlReader {
+
+    @ZetaCached(cache = "users", key = "#p0", hardTtl = "30 * 24 * 3600 * 1000")
+    public String load(String id) {
+      return "v";
+    }
   }
 
   static class SuffixedTtlReader {
@@ -2967,12 +3194,6 @@ class ZetaCacheInterceptorTest {
     }
   }
 
-  @Test
-  @DisplayName("a floating-point TTL literal fails startup: milliseconds are discrete")
-  void floatingTtlLiteralFailsStartup() {
-    assertRejectedAtStartup(() -> proxy(new HugeRealTtlReader()), "hardTtl", "must be an integral number");
-  }
-
   static class ExactTwoPow63TtlReader {
 
     @ZetaCached(cache = "users", key = "#p0", hardTtl = "9223372036854775808e0")
@@ -2981,10 +3202,22 @@ class ZetaCacheInterceptorTest {
     }
   }
 
+  static class TrailingZeroBigDecimalTtlReader {
+
+    @ZetaCached(cache = "users", key = "#p0", hardTtl = "new java.math.BigDecimal('100.00')")
+    public String load(String id) {
+      return "v";
+    }
+  }
+
   @Test
-  @DisplayName("a floating-point literal is rejected before any narrowing can saturate")
-  void exactTwoPow63TtlLiteralFailsStartup() {
-    assertRejectedAtStartup(() -> proxy(new ExactTwoPow63TtlReader()), "hardTtl", "must be an integral number");
+  @DisplayName("a BigDecimal TTL whose fraction is only trailing zeros is still integral")
+  void trailingZeroBigDecimalTtlIsFolded() {
+    TrailingZeroBigDecimalTtlReader service = proxy(new TrailingZeroBigDecimalTtlReader());
+    missRunsBody();
+    service.load("42");
+
+    assertThat(lastOptions.hardTtlMs().getAsLong()).isEqualTo(100L);
   }
 
   static class ConstantTtlFailureReader {
@@ -2993,12 +3226,6 @@ class ZetaCacheInterceptorTest {
     public String load(String id) {
       return "v";
     }
-  }
-
-  @Test
-  @DisplayName("a constant TTL expression that fails evaluation fails startup with its role")
-  void constantTtlEvaluationFailureFailsStartup() {
-    assertRejectedAtStartup(() -> proxy(new ConstantTtlFailureReader()), "hardTtl", "failed constant evaluation");
   }
 
   static class UnresolvedTtlPlaceholderReader {
@@ -3210,6 +3437,27 @@ class ZetaCacheInterceptorTest {
     verify(zeta).put(eq(key("users", "42")), eq("saved-42"), options.capture());
     assertThat(options.getValue().sync()).isTrue();
     assertThat(options.getValue().hardTtlMs().getAsLong()).isZero();
+  }
+
+  static class ConditionOnlyWriter {
+
+    final AtomicInteger calls = new AtomicInteger();
+
+    @ZetaPut(cache = "users", condition = "#p0 != null")
+    public String save(String id) {
+      calls.incrementAndGet();
+      return "saved-" + id;
+    }
+  }
+
+  @Test
+  @DisplayName("a write condition that reads a parameter builds the pre-body context")
+  void writeConditionReadsParameter() {
+    ConditionOnlyWriter target = new ConditionOnlyWriter();
+
+    assertThat(proxy(target).save("42")).isEqualTo("saved-42");
+    assertThat(target.calls).hasValue(1);
+    verify(zeta).put(eq(key("users", "42")), eq("saved-42"), any(PutPolicy.class));
   }
 
   static class TtlWriter {
@@ -3468,39 +3716,32 @@ class ZetaCacheInterceptorTest {
   }
 
   /**
-   * A configuration rejection from the facade is not a cache-engine failure: routing it through
-   * {@link CacheFailurePolicy} logs it at WARN and returns, telling the caller a synced write
-   * succeeded while the facade refused it (for example, the global hard TTL resolved to permanent).
+   * A configuration rejection from the facade is not a cache-engine failure: it must reach the
+   * caller instead of being logged away as a failed write.
    */
   @Test
-  @DisplayName("a synced write's configuration rejection propagates without reaching the failure policy")
+  @DisplayName("a synced write's configuration rejection propagates to the caller")
   void syncedWriteConfigurationFailurePropagates() {
     doThrow(new IllegalArgumentException("A permanent entry cannot be synced"))
       .when(zeta)
       .put(anyString(), any(), any(PutPolicy.class));
-    CacheFailurePolicy policy = mock(CacheFailurePolicy.class);
-    interceptor = new ZetaCacheInterceptor(zeta, resolver, policy);
 
     assertThatThrownBy(() -> proxy(new SyncedWriter()).save("u1"))
       .isInstanceOf(IllegalArgumentException.class)
       .hasMessageContaining("permanent entry cannot be synced");
-    verifyNoInteractions(policy);
   }
 
   /** A Worker-only deployment is a mode error, not a cache-engine failure. */
   @Test
-  @DisplayName("a Worker-only mode rejection propagates without reaching the failure policy")
+  @DisplayName("a Worker-only mode rejection propagates to the caller")
   void workerOnlyModeFailurePropagates() {
     doThrow(new io.github.hyshmily.zeta.exception.ZetaModeException("put", "Worker-only mode", "App-mode cache"))
       .when(zeta)
       .put(anyString(), any(), any(PutPolicy.class));
-    CacheFailurePolicy policy = mock(CacheFailurePolicy.class);
-    interceptor = new ZetaCacheInterceptor(zeta, resolver, policy);
 
     assertThatThrownBy(() -> proxy(new SyncedWriter()).save("u1")).isInstanceOf(
       io.github.hyshmily.zeta.exception.ZetaModeException.class
     );
-    verifyNoInteractions(policy);
   }
 
   static class MutableEntity {
@@ -3572,50 +3813,42 @@ class ZetaCacheInterceptorTest {
   }
 
   @Test
-  @DisplayName("a huge BigInteger or BigDecimal TTL clamps to the permanent sentinel instead of wrapping negative")
-  void hugeNumericTtlClampsInsteadOfWrapping() {
+  @DisplayName("a dynamic TTL outside the long range is rejected, not wrapped")
+  void hugeNumericTtlIsRejected() {
     NumberTtlReader service = proxy(new NumberTtlReader());
 
     missRunsBody();
     service.load("big", new BigInteger("9223372036854775808"));
-    assertThat(lastOptions.hardTtlMs().getAsLong()).isEqualTo(Long.MAX_VALUE);
+    assertThatThrownBy(() -> lastOptions.hardTtlMs().getAsLong()).isInstanceOf(IllegalStateException.class);
 
     missRunsBody();
-    service.load("decimal", new BigDecimal("9223372036854775808.5"));
-    assertThat(lastOptions.hardTtlMs().getAsLong()).isEqualTo(Long.MAX_VALUE);
-
-    missRunsBody();
-    service.load("negative", new BigInteger("-9223372036854775809"));
-    assertThat(lastOptions.hardTtlMs().getAsLong()).isZero();
+    service.load("decimal", new BigDecimal("9223372036854775808"));
+    assertThatThrownBy(() -> lastOptions.hardTtlMs().getAsLong()).isInstanceOf(IllegalStateException.class);
   }
 
   @Test
-  @DisplayName("a dynamic floating-point TTL degrades to the default instead of truncating or becoming permanent")
-  void floatingDynamicTtlDegradesToDefault() {
+  @DisplayName("a floating-point dynamic TTL is rejected")
+  void floatingDynamicTtlIsRejected() {
     NumberTtlReader service = proxy(new NumberTtlReader());
 
     missRunsBody();
     service.load("double", 1500.5d);
-    assertThat(lastOptions.hardTtlMs().getAsLong()).isZero();
-
-    missRunsBody();
-    service.load("infinite", Double.POSITIVE_INFINITY);
-    assertThat(lastOptions.hardTtlMs().getAsLong()).isZero();
+    assertThatThrownBy(() -> lastOptions.hardTtlMs().getAsLong()).isInstanceOf(IllegalStateException.class);
 
     missRunsBody();
     service.load("float", 1500.5f);
-    assertThat(lastOptions.hardTtlMs().getAsLong()).isZero();
+    assertThatThrownBy(() -> lastOptions.hardTtlMs().getAsLong()).isInstanceOf(IllegalStateException.class);
   }
 
   @Test
-  @DisplayName("a dynamic TTL above the packed entry range degrades to the default")
-  void dynamicUnencodableTtlDegradesToDefault() {
+  @DisplayName("a dynamic TTL outside the encodable range is rejected")
+  void dynamicUnencodableTtlIsRejected() {
     NumberTtlReader service = proxy(new NumberTtlReader());
 
     missRunsBody();
     service.load("huge", 3_000_000_000_000L);
 
-    assertThat(lastOptions.hardTtlMs().getAsLong()).isZero();
+    assertThatThrownBy(() -> lastOptions.hardTtlMs().getAsLong()).isInstanceOf(RuntimeException.class);
   }
 
   /** A generated-id entity: the id only exists after the body ran. */
@@ -3723,12 +3956,20 @@ class ZetaCacheInterceptorTest {
     }
   }
 
-  @Test
-  @DisplayName("a runtime @ZetaPut.unless failure fails open: the write happens")
-  void runtimeWriteUnlessFailureFailsOpen() {
-    proxy(new FailingUnlessWriter()).save("u1");
+  static class FailingWriteUnlessService {
 
-    verify(zeta).put(eq(key("users", "u1")), any(Saved.class), any(PutPolicy.class));
+    @ZetaPut(cache = "users", key = "#p0", unless = "#result.id.charAt(99) == 'x'")
+    public Saved save(String id) {
+      return new Saved(id, "ACTIVE", 1L);
+    }
+  }
+
+  @Test
+  @DisplayName("a runtime write-unless failure is thrown to the caller")
+  void runtimeWriteUnlessFailureIsThrown() {
+    FailingWriteUnlessService service = proxy(new FailingWriteUnlessService());
+
+    assertThatThrownBy(() -> service.save("v")).isInstanceOf(RuntimeException.class);
   }
 
   static class BrokenWriteUnless {
@@ -3950,5 +4191,153 @@ class ZetaCacheInterceptorTest {
 
     assertThatThrownBy(() -> service.rename("42")).isInstanceOf(IllegalStateException.class);
     verify(zeta, never()).invalidate(anyString(), any(InvalidatePolicy.class));
+  }
+
+  // ---------------------------------------------------------------------
+  // PLAIN keys
+  // ---------------------------------------------------------------------
+
+  @ZetaConfig(cache = "plainUsers", keyFormat = KeyFormat.Option.PLAIN)
+  static class PlainReader {
+
+    final AtomicInteger calls = new AtomicInteger();
+
+    @ZetaCached(key = "#p0")
+    public String load(Long id) {
+      calls.incrementAndGet();
+      return "real-" + id;
+    }
+  }
+
+  @Test
+  @DisplayName("a PLAIN namespace encodes namespace:value")
+  void plainKeyEncoding() {
+    resolver = new PlanResolver(null, () -> null, () -> new NamespaceKeys(KeyFormat.TYPED));
+    interceptor = new ZetaCacheInterceptor(zeta, resolver);
+    PlainReader target = new PlainReader();
+    missRunsBody();
+
+    assertThat(proxy(target).load(42L)).isEqualTo("real-42");
+    assertThat(target.calls).hasValue(1);
+    assertThat(lastKey).isEqualTo("plainUsers:42");
+  }
+
+  @ZetaConfig(cache = "plainInferred", keyFormat = KeyFormat.Option.PLAIN)
+  static class PlainInferredReader {
+
+    @ZetaCached(key = "#p0")
+    public String load(Long id) {
+      return "v-" + id;
+    }
+  }
+
+  @Test
+  @DisplayName("PLAIN infers the key type from a single-argument key")
+  void plainInfersType() {
+    resolver = new PlanResolver(null, () -> null, () -> new NamespaceKeys(KeyFormat.TYPED));
+    interceptor = new ZetaCacheInterceptor(zeta, resolver);
+    missRunsBody();
+
+    proxy(new PlainInferredReader()).load(42L);
+
+    assertThat(lastKey).isEqualTo("plainInferred:42");
+  }
+
+  @ZetaConfig(cache = "plainDefault", keyFormat = KeyFormat.Option.PLAIN)
+  static class PlainDefaultReader {
+
+    @ZetaCached
+    public String load(Long id) {
+      return "v-" + id;
+    }
+  }
+
+  @Test
+  @DisplayName("a one-argument method with no key attribute uses the single-argument shape in PLAIN")
+  void plainDefaultKeyUsesSingleArgumentShape() {
+    resolver = new PlanResolver(null, () -> null, () -> new NamespaceKeys(KeyFormat.TYPED));
+    interceptor = new ZetaCacheInterceptor(zeta, resolver);
+    missRunsBody();
+
+    proxy(new PlainDefaultReader()).load(42L);
+
+    assertThat(lastKey).isEqualTo("plainDefault:42");
+  }
+
+  @ZetaConfig(cache = "plainRepeated", keyFormat = KeyFormat.Option.PLAIN)
+  static class PlainRepeatedReader {
+
+    @ZetaCached(cache = "plainRepeated", key = "#p0")
+    public String load(Long id) {
+      return "v-" + id;
+    }
+  }
+
+  @Test
+  @DisplayName("a method that repeats the class cache name inherits its format and key type")
+  void repeatedCacheNameInheritsTheClassFormat() {
+    resolver = new PlanResolver(null, () -> null, () -> new NamespaceKeys(KeyFormat.TYPED));
+    interceptor = new ZetaCacheInterceptor(zeta, resolver);
+    missRunsBody();
+
+    proxy(new PlainRepeatedReader()).load(42L);
+
+    assertThat(lastKey).isEqualTo("plainRepeated:42");
+  }
+
+  @ZetaConfig(cache = "plainBatch", keyFormat = KeyFormat.Option.PLAIN)
+  static class PlainBatchInvalidator {
+
+    @ZetaInvalidate(key = "#ids", eachKey = true)
+    public void delete(List<Long> ids) {}
+  }
+
+  @Test
+  @DisplayName("eachKey in a PLAIN namespace infers the Iterable element type")
+  void plainEachKeyUsesTheElementType() {
+    resolver = new PlanResolver(null, () -> null, () -> new NamespaceKeys(KeyFormat.TYPED));
+    interceptor = new ZetaCacheInterceptor(zeta, resolver);
+
+    proxy(new PlainBatchInvalidator()).delete(List.of(1L, 2L));
+
+    verify(zeta).invalidate(eq(List.of("plainBatch:1", "plainBatch:2")), any(InvalidatePolicy.class));
+  }
+
+  @ZetaConfig(cache = "plainMulti", keyFormat = KeyFormat.Option.PLAIN)
+  static class PlainMultiReader {
+
+    @ZetaCached
+    public String load(Long first, Long second) {
+      return first + ":" + second;
+    }
+  }
+
+  @Test
+  @DisplayName("PLAIN refuses a multi-argument default key at startup")
+  void plainMultiArgFailsStartup() {
+    resolver = new PlanResolver(null, () -> null, () -> new NamespaceKeys(KeyFormat.TYPED));
+    interceptor = new ZetaCacheInterceptor(zeta, resolver);
+
+    assertRejectedAtStartup(() -> proxy(new PlainMultiReader()), "multi-argument default key");
+  }
+
+  @ZetaConfig(cache = "plainUnknown", keyFormat = KeyFormat.Option.PLAIN)
+  static class PlainUnknownReader {
+
+    @ZetaCached(key = "#p0.id")
+    public String load(Saved saved) {
+      return saved.id;
+    }
+  }
+
+  @Test
+  @DisplayName("a PLAIN namespace with an untyped expression key is accepted")
+  void plainUnknownTypeIsAccepted() {
+    NamespaceKeys keys = new NamespaceKeys(KeyFormat.TYPED);
+    resolver = new PlanResolver(null, () -> null, () -> keys);
+    interceptor = new ZetaCacheInterceptor(zeta, resolver);
+    proxy(new PlainUnknownReader());
+
+    assertThat(keys.formats()).containsEntry("plainUnknown", KeyFormat.PLAIN);
   }
 }

@@ -136,10 +136,9 @@ public @interface ZetaInvalidate {
    * unwrapped returned value; a pre-invocation condition must not read it.
    *
    * <p>
-   * A malformed expression fails startup; a constant expression is evaluated once at resolution
-   * and must yield a {@code Boolean} or {@code null}. An expression that throws, returns
-   * {@code null} or returns a non-Boolean at evaluation time is treated as {@code false} and
-   * logged at DEBUG. A broken guard must not remove a key the caller meant to keep.
+   * A malformed expression fails startup. At evaluation time a {@code null} result is treated as
+   * {@code false}, any other result is coerced to a Boolean, and a throwing expression propagates
+   * to the caller: a broken guard never silently skips a removal the caller meant to run.
    *
    * @return the removal condition, or empty for "always remove"
    */
@@ -169,7 +168,7 @@ public @interface ZetaInvalidate {
    * Whether the key expression selects many keys. When {@code true}, the
    * expression must resolve to an array or an {@link Iterable}; every non-null
    * element is encoded as one default-key value and removed in one engine batch
-   * call. An empty collection is a no-op; more than 1024 elements fails the
+   * call. An empty collection is a no-op; more than 1024 distinct keys fails the
    * call instead of building an unbounded key list. A top-level {@code null} is
    * a configuration error when resolved before the body and a no-op when
    * resolved after it.

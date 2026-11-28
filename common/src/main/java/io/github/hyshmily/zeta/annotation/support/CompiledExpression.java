@@ -18,582 +18,578 @@ package io.github.hyshmily.zeta.annotation.support;
 import io.github.hyshmily.zeta.util.Internal;
 import java.lang.reflect.Method;
 import java.util.Objects;
+import lombok.Getter;
 import org.jspecify.annotations.Nullable;
 import org.springframework.expression.EvaluationContext;
 import org.springframework.expression.Expression;
 import org.springframework.expression.spel.SpelNode;
-import org.springframework.expression.spel.ast.Assign;
-import org.springframework.expression.spel.ast.BeanReference;
-import org.springframework.expression.spel.ast.CompoundExpression;
-import org.springframework.expression.spel.ast.ConstructorReference;
-import org.springframework.expression.spel.ast.FunctionReference;
-import org.springframework.expression.spel.ast.Indexer;
-import org.springframework.expression.spel.ast.MethodReference;
-import org.springframework.expression.spel.ast.OpDec;
-import org.springframework.expression.spel.ast.OpInc;
-import org.springframework.expression.spel.ast.Projection;
-import org.springframework.expression.spel.ast.PropertyOrFieldReference;
-import org.springframework.expression.spel.ast.Selection;
-import org.springframework.expression.spel.ast.TypeReference;
-import org.springframework.expression.spel.ast.VariableReference;
+import org.springframework.expression.spel.ast.*;
 import org.springframework.expression.spel.standard.SpelExpression;
 import org.springframework.expression.spel.standard.SpelExpressionParser;
 
 /**
- * A SpEL expression compiled once per method, or the shared absent marker.
+ * A SpEL expression compiled once per method, or the shared {@link #ABSENT} marker.
  *
- * <p><b>Read-only contract.</b> A cache expression is a pure function of the invocation:
- * key, TTL and {@code unless} may read arguments and the result, never write. An assignment
- * ({@code #x = ...}, {@code #user.name = ...}) or an increment/decrement ({@code #x++},
- * {@code #x--}) is rejected at resolution, so an expression can neither mutate the caller's
- * arguments nor change the evaluation context between phases.
+ * <p>The expression is parsed at resolution time so syntax errors fail bean creation early. Static
+ * AST inspection also validates variable references: every {@code #name} must be {@code #result}
+ * (when the phase binds a result), {@code #this}/{@code #root}, or a parameter declared by the
+ * method. A misspelt variable is treated as a configuration error rather than a runtime {@code null}.
  *
- * <p>Resolution is the fail-fast boundary: a configured expression that cannot be parsed
- * throws with the attribute role and the method, so a typo fails application startup
- * instead of becoming a per-call log storm. Absent (a null, empty or whitespace-only
- * attribute) is not a failure and skips the tier silently: {@code parseExpression("")}
- * throws, so blankness is decided before parsing and such an attribute is never compiled.
- *
- * <p><b>AST inspection.</b> One walk collects every variable reference, rejects a function call and
- * marks whether the expression is a compile-time constant: only literals and operators qualify,
- * while a variable, bean, property, method, constructor or type access keeps the expression
- * dynamic. An indexer, selection or projection without an explicit receiver applies to
- * {@code #root}, so it is dynamic as well; folding it against an empty context would fail at
- * resolution. A variable inside a string literal or a property name is therefore not mistaken
- * for a reference. Every positional reference ({@code #pN}/{@code #aN}) is validated
- * against the method's arity at resolution. A context-free expression is evaluated exactly once
- * while the plan is built and the resulting value is stored on the {@link Present}, so a constant
- * key, guard or TTL costs one field read at runtime and a constant failure names its role and
- * method instead of becoming a per-call exception.
- *
- * <p><b>No SpEL functions.</b> The evaluation context registers no function resolver, so
- * {@code #fn(...)} could only throw on every evaluation. It is rejected at resolution instead of
- * leaving an {@code unless} or TTL to swallow the exception and degrade.
- *
- * <p><b>Unknown variables fail resolution.</b> The legal variable set is statically known:
- * {@code #root}, {@code #this}, every in-range {@code #pN}/{@code #aN}, every parameter name,
- * and {@code #result} only where the caller declares it available. When the method carries no
- * parameter metadata, a named variable is rejected too: the runtime context is built from the
- * same {@code null} names and could only resolve it to {@code null}. A misspelled name such as
- * {@code #reslt} is rejected here instead of silently evaluating to {@code null}.
- *
- * <p><b>Canonical positional names belong to the slot table.</b> {@code pN}/{@code aN} are
- * generated bindings; {@link ParameterBindings} owns the table and rejects a parameter name that
- * would point at a different argument, while a parameter named for its own slot is harmless.
- * {@code root}, {@code this} and {@code result} are bound ahead of the table — SpEL's root/active
- * object and the context's result field — so a parameter with one of those names stays legal and
- * the reserved name never resolves to it.
- *
- * <p><b>{@code #result} is declared, not guessed.</b> The caller states whether the
- * expression is evaluated before the body (a read key/TTL, a pre-invocation invalidation)
- * or after it. A pre-body expression that references {@code #result} is rejected.
+ * <p>Evaluation is a pure function of the invocation. Assignment, increment/decrement and function
+ * references are rejected while parsing — the contexts this layer evaluates with are read-only and
+ * register no functions — so a state-mutating typo fails bean creation instead of the first call.
+ * Runtime failures propagate to the caller instead of being swallowed into default answers.
  */
 @Internal
-public sealed interface CompiledExpression permits CompiledExpression.Absent, CompiledExpression.Present {
-  /** Shared carrier for a null/empty attribute — no expression, no failure. */
-  CompiledExpression ABSENT = new Absent();
+public final class CompiledExpression {
+
+  /** The shared absent expression marker. */
+  public static final CompiledExpression ABSENT = new CompiledExpression(
+    null,
+    null,
+    null,
+    false,
+    false,
+    false,
+    false,
+    null
+  );
+
+  private final @Nullable String raw;
+  private final @Nullable Expression expression;
+
+  /** The read-only context of the owning resolver, used when a phase passes none. */
+  private final @Nullable EvaluationContext emptyContext;
+
+  private final boolean referencesResult;
+  private final boolean referencesInvocationContext;
+
+  /** Whether the AST is free of every node that can only be evaluated at runtime.
+   * -- GETTER --
+   *  Returns whether this expression is present and evaluates from literals and operators alone.
+   * <p>A pure constant reads no variable, bean, type, constructor, function, property, method or
+   * collection element of the invocation, so resolution can evaluate it once and store the result.
+   *
+   * @return {@code true} if the expression can be evaluated at resolution time
+   */
+  @Getter
+  private final boolean pureConstant;
+
+  private final boolean wholeRootArgs;
+  private final @Nullable String singleVariable;
 
   /**
-   * Compile one attribute, classifying blank as absent and a parse failure as a
-   * configuration error. Surrounding whitespace is stripped at this entry point, so
-   * {@code unless = "   "} is the same absent attribute as {@code ""}.
+   * Creates a compiled expression instance with precomputed static analysis facts.
    *
-   * @param raw            the raw attribute text (may be {@code null})
-   * @param parser         the shared parser
-   * @param role           the attribute role named in the failure message
-   * @param method         the method the attribute belongs to
-   * @param parameterNames the method's parameter names, or {@code null} when they were not discoverable
-   * @param resultAllowed  whether {@code #result} is bound when this expression is evaluated
-   * @return the compiled-or-absent carrier, never {@code null}
-   * @throws IllegalStateException when the attribute was configured but cannot be parsed,
-   *                               contains an assignment or increment/decrement, calls a SpEL
-   *                               function, addresses an out-of-range parameter, references an
-   *                               unknown or unbindable named variable, reads {@code #result}
-   *                               before assignment, or is a constant expression that fails to
-   *                               evaluate
+   * @param raw                         the stripped expression text, or {@code null} when absent
+   * @param expression                  the parsed SpEL expression, or {@code null} when absent
+   * @param emptyContext                the owning resolver's context-free context, or {@code null}
+   *                                    for {@link #ABSENT}
+   * @param referencesResult            whether {@code #result} is referenced
+   * @param referencesInvocationContext whether non-result invocation state or beans are referenced
+   * @param pureConstant                whether the AST holds only literals and operators
+   * @param wholeRootArgs               whether the entire AST is exactly {@code #root.args}
+   * @param singleVariable              the variable name if the entire AST is a single variable
+   *                                    reference, or {@code null} otherwise
    */
-  static CompiledExpression of(
+  private CompiledExpression(
+    @Nullable String raw,
+    @Nullable Expression expression,
+    @Nullable EvaluationContext emptyContext,
+    boolean referencesResult,
+    boolean referencesInvocationContext,
+    boolean pureConstant,
+    boolean wholeRootArgs,
+    @Nullable String singleVariable
+  ) {
+    this.raw = raw;
+    this.expression = expression;
+    this.emptyContext = emptyContext;
+    this.referencesResult = referencesResult;
+    this.referencesInvocationContext = referencesInvocationContext;
+    this.pureConstant = pureConstant;
+    this.wholeRootArgs = wholeRootArgs;
+    this.singleVariable = singleVariable;
+  }
+
+  /**
+   * Compiles and statically validates one annotation expression attribute.
+   *
+   * @param raw           the raw attribute text; {@code null} or blank yields {@link #ABSENT}
+   * @param parser        the shared SpEL parser
+   * @param emptyContext  the owning resolver's context-free context
+   * @param role          the attribute name used in diagnostic messages
+   * @param method        the annotated method
+   * @param bindings      the method's parameter slot table
+   * @param resultAllowed whether {@code #result} is allowed in this evaluation phase
+   * @return the compiled expression, or {@link #ABSENT} when {@code raw} is {@code null} or blank
+   * @throws IllegalStateException if the expression cannot be parsed or references an invalid variable
+   */
+  public static CompiledExpression of(
     @Nullable String raw,
     SpelExpressionParser parser,
+    EvaluationContext emptyContext,
     String role,
     Method method,
-    String@Nullable [] parameterNames,
+    ParameterBindings bindings,
     boolean resultAllowed
   ) {
+    Objects.requireNonNull(parser, "parser must not be null");
+    Objects.requireNonNull(emptyContext, "emptyContext must not be null");
+    Objects.requireNonNull(role, "role must not be null");
+    Objects.requireNonNull(method, "method must not be null");
+    Objects.requireNonNull(bindings, "bindings must not be null");
+
     String text = raw == null ? null : raw.strip();
     if (text == null || text.isEmpty()) {
       return ABSENT;
     }
-    Expression expression;
+
+    Expression expression = parse(text, parser, role, method);
+    if (expression instanceof SpelExpression spel) {
+      SpelNode root = spel.getAST();
+      AstInspector inspector = new AstInspector(text, role, method, bindings, resultAllowed);
+      inspector.inspect(root, false, false);
+      String singleVariable = root instanceof VariableReference ref ? variableName(ref) : null;
+      boolean pure =
+        !inspector.referencesResult && !inspector.referencesInvocationContext && !inspector.referencesRuntimeCall;
+      return new CompiledExpression(
+        text,
+        expression,
+        emptyContext,
+        inspector.referencesResult,
+        inspector.referencesInvocationContext,
+        pure,
+        isWholeRootArgs(root),
+        singleVariable
+      );
+    }
+
+    // Non-SpelExpression fallback: conservatively assume invocation context is required.
+    return new CompiledExpression(text, expression, emptyContext, false, true, false, false, null);
+  }
+
+  /**
+   * Returns whether this expression is present (i.e., configured with non-blank text).
+   *
+   * @return {@code true} if an expression is present
+   */
+  public boolean present() {
+    return expression != null;
+  }
+
+  /**
+   * Returns whether this expression is absent so every query behaves as if unconfigured.
+   *
+   * @return {@code true} if no expression is configured
+   */
+  public boolean absent() {
+    return expression == null;
+  }
+
+  /**
+   * Returns the stripped attribute text.
+   *
+   * @return the expression text, or {@code null} when absent
+   */
+  public @Nullable String raw() {
+    return raw;
+  }
+
+  /**
+   * Returns whether evaluating this expression requires a per-invocation {@link EvaluationContext}.
+   *
+   * @return {@code true} if the expression is present and depends on {@code #result}, invocation
+   *         state, or bean references
+   */
+  public boolean needsContext() {
+    return expression != null && (referencesResult || referencesInvocationContext);
+  }
+
+  /**
+   * Returns whether this expression references {@code #result}.
+   *
+   * @return {@code true} if {@code #result} appears in the AST
+   */
+  public boolean referencesResult() {
+    return referencesResult;
+  }
+
+  /**
+   * Returns whether this expression depends on invocation state other than {@code #result}, such as
+   * a parameter variable, {@code #root}/{@code #this}, an implicit root property/method/indexer
+   * access, or a {@code @beanName} reference.
+   *
+   * @return {@code true} if non-result invocation context is referenced
+   */
+  public boolean referencesInvocationContext() {
+    return referencesInvocationContext;
+  }
+
+  /**
+   * Returns whether the entire AST is exactly {@code #root.args}.
+   *
+   * @return {@code true} if the expression is precisely {@code #root.args}
+   */
+  public boolean wholeRootArgs() {
+    return wholeRootArgs;
+  }
+
+  /**
+   * Resolves the zero-based parameter slot selected directly as a single value by this key
+   * expression, or {@code -1} if the expression does not map to a single parameter slot.
+   *
+   * <p>When the expression is absent, {@code eachKey} is {@code false}, and the method has a single
+   * non-varargs parameter, slot {@code 0} is selected implicitly.
+   *
+   * @param method   the annotated method
+   * @param bindings the method's parameter slot table
+   * @param eachKey  whether the key is expanded to one key per element
+   * @return the zero-based parameter slot, or {@code -1}
+   */
+  public int singleArgumentSlot(Method method, ParameterBindings bindings, boolean eachKey) {
+    int slot = singleVariable == null ? -1 : bindings.slotOf(singleVariable);
+    if (slot < 0 && !eachKey && absent() && method.getParameterCount() == 1 && !method.isVarArgs()) {
+      return 0;
+    }
+    return slot;
+  }
+
+  /**
+   * Resolves the zero-based parameter slot that may be read directly without SpEL evaluation,
+   * excluding a varargs tail parameter which must go through SpEL so the expanded array is preserved.
+   *
+   * @param method   the annotated method
+   * @param bindings the method's parameter slot table
+   * @param eachKey  whether the key is expanded to one key per element
+   * @return the zero-based parameter slot, or {@code -1}
+   */
+  public int directArgumentSlot(Method method, ParameterBindings bindings, boolean eachKey) {
+    int slot = singleArgumentSlot(method, bindings, eachKey);
+    return slot >= 0 && method.isVarArgs() && slot == method.getParameterCount() - 1 ? -1 : slot;
+  }
+
+  /**
+   * Evaluates this expression against the given context.
+   *
+   * @param context the phase context, or {@code null} when the expression reads no invocation state
+   * @return the evaluated value, or {@code null} if absent or the expression evaluates to {@code null}
+   */
+  public @Nullable Object getValue(@Nullable EvaluationContext context) {
+    Expression expr = this.expression;
+    return expr == null ? null : expr.getValue(resolveContext(context));
+  }
+
+  /**
+   * Evaluates this expression and coerces the result to the required type.
+   *
+   * @param context the phase context, or {@code null} when the expression reads no invocation state
+   * @param type    the required result type
+   * @param <T>     the result type
+   * @return the evaluated value, or {@code null} if absent or the expression evaluates to {@code null}
+   */
+  public <T> @Nullable T getValue(@Nullable EvaluationContext context, Class<T> type) {
+    Expression expr = this.expression;
+    return expr == null ? null : expr.getValue(resolveContext(context), type);
+  }
+
+  /**
+   * Evaluates an admission guard: an absent guard admits, while a {@code null} or non-true answer
+   * denies admission.
+   *
+   * @param context the phase context, or {@code null} when the guard reads no invocation state
+   * @return {@code true} if the guarded operation may proceed
+   */
+  public boolean evalAdmission(@Nullable EvaluationContext context) {
+    Expression expr = this.expression;
+    return expr == null || evaluatesTrue(expr, context);
+  }
+
+  /**
+   * Evaluates a veto guard: an absent guard does not veto, and a {@code null} or non-true answer
+   * does not veto either.
+   *
+   * @param context the phase context, or {@code null} when the guard reads no invocation state
+   * @return {@code true} if the guard vetoes the operation
+   */
+  public boolean evalVeto(@Nullable EvaluationContext context) {
+    Expression expr = this.expression;
+    return expr != null && evaluatesTrue(expr, context);
+  }
+
+  /**
+   * Evaluates a non-null expression as a boolean condition.
+   *
+   * @param expression the parsed expression to evaluate
+   * @param context    the evaluation context, or {@code null} when the expression reads no
+   *                   invocation state
+   * @return {@code true} only if the expression evaluates to {@link Boolean#TRUE}
+   */
+  private boolean evaluatesTrue(Expression expression, @Nullable EvaluationContext context) {
+    return Boolean.TRUE.equals(expression.getValue(resolveContext(context), Boolean.class));
+  }
+
+  /**
+   * Returns the provided context or falls back to the owning resolver's context-free context.
+   *
+   * @param context the nullable evaluation context
+   * @return a non-null evaluation context
+   */
+  private EvaluationContext resolveContext(@Nullable EvaluationContext context) {
+    return context != null ? context : Objects.requireNonNull(emptyContext, "emptyContext must not be null");
+  }
+
+  /**
+   * Parses raw SpEL text and wraps parser failures in a descriptive {@link IllegalStateException}.
+   *
+   * @param text   the stripped SpEL text
+   * @param parser the SpEL parser
+   * @param role   the attribute name for diagnostics
+   * @param method the annotated method
+   * @return the parsed {@link Expression}
+   * @throws IllegalStateException if parsing fails
+   */
+  private static Expression parse(String text, SpelExpressionParser parser, String role, Method method) {
     try {
-      expression = parser.parseExpression(text);
+      return parser.parseExpression(text);
     } catch (RuntimeException e) {
       throw new IllegalStateException(role + " '" + text + "' cannot be parsed for " + method, e);
     }
-    boolean constant = true;
-    boolean referencesResult = false;
-    if (expression instanceof SpelExpression spel) {
-      AstFacts facts = new AstFacts();
-      inspectAst(spel.getAST(), text, role, method, parameterNames, resultAllowed, facts);
-      constant = facts.constant();
-      referencesResult = facts.referencesResult();
-    }
-    Object constantValue = constant ? evaluateConstant(expression, text, role, method) : null;
-    return new Present(
-      text,
-      expression,
-      constant,
-      isWholeRootArgs(expression),
-      referencesResult,
-      constantValue
-    );
-  }
-
-  /** No expression configured (null/empty attribute): skip the tier silently. */
-  boolean absent();
-
-  /** Whether the expression evaluates without an invocation context. */
-  boolean constant();
-
-  /**
-   * Whether evaluation needs an invocation context: a configured expression that
-   * is not a compile-time constant. An absent expression and a folded constant
-   * answer {@code false}.
-   *
-   * @return {@code true} when a context must be built
-   */
-  default boolean needsContext() {
-    return !absent() && !constant();
-  }
-
-  /** The stripped attribute text, or {@code null} when absent. */
-  @Nullable
-  String raw();
-
-  /**
-   * Evaluate the expression, or return {@code null} when the attribute was
-   * absent.
-   *
-   * @param context the evaluation context; a constant expression ignores it and may receive
-   *                {@code null}
-   * @return the evaluation result
-   */
-  @Nullable
-  Object getValue(EvaluationContext context);
-
-  /**
-   * Evaluate the expression with a required result type, or return {@code null}
-   * when the attribute was absent.
-   *
-   * @param context the evaluation context; a constant expression ignores it and may receive
-   *                {@code null}
-   * @param type    the required result type
-   * @param <T>     the result type
-   * @return the evaluation result, or {@code null} when absent
-   */
-  <T> @Nullable T getValue(EvaluationContext context, Class<T> type);
-
-  /**
-   * The value of a context-free expression, computed once when the expression was compiled.
-   * An absent or non-constant expression returns {@code null}; a constant expression that
-   * evaluates to {@code null} also returns {@code null}, so the caller decides whether a null
-   * value is legal for its role.
-   *
-   * @return the constant value, or {@code null}
-   */
-  @Nullable
-  Object evaluateConstant();
-
-  /**
-   * Whether the expression reads the post-body {@code #result}; because the bit is
-   * collected from the parsed tree, {@code key = "'#result'"} and a property named
-   * {@code result} stay legal.
-   *
-   * @return {@code true} when {@code #result} is referenced
-   */
-  boolean referencesResult();
-
-  /**
-   * The one variable a whole expression names, or {@code null} when the
-   * expression is absent or larger than a single variable reference.
-   *
-   * @return the variable name without the leading {@code #}, or {@code null}
-   */
-  @Nullable
-  String singleVariable();
-
-  /**
-   * Whether the whole expression is exactly {@code #root.args}, the argument list
-   * itself rather than one argument value. The key plan uses this to apply the
-   * multi-argument default encoding, so an explicit {@code key = "#root.args"}
-   * addresses the same entry as an absent {@code key}.
-   *
-   * @return {@code true} for a whole {@code #root.args} reference
-   */
-  boolean wholeRootArgs();
-
-  /** The absent state: every query answers as if no expression were configured. */
-  final class Absent implements CompiledExpression {
-
-    private Absent() {}
-
-    @Override
-    public boolean absent() {
-      return true;
-    }
-
-    @Override
-    public boolean constant() {
-      return true;
-    }
-
-    @Override
-    public @Nullable String raw() {
-      return null;
-    }
-
-    @Override
-    public @Nullable Object getValue(EvaluationContext context) {
-      return null;
-    }
-
-    @Override
-    public <T> @Nullable T getValue(EvaluationContext context, Class<T> type) {
-      return null;
-    }
-
-    @Override
-    public @Nullable Object evaluateConstant() {
-      return null;
-    }
-
-    @Override
-    public boolean referencesResult() {
-      return false;
-    }
-
-    @Override
-    public @Nullable String singleVariable() {
-      return null;
-    }
-
-    @Override
-    public boolean wholeRootArgs() {
-      return false;
-    }
   }
 
   /**
-   * A compiled expression.
+   * Checks whether the root AST node represents the exact expression {@code #root.args}.
    *
-   * <p>The three AST facts the invocation path asks for are boolean fields: whether the expression
-   * is a compile-time constant, whether it is exactly {@code #root.args}, and whether it reads
-   * {@code #result}.
-   *
-   * @param raw               the stripped attribute text
-   * @param expression        the compiled expression
-   * @param constant          whether the expression evaluates without an invocation context
-   * @param wholeRootArgs     whether the whole expression is {@code #root.args}
-   * @param referencesResult  whether the expression reads the post-body {@code #result}
-   * @param constantValue     the value of a context-free expression, evaluated once at resolution
+   * @param root the AST root node
+   * @return {@code true} if the AST is strictly {@code #root.args}
    */
-  record Present(
-    String raw,
-    Expression expression,
-    boolean constant,
-    boolean wholeRootArgs,
-    boolean referencesResult,
-    @Nullable Object constantValue
-  ) implements CompiledExpression {
-    public Present {
-      Objects.requireNonNull(raw, "raw");
-      Objects.requireNonNull(expression, "expression");
-    }
-
-    @Override
-    public boolean absent() {
-      return false;
-    }
-
-    @Override
-    public @Nullable Object getValue(EvaluationContext context) {
-      return constant ? constantValue : expression.getValue(context);
-    }
-
-    @Override
-    public <T> @Nullable T getValue(EvaluationContext context, Class<T> type) {
-      return constant ? type.cast(constantValue) : expression.getValue(context, type);
-    }
-
-    @Override
-    public @Nullable Object evaluateConstant() {
-      return constantValue;
-    }
-
-    @Override
-    public @Nullable String singleVariable() {
-      if (expression instanceof SpelExpression spel && spel.getAST() instanceof VariableReference reference) {
-        return variableName(reference);
-      }
-      return null;
-    }
-  }
-
-  /** The two AST facts one walk collects, before they are stored on the {@link Present}. */
-  final class AstFacts {
-
-    private boolean constant = true;
-
-    private boolean referencesResult;
-
-    void markDynamic() {
-      constant = false;
-    }
-
-    void markResult() {
-      referencesResult = true;
-    }
-
-    boolean constant() {
-      return constant;
-    }
-
-    boolean referencesResult() {
-      return referencesResult;
-    }
-  }
-
-  /**
-   * One ordered walk: reject a mutation or a function call, validate every variable as it is
-   * found, and decide whether the tree is context-free. A property or method access is dynamic
-   * even when its receiver is a literal, because the access itself is not part of the read-only
-   * literal subset. An indexer, selection or projection without an explicit receiver applies to
-   * {@code #root}, so it is dynamic too; folding it against an empty context would fail at
-   * resolution.
-   */
-  private static void inspectAst(
-    SpelNode node,
-    String text,
-    String role,
-    Method method,
-    String@Nullable [] parameterNames,
-    boolean resultAllowed,
-    AstFacts facts
-  ) {
-    if (node instanceof Assign || node instanceof OpInc || node instanceof OpDec) {
-      throw new IllegalStateException(
-        role +
-          " '" +
-          text +
-          "' on " +
-          method +
-          " must not contain assignments ('=', '++', '--'): cache expressions are read-only"
-      );
-    }
-    if (node instanceof FunctionReference function) {
-      throw new IllegalStateException(
-        role +
-          " '" +
-          text +
-          "' on " +
-          method +
-          " cannot call SpEL function " +
-          function.toStringAST() +
-          ": no functions are registered"
-      );
-    }
-    if (!isContextFree(node)) {
-      facts.markDynamic();
-    }
-    if (node instanceof VariableReference reference) {
-      String variable = variableName(reference);
-      validateVariable(variable, text, role, method, parameterNames, resultAllowed);
-      if ("result".equals(variable)) {
-        facts.markResult();
-      }
-    }
-    for (int i = 0; i < node.getChildCount(); i++) {
-      inspectAst(node.getChild(i), text, role, method, parameterNames, resultAllowed, facts);
-    }
-  }
-
-  /** Whether the node can be evaluated without an invocation context. */
-  private static boolean isContextFree(SpelNode node) {
-    return !(
-      node instanceof VariableReference ||
-      node instanceof PropertyOrFieldReference ||
-      node instanceof MethodReference ||
-      node instanceof BeanReference ||
-      node instanceof ConstructorReference ||
-      node instanceof TypeReference ||
-      node instanceof Indexer ||
-      node instanceof Selection ||
-      node instanceof Projection
-    );
-  }
-
-  /** Whether the whole expression is exactly {@code #root.args}. */
-  private static boolean isWholeRootArgs(Expression expression) {
+  private static boolean isWholeRootArgs(SpelNode root) {
     return (
-      expression instanceof SpelExpression spel &&
-      spel.getAST() instanceof CompoundExpression compound &&
+      root instanceof CompoundExpression compound &&
       compound.getChildCount() == 2 &&
-      compound.getChild(0) instanceof VariableReference root &&
-      "root".equals(variableName(root)) &&
+      compound.getChild(0) instanceof VariableReference variable &&
+      "root".equals(variableName(variable)) &&
       compound.getChild(1) instanceof PropertyOrFieldReference property &&
       "args".equals(property.getName())
     );
   }
 
   /**
-   * Reject a positional reference the method cannot satisfy, a named variable the evaluation
-   * context cannot bind — including every named variable when no parameter metadata was
-   * discovered — and {@code #result} where the phase does not bind it.
+   * Extracts the unprefixed variable name from a {@link VariableReference} AST node.
+   *
+   * @param reference the variable reference node
+   * @return the variable name without the leading {@code '#'}
    */
-  private static void validateVariable(
-    String variable,
-    String text,
-    String role,
-    Method method,
-    String@Nullable [] names,
-    boolean resultAllowed
-  ) {
-    if (!resultAllowed && "result".equals(variable)) {
-      throw new IllegalStateException(
-        role +
-          " '" +
-          text +
-          "' on " +
-          method +
-          " cannot use #result: this evaluation phase does not bind a method result"
-      );
+  private static String variableName(VariableReference reference) {
+    String ast = reference.toStringAST();
+    return ast.startsWith("#") ? ast.substring(1) : ast;
+  }
+
+  /**
+   * Parses the zero-based positional index of a canonical {@code pN}/{@code aN} variable name.
+   *
+   * @param variable the unprefixed variable name
+   * @return the non-negative positional index, or {@code -1} if {@code variable} is not a valid
+   *         canonical positional name (e.g., non-numeric, leading zeros, or integer overflow)
+   */
+  static int argumentIndex(String variable) {
+    int length = variable.length();
+    if (length < 2) {
+      return -1;
     }
-    int parameterCount = method.getParameterCount();
-    int index = argumentIndex(variable);
-    if (index >= parameterCount) {
-      throw new IllegalStateException(
-        role +
-          " '" +
-          text +
-          "' on " +
-          method +
-          " addresses parameter " +
-          index +
-          ", but the method declares " +
-          parameterCount
-      );
+    char prefix = variable.charAt(0);
+    if (prefix != 'p' && prefix != 'a') {
+      return -1;
     }
-    if (index >= 0 || ParameterBindings.isContextVariable(variable)) {
-      return;
+    return CanonicalInt.parse(variable, 1, length);
+  }
+
+  /**
+   * Traverses a SpEL AST to validate variable references and record context dependency facts.
+   */
+  private static final class AstInspector {
+
+    private final String text;
+    private final String role;
+    private final Method method;
+    private final ParameterBindings bindings;
+    private final boolean resultAllowed;
+
+    private boolean referencesResult;
+    private boolean referencesInvocationContext;
+    private boolean referencesRuntimeCall;
+
+    /**
+     * Creates an inspector bound to one method attribute.
+     *
+     * @param text          the stripped expression text
+     * @param role          the attribute name used in diagnostics
+     * @param method        the annotated method
+     * @param bindings      the method's parameter slot table
+     * @param resultAllowed whether {@code #result} is permitted in this phase
+     */
+    private AstInspector(String text, String role, Method method, ParameterBindings bindings, boolean resultAllowed) {
+      this.text = text;
+      this.role = role;
+      this.method = method;
+      this.bindings = bindings;
+      this.resultAllowed = resultAllowed;
     }
-    if (names == null) {
-      throw new IllegalStateException(
-        role +
-          " '" +
-          text +
-          "' on " +
-          method +
-          " references parameter '#" +
-          variable +
-          "', but parameter names are not available; compile with -parameters or use #p0/#a0"
-      );
+
+    /**
+     * Recursively inspects a SpEL AST node and its children.
+     *
+     * @param node       the current AST node
+     * @param inElement  whether traversal is currently inside a collection selection or projection,
+     *                   where {@code #this} and unqualified accesses target the current element
+     * @param onReceiver whether this node is a chained member (property, method, indexer, etc.)
+     *                   invoked on a preceding receiver within a {@link CompoundExpression}
+     */
+    private void inspect(SpelNode node, boolean inElement, boolean onReceiver) {
+      if (node instanceof InlineMap) {
+        // An unquoted key is a PropertyOrFieldReference the evaluator reads by name; it never
+        // touches #root, so it must neither mark the map dynamic nor disqualify it from folding.
+        for (int i = 0; i < node.getChildCount(); i++) {
+          SpelNode child = node.getChild(i);
+          if ((i & 1) == 0 && child instanceof PropertyOrFieldReference) {
+            continue;
+          }
+          inspect(child, inElement, false);
+        }
+        return;
+      }
+      if (node instanceof FunctionReference) {
+        throw new IllegalStateException(
+          role + " '" + text + "' on " + method + " cannot call a SpEL function: no functions are registered"
+        );
+      }
+      if (node instanceof Assign || node instanceof OpInc || node instanceof OpDec) {
+        // Every context this layer evaluates with reports isAssignmentEnabled() == false, so these
+        // nodes could only fail at the first evaluation.
+        throw new IllegalStateException(
+          role + " '" + text + "' on " + method + " cannot mutate state: cache expressions are read-only"
+        );
+      }
+      if (node instanceof VariableReference reference) {
+        inspectVariable(reference, inElement);
+      } else if (node instanceof BeanReference) {
+        referencesInvocationContext = true;
+      } else if (isRuntimeCall(node)) {
+        referencesRuntimeCall = true;
+        if (!inElement && !onReceiver && appliesToRoot(node)) {
+          referencesInvocationContext = true;
+        }
+      } else if (!inElement && !onReceiver && appliesToRoot(node)) {
+        // An unqualified property/method/indexer/selection/projection targets #root.
+        referencesInvocationContext = true;
+      }
+
+      boolean compound = node instanceof CompoundExpression;
+      boolean childInElement = inElement || node instanceof Selection || node instanceof Projection;
+      for (int i = 0; i < node.getChildCount(); i++) {
+        inspect(node.getChild(i), childInElement, compound && i > 0);
+      }
     }
-    if (!contains(names, variable)) {
-      throw new IllegalStateException(
+
+    /**
+     * Validates a variable reference and updates dependency flags.
+     *
+     * @param reference the variable reference AST node
+     * @param inElement whether the reference occurs inside a selection or projection
+     */
+    private void inspectVariable(VariableReference reference, boolean inElement) {
+      String variable = variableName(reference);
+      if ("result".equals(variable)) {
+        if (!resultAllowed) {
+          throw new IllegalStateException(
+            role + " '" + text + "' on " + method + " cannot use #result: this phase does not bind a method result"
+          );
+        }
+        referencesResult = true;
+      } else if ("this".equals(variable) && inElement) {
+        // Inside a selection or projection, #this denotes the current element rather than #root.
+      } else if ("root".equals(variable) || "this".equals(variable)) {
+        referencesInvocationContext = true;
+      } else {
+        referencesInvocationContext = true;
+        if (bindings.slotOf(variable) < 0) {
+          throw unknownVariable(variable);
+        }
+      }
+    }
+
+    /**
+     * Builds a diagnostic exception explaining why an unknown variable cannot be resolved.
+     *
+     * @param variable the unresolved variable name
+     * @return an {@link IllegalStateException} with actionable guidance
+     */
+    private IllegalStateException unknownVariable(String variable) {
+      int index = argumentIndex(variable);
+      if (index >= bindings.parameterCount()) {
+        return new IllegalStateException(
+          role +
+            " '" +
+            text +
+            "' on " +
+            method +
+            " addresses parameter " +
+            index +
+            ", but the method declares " +
+            bindings.parameterCount()
+        );
+      }
+      if (bindings.parameterCount() > 0 && !bindings.hasParameterNames()) {
+        return new IllegalStateException(
+          role +
+            " '" +
+            text +
+            "' on " +
+            method +
+            " references parameter '#" +
+            variable +
+            "', but parameter names are not available; compile with -parameters or use #p0/#a0"
+        );
+      }
+      return new IllegalStateException(
         role + " '" + text + "' on " + method + " references unknown variable '#" + variable + "'"
       );
     }
-  }
 
-  private static boolean contains(String[] names, String variable) {
-    for (String name : names) {
-      if (variable.equals(name)) {
-        return true;
-      }
+    /**
+     * Returns whether the given AST node can only be evaluated at runtime, even when its children
+     * are literals: it reads a type, a constructor, a member, a function, or a collection element of
+     * a receiver rather than this expression's own operands.
+     *
+     * @param node the AST node to test
+     * @return {@code true} if the node disqualifies the expression from constant folding
+     */
+    private static boolean isRuntimeCall(SpelNode node) {
+      return (
+        node instanceof TypeReference ||
+        node instanceof ConstructorReference ||
+        node instanceof MethodReference ||
+        node instanceof PropertyOrFieldReference ||
+        node instanceof Selection ||
+        node instanceof Projection
+      );
     }
-    return false;
-  }
 
-  /** Evaluate one context-free expression once, wrapping a failure as a configuration error. */
-  private static @Nullable Object evaluateConstant(
-    Expression expression,
-    String text,
-    String role,
-    Method method
-  ) {
-    try {
-      return expression.getValue();
-    } catch (RuntimeException e) {
-      throw new IllegalStateException(role + " '" + text + "' on " + method + " failed constant evaluation", e);
+    /**
+     * Returns whether the given AST node implicitly evaluates against {@code #root} when not
+     * attached to an explicit receiver or element scope.
+     *
+     * @param node the AST node to test
+     * @return {@code true} if the node accesses members or elements of the current target
+     */
+    private static boolean appliesToRoot(SpelNode node) {
+      return (
+        node instanceof PropertyOrFieldReference ||
+        node instanceof MethodReference ||
+        node instanceof Indexer ||
+        node instanceof Selection ||
+        node instanceof Projection
+      );
     }
-  }
-
-  /** {@link VariableReference} exposes no name accessor; {@code toStringAST()} is {@code "#" + name}. */
-  private static String variableName(VariableReference reference) {
-    return reference.toStringAST().substring(1);
-  }
-
-  /**
-   * The argument index a positional variable names, or {@code -1} when the
-   * variable is not a canonical {@code #pN}/{@code #aN}.
-   *
-   * <p>{@code #p01} is deliberately not index 1: SpEL binds it as the variable
-   * named {@code p01}, and reinterpreting it here would change the caller's
-   * expression. The same rule keeps the interceptor's zero-SpEL fast path and
-   * this validation in agreement.
-   *
-   * @param variable the variable name without the leading {@code #}
-   * @return the zero-based index, or {@code -1}
-   */
-  static int argumentIndex(String variable) {
-    if (variable.length() < 2) {
-      return -1;
-    }
-    char kind = variable.charAt(0);
-    if (kind != 'p' && kind != 'a') {
-      return -1;
-    }
-    int index = 0;
-    for (int i = 1; i < variable.length(); i++) {
-      char digit = variable.charAt(i);
-      if (digit < '0' || digit > '9') {
-        return -1;
-      }
-      if (i == 1 && digit == '0' && variable.length() > 2) {
-        return -1;
-      }
-      if (index > (Integer.MAX_VALUE - (digit - '0')) / 10) {
-        return -1;
-      }
-      index = index * 10 + (digit - '0');
-    }
-    return index;
-  }
-
-  /**
-   * The argument index a variable names — a canonical {@code #pN}/{@code #aN}
-   * or one of the method's discovered parameter names — or {@code -1}.
-   *
-   * <p>{@code root}, {@code this} and {@code result} are bound ahead of the slot
-   * table (SpEL's root/active object and the context's result field), so they
-   * never resolve to a parameter of the same name and return {@code -1} even
-   * when one is declared.
-   *
-   * @param variable       the variable name without the leading {@code #}
-   * @param parameterNames the method's discovered parameter names, or
-   *                       {@code null} when they were not discoverable
-   * @return the zero-based index, or {@code -1}
-   */
-  public static int argumentIndex(String variable, String@Nullable [] parameterNames) {
-    int index = argumentIndex(variable);
-    if (index >= 0 || parameterNames == null || ParameterBindings.isContextVariable(variable)) {
-      return index;
-    }
-    for (int i = 0; i < parameterNames.length; i++) {
-      if (variable.equals(parameterNames[i])) {
-        return i;
-      }
-    }
-    return -1;
   }
 }

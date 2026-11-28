@@ -15,6 +15,7 @@
  */
 package io.github.hyshmily.zeta.annotation;
 
+import io.github.hyshmily.zeta.policy.HeatTrigger;
 import java.lang.annotation.Documented;
 import java.lang.annotation.ElementType;
 import java.lang.annotation.Retention;
@@ -52,9 +53,8 @@ import java.lang.annotation.Target;
  * advice is bypassed for that one call so the stale entry cannot be served,
  * but a transaction advice outside it may run. A method whose body depends on
  * request-scoped state must therefore not be given a soft TTL. A refresh
- * failure reaches the engine's failure path (WARN plus lease-on-failure),
- * so a failing source keeps serving the stale value instead of re-running
- * the body on every stale read.</li>
+ * failure reaches the engine's failure path (WARN plus a closed retry window),
+ * so a failing source is not re-run on every stale read.</li>
  * <li>Configuration is validated when the bean is proxied: a cache name that
  * is still blank after the {@link ZetaConfig} fallback, a conflicting verb, two
  * views declaring the same read/write verb with different attributes, a
@@ -65,12 +65,12 @@ import java.lang.annotation.Target;
  * {@code #result} fails startup, not the first
  * call. Every candidate method of the bean is checked on the first pointcut
  * question, including through a JDK proxy.</li>
- * <li>{@code pN}/{@code aN} are generated positional bindings, so the slot
- * table rejects a method parameter whose name would point at a different
- * argument; a parameter named for its own slot is harmless. {@code #root},
- * {@code #this} and {@code #result} are bound ahead of the parameter table,
- * so a parameter with one of those names is legal, is omitted from the table,
- * and the reserved name never resolves to it.</li>
+ * <li>{@code #pN}/{@code #aN} always address parameter {@code N}: the
+ * positional aliases are written after the discovered names, so a parameter
+ * that happens to be named {@code p1} cannot move {@code #p1} to another slot.
+ * {@code #root}, {@code #this} and {@code #result} are bound ahead of the
+ * parameter table, so a parameter with one of those names is legal, is omitted
+ * from the table, and the reserved name never resolves to it.</li>
  * </ul>
  *
  * <p>
@@ -166,10 +166,9 @@ public @interface ZetaCached {
    *
    * <p>
    * {@code #result} is not available: the expression runs before the body. A
-   * malformed expression fails startup; a constant expression is evaluated once at resolution and
-   * must yield a {@code Boolean} or {@code null}. An expression that throws, returns {@code null}
-   * or returns a non-Boolean at evaluation time is treated as {@code false} and logged at DEBUG.
-   * A broken admission guard must not admit a call the caller meant to bypass.
+   * malformed expression fails startup. At evaluation time a {@code null} result is treated as
+   * {@code false}, any other result is coerced to a Boolean, and a throwing expression propagates
+   * to the caller: a broken admission guard never silently admits a call the caller meant to bypass.
    *
    * @return the entry condition, or empty for "always enter the cache"
    */
@@ -182,11 +181,9 @@ public @interface ZetaCached {
    * contract of Spring's {@code @Cacheable}, without requiring Spring Cache.
    *
    * <p>
-   * An expression that throws at evaluation time fails open (the value is
-   * stored) and logs at DEBUG, because a broken veto must not turn every read into a
-   * miss and must not become a per-call WARN storm; a malformed expression fails
-   * startup instead, and a constant expression must yield a {@code Boolean} or {@code null} at
-   * resolution.
+   * A malformed expression fails startup. At evaluation time a {@code null} result does not veto,
+   * any other result is coerced to a Boolean, and a throwing expression propagates to the caller
+   * instead of silently storing a value the veto was meant to reject.
    *
    * @return the store veto expression, or empty for "always store"
    */
@@ -195,37 +192,86 @@ public @interface ZetaCached {
   /**
    * Hard TTL override: the absolute lifetime of the entry this method creates.
    * Either a literal millisecond count ({@code "60000"}) or a SpEL expression
-   * ({@code "#vip ? 600000 : 60000"}). Empty or {@code "0"} means the
-   * configured default.
+   * ({@code "#vip ? 600000 : 60000"}).
+   *
+   * <p>The declaration vocabulary is the same on every attribute: empty, {@code "0"} and
+   * {@code "-1"} all mean the configured default (a hard TTL cannot be switched off), every
+   * positive value is the lifetime, and {@link Long#MAX_VALUE} means the entry never expires.
    *
    * <p>
    * A literal — optionally signed — is folded to a constant at method
-   * resolution; surrounding whitespace is ignored, a negative literal clamps to
-   * {@code 0} (the configured default), and a digits-only literal outside the
-   * {@code long} range fails startup. Supports {@code ${...}} placeholders. An
-   * expression is compiled once; a context-free expression is folded at
-   * resolution, and a negative fold fails startup because SpEL's integer
-   * arithmetic overflows at 32 bits. A dynamic expression is evaluated lazily —
-   * only when the engine
-   * actually needs it (entry creation, promotion to HOT, renewal, or a
-   * soft-expire refresh), never on a plain hit. A malformed expression or an
-   * unknown SpEL variable fails startup; at evaluation time a negative result
-   * is clamped to {@code 0} (use the default), a huge {@code BigInteger} or
-   * {@code BigDecimal} is clamped to {@link Long#MAX_VALUE} instead of wrapping
-   * negative, and a failure degrades to the default. {@code #result} is not
-   * available here (the same reason as {@link #key()}).
+   * resolution and surrounding whitespace is ignored; any other negative literal
+   * fails startup, and so does a digits-only literal outside the {@code long}
+   * range. Supports {@code ${...}} placeholders. An expression is compiled once; a
+   * context-free expression is folded at resolution, and a negative fold other than {@code -1}
+   * fails startup because SpEL's integer arithmetic overflows at 32 bits. A dynamic expression is
+   * evaluated lazily — only when the engine actually needs it (entry creation, renewal, or a
+   * soft-expire refresh), never on a plain hit. A malformed expression or
+   * an unknown SpEL variable fails startup; at evaluation time a negative result other than
+   * {@code -1} fails instead of falling back to the default, and a {@code BigInteger} or
+   * {@code BigDecimal} result that is not exactly representable as a {@code long} fails instead of
+   * wrapping into a positive lifetime or the {@code -1} sentinel.
+   * {@code #result} is not available here (the same reason as {@link #key()}).
    *
    * @return the hard TTL literal or expression
    */
   String hardTtl() default "";
 
   /**
-   * Soft TTL override — how long the entry is served without revalidation
-   * before a background refresh is armed. Same literal-or-SpEL rule as
-   * {@link #hardTtl()}, evaluated independently. Empty or {@code "0"} means the
-   * configured default.
+   * Soft TTL override — how long the entry is served without revalidation before a background
+   * refresh is armed. Same literal-or-SpEL rule as {@link #hardTtl()}, evaluated independently:
+   * {@code "-1"} disables the window outright (no warming path resurrects it), {@code ""}
+   * or {@code "0"} inherits {@code zeta.local.soft-ttl-ms}, and {@link Long#MAX_VALUE} means the
+   * entry never goes stale.
    *
    * @return the soft TTL literal or expression
    */
   String softTtl() default "";
+
+  /**
+   * Which heat signal may prewarm a missing entry for this method's namespace.
+   * {@link HeatTrigger.Option#INHERIT} takes the enclosing {@code @ZetaConfig} value and then the
+   * global {@code zeta.local.warm.prewarm.trigger}.
+   *
+   * @return the prewarm trigger declaration
+   */
+  HeatTrigger.Option prewarm() default HeatTrigger.Option.INHERIT;
+
+  /**
+   * Which heat signal may renew a resident entry before its deadline.
+   * {@link HeatTrigger.Option#INHERIT} takes the enclosing {@code @ZetaConfig} value and then the
+   * global {@code zeta.local.warm.keep-warm.trigger}. The trigger is independent of the soft TTL:
+   * a hard-only namespace can renew, and a namespace with a soft window still needs this
+   * declaration (or the global default) to opt in.
+   *
+   * @return the keep-warm trigger declaration
+   */
+  HeatTrigger.Option keepWarm() default HeatTrigger.Option.INHERIT;
+
+  /**
+   * Authorize the framework to bind this method itself as its namespace's background loader.
+   *
+   * <p>It is sugar for a programmatic loader, not a second resolution model: the method is
+   * validated at startup and then registered as the same background-loader declaration a
+   * {@code ZetaWarmConfigurer} would produce. The validation rejects a non-reversible key, a
+   * dynamic or conflicting TTL for prewarm, a {@code condition}, and an {@code unless} that reads
+   * anything but {@code #result}.
+   *
+   * <p><b>The load runs outside the caller's advice chain.</b> It invokes the method reflectively
+   * on the unwrapped target, so a transaction or method-security advice on the method is not part
+   * of that call; when only the proxy exposes the annotated view (a repository or a scoped proxy),
+   * the call re-enters the whole chain with no caller state. The plan is built while the bean is
+   * still being proxied, so the advisors are not visible there: startup logs one WARN naming every
+   * advisor that applies to the method and cannot run as it does for the caller. A method whose
+   * body depends on that advice — a transaction, method security, request-scoped state — must bind
+   * its loader through {@link io.github.hyshmily.zeta.policy.ZetaWarmConfigurer} instead.
+   *
+   * <p>A namespace may have at most one canonical warmed read method. If another
+   * {@code @ZetaCached} method in the same namespace produces a different key shape, or another
+   * declaration already registered a loader, startup fails rather than letting a broadcast warm
+   * the wrong entry.
+   *
+   * @return whether this method is its namespace's background loader
+   */
+  boolean selfWarmLoader() default false;
 }

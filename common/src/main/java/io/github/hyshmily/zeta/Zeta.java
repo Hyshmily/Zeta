@@ -302,6 +302,12 @@ public interface Zeta {
    * like a miss — omitted from the result. No admission filter is applied —
    * every non-{@code null} value is stored.
    *
+   * <p>With {@link GetPolicy#callerRunsLoader()} every miss is loaded on the
+   * calling thread, one key at a time, so the reader keeps the caller's
+   * transaction, security context and MDC; same-key deduplication still applies.
+   * Inside an active read-write transaction such a load is isolated instead:
+   * it is neither shared with a concurrent reader nor stored in L1.
+   *
    * @param cacheKeys the keys to retrieve
    * @param reader    the value function for cache misses
    * @param options   the shared per-invocation read options ({@code null} =

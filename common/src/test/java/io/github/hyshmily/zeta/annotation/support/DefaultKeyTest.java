@@ -23,6 +23,7 @@ import java.util.Collections;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.UUID;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -173,6 +174,18 @@ class DefaultKeyTest {
   }
 
   @Test
+  @DisplayName("a UUID carries its own tag and never collides with its string form")
+  void uuidCarriesItsOwnTag() {
+    UUID uuid = UUID.fromString("6c84fb90-12c4-11e1-840d-7b25c5ee775a");
+
+    assertThat(DefaultKey.encode(new Object[] { uuid })).isEqualTo("[U:6c84fb90-12c4-11e1-840d-7b25c5ee775a]");
+    assertThat(DefaultKey.encodeSingle("cache:", uuid)).isEqualTo("cache:[U:6c84fb90-12c4-11e1-840d-7b25c5ee775a]");
+    assertThat(DefaultKey.encode(new Object[] { uuid })).isNotEqualTo(
+      DefaultKey.encode(new Object[] { uuid.toString() })
+    );
+  }
+
+  @Test
   @DisplayName("negative zero renders as zero: a numerically equal argument addresses one key")
   void negativeZeroIsNormalized() {
     assertThat(DefaultKey.encode(new Object[] { -0.0 })).isEqualTo("[D:0.0]");
@@ -191,7 +204,7 @@ class DefaultKeyTest {
 
     assertThatThrownBy(() -> DefaultKey.encode(new Object[] { self }))
       .isInstanceOf(IllegalStateException.class)
-      .hasMessageContaining("cyclic array")
+      .hasMessageContaining("self-referential")
       .hasMessageContaining("explicit key");
   }
 
@@ -205,7 +218,7 @@ class DefaultKeyTest {
 
     assertThatThrownBy(() -> DefaultKey.encode(new Object[] { first }))
       .isInstanceOf(IllegalStateException.class)
-      .hasMessageContaining("cyclic array")
+      .hasMessageContaining("self-referential")
       .hasMessageContaining("explicit key");
   }
 
@@ -221,7 +234,7 @@ class DefaultKeyTest {
 
     assertThatThrownBy(() -> DefaultKey.encode(new Object[] { first }))
       .isInstanceOf(IllegalStateException.class)
-      .hasMessageContaining("cyclic array")
+      .hasMessageContaining("self-referential")
       .hasMessageContaining("explicit key");
   }
 
@@ -235,7 +248,7 @@ class DefaultKeyTest {
 
     assertThatThrownBy(() -> DefaultKey.encode(new Object[] { first }))
       .isInstanceOf(IllegalStateException.class)
-      .hasMessageContaining("cyclic array")
+      .hasMessageContaining("self-referential")
       .hasMessageContaining("explicit key");
   }
 
@@ -251,7 +264,7 @@ class DefaultKeyTest {
 
     assertThatThrownBy(() -> DefaultKey.encode(new Object[] { ring[0] }))
       .isInstanceOf(IllegalStateException.class)
-      .hasMessageContaining("32 nested array levels")
+      .hasMessageContaining("16 nested levels")
       .hasMessageContaining("explicit key");
   }
 
@@ -273,10 +286,10 @@ class DefaultKeyTest {
   }
 
   @Test
-  @DisplayName("the maximum accepted nesting depth is 32 array levels")
+  @DisplayName("the maximum accepted nesting depth is 16 array levels")
   void maximumNestingDepthIsAccepted() {
     Object[] nested = new Object[0];
-    for (int i = 1; i < 32; i++) {
+    for (int i = 1; i < 16; i++) {
       nested = new Object[] { nested };
     }
 
@@ -287,17 +300,17 @@ class DefaultKeyTest {
   }
 
   @Test
-  @DisplayName("a 33rd array level is rejected")
+  @DisplayName("a 17th array level is rejected")
   void nestingBeyondTheLimitIsRejected() {
     Object[] nested = new Object[0];
-    for (int i = 0; i < 32; i++) {
+    for (int i = 0; i < 17; i++) {
       nested = new Object[] { nested };
     }
     Object[] tooDeep = nested;
 
     assertThatThrownBy(() -> DefaultKey.encode(new Object[] { tooDeep }))
       .isInstanceOf(IllegalStateException.class)
-      .hasMessageContaining("32 nested array levels");
+      .hasMessageContaining("16 nested levels");
   }
 
   @Test
@@ -356,7 +369,7 @@ class DefaultKeyTest {
 
     assertThatThrownBy(() -> DefaultKey.encode(new Object[] { self }))
       .isInstanceOf(IllegalStateException.class)
-      .hasMessageContaining("cyclic collection")
+      .hasMessageContaining("self-referential")
       .hasMessageContaining("explicit key");
   }
 
@@ -367,7 +380,33 @@ class DefaultKeyTest {
 
     assertThatThrownBy(() -> DefaultKey.encode(new Object[] { values }))
       .isInstanceOf(IllegalStateException.class)
-      .hasMessageContaining("1024 elements")
+      .hasMessageContaining("exceeds 1024 elements")
       .hasMessageContaining("explicit key");
+  }
+
+  @Test
+  @DisplayName("an array above the element cap is rejected before building a giant key")
+  void arrayElementCapIsEnforced() {
+    Object[] references = new Object[1025];
+    byte[] bytes = new byte[1025];
+
+    assertThatThrownBy(() -> DefaultKey.encode(new Object[] { references }))
+      .isInstanceOf(IllegalStateException.class)
+      .hasMessageContaining("exceeds 1024 elements")
+      .hasMessageContaining("explicit key");
+    assertThatThrownBy(() -> DefaultKey.encode(new Object[] { bytes }))
+      .isInstanceOf(IllegalStateException.class)
+      .hasMessageContaining("exceeds 1024 elements")
+      .hasMessageContaining("explicit key");
+  }
+
+  @Test
+  @DisplayName("an array at the element cap is still encodable")
+  void arrayAtTheElementCapIsAccepted() {
+    Object[] references = new Object[1024];
+    byte[] bytes = new byte[1024];
+
+    assertThat(DefaultKey.encode(new Object[] { references })).startsWith("[aO[");
+    assertThat(DefaultKey.encode(new Object[] { bytes })).startsWith("[aB[");
   }
 }

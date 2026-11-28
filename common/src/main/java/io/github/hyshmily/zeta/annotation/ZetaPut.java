@@ -108,10 +108,9 @@ public @interface ZetaPut {
    *
    * <p>
    * {@code #result} is not available: use {@link #unless()} for a result-based
-   * veto. A malformed expression fails startup; a constant expression is evaluated once at
-   * resolution and must yield a {@code Boolean} or {@code null}. An expression that throws,
-   * returns {@code null} or returns a non-Boolean at evaluation time is treated as
-   * {@code false} and logged at DEBUG.
+   * veto. A malformed expression fails startup. At evaluation time a {@code null} result is
+   * treated as {@code false}, any other result is coerced to a Boolean, and a throwing expression
+   * propagates to the caller instead of silently writing to a cache the caller meant to skip.
    *
    * @return the write condition, or empty for "always attempt the write"
    */
@@ -124,11 +123,9 @@ public @interface ZetaPut {
    * writes no entry — the write-side counterpart of {@link ZetaCached#unless()}.
    *
    * <p>
-   * An expression that throws at evaluation time fails open (the value is
-   * written) and logs at DEBUG, because a broken veto must not silently stop every
-   * write and must not become a per-call WARN storm; a malformed expression fails
-   * startup instead, and a constant expression must yield a {@code Boolean} or {@code null} at
-   * resolution.
+   * A malformed expression fails startup. At evaluation time a {@code null} result does not veto,
+   * any other result is coerced to a Boolean, and a throwing expression propagates to the caller
+   * instead of silently writing a value the veto was meant to reject.
    *
    * @return the write veto expression, or empty for "always write"
    */
@@ -137,15 +134,15 @@ public @interface ZetaPut {
   /**
    * Hard TTL override for the entry this write creates: a literal millisecond
    * count or a SpEL expression (with {@code #result} bound when it reads it —
-   * see {@link #key()}). Empty or {@code "0"} means the configured default. A
-   * malformed expression, a digits-only literal outside the {@code long} range,
-   * a constant expression that evaluates negative (a likely 32-bit overflow),
-   * or an unknown SpEL variable (when parameter names are discoverable) fails
-   * startup; a runtime evaluation failure degrades to the default. Supports
-   * {@code ${...}} placeholders. A permanent
-   * entry ({@code Long.MAX_VALUE}) cannot be synced; for a synced write, a
-   * dynamic hard TTL that does not depend on {@code #result} is checked before
-   * the body.
+   * see {@link #key()}). Empty, {@code "0"} and {@code "-1"} all mean the configured default (a hard
+   * TTL has no off state); every positive value is the lifetime, and {@link Long#MAX_VALUE} is
+   * permanent. A malformed expression, a digits-only literal outside the {@code long} range, a
+   * constant expression that evaluates to a negative other than {@code -1} (a likely 32-bit
+   * overflow), or an unknown SpEL variable (when parameter names are discoverable) fails startup;
+   * a runtime evaluation failure propagates, and a result that is not exactly representable as a
+   * {@code long} fails instead of wrapping. Supports {@code ${...}} placeholders. A
+   * permanent entry ({@code Long.MAX_VALUE}) cannot be synced; for a synced write, a dynamic hard
+   * TTL that does not depend on {@code #result} is checked before the body.
    *
    * @return the hard TTL literal or expression
    */
@@ -171,7 +168,7 @@ public @interface ZetaPut {
    * body as soon as it resolves to permanent. A result-dependent hard TTL is
    * only knowable after the body, so the facade rejects it at the write. The
    * same rule applies when no override is given but
-   * {@code zeta.local.hard-ttl-ms=0} resolves the effective hard TTL to
+   * {@code zeta.local.hard-ttl-ms=9223372036854775807} resolves the effective hard TTL to
    * permanent: the facade rejects the synced write instead of broadcasting an
    * entry peers can never expire.
    *

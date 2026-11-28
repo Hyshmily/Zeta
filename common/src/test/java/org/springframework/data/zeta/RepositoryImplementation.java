@@ -13,18 +13,16 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.github.hyshmily.zeta.annotation;
+package org.springframework.data.zeta;
 
 /**
- * The cache verb that failed. A read failure is not routed through
- * {@link CacheFailurePolicy}: a loader may already have run, so a fallback
- * cannot safely repeat the body.
+ * Stands in for a Spring Data repository base implementation ({@code SimpleJpaRepository} and its
+ * peers): a framework-package class whose business interface is the one carrying cache
+ * annotations, used to pin the advisor's class filter.
  */
-public enum CacheVerb {
-  /** A write-through {@code zeta.put}. */
-  PUT,
-  /** A single-key or multi-key {@code zeta.invalidate}. */
-  INVALIDATE,
-  /** A namespace clear through {@code zeta.clearNamespace}. */
-  CLEAR,
+public class RepositoryImplementation {
+
+  public String findAll() {
+    return "";
+  }
 }

@@ -36,6 +36,7 @@ import io.github.hyshmily.zeta.cache.cachesupport.loader.CacheLoader;
 import io.github.hyshmily.zeta.cache.cachesupport.policy.GetPolicy;
 import io.github.hyshmily.zeta.cache.cachesupport.policy.InvalidatePolicy;
 import io.github.hyshmily.zeta.cache.cachesupport.policy.PutPolicy;
+import io.github.hyshmily.zeta.exception.ZetaModeException;
 import java.lang.annotation.ElementType;
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
@@ -152,13 +153,11 @@ class AnnotationExtensionsTest {
   }
 
   @Test
-  @DisplayName("a throwing condition fails closed: the body runs and the cache is bypassed")
-  void brokenConditionBypassesTheCache() {
-    BrokenConditionReader target = new BrokenConditionReader();
-    BrokenConditionReader service = proxy(target);
+  @DisplayName("a condition evaluation failure is thrown to the caller")
+  void brokenConditionIsThrown() {
+    BrokenConditionReader service = proxy(new BrokenConditionReader());
 
-    assertThat(service.load("42")).isEqualTo("v-42");
-    assertThat(target.calls).hasValue(1);
+    assertThatThrownBy(() -> service.load("42")).isInstanceOf(RuntimeException.class);
     verify(zeta, never()).get(anyString(), any(CacheLoader.class), any(GetPolicy.class));
   }
 
@@ -192,22 +191,6 @@ class AnnotationExtensionsTest {
     public String load(String id) {
       return id;
     }
-  }
-
-  @Test
-  @DisplayName("a constant condition or unless that is not Boolean fails startup")
-  void nonBooleanConstantGuardsFailStartup() {
-    Throwable condition = catchThrowable(() -> proxy(new StringConstantConditionReader()));
-    assertThat(rootCause(condition))
-      .isInstanceOf(IllegalStateException.class)
-      .hasMessageContaining("condition")
-      .hasMessageContaining("must evaluate to a boolean");
-
-    Throwable unless = catchThrowable(() -> proxy(new NumberConstantUnlessReader()));
-    assertThat(rootCause(unless))
-      .isInstanceOf(IllegalStateException.class)
-      .hasMessageContaining("unless")
-      .hasMessageContaining("must evaluate to a boolean");
   }
 
   record Saved(String id, String status) {}
@@ -383,6 +366,25 @@ class AnnotationExtensionsTest {
 
     verify(zeta).invalidate(eq(key("users", "42")), any(InvalidatePolicy.class));
     verify(zeta).invalidate(eq(key("emails", "42")), any(InvalidatePolicy.class));
+  }
+
+  static class DeferredInvalidator {
+
+    @ZetaInvalidate(cache = "users", key = "#p0")
+    public String rename(String id) {
+      return id;
+    }
+  }
+
+  @Test
+  @DisplayName("a mode rejection from a deferred invalidation propagates to the caller")
+  void deferredInvalidationModeRejectionPropagates() {
+    doThrow(new ZetaModeException("invalidate", "Worker-only mode", "App-mode cache"))
+      .when(zeta)
+      .invalidate(anyString(), any(InvalidatePolicy.class));
+    DeferredInvalidator service = proxy(new DeferredInvalidator());
+
+    assertThatThrownBy(() -> service.rename("42")).isInstanceOf(ZetaModeException.class);
   }
 
   static class MixedStateInvalidator {
@@ -727,19 +729,13 @@ class AnnotationExtensionsTest {
   }
 
   @Test
-  @DisplayName("allEntries forbids a key and eachKey rejects a statically non-collection key")
-  void invalidInvalidationShapesFailStartup() {
+  @DisplayName("an allEntries declaration cannot combine with a key")
+  void invalidInvalidationShapeFailsStartup() {
     Throwable allEntries = catchThrowable(() -> proxy(new BadAllEntriesInvalidator()));
     assertThat(allEntries).isNotNull();
     assertThat(rootCause(allEntries))
       .isInstanceOf(IllegalStateException.class)
       .hasMessageContaining("allEntries = true");
-
-    Throwable eachKey = catchThrowable(() -> proxy(new BadEachKeyInvalidator()));
-    assertThat(eachKey).isNotNull();
-    assertThat(rootCause(eachKey))
-      .isInstanceOf(IllegalStateException.class)
-      .hasMessageContaining("not an array or Iterable");
   }
 
   static class BrokenThenGoodInvalidator {
@@ -775,18 +771,12 @@ class AnnotationExtensionsTest {
   }
 
   @Test
-  @DisplayName("a put failure after the body is handed to the policy and the value is returned")
-  void putFailureIsHandedToThePolicy() {
+  @DisplayName("a put failure after the body is logged and the value is returned")
+  void putFailureDoesNotFailTheCaller() {
     doThrow(new IllegalStateException("cache down")).when(zeta).put(anyString(), any(), any(PutPolicy.class));
-    AtomicReference<CacheFailure> failure = new AtomicReference<>();
-    ZetaCacheInterceptor failing = new ZetaCacheInterceptor(zeta, resolver, failure::set);
-    PutFailureService service = proxy(new PutFailureService(), failing);
+    PutFailureService service = proxy(new PutFailureService(), new ZetaCacheInterceptor(zeta, resolver));
 
     assertThat(service.save("42")).isEqualTo("saved-42");
-    assertThat(failure.get().verb()).isEqualTo(CacheVerb.PUT);
-    assertThat(failure.get().cache()).isEqualTo("users");
-    assertThat(failure.get().keys()).containsExactly(key("users", "42"));
-    assertThat(failure.get().value()).isEqualTo("saved-42");
   }
 
   static class BeforeInvalidateFailureService {

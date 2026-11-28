@@ -287,12 +287,14 @@ public class DefaultZeta implements Zeta {
     GetPolicy opts = orDefault(options, GetPolicy.defaults());
     // The batch contract resolves the TTL overrides once for the whole batch;
     // doing it here validates them even for an empty collection and keeps the
-    // engine from evaluating the caller's suppliers a second time.
+    // engine from evaluating the caller's suppliers a second time. The loader-thread requirement
+    // travels with the rebuild: dropping it would silently move a caller-affine reader onto the
+    // load executor.
     ResolvedTtls ttls = ResolvedTtls.of(opts);
     GetPolicy batch =
       opts == GetPolicy.defaults()
         ? opts
-        : GetPolicy.of(ttls.hardMs(), ttls.softMs(), opts.report(), opts.stalePolicy());
+        : GetPolicy.of(ttls.hardMs(), ttls.softMs(), opts.report(), opts.stalePolicy(), opts.callerRunsLoader());
     HotKeyCache cache = requireAppCache("getAll");
     // An invalid key cannot be a map key and is a miss by definition: dropped
     // here, so the engine's batch read assumes valid keys.

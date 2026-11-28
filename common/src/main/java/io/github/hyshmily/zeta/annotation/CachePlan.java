@@ -15,48 +15,76 @@
  */
 package io.github.hyshmily.zeta.annotation;
 
-import io.github.hyshmily.zeta.annotation.support.CompiledExpression;
-import io.github.hyshmily.zeta.annotation.support.DefaultKey;
-import io.github.hyshmily.zeta.annotation.support.InvocationArguments;
-import io.github.hyshmily.zeta.annotation.support.ParameterBindings;
-import io.github.hyshmily.zeta.annotation.support.ZetaEvaluationContext;
+import io.github.hyshmily.zeta.Zeta;
+import io.github.hyshmily.zeta.annotation.support.*;
 import io.github.hyshmily.zeta.cache.cachesupport.policy.GetPolicy;
 import io.github.hyshmily.zeta.cache.cachesupport.policy.InvalidatePolicy;
 import io.github.hyshmily.zeta.cache.cachesupport.policy.PutPolicy;
 import io.github.hyshmily.zeta.cache.cachesupport.policy.StalePolicy;
 import io.github.hyshmily.zeta.cache.cachesupport.raw.CacheEntry;
+import io.github.hyshmily.zeta.exception.ZetaModeException;
+import io.github.hyshmily.zeta.policy.KeyFormat;
+import io.github.hyshmily.zeta.util.CollectionSizing;
 import java.lang.reflect.Array;
 import java.lang.reflect.Method;
 import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.util.*;
 import java.util.function.LongSupplier;
-import lombok.extern.slf4j.Slf4j;
 import org.jspecify.annotations.Nullable;
+import org.springframework.expression.EvaluationContext;
 import org.springframework.expression.spel.standard.SpelExpressionParser;
 
 /**
- * What one annotated method does, resolved once per (method, user class). A sealed
- * hierarchy rather than one record with unused fields: an attribute that cannot
- * apply to a verb is not representable.
+ * What one annotated method does, resolved once per (method, user class). A sealed hierarchy
+ * rather than one record with unused fields: an attribute that cannot apply to a verb is not
+ * representable.
  *
- * <p>The plan is the annotation layer's immutable data model. It owns the key
- * shape, the TTL classification and evaluation, and the write policy assembled
- * from the resolved TTLs; the interceptor owns the per-invocation orchestration
- * and the evaluation context, and {@link TargetMethodResolver} owns reflective
- * target resolution.
+ * <p>The plan is the annotation layer's immutable data model. It owns the key shape, the TTL
+ * classification and evaluation, and the write policy assembled from the resolved TTLs; the
+ * interceptor owns the per-invocation orchestration and the evaluation context.
  */
 sealed interface CachePlan {
-  /** The group's most-specific method: {@code #root.method}, reflective refresh and the parameter-name fallback. */
+  /** The group's most-specific method: {@code #root.method} and the reflective refresh. */
   Method specific();
 
   /** The plan's parameter slot table, built once at resolution. */
   ParameterBindings bindings();
 
   /**
-   * {@code @ZetaCached}. The trailing booleans are the per-call decisions resolved once at plan
-   * time: whether the method returns {@link java.util.Optional} and whether an {@code unless} is
-   * declared.
+   * Whether any expression evaluated before the body needs an evaluation context. The interceptor
+   * builds a pre-body context only when this is {@code true}, so a plan whose condition and key are
+   * plain constants never pays for SpEL setup on the read path.
+   *
+   * @return {@code true} when a pre-body context must be created
+   */
+  boolean needsPreContext();
+
+  /** Whether the annotated method returns {@link Optional}, so its result must be unwrapped. */
+  boolean optional();
+
+  /**
+   * Unwraps a method result when the method returns {@link Optional}. One definition for the read,
+   * write, invalidate and background-load paths, so they cannot disagree about an empty value.
+   *
+   * @param value the returned value, or {@code null}
+   * @return the contained value, or {@code null} when absent or empty
+   */
+  default @Nullable Object unwrapResult(@Nullable Object value) {
+    return optional() ? unwrap(value) : value;
+  }
+
+  /**
+   * @param value the raw return value, which may be {@code null} or an {@link Optional}
+   * @return the contained value, or {@code null}
+   */
+  static @Nullable Object unwrap(@Nullable Object value) {
+    return value instanceof Optional<?> optional ? optional.orElse(null) : value;
+  }
+
+  /**
+   * {@code @ZetaCached}. {@code optional} is the one per-call decision resolved at plan time;
+   * whether an {@code unless} is declared is a direct field query on the guard itself.
    */
   record Read(
     Method specific,
@@ -64,42 +92,24 @@ sealed interface CachePlan {
     Key key,
     CompiledExpression condition,
     CompiledExpression unless,
-    Ttls ttls,
+    Ttl hardTtl,
+    Ttl softTtl,
     @Nullable GetPolicy prebuiltPolicy,
-    @Nullable Method erasedBridge,
-    boolean optional,
-    boolean hasUnless
+    boolean optional
   ) implements CachePlan {
-    static Read of(
-      Method specific,
-      ParameterBindings bindings,
-      Key key,
-      CompiledExpression condition,
-      CompiledExpression unless,
-      Ttls ttls,
-      @Nullable GetPolicy prebuiltPolicy,
-      @Nullable Method erasedBridge
-    ) {
-      return new Read(
-        specific,
-        bindings,
-        key,
-        condition,
-        unless,
-        ttls,
-        prebuiltPolicy,
-        erasedBridge,
-        returnsOptional(specific),
-        !unless.absent()
-      );
+    @Override
+    public boolean needsPreContext() {
+      return condition.needsContext() || key.needsContext();
+    }
+
+    boolean hasUnless() {
+      return !unless.absent();
     }
   }
 
   /**
-   * {@code @ZetaPut}. {@code cache} is the physical namespace, carried so a failed write reports it
-   * without re-deriving it from the key. The trailing booleans are the per-call decisions resolved
-   * once at plan time: whether a synced dynamic hard TTL is preflighted, whether the pre-body or
-   * post-body phase needs a context, and whether the method returns {@link java.util.Optional}.
+   * {@code @ZetaPut}. {@code cache} is the logical namespace, carried so a failed write reports it
+   * without re-deriving it from the key.
    */
   record Write(
     Method specific,
@@ -108,9 +118,10 @@ sealed interface CachePlan {
     Key key,
     CompiledExpression condition,
     CompiledExpression unless,
-    Ttls ttls,
-    boolean sync,
+    Ttl hardTtl,
+    Ttl softTtl,
     @Nullable PutPolicy prebuiltPolicy,
+    boolean sync,
     boolean preflightHard,
     boolean needsPreContext,
     boolean needsPostContext,
@@ -123,17 +134,22 @@ sealed interface CachePlan {
       Key key,
       CompiledExpression condition,
       CompiledExpression unless,
-      Ttls ttls,
+      Ttl hardTtl,
+      Ttl softTtl,
       boolean sync,
-      @Nullable PutPolicy prebuiltPolicy
+      @Nullable PutPolicy prebuiltPolicy,
+      boolean optional
     ) {
-      boolean preflight = sync && !ttls.hard().isConstant() && !ttls.hard().resultDependent();
-      boolean preContext = condition.needsContext() || (!key.resultDependent() && key.needsContext()) || preflight;
+      boolean preflight = sync && !hardTtl.isConstant() && !hardTtl.resultDependent();
+      boolean preContext =
+        condition.needsContext() ||
+        (!key.resultDependent() && key.needsContext()) ||
+        (preflight && hardTtl.needsContext());
       boolean postContext =
         unless.needsContext() ||
         key.resultDependent() ||
-        (!ttls.hard().isConstant() && !preflight) ||
-        !ttls.soft().isConstant();
+        (!hardTtl.isConstant() && !preflight && hardTtl.needsContext()) ||
+        (!softTtl.isConstant() && softTtl.needsContext());
       return new Write(
         specific,
         cache,
@@ -141,13 +157,14 @@ sealed interface CachePlan {
         key,
         condition,
         unless,
-        ttls,
-        sync,
+        hardTtl,
+        softTtl,
         prebuiltPolicy,
+        sync,
         preflight,
         preContext,
         postContext,
-        returnsOptional(specific)
+        optional
       );
     }
 
@@ -163,7 +180,7 @@ sealed interface CachePlan {
       if (!preflightHard) {
         return 0L;
       }
-      long hardMs = ttls.hard().evaluate(context);
+      long hardMs = hardTtl.evaluate(context);
       PutPolicy.requireSyncable(hardMs, sync);
       return hardMs;
     }
@@ -179,8 +196,8 @@ sealed interface CachePlan {
       if (prebuiltPolicy != null) {
         return prebuiltPolicy;
       }
-      long hardMs = preflightHard ? preflightHardMs : ttls.hard().evaluate(context);
-      long softMs = ttls.soft().evaluate(context);
+      long hardMs = preflightHard ? preflightHardMs : hardTtl.evaluate(context);
+      long softMs = softTtl.evaluate(context);
       return PutPolicy.of(hardMs, softMs, sync);
     }
   }
@@ -188,110 +205,557 @@ sealed interface CachePlan {
   /**
    * {@code @ZetaInvalidate}: every removal declared on one method. Each operation owns its target,
    * condition and policy, so one declaration's skipped condition or empty expansion can neither
-   * suppress nor re-resolve another's removal. Whether a phase needs an evaluation context is
-   * resolved once from those operations, never re-derived per call.
+   * suppress nor re-resolve another's removal.
    */
+  @lombok.extern.slf4j.Slf4j
   record Invalidate(
     Method specific,
     ParameterBindings bindings,
     List<Operation> operations,
     boolean needsPreContext,
     boolean needsPostContext,
+    boolean hasPrePhase,
+    boolean hasPostPhase,
     boolean optional
   ) implements CachePlan {
     public Invalidate {
       operations = List.copyOf(operations);
     }
 
-    static Invalidate of(Method specific, ParameterBindings bindings, List<Operation> operations) {
+    static Invalidate of(Method specific, ParameterBindings bindings, List<Operation> operations, boolean optional) {
       boolean preContext = false;
       boolean postContext = false;
+      boolean prePhase = false;
+      boolean postPhase = false;
       for (Operation operation : operations) {
         preContext |= operation.needsPreContext();
         postContext |= operation.needsPostContext();
+        prePhase |= operation.phase() != Phase.AFTER_BODY;
+        postPhase |= operation.phase() != Phase.BEFORE_BODY;
       }
-      return new Invalidate(specific, bindings, operations, preContext, postContext, returnsOptional(specific));
+      return new Invalidate(specific, bindings, operations, preContext, postContext, prePhase, postPhase, optional);
+    }
+
+    /** The execution stage of one removal, decided once at resolution. */
+    enum Phase {
+      /** The condition and target run before the body; the removal is applied immediately. */
+      BEFORE_BODY,
+      /** The target resolves before the body and the removal is applied after it returns. */
+      PRE_RESOLVE_POST_APPLY,
+      /** The condition and target resolve after the body, against the one post-body context. */
+      AFTER_BODY,
     }
 
     /**
-     * One declared removal. Its condition and target phases follow from the policy's
-     * {@code immediate} flag and the target's {@code #result} dependency; the predicates below
-     * derive that phase from the immutable declaration.
+     * One declared removal. The target is a sealed hierarchy rather than a set of mutually exclusive
+     * nullable fields, so an operation always names exactly one removal shape.
      */
-    record Operation(Target target, InvalidatePolicy policy, CompiledExpression condition) {
-      boolean immediate() {
-        return policy.immediate();
+    record Operation(String cache, InvalidatePolicy policy, CompiledExpression condition, Phase phase, Target target) {
+      static Operation single(String cache, Key key, InvalidatePolicy policy, CompiledExpression condition) {
+        return create(cache, policy, condition, new Target.Single(key));
       }
 
-      boolean unconditional() {
-        return condition.absent();
+      static Operation eachKey(
+        String cache,
+        KeyEncoding encoding,
+        CompiledExpression expression,
+        int slot,
+        InvalidatePolicy policy,
+        CompiledExpression condition
+      ) {
+        return create(cache, policy, condition, new Target.Each(encoding, expression, slot));
       }
 
-      /** Whether the target is resolved and validated before the body runs. */
-      boolean targetBeforeBody() {
-        return immediate() || (unconditional() && !target.resultDependent());
+      static Operation all(String cache, InvalidatePolicy policy, CompiledExpression condition) {
+        return create(cache, policy, condition, Target.All.INSTANCE);
+      }
+
+      /**
+       * Builds an operation and fixes its execution phase at plan time. Immediate invalidations run
+       * before the body. A deferred invalidation runs after the body when its condition or target
+       * reads invocation state; otherwise resolution happens before the body and only the apply is
+       * deferred. Fixing the phase here keeps the interceptor free of per-call branching.
+       *
+       * @param cache     the logical cache namespace
+       * @param policy    the invalidation policy
+       * @param condition the guard expression
+       * @param target    the removal shape
+       * @return the operation with its phase settled
+       */
+      private static Operation create(
+        String cache,
+        InvalidatePolicy policy,
+        CompiledExpression condition,
+        Target target
+      ) {
+        Phase phase = policy.immediate()
+          ? Phase.BEFORE_BODY
+          : condition.absent() && !target.resultDependent()
+            ? Phase.PRE_RESOLVE_POST_APPLY
+            : Phase.AFTER_BODY;
+        return new Operation(cache, policy, condition, phase, target);
       }
 
       boolean needsPreContext() {
-        return (immediate() && condition.needsContext()) || (targetBeforeBody() && target.needsContext());
+        return switch (phase) {
+          case BEFORE_BODY -> condition.needsContext() || target.needsContext();
+          case PRE_RESOLVE_POST_APPLY -> target.needsContext();
+          case AFTER_BODY -> false;
+        };
       }
 
       boolean needsPostContext() {
-        return (!immediate() && condition.needsContext()) || (!targetBeforeBody() && target.needsContext());
+        return phase == Phase.AFTER_BODY && (condition.needsContext() || target.needsContext());
+      }
+
+      /**
+       * Resolves one phase.
+       *
+       * @return the target's resolved form, or {@code null} when nothing is to be removed
+       */
+      @Nullable
+      Object resolve(Method specific, Object[] args, @Nullable ZetaEvaluationContext context, boolean afterBody) {
+        return target.resolve(specific, args, context, afterBody);
+      }
+
+      /**
+       * Apply one resolved removal. A {@code null} target is no work.
+       *
+       * @param zeta     the cache facade
+       * @param resolved the resolved target, or {@code null} when the condition rejected it or the
+       *                 target expanded to nothing
+       */
+      void apply(Zeta zeta, @Nullable Object resolved) {
+        if (resolved != null) {
+          target.apply(zeta, cache, policy, resolved);
+        }
+      }
+
+      /**
+       * Apply one resolved removal after the body. A {@code null} target is no work. A caller or
+       * configuration rejection propagates like {@code @ZetaPut}'s; a transient engine failure is
+       * logged and the committed business result stands.
+       *
+       * @param zeta     the cache facade
+       * @param resolved the resolved target, or {@code null} when nothing is to be removed
+       */
+      void applyAfterBody(Zeta zeta, @Nullable Object resolved) {
+        try {
+          apply(zeta, resolved);
+        } catch (ZetaModeException | IllegalArgumentException e) {
+          throw e;
+        } catch (RuntimeException e) {
+          log.warn("[Zeta] cache invalidation failed for namespace '{}'; the business result is returned", cache, e);
+        }
+      }
+
+      /** The mutually exclusive removal shapes one declaration can name. */
+      sealed interface Target permits Target.All, Target.Single, Target.Each {
+        /** Whether the target reads {@code #result}, so its phase cannot precede the body. */
+        boolean resultDependent();
+
+        /** Whether resolving the target reads invocation state. */
+        boolean needsContext();
+
+        /**
+         * Resolves the removal at one phase.
+         *
+         * @return the resolved form this target applies, or {@code null} when nothing is to be removed
+         */
+        @Nullable
+        Object resolve(Method specific, Object[] args, @Nullable ZetaEvaluationContext context, boolean afterBody);
+
+        /**
+         * Applies one non-null resolved form.
+         *
+         * @param zeta     the cache facade
+         * @param cache    the logical cache namespace
+         * @param policy   the invalidation policy
+         * @param resolved the form this target's {@code resolve} produced
+         */
+        void apply(Zeta zeta, String cache, InvalidatePolicy policy, Object resolved);
+
+        /** The table-wide clear: every entry of the namespace. */
+        enum All implements Target {
+          INSTANCE;
+
+          @Override
+          public boolean resultDependent() {
+            return false;
+          }
+
+          @Override
+          public boolean needsContext() {
+            return false;
+          }
+
+          @Override
+          public Object resolve(
+            Method specific,
+            Object[] args,
+            @Nullable ZetaEvaluationContext context,
+            boolean afterBody
+          ) {
+            return this;
+          }
+
+          @Override
+          public void apply(Zeta zeta, String cache, InvalidatePolicy policy, Object resolved) {
+            zeta.clearNamespace(cache, policy);
+          }
+        }
+
+        /** One exact key resolved from the invocation. */
+        record Single(Key key) implements Target {
+          @Override
+          public boolean resultDependent() {
+            return key.resultDependent();
+          }
+
+          @Override
+          public boolean needsContext() {
+            return key.needsContext();
+          }
+
+          @Override
+          public @Nullable Object resolve(
+            Method specific,
+            Object[] args,
+            @Nullable ZetaEvaluationContext context,
+            boolean afterBody
+          ) {
+            return afterBody ? key.resolveOrNull(args, context) : key.resolve(args, context);
+          }
+
+          @Override
+          public void apply(Zeta zeta, String cache, InvalidatePolicy policy, Object resolved) {
+            zeta.invalidate((String) resolved, policy);
+          }
+        }
+
+        /** An argument or expression expanded into the keys it names. */
+        record Each(KeyEncoding encoding, CompiledExpression expression, int slot) implements Target {
+          private static final int MAX_EACH_KEYS = 1024;
+
+          @Override
+          public boolean resultDependent() {
+            return slot < 0 && expression.referencesResult();
+          }
+
+          @Override
+          public boolean needsContext() {
+            return slot < 0 && expression.needsContext();
+          }
+
+          @Override
+          public @Nullable Object resolve(
+            Method specific,
+            Object[] args,
+            @Nullable ZetaEvaluationContext context,
+            boolean afterBody
+          ) {
+            Object value = slot >= 0 ? (slot < args.length ? args[slot] : null) : expression.getValue(context);
+            if (value == null) {
+              if (!afterBody) {
+                throw new IllegalStateException(
+                  "cache key '" + expression.raw() + "' resolved to null for " + specific
+                );
+              }
+              return null;
+            }
+            List<String> keys = expand(encoding, value, specific);
+            return keys.isEmpty() ? null : keys;
+          }
+
+          @Override
+          @SuppressWarnings("unchecked")
+          public void apply(Zeta zeta, String cache, InvalidatePolicy policy, Object resolved) {
+            zeta.invalidate((List<String>) resolved, policy);
+          }
+
+          /**
+           * Expands an array or iterable target into distinct encoded keys, stopping at
+           * {@link #MAX_EACH_KEYS}. Null elements are skipped and insertion order is preserved so the
+           * resulting batch is stable. The cap turns an unbounded SpEL result into a fail-fast
+           * declaration error instead of a large invalidation burst.
+           *
+           * @param encoding the namespace encoder
+           * @param value    the array or iterable of raw keys
+           * @param specific the method named in errors
+           * @return the encoded, deduplicated keys
+           * @throws IllegalStateException when the value is neither array nor iterable, or exceeds the cap
+           */
+          private static List<String> expand(KeyEncoding encoding, Object value, Method specific) {
+            if (value instanceof Iterable<?> iterable) {
+              Iterator<?> elements = iterable.iterator();
+              if (!elements.hasNext()) {
+                return List.of();
+              }
+              Object first = elements.next();
+              if (!elements.hasNext()) {
+                return first == null ? List.of() : List.of(encoding.encodeSingle(first));
+              }
+              Set<String> keys = new LinkedHashSet<>(
+                iterable instanceof Collection<?> collection
+                  ? CollectionSizing.capacity(Math.min(collection.size(), MAX_EACH_KEYS))
+                  : 16
+              );
+              if (first != null) {
+                keys.add(encoding.encodeSingle(first));
+              }
+              while (elements.hasNext()) {
+                Object element = elements.next();
+                if (element != null && keys.add(encoding.encodeSingle(element)) && keys.size() > MAX_EACH_KEYS) {
+                  throw tooManyKeys(specific);
+                }
+              }
+              return List.copyOf(keys);
+            }
+            if (!value.getClass().isArray()) {
+              throw new IllegalStateException(
+                "eachKey requires an array or Iterable, got " + value.getClass().getName()
+              );
+            }
+            int length = Array.getLength(value);
+            if (length == 0) {
+              return List.of();
+            }
+            if (length == 1) {
+              Object element = Array.get(value, 0);
+              return element == null ? List.of() : List.of(encoding.encodeSingle(element));
+            }
+            Set<String> keys = new LinkedHashSet<>(CollectionSizing.capacity(Math.min(length, MAX_EACH_KEYS)));
+            for (int i = 0; i < length; i++) {
+              Object element = Array.get(value, i);
+              if (element != null && keys.add(encoding.encodeSingle(element)) && keys.size() > MAX_EACH_KEYS) {
+                throw tooManyKeys(specific);
+              }
+            }
+            return List.copyOf(keys);
+          }
+
+          private static IllegalStateException tooManyKeys(Method specific) {
+            return new IllegalStateException(
+              "eachKey on " + specific + " expands more than " + MAX_EACH_KEYS + " keys; split the batch"
+            );
+          }
+        }
       }
     }
   }
 
   /**
-   * What one invalidation removes: one key, one key per resolved element, or the whole namespace.
-   * The three shapes are structurally exclusive, so a namespace clear cannot carry a stale key and
-   * a single-key removal cannot accidentally be expanded.
+   * The one read-policy shape every annotation read uses. {@code callerRunsLoader} keeps the
+   * elected first-miss leader on the invocation thread, so {@code MethodInvocation.proceed()}
+   * preserves the caller's transaction, security context and MDC.
    */
-  sealed interface Target {
-    /** Whether resolution needs the post-body {@code #result}. */
+  static GetPolicy readPolicy(LongSupplier hardTtlMs, LongSupplier softTtlMs) {
+    return new GetPolicy(hardTtlMs, softTtlMs, StalePolicy.SOFT_REFRESH, true, true);
+  }
+
+  /**
+   * The resolved shape of a method's key. Four mutually exclusive forms: a fixed physical key, one
+   * argument value, the canonical argument-list key, or a SpEL expression. The shape is chosen once
+   * at resolution, so a plain hit never reclassifies it.
+   */
+  sealed interface Key permits Key.Constant, Key.SingleArgument, Key.DefaultArguments, Key.Expression {
+    /**
+     * Whether the key reads the post-body {@code #result}. A result-dependent key cannot be resolved
+     * before the body, so a deferred removal that uses one runs after the body and against the one
+     * post-body context instead of a pre-body snapshot.
+     */
     boolean resultDependent();
 
     /** Whether resolution needs a SpEL context. */
     boolean needsContext();
 
     /**
-     * Resolve this target for one phase.
+     * The physical key, or {@code null} when the selected value is {@code null}.
      *
-     * @param args      the invocation arguments
-     * @param context   the phase context, or {@code null} when this target needs none
-     * @param afterBody whether the body already returned; a target resolved in that phase treats a
-     *                  {@code null} key, or a {@code null}/empty collection, as no removal
-     * @return the executable target, or {@code null} when this phase removes nothing
-     * @throws IllegalStateException when a target resolved before the body yields {@code null}
+     * <p>A {@code null} argument yields {@code null} in every shape, including the canonical
+     * argument list: the caller decides whether that is fatal (a read) or a no-op (an after-body
+     * removal).
      */
     @Nullable
-    ResolvedTarget resolve(Object[] args, @Nullable ZetaEvaluationContext context, boolean afterBody);
+    String resolveOrNull(Object[] args, @Nullable ZetaEvaluationContext context);
 
-    /** One explicit or default-encoded key. */
-    record Key(String cache, CachePlan.Key key) implements Target {
+    /**
+     * The physical key.
+     *
+     * @throws IllegalStateException when the key resolves to {@code null}
+     */
+    String resolve(Object[] args, @Nullable ZetaEvaluationContext context);
+
+    static Key of(KeyEncoding encoding, Method method, CompiledExpression compiled, ParameterBindings bindings) {
+      String constantKey = constantKeyOf(encoding, method, compiled);
+      if (constantKey != null) {
+        return new Constant(constantKey);
+      }
+      int index = compiled.directArgumentSlot(method, bindings, false);
+      if (index >= 0) {
+        return new SingleArgument(encoding, method, index, compiled);
+      }
+      if (compiled.absent() || compiled.wholeRootArgs()) {
+        if (encoding.format() == KeyFormat.PLAIN) {
+          String reason = method.isVarArgs()
+            ? "cannot encode a varargs argument list"
+            : "cannot use a multi-argument default key";
+          throw new IllegalStateException(
+            "PLAIN namespace '" +
+              encoding.namespace() +
+              "' " +
+              reason +
+              " on " +
+              method +
+              "; declare one explicit key or use TYPED"
+          );
+        }
+        return new DefaultArguments(encoding, method, compiled);
+      }
+      return new Expression(encoding, method, compiled);
+    }
+
+    /**
+     * Folds a startup-constant key into its physical form when it needs no invocation state. An
+     * absent expression on a no-arg method folds to the namespace default; a pure expression is
+     * evaluated once here so a non-encoding or null result fails at startup instead of on the
+     * first invocation.
+     *
+     * @return the folded key, or {@code null} when the key must be resolved per invocation
+     */
+    private static @Nullable String constantKeyOf(KeyEncoding encoding, Method method, CompiledExpression compiled) {
+      if ((compiled.absent() || compiled.wholeRootArgs()) && method.getParameterCount() == 0) {
+        return encoding.encodeArgs(new Object[0]);
+      }
+      if (!compiled.isPureConstant()) {
+        return null;
+      }
+      Object value;
+      try {
+        value = compiled.getValue(null);
+      } catch (RuntimeException e) {
+        throw new IllegalStateException(
+          "cache key '" + compiled.raw() + "' on " + method + " cannot be evaluated at startup",
+          e
+        );
+      }
+      if (value == null) {
+        throw new IllegalStateException("cache key '" + compiled.raw() + "' resolved to null for " + method);
+      }
+      return encoding.encodeSingle(value);
+    }
+
+    private static String nullArgumentMessage(int index, @Nullable String raw, Method method) {
+      String prefix = "null argument " + index + " for " + method + ": ";
+      return raw == null
+        ? prefix + "pass a non-null argument or declare an explicit key"
+        : prefix +
+          "key = \"" +
+          raw +
+          "\" requires every argument to be non-null; pass a non-null argument or declare an expression that tolerates null";
+    }
+
+    /** A physical key folded once at resolution. */
+    record Constant(String physicalKey) implements Key {
       @Override
       public boolean resultDependent() {
-        return key.resultDependent();
+        return false;
       }
 
       @Override
       public boolean needsContext() {
-        return key.needsContext();
+        return false;
       }
 
       @Override
-      public @Nullable ResolvedTarget resolve(
-        Object[] args,
-        @Nullable ZetaEvaluationContext context,
-        boolean afterBody
-      ) {
-        String resolved = afterBody ? key.resolveOrNull(args, context) : key.resolve(args, context);
-        return resolved == null ? null : new ResolvedTarget.Single(cache, resolved);
+      public @Nullable String resolveOrNull(Object[] args, @Nullable ZetaEvaluationContext context) {
+        return physicalKey;
+      }
+
+      @Override
+      public String resolve(Object[] args, @Nullable ZetaEvaluationContext context) {
+        return physicalKey;
       }
     }
 
-    /** One physical key per non-null element of the resolved array/Iterable. */
-    record Keys(String cache, String namespace, CompiledExpression expression, Method specific) implements Target {
+    /** One selected argument, encoded as the namespace's single-value key. */
+    record SingleArgument(
+      KeyEncoding encoding,
+      Method method,
+      int argumentIndex,
+      CompiledExpression expression
+    ) implements Key {
+      @Override
+      public boolean resultDependent() {
+        return false;
+      }
+
+      @Override
+      public boolean needsContext() {
+        return false;
+      }
+
+      @Override
+      public @Nullable String resolveOrNull(Object[] args, @Nullable ZetaEvaluationContext context) {
+        if (argumentIndex >= args.length) {
+          return null;
+        }
+        Object argument = args[argumentIndex];
+        return argument == null ? null : encoding.encodeSingle(argument);
+      }
+
+      @Override
+      public String resolve(Object[] args, @Nullable ZetaEvaluationContext context) {
+        String resolved = resolveOrNull(args, context);
+        if (resolved != null) {
+          return resolved;
+        }
+        if (expression.absent()) {
+          throw new IllegalStateException(Key.nullArgumentMessage(argumentIndex, null, method));
+        }
+        throw new IllegalStateException("cache key '" + expression.raw() + "' resolved to null for " + method);
+      }
+    }
+
+    /** The canonical argument-list key: every parameter contributes, in order. */
+    record DefaultArguments(KeyEncoding encoding, Method method, CompiledExpression expression) implements Key {
+      @Override
+      public boolean resultDependent() {
+        return false;
+      }
+
+      @Override
+      public boolean needsContext() {
+        return false;
+      }
+
+      @Override
+      public @Nullable String resolveOrNull(Object[] args, @Nullable ZetaEvaluationContext context) {
+        for (Object argument : args) {
+          if (argument == null) {
+            return null;
+          }
+        }
+        return encoding.encodeArgs(args);
+      }
+
+      @Override
+      public String resolve(Object[] args, @Nullable ZetaEvaluationContext context) {
+        String resolved = resolveOrNull(args, context);
+        if (resolved != null) {
+          return resolved;
+        }
+        for (int i = 0; i < args.length; i++) {
+          if (args[i] == null) {
+            throw new IllegalStateException(Key.nullArgumentMessage(i, expression.raw(), method));
+          }
+        }
+        throw new IllegalStateException("cache key '" + expression.raw() + "' resolved to null for " + method);
+      }
+    }
+
+    /** A SpEL expression resolved against the invocation's context. */
+    record Expression(KeyEncoding encoding, Method method, CompiledExpression expression) implements Key {
       @Override
       public boolean resultDependent() {
         return expression.referencesResult();
@@ -303,375 +767,61 @@ sealed interface CachePlan {
       }
 
       @Override
-      public @Nullable ResolvedTarget resolve(
-        Object[] args,
-        @Nullable ZetaEvaluationContext context,
-        boolean afterBody
-      ) {
-        Object value = expression.getValue(context);
-        if (value == null) {
-          if (!afterBody) {
-            throw new IllegalStateException("cache key '" + expression.raw() + "' resolved to null for " + specific);
-          }
-          return null;
-        }
-        List<String> keys = expand(namespace, value);
-        return keys.isEmpty() ? null : new ResolvedTarget.Many(cache, keys);
-      }
-
-      /** The bound on one expansion, matching the default-key collection cap. */
-      private static final int MAX_KEYS = 1024;
-
-      /** Expand one array or {@link Iterable} into distinct physical keys, skipping null elements. */
-      private List<String> expand(String namespace, Object value) {
-        if (value.getClass().isArray()) {
-          int length = Array.getLength(value);
-          if (length == 0) {
-            return List.of();
-          }
-          requireBounded(length);
-          Set<String> keys = new LinkedHashSet<>(capacity(length));
-          for (int i = 0; i < length; i++) {
-            Object element = Array.get(value, i);
-            if (element != null) {
-              keys.add(DefaultKey.encodeSingle(namespace, element));
-            }
-          }
-          return List.copyOf(keys);
-        }
-        if (value instanceof Iterable<?> iterable) {
-          if (iterable instanceof Collection<?> collection && collection.isEmpty()) {
-            return List.of();
-          }
-          if (iterable instanceof Collection<?> collection) {
-            requireBounded(collection.size());
-          }
-          Set<String> keys =
-            iterable instanceof Collection<?> collection
-              ? new LinkedHashSet<>(capacity(collection.size()))
-              : new LinkedHashSet<>();
-          int count = 0;
-          for (Object element : iterable) {
-            if (++count > MAX_KEYS) {
-              requireBounded(count);
-            }
-            if (element != null) {
-              keys.add(DefaultKey.encodeSingle(namespace, element));
-            }
-          }
-          return List.copyOf(keys);
-        }
-        throw new IllegalStateException("eachKey requires an array or Iterable, got " + value.getClass().getName());
-      }
-
-      private void requireBounded(int size) {
-        if (size > MAX_KEYS) {
-          throw new IllegalStateException(
-            "eachKey on " + specific + " expands more than " + MAX_KEYS + " keys; split the batch"
-          );
-        }
-      }
-
-      /** A set capacity that holds {@code entries} at the default 0.75 load factor without a rehash. */
-      private static int capacity(int entries) {
-        return (int) (entries / 0.75f) + 1;
-      }
-    }
-
-    /** Every entry of one namespace. */
-    record Namespace(String cache) implements Target {
-      @Override
-      public boolean resultDependent() {
-        return false;
-      }
-
-      @Override
-      public boolean needsContext() {
-        return false;
-      }
-
-      @Override
-      public ResolvedTarget resolve(Object[] args, @Nullable ZetaEvaluationContext context, boolean afterBody) {
-        return new ResolvedTarget.All(cache);
-      }
-    }
-  }
-
-  /** One executable invalidation target: the namespace it addresses and the keys to remove. */
-  sealed interface ResolvedTarget {
-    record Single(String cache, String key) implements ResolvedTarget {}
-
-    record Many(String cache, List<String> keys) implements ResolvedTarget {}
-
-    record All(String cache) implements ResolvedTarget {}
-  }
-
-  /** The one read-policy shape every annotation read uses. */
-  static GetPolicy readPolicy(LongSupplier hardTtlMs, LongSupplier softTtlMs) {
-    return new GetPolicy(hardTtlMs, softTtlMs, StalePolicy.SOFT_REFRESH, true, true);
-  }
-
-  /** Whether the method returns {@link Optional}, the one wrapper this layer unwraps. */
-  private static boolean returnsOptional(Method method) {
-    return method.getReturnType() == Optional.class;
-  }
-
-  /**
-   * The resolved shape of a method's key. Four mutually exclusive forms: a fixed physical
-   * key, one argument value, the canonical argument-list key, or a SpEL expression. The shape
-   * is chosen once at resolution, so a plain hit never reclassifies it.
-   *
-   * <p>An explicit expression encodes its value as one default-key argument, so
-   * {@code key = "#id"} and an absent key address the same entry for a single-id method. A
-   * whole {@code #root.args} selects the argument list itself and uses the multi-argument
-   * default encoding instead. A context-free expression is folded to a constant physical key;
-   * a constant {@code null} is a configuration error.
-   */
-  sealed interface Key {
-    /** Whether the key reads the post-body {@code #result}; only the expression form can. */
-    default boolean resultDependent() {
-      return false;
-    }
-
-    /** Whether resolution needs a SpEL context; only the expression form does. */
-    default boolean needsContext() {
-      return false;
-    }
-
-    /** The method the key belongs to, named in a resolution failure. */
-    Method method();
-
-    /** The configured key text, or {@code null} for an absent attribute or a whole {@code #root.args}. */
-    @Nullable
-    String rawExpression();
-
-    /**
-     * The physical key, or {@code null} when the selected argument or expression value is
-     * {@code null}; a whole-argument-list key throws instead, because a null argument cannot be
-     * encoded.
-     * {@code context} must be non-null whenever {@link #needsContext()} is true.
-     */
-    @Nullable
-    String resolveOrNull(Object[] args, @Nullable ZetaEvaluationContext context);
-
-    /**
-     * The physical key.
-     *
-     * @param args    the invocation arguments
-     * @param context the context, or {@code null} when the key needs none
-     * @return the physical key
-     * @throws IllegalStateException when the key resolves to {@code null}, or an
-     *                               argument-list key sees a null argument
-     */
-    default String resolve(Object[] args, @Nullable ZetaEvaluationContext context) {
-      String resolved = resolveOrNull(args, context);
-      if (resolved == null) {
-        throw new IllegalStateException("cache key '" + rawExpression() + "' resolved to null for " + method());
-      }
-      return resolved;
-    }
-
-    static Key of(String namespace, Method method, CompiledExpression compiled, String@Nullable [] parameterNames) {
-      String constantKey = constantKeyOf(namespace, method, compiled);
-      if (constantKey != null) {
-        return new Constant(constantKey, method, compiled.raw());
-      }
-      int index = argumentIndex(compiled, parameterNames);
-      if (index >= 0) {
-        Class<?> parameterType = method.getParameterTypes()[index];
-        // A varargs tail is one array parameter (or several expanded arguments). Only the SpEL
-        // lookup path preserves both shapes; the single-argument fast path would read just the
-        // first expanded element.
-        if (method.isVarArgs() && index == method.getParameterCount() - 1) {
-          index = -1;
-        } else {
-          return new SingleArgument(
-            namespace,
-            method,
-            index,
-            parameterType.isArray() ? parameterType : null,
-            compiled.raw()
-          );
-        }
-      }
-      if (compiled.absent() || compiled.wholeRootArgs()) {
-        return new DefaultArguments(namespace, method, compiled.raw());
-      }
-      return new Expression(namespace, method, compiled, compiled.referencesResult());
-    }
-
-    /**
-     * Precompute the full physical key when it cannot depend on the invocation: the
-     * no-argument default key, a whole {@code #root.args} over no arguments, and a
-     * context-free expression. A constant {@code null} cannot address an entry.
-     */
-    private static @Nullable String constantKeyOf(String namespace, Method method, CompiledExpression compiled) {
-      if (compiled.absent() || compiled.wholeRootArgs()) {
-        return method.getParameterCount() == 0 ? DefaultKey.encode(namespace, new Object[0]) : null;
-      }
-      if (!compiled.constant()) {
-        return null;
-      }
-      Object value = compiled.evaluateConstant();
-      if (value == null) {
-        throw new IllegalStateException("cache key '" + compiled.raw() + "' on " + method + " is a constant null");
-      }
-      return DefaultKey.encodeSingle(namespace, value);
-    }
-
-    /**
-     * Recognize a key that reads exactly one argument — {@code #p0}/{@code #a0} or a bare
-     * parameter name — so the common single-id key resolves straight from the argument
-     * array instead of through SpEL. Anything else returns {@code -1} and keeps the full
-     * expression path.
-     */
-    private static int argumentIndex(CompiledExpression expression, String@Nullable [] parameterNames) {
-      String name = expression.singleVariable();
-      return name == null ? -1 : CompiledExpression.argumentIndex(name, parameterNames);
-    }
-
-    /** A full physical key that cannot depend on the invocation. */
-    record Constant(String physicalKey, Method method, @Nullable String rawExpression) implements Key {
-      @Override
-      public @Nullable String resolveOrNull(Object[] args, @Nullable ZetaEvaluationContext context) {
-        return physicalKey;
-      }
-    }
-
-    /**
-     * One argument value, encoded as one default-key argument. An array-shaped parameter is
-     * normalized to its declared component type first: a generic interface erases {@code T[]} to
-     * {@code Object[]}, and the key must see the same shape the SpEL path sees.
-     */
-    record SingleArgument(
-      String namespace,
-      Method method,
-      int argumentIndex,
-      @Nullable Class<?> expectedArrayType,
-      @Nullable String rawExpression
-    ) implements Key {
-      @Override
-      public @Nullable String resolveOrNull(Object[] args, @Nullable ZetaEvaluationContext context) {
-        if (argumentIndex >= args.length) {
-          return null;
-        }
-        Object argument = args[argumentIndex];
-        if (argument == null) {
-          return null;
-        }
-        if (expectedArrayType != null) {
-          argument = InvocationArguments.adaptArgument(expectedArrayType, argument);
-        }
-        return DefaultKey.encodeSingle(namespace, argument);
-      }
-    }
-
-    /** The canonical argument-list key for an absent attribute or a whole {@code #root.args}. */
-    record DefaultArguments(String namespace, Method method, @Nullable String rawExpression) implements Key {
-      @Override
-      public String resolveOrNull(Object[] args, @Nullable ZetaEvaluationContext context) {
-        for (int i = 0; i < args.length; i++) {
-          if (args[i] == null) {
-            throw new IllegalStateException(nullArgumentMessage(i));
-          }
-        }
-        return DefaultKey.encode(namespace, args);
-      }
-
-      private String nullArgumentMessage(int index) {
-        String prefix = "null argument " + index + " for " + method + ": ";
-        if (rawExpression == null) {
-          return prefix + "pass a non-null argument or declare an explicit key";
-        }
-        return (
-          prefix +
-          "key = \"" +
-          rawExpression +
-          "\" requires every argument to be non-null; pass a non-null argument or declare an expression that tolerates null"
-        );
-      }
-    }
-
-    /** A SpEL expression evaluated once per call. */
-    record Expression(
-      String namespace,
-      Method method,
-      CompiledExpression expression,
-      boolean resultDependent
-    ) implements Key {
-      @Override
-      public boolean needsContext() {
-        return true;
-      }
-
-      @Override
-      public @Nullable String rawExpression() {
-        return expression.raw();
-      }
-
-      @Override
       public @Nullable String resolveOrNull(Object[] args, @Nullable ZetaEvaluationContext context) {
         Object value = expression.getValue(context);
-        return value == null ? null : DefaultKey.encodeSingle(namespace, value);
+        return value == null ? null : encoding.encodeSingle(value);
       }
-    }
-  }
 
-  /** Both TTL attributes of one verb, classified at resolution. */
-  record Ttls(Ttl hard, Ttl soft) {
-    boolean bothConstant() {
-      return hard.isConstant() && soft.isConstant();
+      @Override
+      public String resolve(Object[] args, @Nullable ZetaEvaluationContext context) {
+        String resolved = resolveOrNull(args, context);
+        if (resolved != null) {
+          return resolved;
+        }
+        throw new IllegalStateException("cache key '" + expression.raw() + "' resolved to null for " + method);
+      }
     }
   }
 
   /**
-   * One TTL attribute classified at resolution. The two forms are structurally exclusive: a
-   * constant is a folded millisecond value, while a dynamic attribute is SpEL compiled once and
-   * evaluated lazily and is the only form that can read {@code #result}.
+   * One TTL attribute. A constant is a folded millisecond value with no expression; a dynamic
+   * attribute is the compiled expression evaluated lazily.
    *
-   * <p>An integral literal — optionally signed, after stripping surrounding whitespace — and a
-   * context-free SpEL expression such as {@code 60000L} or {@code 60 * 1000} are folded to a
-   * constant with one prebuilt {@link LongSupplier}, so a static TTL costs no lambda per call and
-   * no SpEL. A negative literal clamps to {@code 0} (the configured default); a constant expression
-   * that evaluates negative fails resolution, because SpEL's integer arithmetic overflows at 32
-   * bits and a negative fold would otherwise silently degrade a 30-day TTL to the default. A
-   * floating-point literal is rejected: milliseconds are discrete, and accepting
-   * {@code 1e3} or {@code NaN} only buys precision hazards. A literal outside the {@code long}
-   * range fails resolution with a range error, and a constant outside the packed entry's encodable
-   * range fails resolution instead of the first miss. Anything else is SpEL compiled once and
-   * evaluated lazily; {@code resultDependent} marks an expression that must wait for the body. A
-   * parse failure or a constant expression that fails to evaluate fails resolution; only a runtime
-   * evaluation of a dynamic expression degrades to the configured default, including a
-   * floating-point result, so a broken attribute can never fail a read.
+   * <p>The declaration vocabulary: {@code 0} inherits the configured default, {@code -1} disables
+   * a soft window (and inherits a hard one, which has no "off" state), every positive value is used
+   * exactly as written, and {@code Long.MAX_VALUE} never expires. Any other negative literal fails
+   * resolution; a negative dynamic result fails evaluation. Both rules exist because a silent
+   * fallback would turn a mistyped TTL into the configured default.
    */
   sealed interface Ttl permits Ttl.Constant, Ttl.Dynamic {
-    BigDecimal MAX_LONG_DECIMAL = BigDecimal.valueOf(Long.MAX_VALUE);
+    /** The disable sentinel: a soft window is skipped where allowed, otherwise the default is used. */
+    long DISABLE = -1L;
 
     boolean isConstant();
 
-    /**
-     * Whether this is the constant {@link Long#MAX_VALUE} (permanent), which {@code sync = true}
-     * cannot broadcast safely.
-     */
-    default boolean isPermanent() {
-      return false;
-    }
+    /** Whether evaluating this TTL reads invocation state, so a phase context is required. */
+    boolean needsContext();
 
-    default boolean resultDependent() {
-      return false;
-    }
+    /** Whether this is the constant {@link Long#MAX_VALUE} (permanent). */
+    boolean isPermanent();
 
-    /** The prebuilt supplier when this TTL is constant, else {@code null}. */
-    default @Nullable LongSupplier constantSupplier() {
-      return null;
-    }
+    /** Whether this TTL reads {@code #result}. */
+    boolean resultDependent();
+
+    /** This instance when it is constant, else {@code null}. */
+    @Nullable
+    LongSupplier constantSupplier();
 
     /**
      * Evaluate this TTL against the context of the current phase. A constant returns its folded
-     * value without a context; a negative or absent dynamic result clamps to {@code 0} (use the
-     * configured default), a floating-point result is rejected like a floating-point literal at
-     * resolution and also resolves to {@code 0}, and an evaluation failure is logged at DEBUG and
-     * degrades the same way, because a runtime failure must not fail the cache operation.
+     * value without a context; an absent dynamic result clamps to {@code 0} (use the configured
+     * default). A negative, floating-point or out-of-range result is a configuration error and is
+     * thrown, not silently degraded.
+     *
+     * <p>An integral result must be exactly representable as a {@code long}: a {@code BigInteger} or
+     * {@code BigDecimal} outside the range fails instead of wrapping, because a wrapped negative
+     * value would either disable a window or throw "must be &gt;= -1" for a value the caller never
+     * wrote.
      */
     long evaluate(@Nullable ZetaEvaluationContext context);
 
@@ -679,17 +829,21 @@ sealed interface CachePlan {
       String role,
       @Nullable String raw,
       SpelExpressionParser parser,
+      EvaluationContext emptyContext,
       Method method,
-      String@Nullable [] parameterNames,
-      boolean resultAllowed
+      ParameterBindings bindings,
+      boolean resultAllowed,
+      boolean disableAllowed
     ) {
       String literal = raw == null ? null : raw.strip();
       if (literal == null || literal.isEmpty()) {
-        return Constant.of(0L);
+        return new Constant(0L);
       }
-      if (isInteger(literal)) {
+      String numeric =
+        literal.endsWith("L") || literal.endsWith("l") ? literal.substring(0, literal.length() - 1) : literal;
+      if (isDigits(numeric)) {
         try {
-          return constant(role, Math.max(0L, Long.parseLong(literal)), literal, method);
+          return constant(role, Long.parseLong(numeric), literal, method, disableAllowed);
         } catch (NumberFormatException overflow) {
           throw new IllegalStateException(
             role + " literal '" + literal + "' on " + method + " exceeds the long range",
@@ -697,77 +851,120 @@ sealed interface CachePlan {
           );
         }
       }
-      CompiledExpression compiled = CompiledExpression.of(literal, parser, role, method, parameterNames, resultAllowed);
-      if (compiled.constant()) {
-        Object value = compiled.evaluateConstant();
-        if (!(value instanceof Number number) || isFloating(number)) {
-          throw new IllegalStateException(role + " '" + literal + "' on " + method + " must be an integral number");
-        }
-        if (isNegative(number)) {
-          throw new IllegalStateException(
-            role +
-              " '" +
-              literal +
-              "' on " +
-              method +
-              " evaluated to a negative value (" +
-              number +
-              "); check for 32-bit integer overflow and write a long literal such as 2592000000L"
-          );
-        }
-        return constant(role, clampTtl(number), literal, method);
+      CompiledExpression compiled = CompiledExpression.of(
+        literal,
+        parser,
+        emptyContext,
+        role,
+        method,
+        bindings,
+        resultAllowed
+      );
+      if (!compiled.isPureConstant()) {
+        return new Dynamic(compiled, role, method, disableAllowed);
       }
-      return new Dynamic(role, compiled, method, resultAllowed && compiled.referencesResult());
+      return new Constant(fold(role, literal, method, compiled, disableAllowed));
     }
 
     /**
-     * Validate and fold one constant TTL at resolution. A duration the packed entry cannot store
-     * would otherwise fail at the first miss or after the transaction committed; the constant is
-     * knowable at plan time, so it fails bean creation instead.
+     * Evaluates a context-free expression once at resolution so the stored attribute is a constant.
      *
-     * @param role    the attribute name ({@code hardTtl}/{@code softTtl})
-     * @param millis  the folded duration
-     * @param literal the configured text, for the error message
-     * @param method  the annotated method
-     * @return the constant TTL
-     * @throws IllegalStateException when the duration is outside the encodable range
+     * @param role           the attribute role for diagnostics
+     * @param literal        the stripped attribute text
+     * @param method         the annotated method
+     * @param compiled       the context-free expression
+     * @param disableAllowed whether {@code -1} keeps its disable meaning
+     * @return the folded millisecond value
+     * @throws IllegalStateException if the expression fails or produces an invalid TTL
      */
-    private static Constant constant(String role, long millis, String literal, Method method) {
+    private static long fold(
+      String role,
+      String literal,
+      Method method,
+      CompiledExpression compiled,
+      boolean disableAllowed
+    ) {
+      try {
+        return new Dynamic(compiled, role, method, disableAllowed).foldValue();
+      } catch (IllegalStateException invalid) {
+        throw invalid;
+      } catch (RuntimeException failure) {
+        throw new IllegalStateException(
+          role + " '" + literal + "' on " + method + " cannot be evaluated at startup",
+          failure
+        );
+      }
+    }
+
+    /**
+     * Whether text is an optionally signed ASCII integer literal. This distinguishes an
+     * out-of-range literal from a SpEL expression when parsing fails, so an oversized number is
+     * reported as a range error instead of being compiled as code.
+     */
+    private static boolean isDigits(String text) {
+      int length = text.length();
+      if (length == 0) {
+        return false;
+      }
+      int start = (text.charAt(0) == '+' || text.charAt(0) == '-') ? 1 : 0;
+      if (start == length) {
+        return false;
+      }
+      for (int i = start; i < length; i++) {
+        char ch = text.charAt(i);
+        if (ch < '0' || ch > '9') {
+          return false;
+        }
+      }
+      return true;
+    }
+
+    /**
+     * Validates and folds a numeric TTL literal. {@code -1} becomes the inherited value unless the
+     * attribute allows a disable sentinel; other negative values are rejected at declaration time.
+     * A positive value must fit the packed entry fields, so an unencodable literal is reported
+     * where it was written.
+     *
+     * @param role           the attribute name for errors
+     * @param millis         the parsed literal
+     * @param literal        the original text for errors
+     * @param method         the declaring method for errors
+     * @param disableAllowed whether {@code -1} is a valid disable value here
+     * @return the constant TTL
+     * @throws IllegalStateException for a negative literal below {@code -1} or an out-of-range value
+     */
+    private static Ttl constant(String role, long millis, String literal, Method method, boolean disableAllowed) {
+      if (millis < DISABLE) {
+        throw new IllegalStateException(
+          role +
+            " '" +
+            literal +
+            "' on " +
+            method +
+            " is negative; only -1 and >= 0 are accepted (use a long literal such as 2592000000L)"
+        );
+      }
+      if (millis == DISABLE) {
+        return new Constant(disableAllowed ? DISABLE : 0L);
+      }
       try {
         CacheEntry.requireEncodableTtl(millis, role);
       } catch (IllegalArgumentException e) {
         throw new IllegalStateException(role + " '" + literal + "' on " + method + " is out of range: " + millis, e);
       }
-      return Constant.of(millis);
+      return new Constant(millis);
     }
 
-    /** Whether a numeric TTL result is a floating-point value, which milliseconds cannot represent. */
-    private static boolean isFloating(Number value) {
-      return value instanceof Double || value instanceof Float;
-    }
-
-    /** Whether a constant TTL value is below zero, including a {@link BigInteger}/{@link BigDecimal} result. */
-    private static boolean isNegative(Number value) {
-      if (value instanceof BigInteger integer) {
-        return integer.signum() < 0;
-      }
-      if (value instanceof BigDecimal decimal) {
-        return decimal.signum() < 0;
-      }
-      return value.longValue() < 0;
-    }
-
-    /** A folded millisecond value, which is also the prebuilt supplier. */
+    /** A folded millisecond value, resolved once at bean creation. */
     record Constant(long millis) implements Ttl, LongSupplier {
-      private static final Constant ZERO = new Constant(0L);
-
-      static Constant of(long millis) {
-        return millis == 0L ? ZERO : new Constant(millis);
-      }
-
       @Override
       public boolean isConstant() {
         return true;
+      }
+
+      @Override
+      public boolean needsContext() {
+        return false;
       }
 
       @Override
@@ -776,7 +973,12 @@ sealed interface CachePlan {
       }
 
       @Override
-      public LongSupplier constantSupplier() {
+      public boolean resultDependent() {
+        return false;
+      }
+
+      @Override
+      public @Nullable LongSupplier constantSupplier() {
         return this;
       }
 
@@ -791,76 +993,87 @@ sealed interface CachePlan {
       }
     }
 
-    /** A compiled expression evaluated lazily on the phase that needs it. */
-    @Slf4j
-    record Dynamic(String role, CompiledExpression expression, Method method, boolean resultDependent) implements Ttl {
+    /** A compiled expression evaluated lazily against the current phase's context. */
+    record Dynamic(CompiledExpression expression, String role, Method method, boolean disableAllowed) implements Ttl {
       @Override
       public boolean isConstant() {
         return false;
       }
 
       @Override
-      public long evaluate(@Nullable ZetaEvaluationContext context) {
-        try {
-          Number value = expression.getValue(context, Number.class);
-          if (value == null) {
-            return 0L;
-          }
-          if (isFloating(value)) {
-            log.debug("[Zeta] {} evaluated to a floating-point value for {}; using the default TTL", role, method);
-            return 0L;
-          }
-          long millis = clampTtl(value);
-          try {
-            CacheEntry.requireEncodableTtl(millis, role);
-            return millis;
-          } catch (IllegalArgumentException e) {
-            log.debug("[Zeta] {} evaluated out of range for {}; using the default TTL", role, method);
-            return 0L;
-          }
-        } catch (RuntimeException e) {
-          log.debug("[Zeta] {} evaluation failed for {}: {}", role, method, e.toString());
-          return 0L;
-        }
+      public boolean needsContext() {
+        return expression.needsContext();
       }
-    }
 
-    /**
-     * Clamp a TTL number to {@code [0, Long.MAX_VALUE]}. {@link BigInteger} and
-     * {@link BigDecimal} do not saturate in {@code longValue()}: they keep the low
-     * 64 bits, so a huge positive value can become negative and silently degrade
-     * to the default TTL. Compare first and use the permanent sentinel as the
-     * upper bound.
-     */
-    private static long clampTtl(Number value) {
-      if (value instanceof BigInteger integer) {
-        if (integer.signum() <= 0) {
-          return 0L;
-        }
-        return integer.bitLength() > 63 ? Long.MAX_VALUE : integer.longValue();
-      }
-      if (value instanceof BigDecimal decimal) {
-        if (decimal.signum() <= 0) {
-          return 0L;
-        }
-        return decimal.compareTo(MAX_LONG_DECIMAL) > 0 ? Long.MAX_VALUE : decimal.longValue();
-      }
-      long millis = value.longValue();
-      return Math.max(millis, 0L);
-    }
-
-    private static boolean isInteger(String raw) {
-      int start = raw.charAt(0) == '+' || raw.charAt(0) == '-' ? 1 : 0;
-      if (start == raw.length()) {
+      @Override
+      public boolean isPermanent() {
         return false;
       }
-      for (int i = start; i < raw.length(); i++) {
-        char c = raw.charAt(i);
-        if (c < '0' || c > '9') {
-          return false;
-        }
+
+      @Override
+      public boolean resultDependent() {
+        return expression.referencesResult();
       }
-      return true;
+
+      @Override
+      public @Nullable LongSupplier constantSupplier() {
+        return null;
+      }
+
+      @Override
+      public long evaluate(@Nullable ZetaEvaluationContext context) {
+        Number value = expression.getValue(context, Number.class);
+        return value == null ? 0L : toMillis(value);
+      }
+
+      /**
+       * Folds a context-free expression at resolution; a {@code null} result is a declaration
+       * error because only a dynamic expression may inherit the default TTL at evaluation time.
+       *
+       * @return the folded millisecond value
+       */
+      long foldValue() {
+        Number value = expression.getValue(null, Number.class);
+        if (value == null) {
+          throw invalidValue("null", "must be an integral number of milliseconds");
+        }
+        return toMillis(value);
+      }
+
+      private long toMillis(Number value) {
+        long evaluated;
+        if (value instanceof Double || value instanceof Float) {
+          throw invalidValue(value, "must be an integral number of milliseconds");
+        } else if (value instanceof BigInteger integer) {
+          try {
+            evaluated = integer.longValueExact();
+          } catch (ArithmeticException overflow) {
+            throw invalidValue(value, "exceeds the long range");
+          }
+        } else if (value instanceof BigDecimal decimal) {
+          try {
+            evaluated = decimal.longValueExact();
+          } catch (ArithmeticException invalid) {
+            throw invalidValue(value, "must be an integral number of milliseconds within the long range");
+          }
+        } else {
+          evaluated = value.longValue();
+        }
+        if (evaluated == DISABLE) {
+          return disableAllowed ? DISABLE : 0L;
+        }
+        if (evaluated < 0L) {
+          throw invalidValue(value, "must be >= -1");
+        }
+        CacheEntry.requireEncodableTtl(evaluated, role);
+        return evaluated;
+      }
+
+      private IllegalStateException invalidValue(Object value, String requirement) {
+        return new IllegalStateException(
+          role + " evaluated to " + value + " for " + method + "; the value " + requirement
+        );
+      }
     }
   }
 }
